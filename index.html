@@ -1,178 +1,168 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="theme-color" content="#070d1a">
-<title>CLUB GENESIS — 経理</title>
-<link rel="manifest" href="manifest.json">
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0,viewport-fit=cover"/>
+<title>CLUB GENESIS 経理</title>
+<link rel="manifest" href="manifest.json"/>
+<meta name="theme-color" content="#0a0a0f"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="GENESIS 経理"/>
+<link rel="apple-touch-icon" href="icon-192.png"/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;700&family=Cormorant+Garamond:wght@400;600&display=swap" rel="stylesheet"/>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
 <style>
-*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
-:root{
-  --bg:#070d1a;--bg2:#0d1526;--bg3:#121d30;--bg4:#1a2640;
-  --border:rgba(255,255,255,.07);--border2:rgba(255,255,255,.12);
-  --text:#e8edf5;--text2:#9aaabb;--text3:#556070;
-  --gold:#c9a84c;--gold2:rgba(201,168,76,.12);--gold-border:rgba(201,168,76,.3);
-  --blue:#4a9eff;--blue2:rgba(74,158,255,.1);
-  --green:#4ade80;--green2:rgba(74,222,128,.1);
-  --red:#ff6b6b;--red2:rgba(255,107,107,.1);
-  --orange:#ffa040;--orange2:rgba(255,160,64,.1);
-  --purple:#a78bfa;--purple2:rgba(167,139,250,.1);
-}
-html,body{height:100%;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px;}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{font-family:'Noto Sans JP',sans-serif;background:#0a0a0f;color:#e8dcc8;min-height:100vh;}
+::-webkit-scrollbar{width:4px;}::-webkit-scrollbar-track{background:#111;}::-webkit-scrollbar-thumb{background:#b8960c;border-radius:2px;}
+.btn{cursor:pointer;border:none;border-radius:4px;font-family:inherit;transition:all .15s;}.btn:active{transform:scale(.96);}
+.gbg{background:linear-gradient(135deg,#b8960c,#e8c84a);color:#1a1200;}
+.glass{background:rgba(255,255,255,.04);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.08);}
+.ip{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:4px;color:#e8dcc8;font-family:inherit;font-size:16px;padding:8px 12px;width:100%;}
+.ip:focus{outline:none;border-color:#b8960c;}
+.st{font-size:10px;letter-spacing:.15em;color:#888;text-transform:uppercase;margin-bottom:8px;}
+.ir{display:flex;align-items:center;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.05);font-size:13px;}
+.nb{background:transparent;border:none;color:#888;font-family:inherit;font-size:13px;padding:8px 14px;cursor:pointer;border-radius:4px;transition:all .15s;letter-spacing:.05em;}
+.nb.ac{color:#d4a017;background:rgba(184,150,12,.12);}
 
-/* ===== LOGIN ===== */
-#login-wrap{min-height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(ellipse at 50% 0%,#0d1f3a 0%,var(--bg) 70%);}
-.login-box{width:100%;max-width:360px;padding:40px 32px;background:var(--bg2);border:1px solid var(--border2);border-radius:16px;}
-.login-logo{text-align:center;margin-bottom:8px;font-size:22px;font-weight:800;letter-spacing:.12em;color:var(--gold);}
-.login-sub{text-align:center;font-size:11px;color:var(--text3);letter-spacing:.15em;margin-bottom:32px;}
-.login-label{font-size:11px;color:var(--text3);letter-spacing:.08em;margin-bottom:6px;}
-.login-input-wrap{position:relative;margin-bottom:20px;}
-.login-input{width:100%;padding:12px 44px 12px 14px;background:var(--bg3);border:1px solid var(--border2);border-radius:8px;color:var(--text);font-size:15px;outline:none;}
-.login-input:focus{border-color:rgba(201,168,76,.5);}
-.pw-toggle{position:absolute;right:12px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text3);cursor:pointer;font-size:16px;}
-.login-btn{width:100%;padding:13px;background:linear-gradient(135deg,#b8960c,var(--gold));border:none;border-radius:8px;color:#1a0f00;font-size:15px;font-weight:700;cursor:pointer;letter-spacing:.05em;}
-.login-btn:active{opacity:.85;}
-.login-err{color:var(--red);font-size:12px;text-align:center;margin-top:12px;min-height:18px;}
+/* HEADER */
+header{background:linear-gradient(180deg,#0f0e0a 0%,#0a0a0f 100%);border-bottom:1px solid rgba(184,150,12,.2);padding:0 16px;display:flex;align-items:center;justify-content:space-between;height:56px;position:sticky;top:0;z-index:100;}
+main{padding:16px;max-width:960px;margin:0 auto;}
 
-/* ===== HEADER ===== */
-#app{display:none;min-height:100vh;flex-direction:column;}
-#app.show{display:flex;}
-.hdr{position:sticky;top:0;z-index:100;background:var(--bg2);border-bottom:1px solid var(--border);padding:10px 16px;display:flex;align-items:center;gap:12px;}
-.hdr-logo{font-size:13px;font-weight:800;letter-spacing:.1em;color:var(--gold);white-space:nowrap;}
-.hdr-sub{font-size:10px;color:var(--text3);letter-spacing:.1em;}
-.hdr-sync{font-size:11px;padding:3px 10px;border-radius:20px;background:rgba(74,222,128,.08);border:1px solid rgba(74,222,128,.2);color:var(--green);margin-left:auto;white-space:nowrap;}
-.hdr-sync.err{background:var(--red2);border-color:rgba(255,107,107,.25);color:var(--red);}
-.hdr-logout{padding:5px 12px;background:var(--bg3);border:1px solid var(--border2);border-radius:6px;color:var(--text3);font-size:12px;cursor:pointer;white-space:nowrap;}
+/* LOADING */
+#loading{position:fixed;inset:0;background:#0a0a0f;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;z-index:999;}
+.sp{width:40px;height:40px;border:3px solid rgba(184,150,12,.2);border-top-color:#d4a017;border-radius:50%;animation:spin .8s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg)}}
 
-/* ===== DATE NAV ===== */
-.date-nav{background:var(--bg2);border-bottom:1px solid var(--border);padding:10px 16px;display:flex;align-items:center;gap:8px;}
-.date-arrow{width:36px;height:36px;background:var(--bg3);border:1px solid var(--border2);border-radius:8px;color:var(--text2);font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;}
-.date-arrow:active{opacity:.7;}
-.date-display{flex:1;text-align:center;}
-.date-display-main{font-size:16px;font-weight:700;color:var(--text);letter-spacing:.05em;}
-.date-display-sub{font-size:11px;color:var(--text3);margin-top:1px;}
-.date-input{padding:7px 10px;background:var(--bg3);border:1px solid var(--border2);border-radius:6px;color:var(--text2);font-size:12px;cursor:pointer;}
+/* LOGIN */
+#pw-screen{position:fixed;inset:0;background:#0a0a0f;z-index:9999;display:flex;align-items:center;justify-content:center;}
+.pw-box{text-align:center;width:320px;padding:0 20px;}
 
-/* ===== CONTENT ===== */
-#content{flex:1;padding:16px;max-width:900px;margin:0 auto;width:100%;}
-
-/* ===== SUMMARY CARDS ===== */
+/* CARDS */
 .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px;}
-@media(min-width:600px){.cards{grid-template-columns:repeat(6,1fr);}}
-.card{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:12px 10px;text-align:center;}
-.card-label{font-size:10px;color:var(--text3);letter-spacing:.06em;margin-bottom:4px;}
-.card-val{font-size:16px;font-weight:700;}
-.card-val.gold{color:var(--gold);}
-.card-val.blue{color:var(--blue);}
-.card-val.green{color:var(--green);}
-.card-val.orange{color:var(--orange);}
-.card-val.text{color:var(--text);}
+@media(min-width:640px){.cards{grid-template-columns:repeat(6,1fr);}}
+.card{background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:8px;padding:12px 10px;text-align:center;}
+.card-lbl{font-size:10px;letter-spacing:.08em;color:#666;margin-bottom:4px;}
+.card-val{font-size:15px;font-weight:700;}
 
-/* ===== SECTION ===== */
-.sec{background:var(--bg2);border:1px solid var(--border);border-radius:10px;margin-bottom:14px;overflow:hidden;}
-.sec-hdr{padding:12px 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);}
-.sec-title{font-size:13px;font-weight:700;color:var(--text);letter-spacing:.06em;}
+/* SECTION */
+.sec{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);border-radius:8px;margin-bottom:14px;overflow:hidden;}
+.sec-hdr{padding:11px 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,.06);background:rgba(255,255,255,.02);}
+.sec-title{font-size:12px;font-weight:700;letter-spacing:.1em;color:#d4a017;}
+.sec-note{font-size:11px;color:#666;}
 .sec-body{padding:12px 16px;}
 
-/* ===== CATEGORY TABLE ===== */
-.cat-row{display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid rgba(255,255,255,.04);}
-.cat-row:last-child{border-bottom:none;}
-.cat-label{font-size:13px;color:var(--text2);}
-.cat-badge{font-size:10px;color:var(--text3);background:var(--bg3);padding:1px 7px;border-radius:10px;margin-left:6px;}
-.cat-val{font-size:13px;font-weight:600;color:var(--text);}
-.cat-val.disc{color:var(--red);}
+/* TABLE ROWS */
+.trow{display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:1px solid rgba(255,255,255,.04);font-size:13px;}
+.trow:last-child{border-bottom:none;}
+.trow-label{color:#aaa;}
+.trow-val{color:#e8dcc8;font-weight:600;}
+.trow-val.gold{color:#d4a017;}
+.trow-val.red{color:#ff6b6b;}
+.trow-badge{font-size:10px;color:#666;background:rgba(255,255,255,.05);padding:1px 7px;border-radius:10px;margin-left:6px;}
 
-/* ===== SESSION TABLE ===== */
-.sess-row{padding:10px 0;border-bottom:1px solid rgba(255,255,255,.04);cursor:pointer;}
-.sess-row:last-child{border-bottom:none;}
-.sess-main{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
-.sess-table{font-size:13px;font-weight:700;color:var(--gold);min-width:60px;}
-.sess-time{font-size:11px;color:var(--text3);}
-.sess-guests{font-size:12px;color:var(--text2);}
-.sess-tag{font-size:10px;padding:1px 7px;border-radius:10px;white-space:nowrap;}
-.tag-hon{background:rgba(255,107,107,.12);color:var(--red);border:1px solid rgba(255,107,107,.2);}
-.tag-ban{background:var(--green2);color:var(--green);border:1px solid rgba(74,222,128,.2);}
-.tag-ext{background:var(--orange2);color:var(--orange);border:1px solid rgba(255,160,64,.2);}
-.tag-banext{background:var(--orange2);color:var(--orange);border:1px solid rgba(255,160,64,.35);}
-.tag-cash{background:var(--bg3);color:var(--text3);border:1px solid var(--border);}
-.tag-card{background:var(--blue2);color:var(--blue);border:1px solid rgba(74,158,255,.2);}
-.sess-total{margin-left:auto;font-size:14px;font-weight:700;color:var(--gold);}
-.sess-detail{display:none;margin-top:8px;padding:10px 12px;background:var(--bg3);border-radius:8px;border:1px solid var(--border);}
+/* SESSION ROWS */
+.sess{padding:10px 0;border-bottom:1px solid rgba(255,255,255,.04);cursor:pointer;}
+.sess:last-child{border-bottom:none;}
+.sess-top{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+.stbl{font-size:13px;font-weight:700;color:#d4a017;min-width:64px;}
+.stime{font-size:11px;color:#555;}
+.sguests{font-size:12px;color:#888;}
+.stag{font-size:10px;padding:1px 7px;border-radius:3px;font-weight:700;letter-spacing:.04em;white-space:nowrap;}
+.stag-hon{background:rgba(255,68,68,.12);color:#ff6b6b;border:1px solid rgba(255,68,68,.2);}
+.stag-ban{background:rgba(74,222,128,.1);color:#4ade80;border:1px solid rgba(74,222,128,.2);}
+.stag-ext{background:rgba(255,165,0,.1);color:#ffa040;border:1px solid rgba(255,165,0,.2);}
+.stag-banext{background:rgba(255,165,0,.15);color:#ffd066;border:1px solid rgba(255,165,0,.35);}
+.stag-cash{background:rgba(255,255,255,.05);color:#666;border:1px solid rgba(255,255,255,.08);}
+.stag-card{background:rgba(74,158,255,.1);color:#4a9eff;border:1px solid rgba(74,158,255,.2);}
+.stag-split{background:rgba(124,77,255,.1);color:#a78bfa;border:1px solid rgba(124,77,255,.2);}
+.stotal{margin-left:auto;font-size:14px;font-weight:700;color:#d4a017;}
+.sess-detail{display:none;margin-top:8px;padding:10px 12px;background:#141418;border-radius:6px;border:1px solid rgba(184,150,12,.15);}
 .sess-detail.open{display:block;}
-.detail-row{display:flex;justify-content:space-between;font-size:12px;padding:3px 0;color:var(--text2);}
-.detail-row span:last-child{color:var(--text);}
-.detail-row.disc span:last-child{color:var(--red);}
-.detail-divider{border-top:1px solid var(--border);margin:6px 0;}
-.detail-total{display:flex;justify-content:space-between;font-size:13px;font-weight:700;padding:4px 0;color:var(--gold);}
+.det-row{display:flex;justify-content:space-between;font-size:12px;padding:3px 0;color:#888;}
+.det-row span:last-child{color:#ccc;}
+.det-row.disc span:last-child{color:#ff6b6b;}
+.det-div{border-top:1px solid rgba(255,255,255,.06);margin:5px 0;}
+.det-total{display:flex;justify-content:space-between;font-size:13px;font-weight:700;padding:4px 0;color:#d4a017;}
 
-/* ===== CAST TABLE ===== */
-.cast-grid{display:grid;grid-template-columns:1fr auto auto auto auto;gap:0;font-size:12px;}
-.cast-gh{font-size:10px;color:var(--text3);padding:4px 6px;border-bottom:1px solid var(--border);}
-.cast-gh:first-child{text-align:left;}
-.cast-gh:not(:first-child){text-align:right;}
-.cast-gr{display:contents;}
-.cast-gc{padding:7px 6px;border-bottom:1px solid rgba(255,255,255,.04);}
-.cast-gc:first-child{color:var(--text);font-weight:600;}
-.cast-gc:not(:first-child){text-align:right;color:var(--text2);}
-.cast-gc.val{color:var(--gold);font-weight:600;}
-.cast-gc.val-s{color:var(--orange);font-weight:600;}
+/* CAST TABLE */
+.ctbl{width:100%;border-collapse:collapse;font-size:12px;}
+.ctbl th{font-size:10px;letter-spacing:.08em;color:#555;font-weight:400;padding:4px 8px;border-bottom:1px solid rgba(255,255,255,.06);text-align:right;}
+.ctbl th:first-child{text-align:left;}
+.ctbl td{padding:7px 8px;border-bottom:1px solid rgba(255,255,255,.04);color:#999;text-align:right;}
+.ctbl td:first-child{color:#e8dcc8;font-weight:600;text-align:left;}
+.ctbl td.gv{color:#d4a017;font-weight:700;}
+.ctbl td.ov{color:#ffa040;font-weight:700;}
+.ctbl tr:last-child td{border-bottom:none;}
 
-/* ===== EMPTY ===== */
-.empty{padding:32px;text-align:center;color:var(--text3);font-size:13px;}
+/* DATE NAV */
+.dnav{display:flex;align-items:center;gap:8px;padding:10px 16px;background:linear-gradient(180deg,#0f0e0a 0%,#0a0a0f 100%);border-bottom:1px solid rgba(255,255,255,.06);}
+.darr{width:34px;height:34px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:6px;color:#888;font-size:18px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s;}
+.darr:hover{border-color:rgba(184,150,12,.3);color:#d4a017;}
+.ddisp{flex:1;text-align:center;}
+.ddisp-main{font-size:15px;font-weight:700;color:#e8dcc8;letter-spacing:.04em;}
+.ddisp-sub{font-size:10px;color:#555;margin-top:2px;}
+.djump{padding:6px 10px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:4px;color:#888;font-size:12px;cursor:pointer;font-family:inherit;}
 
-/* ===== SPINNER ===== */
-.spinner{display:inline-block;width:20px;height:20px;border:2px solid var(--border2);border-top-color:var(--gold);border-radius:50%;animation:spin .7s linear infinite;}
-@keyframes spin{to{transform:rotate(360deg)}}
-.loading{display:flex;align-items:center;justify-content:center;gap:10px;padding:40px;color:var(--text3);}
-
-/* ===== NO DATA ===== */
-.no-data{background:var(--bg2);border:1px solid var(--border);border-radius:10px;margin-bottom:14px;padding:48px 16px;text-align:center;}
-.no-data-icon{font-size:32px;margin-bottom:8px;opacity:.4;}
-.no-data-text{color:var(--text3);font-size:13px;}
+/* EMPTY / NODATA */
+.nodata{padding:48px 16px;text-align:center;color:#444;font-size:13px;}
+.sp-inline{display:inline-block;width:18px;height:18px;border:2px solid rgba(184,150,12,.2);border-top-color:#d4a017;border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle;margin-right:8px;}
 </style>
 </head>
 <body>
 
-<!-- ===== LOGIN ===== -->
-<div id="login-wrap">
-  <div class="login-box">
-    <div class="login-logo">CLUB GENESIS</div>
-    <div class="login-sub">経理システム Ver1.0</div>
-    <div class="login-label">パスワード</div>
-    <div class="login-input-wrap">
-      <input type="password" id="pw-input" class="login-input" placeholder="パスワードを入力" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()">
-      <button class="pw-toggle" onclick="togglePw()" id="pw-eye">👁</button>
+<!-- LOADING -->
+<div id="loading">
+  <div style="font-family:'Cormorant Garamond',serif;font-size:28px;color:#d4a017;letter-spacing:.2em;">CLUB GENESIS</div>
+  <div class="sp"></div>
+  <div style="font-size:12px;color:#666;letter-spacing:.1em;">Firebaseに接続中...</div>
+</div>
+
+<!-- LOGIN -->
+<div id="pw-screen" style="display:none;">
+  <div class="pw-box">
+    <div style="font-family:'Cormorant Garamond',serif;font-size:32px;font-weight:300;letter-spacing:.3em;color:#d4a017;margin-bottom:6px;">CLUB GENESIS</div>
+    <div style="font-size:10px;color:#555;letter-spacing:.15em;margin-bottom:40px;">ACCOUNTING SYSTEM</div>
+    <div style="margin-bottom:12px;">
+      <input type="password" id="pw-input" class="ip" placeholder="パスワードを入力" autocomplete="current-password"
+        style="font-size:16px;text-align:center;letter-spacing:.1em;padding:14px;"
+        onkeydown="if(event.key==='Enter')doLogin()"/>
     </div>
-    <button class="login-btn" onclick="doLogin()">ログイン</button>
-    <div class="login-err" id="login-err"></div>
+    <button class="btn gbg" onclick="doLogin()" style="width:100%;padding:14px;font-size:15px;font-weight:700;border-radius:8px;touch-action:manipulation;">入室する</button>
+    <div id="pw-err" style="color:#ff6b6b;font-size:12px;margin-top:12px;min-height:18px;"></div>
   </div>
 </div>
 
-<!-- ===== MAIN APP ===== -->
-<div id="app">
-  <div class="hdr">
-    <div>
-      <div class="hdr-logo">CLUB GENESIS</div>
-      <div class="hdr-sub">経理システム</div>
+<!-- MAIN APP -->
+<div id="app" style="display:none;">
+  <header>
+    <div style="display:flex;align-items:baseline;gap:10px;">
+      <span style="font-family:'Cormorant Garamond',serif;font-size:22px;font-weight:300;letter-spacing:.2em;color:#d4a017;">CLUB GENESIS</span>
+      <span style="font-size:10px;color:#666;letter-spacing:.1em;">ACCOUNTING</span>
+      <span style="font-size:9px;color:#555;letter-spacing:.05em;">Ver1.0</span>
     </div>
-    <div class="hdr-sync" id="sync-badge">接続中…</div>
-    <button class="hdr-logout" onclick="doLogout()">ログアウト</button>
-  </div>
-  <div class="date-nav">
-    <button class="date-arrow" onclick="shiftDate(-1)">‹</button>
-    <div class="date-display">
-      <div class="date-display-main" id="date-main"></div>
-      <div class="date-display-sub" id="date-sub"></div>
+    <nav style="display:flex;gap:2px;">
+      <button class="nb ac" id="nav-sales">売上確認</button>
+    </nav>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <div id="sb" style="font-size:10px;color:#4ade80;letter-spacing:.05em;background:rgba(74,222,128,.06);border:1px solid rgba(74,222,128,.2);border-radius:4px;padding:2px 8px;">⟳ 接続中...</div>
+      <button class="btn" onclick="doLogout()" style="padding:4px 10px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);color:#888;border-radius:4px;font-size:11px;">退出</button>
     </div>
-    <button class="date-arrow" onclick="shiftDate(1)">›</button>
-    <input type="date" class="date-input" id="date-jump" onchange="jumpDate(this.value)">
+  </header>
+  <div class="dnav">
+    <button class="darr" onclick="shiftDate(-1)">‹</button>
+    <div class="ddisp">
+      <div class="ddisp-main" id="d-main"></div>
+      <div class="ddisp-sub" id="d-sub"></div>
+    </div>
+    <button class="darr" onclick="shiftDate(1)">›</button>
+    <input type="date" class="djump" id="d-jump" onchange="jumpDate(this.value)"/>
   </div>
-  <div id="content"><div class="loading"><div class="spinner"></div><span>データ読込中…</span></div></div>
+  <main id="content"></main>
 </div>
 
 <script>
@@ -185,45 +175,38 @@ const db=firebase.database();
 let S={history:[],casts:[],tables:[],config:{}};
 let loaded=false;
 let selDate=todayStr();
+const SK="genesis_acc_v1";
 
 // ===== UTILS =====
 function todayStr(){const d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");}
 function fmt(n){return Math.round(Number(n||0)).toLocaleString("ja-JP");}
-function dow(str){return["日","月","火","水","木","金","土"][new Date(str).getDay()];}
-function dateLabel(str){const p=str.split("-");return p[0]+"年"+parseInt(p[1])+"月"+parseInt(p[2])+"日";}
+function dow(s){return["日","月","火","水","木","金","土"][new Date(s).getDay()];}
+function dateLabel(s){const p=s.split("-");return p[0]+"年"+parseInt(p[1])+"月"+parseInt(p[2])+"日";}
+function iso(i){if(i.isSet)return 0;if(i.isHonShimei)return 1;if(i.isBanaiShimei)return 2;if(i.label==="同伴料")return 3;if(i.isExtension)return 7;if(i.isDiscount)return 11;if(i.id?.startsWith("cd_"))return 9;return 8;}
 
-function getHistForDate(date){
-  const d=new Date(date+"T00:00:00");
-  const s=d.getTime();
-  const e=s+86400000;
-  return (S.history||[]).filter(h=>h.startTime>=s&&h.startTime<e);
+function getHist(date){
+  const s=new Date(date+"T00:00:00").getTime();
+  return(S.history||[]).filter(h=>h.startTime>=s&&h.startTime<s+86400000);
 }
-
 function calcCash(h){
-  if(h.splits&&h.splits.length>1)return h.splits.filter(sp=>sp.method==="cash").reduce((a,sp)=>a+(sp.amount||0),0);
+  if(h.splits?.length>1)return h.splits.filter(s=>s.method==="cash").reduce((a,s)=>a+(s.amount||0),0);
   return h.payMethod==="card"?0:(h.total||0);
 }
 function calcCard(h){
-  if(h.splits&&h.splits.length>1)return h.splits.filter(sp=>sp.method==="card").reduce((a,sp)=>a+(sp.amount||0),0);
+  if(h.splits?.length>1)return h.splits.filter(s=>s.method==="card").reduce((a,s)=>a+(s.amount||0),0);
   return h.payMethod==="card"?(h.total||0):0;
 }
-
-function itemsTotal(items,pred){return (items||[]).filter(pred).reduce((a,i)=>a+Math.abs((i.price||0)*(i.qty||1)),0);}
-
-function castHonSub(recs,cid){
-  const sid=String(cid);
-  const honRecs=recs.filter(h=>(h.items||[]).some(i=>i.isHonShimei&&String(i.castId)===sid));
-  return honRecs.reduce((a,h)=>{
+function iAmt(items,fn){return(items||[]).filter(fn).reduce((a,i)=>a+Math.abs((i.price||0)*(i.qty||1)),0);}
+function becMatch(i,cid){return i.isBanaiExtension&&((i.banaiExtCastIds||[]).map(String).includes(cid)||(i.banaiExtCastId&&String(i.banaiExtCastId)===cid));}
+function honSub(recs,cid){
+  return recs.filter(h=>(h.items||[]).some(i=>i.isHonShimei&&String(i.castId)===cid)).reduce((a,h)=>{
     const n=Math.max(1,(h.items||[]).filter(i=>i.isHonShimei).length);
     return a+(h.subtotal||h.total)/n;
   },0);
 }
-function becMatch(i,cid){return i.isBanaiExtension&&((i.banaiExtCastIds||[]).map(String).includes(cid)||(i.banaiExtCastId&&String(i.banaiExtCastId)===cid));}
-function castBanaiExtSub(recs,cid){
-  const sid=String(cid);
-  const beRecs=recs.filter(h=>(h.items||[]).some(i=>becMatch(i,sid))&&!(h.items||[]).some(i=>i.isHonShimei));
-  return beRecs.reduce((a,h)=>{
-    return a+(h.items||[]).filter(i=>becMatch(i,sid)).reduce((s,i)=>{
+function beSub(recs,cid){
+  return recs.filter(h=>(h.items||[]).some(i=>becMatch(i,cid))&&!(h.items||[]).some(i=>i.isHonShimei)).reduce((a,h)=>{
+    return a+(h.items||[]).filter(i=>becMatch(i,cid)).reduce((s,i)=>{
       const n=Math.max(1,(i.banaiExtCastIds||[i.banaiExtCastId]).filter(Boolean).length);
       return s+Math.abs(i.price*(i.qty||1))/n;
     },0);
@@ -238,199 +221,188 @@ db.ref("pos").on("value",snap=>{
   S.tables=d.tables||[];
   S.config=d.config||{};
   loaded=true;
-  document.getElementById("sync-badge").textContent="同期済み ✓";
-  document.getElementById("sync-badge").className="hdr-sync";
-  if(document.getElementById("app").classList.contains("show"))render();
-},err=>{
-  document.getElementById("sync-badge").textContent="接続エラー";
-  document.getElementById("sync-badge").className="hdr-sync err";
-});
+  sb(true,"同期済み ✓");
+  // 初回: ローディング → ログイン or アプリ
+  if(document.getElementById("loading").style.display!=="none"){
+    document.getElementById("loading").style.display="none";
+    if(sessionStorage.getItem(SK)==="1"){showApp();}
+    else{document.getElementById("pw-screen").style.display="flex";}
+  }
+  if(document.getElementById("app").style.display!=="none")render();
+},()=>{sb(false,"接続エラー");});
+
+function sb(ok,msg){const e=document.getElementById("sb");if(!e)return;e.style.color=ok?"#4ade80":"#ff6b6b";e.style.borderColor=ok?"rgba(74,222,128,.2)":"rgba(255,80,80,.2)";e.style.background=ok?"rgba(74,222,128,.06)":"rgba(255,80,80,.06)";e.textContent="⟳ "+msg;}
 
 // ===== AUTH =====
-const SESSION_KEY="genesis_acc_auth";
-function togglePw(){const i=document.getElementById("pw-input");i.type=i.type==="password"?"text":"password";}
 function doLogin(){
   const pw=document.getElementById("pw-input").value;
   const stored=S.config.accountingPassword||"genesis";
   if(pw===stored){
-    sessionStorage.setItem(SESSION_KEY,"1");
-    document.getElementById("login-wrap").style.display="none";
-    document.getElementById("app").classList.add("show");
-    updateDateNav();
-    if(loaded)render();
+    sessionStorage.setItem(SK,"1");
+    document.getElementById("pw-screen").style.display="none";
+    showApp();
   }else{
-    document.getElementById("login-err").textContent="パスワードが違います";
+    const e=document.getElementById("pw-err");
+    e.textContent="パスワードが違います";
     document.getElementById("pw-input").value="";
     document.getElementById("pw-input").focus();
-    setTimeout(()=>{document.getElementById("login-err").textContent="";},2500);
+    setTimeout(()=>{e.textContent="";},2500);
   }
 }
 function doLogout(){
-  sessionStorage.removeItem(SESSION_KEY);
-  document.getElementById("app").classList.remove("show");
-  document.getElementById("login-wrap").style.display="flex";
+  sessionStorage.removeItem(SK);
+  document.getElementById("app").style.display="none";
+  document.getElementById("pw-screen").style.display="flex";
   document.getElementById("pw-input").value="";
 }
-// Auto-login if session exists
-window.addEventListener("DOMContentLoaded",()=>{
-  if(sessionStorage.getItem(SESSION_KEY)==="1"){
-    document.getElementById("login-wrap").style.display="none";
-    document.getElementById("app").classList.add("show");
-    updateDateNav();
-  }
-  if("serviceWorker" in navigator)navigator.serviceWorker.register("./sw.js");
-});
+function showApp(){
+  document.getElementById("app").style.display="block";
+  updateDNav();render();
+}
 
 // ===== DATE NAV =====
-function shiftDate(delta){
-  const d=new Date(selDate+"T12:00:00");
-  d.setDate(d.getDate()+delta);
-  selDate=d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");
-  updateDateNav();render();
+function shiftDate(d){
+  const dt=new Date(selDate+"T12:00:00");dt.setDate(dt.getDate()+d);
+  selDate=dt.getFullYear()+"-"+String(dt.getMonth()+1).padStart(2,"0")+"-"+String(dt.getDate()).padStart(2,"0");
+  updateDNav();render();
 }
-function jumpDate(v){if(v){selDate=v;updateDateNav();render();}}
-function updateDateNav(){
-  document.getElementById("date-main").textContent=dateLabel(selDate)+" ("+dow(selDate)+")";
-  const isToday=selDate===todayStr();
-  document.getElementById("date-sub").textContent=isToday?"本日":"";
-  document.getElementById("date-jump").value=selDate;
+function jumpDate(v){if(v){selDate=v;updateDNav();render();}}
+function updateDNav(){
+  document.getElementById("d-main").textContent=dateLabel(selDate)+" ("+dow(selDate)+")";
+  document.getElementById("d-sub").textContent=selDate===todayStr()?"本日":"";
+  document.getElementById("d-jump").value=selDate;
 }
 
 // ===== RENDER =====
 function render(){
-  if(!document.getElementById("app").classList.contains("show"))return;
-  const recs=getHistForDate(selDate);
-  const c=document.getElementById("content");
-  if(!loaded){c.innerHTML='<div class="loading"><div class="spinner"></div><span>データ読込中…</span></div>';return;}
-  if(!recs.length){c.innerHTML='<div class="no-data"><div class="no-data-icon">📋</div><div class="no-data-text">'+dateLabel(selDate)+'のデータはありません</div></div>';return;}
+  const el=document.getElementById("content");if(!el)return;
+  if(!loaded){el.innerHTML='<div class="nodata"><span class="sp-inline"></span>データ読込中…</div>';return;}
+  const recs=getHist(selDate);
+  if(!recs.length){el.innerHTML='<div class="nodata">'+dateLabel(selDate)+'のデータはありません</div>';return;}
 
-  // ---- サマリ計算 ----
-  const totalSales=recs.reduce((a,h)=>a+(h.total||0),0);
-  const totalCash=recs.reduce((a,h)=>a+calcCash(h),0);
-  const totalCard=recs.reduce((a,h)=>a+calcCard(h),0);
-  const totalGuests=recs.reduce((a,h)=>a+(h.guests||0),0);
-  const receiptCount=recs.filter(h=>h.receiptIssued||(h.splits&&h.splits.some(sp=>sp.receipt))).length;
+  // ---- 集計 ----
+  const total=recs.reduce((a,h)=>a+(h.total||0),0);
+  const cash=recs.reduce((a,h)=>a+calcCash(h),0);
+  const card=recs.reduce((a,h)=>a+calcCard(h),0);
+  const guests=recs.reduce((a,h)=>a+(h.guests||0),0);
+  const rcpt=recs.filter(h=>h.receiptIssued||(h.splits?.some(s=>s.receipt))).length;
+  const allI=recs.flatMap(h=>h.items||[]);
+  const catSet=iAmt(allI,i=>i.isSet);
+  const catHon=iAmt(allI,i=>i.isHonShimei);const honCnt=allI.filter(i=>i.isHonShimei).length;
+  const catBan=iAmt(allI,i=>i.isBanaiShimei);const banCnt=allI.filter(i=>i.isBanaiShimei).length;
+  const catDohan=iAmt(allI,i=>i.label==="同伴料");
+  const catExt=iAmt(allI,i=>i.isExtension&&!i.isBanaiExtension);const extCnt=allI.filter(i=>i.isExtension&&i.extMinutes).length;
+  const catBE=iAmt(allI,i=>i.isBanaiExtension);
+  const catVip=iAmt(allI,i=>i.isVipCharge);
+  const catSC=iAmt(allI,i=>i.label?.includes("シングルチャージ"));
+  const catDrink=iAmt(allI,i=>i.id?.startsWith("cd_")||(!i.isSet&&!i.isHonShimei&&!i.isBanaiShimei&&!i.isExtension&&!i.isVipCharge&&!i.isDiscount&&!i.label?.includes("シングルチャージ")&&!i.label?.includes("同伴料")&&(i.label?.includes("Drink")||i.label?.includes("ドリンク"))));
+  const catDisc=iAmt(allI,i=>i.isDiscount);
+  const subTotal=recs.reduce((a,h)=>a+(h.subtotal||0),0);
 
-  // ---- カテゴリ集計 ----
-  const allItems=recs.flatMap(h=>h.items||[]);
-  const catSet=itemsTotal(allItems,i=>i.isSet);
-  const catHon=itemsTotal(allItems,i=>i.isHonShimei);
-  const catBan=itemsTotal(allItems,i=>i.isBanaiShimei);
-  const catExt=itemsTotal(allItems,i=>i.isExtension&&!i.isBanaiExtension&&!i.isSC);
-  const catBanExt=itemsTotal(allItems,i=>i.isBanaiExtension);
-  const catVip=itemsTotal(allItems,i=>i.isVipCharge);
-  const catDrink=itemsTotal(allItems,i=>!i.isSet&&!i.isHonShimei&&!i.isBanaiShimei&&!i.isExtension&&!i.isVipCharge&&!i.isDiscount&&!i.label?.includes("シングルチャージ")&&!i.label?.includes("同伴料")&&(i.id?.startsWith("cd_")||i.label?.includes("Drink")||i.label?.includes("飲")));
-  const catSC=itemsTotal(allItems,i=>i.label&&i.label.includes("シングルチャージ"));
-  const catDohan=itemsTotal(allItems,i=>i.label==="同伴料");
-  const catDisc=itemsTotal(allItems,i=>i.isDiscount);
-  const honCount=recs.reduce((a,h)=>a+(h.items||[]).filter(i=>i.isHonShimei).length,0);
-  const banCount=recs.reduce((a,h)=>a+(h.items||[]).filter(i=>i.isBanaiShimei).length,0);
-  const extCount=recs.flatMap(h=>(h.items||[]).filter(i=>i.isExtension&&i.extMinutes)).length;
-
-  // ---- キャスト別 ----
+  // ---- キャスト ----
   const castRows=(S.casts||[]).map(c=>{
     const cid=String(c.id);
-    const honRecs=recs.filter(h=>(h.items||[]).some(i=>i.isHonShimei&&String(i.castId)===cid));
-    const banRecs=recs.filter(h=>(h.items||[]).some(i=>i.isBanaiShimei&&String(i.castId)===cid));
-    const beRecs=recs.filter(h=>(h.items||[]).some(i=>becMatch(i,cid)));
-    const honSub=castHonSub(recs,cid);
-    const beSub=castBanaiExtSub(recs,cid);
-    return{name:c.name,honCnt:honRecs.length,banCnt:banRecs.length,beCnt:beRecs.length,honSub,beSub};
-  }).filter(r=>r.honCnt||r.banCnt||r.beCnt);
+    const hc=recs.filter(h=>(h.items||[]).some(i=>i.isHonShimei&&String(i.castId)===cid)).length;
+    const bc=recs.filter(h=>(h.items||[]).some(i=>i.isBanaiShimei&&String(i.castId)===cid)).length;
+    const bec=recs.filter(h=>(h.items||[]).some(i=>becMatch(i,cid))).length;
+    const hs=honSub(recs,cid);const bs=beSub(recs,cid);
+    return{name:c.name,hc,bc,bec,hs,bs};
+  }).filter(r=>r.hc||r.bc||r.bec);
 
-  // ---- HTML BUILD ----
-  let html="";
+  // ---- HTML ----
+  let h="";
 
-  // サマリカード
-  html+='<div class="cards">';
-  html+=card("総売上","¥"+fmt(totalSales),"gold");
-  html+=card("現金","¥"+fmt(totalCash),"green");
-  html+=card("カード","¥"+fmt(totalCard),"blue");
-  html+=card("組数",recs.length+"組","text");
-  html+=card("客数",totalGuests+"名","text");
-  html+=card("領収書",receiptCount+"件","orange");
-  html+='</div>';
+  // カード
+  h+='<div class="cards">';
+  h+=crd("総売上","¥"+fmt(total),"#d4a017");
+  h+=crd("現金","¥"+fmt(cash),"#4ade80");
+  h+=crd("カード","¥"+fmt(card),"#4a9eff");
+  h+=crd("組数",recs.length+"組","#e8dcc8");
+  h+=crd("客数",guests+"名","#e8dcc8");
+  h+=crd("領収書",rcpt+"件","#ffa040");
+  h+='</div>';
 
-  // カテゴリ別
-  html+='<div class="sec"><div class="sec-hdr"><span class="sec-title">カテゴリ別売上</span><span style="font-size:11px;color:var(--text3);">小計: ¥'+fmt(recs.reduce((a,h)=>a+(h.subtotal||0),0))+'</span></div><div class="sec-body">';
-  html+=catRow("セット料金",catSet);
-  html+=catRow("本指名料",catHon,honCount+"件");
-  html+=catRow("場内指名料",catBan,banCount+"件");
-  if(catDohan)html+=catRow("同伴料",catDohan);
-  html+=catRow("延長料金",catExt,extCount+"件");
-  if(catBanExt)html+=catRow("場内延長料金",catBanExt);
-  if(catVip)html+=catRow("VIP室料",catVip);
-  if(catSC)html+=catRow("シングルチャージ",catSC);
-  if(catDrink)html+=catRow("ドリンク",catDrink);
-  if(catDisc)html+='<div class="cat-row"><span class="cat-label">割引</span><span class="cat-val disc">-¥'+fmt(catDisc)+'</span></div>';
-  html+='</div></div>';
+  // カテゴリ
+  h+='<div class="sec"><div class="sec-hdr"><span class="sec-title">カテゴリ別売上</span><span class="sec-note">小計 ¥'+fmt(subTotal)+'</span></div><div class="sec-body">';
+  h+=tr("セット料金",catSet);
+  h+=tr("本指名料",catHon,honCnt+"件");
+  h+=tr("場内指名料",catBan,banCnt+"件");
+  if(catDohan)h+=tr("同伴料",catDohan);
+  h+=tr("延長料金",catExt,extCnt+"件");
+  if(catBE)h+=tr("場内延長料金",catBE);
+  if(catVip)h+=tr("VIP室料",catVip);
+  if(catSC)h+=tr("シングルチャージ",catSC);
+  if(catDrink)h+=tr("ドリンク",catDrink);
+  if(catDisc)h+='<div class="trow"><span class="trow-label">割引</span><span class="trow-val red">-¥'+fmt(catDisc)+'</span></div>';
+  h+='</div></div>';
 
   // テーブル別
-  html+='<div class="sec"><div class="sec-hdr"><span class="sec-title">テーブル別一覧</span><span style="font-size:11px;color:var(--text3);">'+recs.length+'件</span></div><div class="sec-body" style="padding:0 16px;">';
-  [...recs].sort((a,b)=>a.startTime-b.startTime).forEach((h,i)=>{
-    const inT=new Date(h.startTime).toLocaleTimeString("ja-JP",{hour:"2-digit",minute:"2-digit"});
-    const outT=h.endTime?new Date(h.endTime).toLocaleTimeString("ja-JP",{hour:"2-digit",minute:"2-digit"}):"—";
-    const honNames=(h.items||[]).filter(i=>i.isHonShimei).map(i=>i.label.replace("本指名料 (","").replace(")","").trim());
-    const banNames=(h.items||[]).filter(i=>i.isBanaiShimei).map(i=>i.label.replace("場内指名料 (","").replace(")","").trim());
-    const hasExt=(h.items||[]).some(i=>i.isExtension&&i.extMinutes);
-    const hasBanExt=(h.items||[]).some(i=>i.isBanaiExtension);
-    const payM=h.payMethod==="card"?"card":"cash";
-    const payLabel=h.splits&&h.splits.length>1?"分割":(payM==="card"?"カード":"現金");
-    html+='<div class="sess-row" onclick="toggleDetail('+i+')">';
-    html+='<div class="sess-main">';
-    html+='<span class="sess-table">'+(h.tableLabel||"—")+'</span>';
-    html+='<span class="sess-time">'+inT+'→'+outT+'</span>';
-    html+='<span class="sess-guests">'+h.guests+'名</span>';
-    if(honNames.length)html+='<span class="sess-tag tag-hon">本: '+honNames.join("・")+'</span>';
-    if(banNames.length)html+='<span class="sess-tag tag-ban">場: '+banNames.join("・")+'</span>';
-    if(hasBanExt)html+='<span class="sess-tag tag-banext">場内延長</span>';
-    else if(hasExt)html+='<span class="sess-tag tag-ext">延長</span>';
-    html+='<span class="sess-tag '+(payM==="card"?"tag-card":"tag-cash")+'">'+payLabel+'</span>';
-    html+='<span class="sess-total">¥'+fmt(h.total)+'</span>';
-    html+='</div>';
+  h+='<div class="sec"><div class="sec-hdr"><span class="sec-title">テーブル別一覧</span><span class="sec-note">'+recs.length+'件</span></div><div class="sec-body" style="padding:4px 16px;">';
+  [...recs].sort((a,b)=>a.startTime-b.startTime).forEach((rec,i)=>{
+    const iT=new Date(rec.startTime).toLocaleTimeString("ja-JP",{hour:"2-digit",minute:"2-digit"});
+    const oT=rec.endTime?new Date(rec.endTime).toLocaleTimeString("ja-JP",{hour:"2-digit",minute:"2-digit"}):"—";
+    const hons=(rec.items||[]).filter(x=>x.isHonShimei).map(x=>x.label.replace("本指名料 (","").replace(")","").trim());
+    const bans=(rec.items||[]).filter(x=>x.isBanaiShimei).map(x=>x.label.replace("場内指名料 (","").replace(")","").trim());
+    const hasExt=(rec.items||[]).some(x=>x.isExtension&&x.extMinutes&&!x.isBanaiExtension);
+    const hasBE=(rec.items||[]).some(x=>x.isBanaiExtension);
+    const isSplit=rec.splits?.length>1;
+    const pm=isSplit?"split":(rec.payMethod==="card"?"card":"cash");
+    const pmLabel={"split":"分割","card":"カード","cash":"現金"}[pm];
+    h+='<div class="sess" onclick="tog('+i+')">';
+    h+='<div class="sess-top">';
+    h+='<span class="stbl">'+(rec.tableLabel||"—")+'</span>';
+    h+='<span class="stime">'+iT+'→'+oT+'</span>';
+    h+='<span class="sguests">'+rec.guests+'名</span>';
+    if(hons.length)h+='<span class="stag stag-hon">本: '+hons.join("・")+'</span>';
+    if(bans.length)h+='<span class="stag stag-ban">場: '+bans.join("・")+'</span>';
+    if(hasBE)h+='<span class="stag stag-banext">場内延長</span>';
+    else if(hasExt)h+='<span class="stag stag-ext">延長</span>';
+    h+='<span class="stag stag-'+pm+'">'+pmLabel+'</span>';
+    h+='<span class="stotal">¥'+fmt(rec.total)+'</span>';
+    h+='</div>';
     // 明細
-    html+='<div class="sess-detail" id="det-'+i+'">';
-    (h.items||[]).sort((a,b)=>iso(a)-iso(b)).forEach(it=>{
+    h+='<div class="sess-detail" id="sd-'+i+'">';
+    (rec.items||[]).sort((a,b)=>iso(a)-iso(b)).forEach(it=>{
       const lb=it.qty>1?it.label+" ×"+it.qty:it.label;
-      const amt=it.isDiscount?"-¥"+fmt(Math.abs(it.price*(it.qty||1))):"¥"+fmt(Math.abs(it.price*(it.qty||1)));
-      html+='<div class="detail-row'+(it.isDiscount?" disc":"")+'"><span>'+lb+'</span><span>'+amt+'</span></div>';
+      const av=it.isDiscount?"-¥"+fmt(Math.abs(it.price*(it.qty||1))):"¥"+fmt(Math.abs(it.price*(it.qty||1)));
+      h+='<div class="det-row'+(it.isDiscount?" disc":"")+'"><span>'+lb+'</span><span>'+av+'</span></div>';
     });
-    html+='<div class="detail-divider"></div>';
-    html+='<div class="detail-row"><span>小計</span><span>¥'+fmt(h.subtotal)+'</span></div>';
-    if((h.discount||0)>0)html+='<div class="detail-row disc"><span>割引</span><span>-¥'+fmt(h.discount)+'</span></div>';
-    html+='<div class="detail-row"><span>税・SC ('+Math.round((h.rate||.25)*100)+'%)</span><span>¥'+fmt(h.tax)+'</span></div>';
-    if(h.splits&&h.splits.length>1){
-      html+='<div class="detail-divider"></div>';
-      h.splits.forEach(sp=>html+='<div class="detail-row"><span>'+(sp.method==="card"?"カード":"現金")+(sp.receipt?" [領]":"")+'</span><span>¥'+fmt(sp.amount)+'</span></div>');
-    }
-    html+='<div class="detail-total"><span>合計</span><span>¥'+fmt(h.total)+'</span></div>';
-    html+='</div>';
-    html+='</div>';
+    h+='<div class="det-div"></div>';
+    h+='<div class="det-row"><span>小計</span><span>¥'+fmt(rec.subtotal)+'</span></div>';
+    if((rec.discount||0)>0)h+='<div class="det-row disc"><span>割引</span><span>-¥'+fmt(rec.discount)+'</span></div>';
+    h+='<div class="det-row"><span>税・SC ('+Math.round((rec.rate||.25)*100)+'%)</span><span>¥'+fmt(rec.tax)+'</span></div>';
+    if(isSplit){h+='<div class="det-div"></div>';rec.splits.forEach(sp=>h+='<div class="det-row"><span>'+(sp.method==="card"?"カード":"現金")+(sp.receipt?" [領]":"")+'</span><span>¥'+fmt(sp.amount)+'</span></div>');}
+    h+='<div class="det-total"><span>合計</span><span>¥'+fmt(rec.total)+'</span></div>';
+    h+='</div></div>';
   });
-  html+='</div></div>';
+  h+='</div></div>';
 
   // キャスト別
   if(castRows.length){
-    html+='<div class="sec"><div class="sec-hdr"><span class="sec-title">キャスト別売上</span></div><div class="sec-body" style="padding:10px 16px;">';
-    html+='<div class="cast-grid">';
-    html+='<div class="cast-gh">キャスト</div><div class="cast-gh">本指名</div><div class="cast-gh">本指名売上</div><div class="cast-gh">場内延長</div><div class="cast-gh">場内延長売上</div>';
+    h+='<div class="sec"><div class="sec-hdr"><span class="sec-title">キャスト別売上</span></div><div class="sec-body" style="padding:10px 16px;">';
+    h+='<table class="ctbl"><thead><tr><th>キャスト</th><th>本指名</th><th>本指名売上</th><th>場内指名</th><th>場内延長</th><th>場内延長売上</th></tr></thead><tbody>';
     castRows.forEach(r=>{
-      html+='<div class="cast-gc">'+r.name+'</div>';
-      html+='<div class="cast-gc">'+(r.honCnt?r.honCnt+'件':"—")+'</div>';
-      html+='<div class="cast-gc'+(r.honSub?' val':'')+'">'+( r.honSub?"¥"+fmt(r.honSub):"—")+'</div>';
-      html+='<div class="cast-gc">'+(r.beCnt?r.beCnt+'件':"—")+'</div>';
-      html+='<div class="cast-gc'+(r.beSub?' val-s':'')+'">'+( r.beSub?"¥"+fmt(r.beSub):"—")+'</div>';
+      h+='<tr>';
+      h+='<td>'+r.name+'</td>';
+      h+='<td>'+(r.hc?r.hc+'件':"—")+'</td>';
+      h+='<td class="'+(r.hs?"gv":"")+'">'+( r.hs?"¥"+fmt(r.hs):"—")+'</td>';
+      h+='<td>'+(r.bc?r.bc+'件':"—")+'</td>';
+      h+='<td>'+(r.bec?r.bec+'件':"—")+'</td>';
+      h+='<td class="'+(r.bs?"ov":"")+'">'+( r.bs?"¥"+fmt(r.bs):"—")+'</td>';
+      h+='</tr>';
     });
-    html+='</div></div></div>';
+    h+='</tbody></table></div></div>';
   }
 
-  c.innerHTML=html;
+  el.innerHTML=h;
 }
 
-function card(label,val,cls){return'<div class="card"><div class="card-label">'+label+'</div><div class="card-val '+cls+'">'+val+'</div></div>';}
-function catRow(label,val,badge){return'<div class="cat-row"><span class="cat-label">'+label+(badge?'<span class="cat-badge">'+badge+'</span>':'')+'</span><span class="cat-val">¥'+fmt(val)+'</span></div>';}
-function iso(i){if(i.isSet)return 0;if(i.isHonShimei)return 1;if(i.isBanaiShimei)return 2;if(i.label==="同伴料")return 3;if(i.isExtension)return 7;if(i.isDiscount)return 11;if(i.id?.startsWith("cd_"))return 9;return 8;}
-function toggleDetail(i){const el=document.getElementById("det-"+i);if(el)el.classList.toggle("open");}
+function crd(l,v,color){return'<div class="card"><div class="card-lbl">'+l+'</div><div class="card-val" style="color:'+color+'">'+v+'</div></div>';}
+function tr(label,val,badge){return'<div class="trow"><span class="trow-label">'+label+(badge?'<span class="trow-badge">'+badge+'</span>':'')+'</span><span class="trow-val gold">¥'+fmt(val)+'</span></div>';}
+function tog(i){const e=document.getElementById("sd-"+i);if(e)e.classList.toggle("open");}
+
+// ===== SW =====
+if("serviceWorker" in navigator)navigator.serviceWorker.register("./sw.js");
 </script>
 </body>
 </html>
