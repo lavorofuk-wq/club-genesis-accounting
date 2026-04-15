@@ -170,8 +170,8 @@ main{padding:16px;max-width:960px;margin:0 auto;}
 const cfg={apiKey:"AIzaSyD_7XgXow1D-cp-TNsbqitjMzJCGD5DE64",authDomain:"club-genesis-5cba7.firebaseapp.com",databaseURL:"https://club-genesis-5cba7-default-rtdb.asia-southeast1.firebasedatabase.app",projectId:"club-genesis-5cba7",storageBucket:"club-genesis-5cba7.firebasestorage.app",messagingSenderId:"591051426146",appId:"1:591051426146:web:08a486510b89d6be0e443b"};
 firebase.initializeApp(cfg);
 const db=firebase.database();
-// 本番(genesis-accounting.vercel.app): 'pos' / 開発環境: 'pos-dev'
-const FB_ROOT = window.location.hostname === 'genesis-accounting.vercel.app' ? 'pos' : 'pos-dev';
+// 本番(club-genesis-accounting.vercel.app): 'pos' / 開発環境: 'pos-dev'
+const FB_ROOT = window.location.hostname === 'club-genesis-accounting.vercel.app' ? 'pos' : 'pos-dev';
 
 // ===== STATE =====
 let S={history:[],casts:[],tables:[],config:{}};
