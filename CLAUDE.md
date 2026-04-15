@@ -1,6 +1,7 @@
 # CLUB GENESIS 経理システム 開発ルール
 
 返答はすべて日本語で行う。
+作業は必ずdevブランチで行い、完了後にmainへマージしてpushする。
 変更後は常にgit add && git commitとgit pushまで自動実行する。
 システム内のバージョンを毎回更新する（index.html の Ver番号）。
 このプロジェクトはキャバクラ経理システム（index.html）。
