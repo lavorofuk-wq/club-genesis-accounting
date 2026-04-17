@@ -22,6 +22,12 @@
 - refactor: リファクタリング
 例: "feat: Ver1.1 給与計算機能追加"
 
+# システム構成・開発体制
+- このワークスペースは経理システム専用
+- POSシステムは別のVS Code / Claude Codeインスタンスで独立して開発する
+- 基本的にこのワークスペースからPOSシステムへのアクセス・開発は行わない
+- 両システムを同時に変更する必要がある場合のみ、POSシステム側の対応も考慮する
+
 # Firebase 接続
 - 経理システム専用のFirebaseプロジェクト（POSとは完全に別）
 - projectId: club-genesis-accountin
