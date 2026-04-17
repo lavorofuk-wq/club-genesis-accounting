@@ -22,14 +22,20 @@
 - refactor: リファクタリング
 例: "feat: Ver1.1 給与計算機能追加"
 
-# Firebase データ構造（POSと同じFirebaseを参照）
-pos/
-  history/              ← 会計済みセッション（売上データ）
-  sessions/             ← 進行中セッション
+# Firebase 接続
+- 経理システム専用のFirebaseプロジェクト（POSとは完全に別）
+- projectId: club-genesis-accountin
+- databaseURL: https://club-genesis-accountin-default-rtdb.asia-southeast1.firebasedatabase.app
+- 本番(club-genesis-accounting.vercel.app): FB_ROOT = 'accounting'
+- 開発(ローカル等): FB_ROOT = 'accounting-dev'
+- 切り替えはホスト名で自動判定
+
+# Firebase データ構造
+accounting/  ← 本番 / accounting-dev/  ← 開発
+  history/              ← POSから同期した会計済みセッション（売上データ）
   casts/                ← キャスト一覧
-  tables/               ← テーブル一覧
   shifts/               ← 出勤記録
-  assignments/          ← テーブルアサイン情報
+  bizDays/              ← 営業日管理
   config/
     accountingPassword  ← 経理システムパスワード
 

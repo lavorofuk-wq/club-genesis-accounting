@@ -143,7 +143,7 @@ main{padding:16px;max-width:960px;margin:0 auto;}
     <div style="display:flex;align-items:baseline;gap:10px;">
       <span style="font-family:'Cormorant Garamond',serif;font-size:22px;font-weight:300;letter-spacing:.2em;color:#d4a017;">CLUB GENESIS</span>
       <span style="font-size:10px;color:#666;letter-spacing:.1em;">ACCOUNTING</span>
-      <span style="font-size:9px;color:#555;letter-spacing:.05em;">Ver1.1</span>
+      <span style="font-size:9px;color:#555;letter-spacing:.05em;">Ver1.2</span>
     </div>
     <nav style="display:flex;gap:2px;">
       <button class="nb ac" id="nav-sales">売上確認</button>
@@ -167,14 +167,14 @@ main{padding:16px;max-width:960px;margin:0 auto;}
 
 <script>
 // ===== FIREBASE =====
-const cfg={apiKey:"AIzaSyD_7XgXow1D-cp-TNsbqitjMzJCGD5DE64",authDomain:"club-genesis-5cba7.firebaseapp.com",databaseURL:"https://club-genesis-5cba7-default-rtdb.asia-southeast1.firebasedatabase.app",projectId:"club-genesis-5cba7",storageBucket:"club-genesis-5cba7.firebasestorage.app",messagingSenderId:"591051426146",appId:"1:591051426146:web:08a486510b89d6be0e443b"};
+const cfg={apiKey:"AIzaSyBX0LqE5XKywU8ERzJl738SQq2QUuCsDQ8",authDomain:"club-genesis-accountin.firebaseapp.com",databaseURL:"https://club-genesis-accountin-default-rtdb.asia-southeast1.firebasedatabase.app",projectId:"club-genesis-accountin",storageBucket:"club-genesis-accountin.firebasestorage.app",messagingSenderId:"1086890949782",appId:"1:1086890949782:web:d9425cd2157adea94a16b7"};
 firebase.initializeApp(cfg);
 const db=firebase.database();
-// 本番(club-genesis-accounting.vercel.app): 'pos' / 開発環境: 'pos-dev'
-const FB_ROOT = window.location.hostname === 'club-genesis-accounting.vercel.app' ? 'pos' : 'pos-dev';
+// 本番(club-genesis-accounting.vercel.app): 'accounting' / 開発環境: 'accounting-dev'
+const FB_ROOT = window.location.hostname === 'club-genesis-accounting.vercel.app' ? 'accounting' : 'accounting-dev';
 
 // ===== STATE =====
-let S={history:[],casts:[],tables:[],config:{}};
+let S={history:[],casts:[],tables:[],config:{},bizDays:{}};
 let loaded=false;
 let selDate=todayStr();
 const SK="genesis_acc_v1";
@@ -222,6 +222,7 @@ db.ref(FB_ROOT).on("value",snap=>{
   S.casts=d.casts||[];
   S.tables=d.tables||[];
   S.config=d.config||{};
+  S.bizDays=d.bizDays||{};
   loaded=true;
   sb(true,"同期済み ✓");
   // 初回: ローディング → ログイン or アプリ
@@ -280,6 +281,14 @@ function render(){
   const el=document.getElementById("content");if(!el)return;
   if(!loaded){el.innerHTML='<div class="nodata"><span class="sp-inline"></span>データ読込中…</div>';return;}
   const recs=getHist(selDate);
+  const bizDay=Object.values(S.bizDays).find(d=>d.date===selDate);
+  if(!bizDay?.sentToAccounting){
+    el.innerHTML='<div class="nodata" style="text-align:center;">'
+      +'<div style="font-size:14px;color:#555;margin-bottom:8px;">'+dateLabel(selDate)+'</div>'
+      +'<div style="font-size:13px;color:#444;">POSから送信されていません</div>'
+      +'</div>';
+    return;
+  }
   if(!recs.length){el.innerHTML='<div class="nodata">'+dateLabel(selDate)+'のデータはありません</div>';return;}
 
   // ---- 集計 ----
