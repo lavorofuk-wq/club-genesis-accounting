@@ -29,6 +29,26 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    match /staffMembers/{document} {
+      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow create, update, delete: if signedIn() && userRole() == 'shop';
+    }
+
+    match /staffMembers-dev/{document} {
+      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow create, update, delete: if signedIn() && userRole() == 'shop';
+    }
+
+    match /castMembers/{document} {
+      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow create, update, delete: if signedIn() && userRole() == 'shop';
+    }
+
+    match /castMembers-dev/{document} {
+      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow create, update, delete: if signedIn() && userRole() == 'shop';
+    }
+
     match /users/{uid} {
       allow read: if signedIn() && request.auth.uid == uid;
       allow write: if false;
