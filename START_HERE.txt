@@ -8,9 +8,9 @@ CLUB GENESIS 経理システム - 最初に読むファイル
 3. 公開: Firebase Hosting または Vercel
 
 本番データと開発データ
-1. 本番サイトは dailyReports に保存します。
-2. dev環境とローカルは dailyReports-dev に保存します。
-3. 本番と開発の日報データは相互に表示されません。
+1. 本番サイトは dailyClosings に保存します。
+2. dev環境とローカルは dailyClosings-dev に保存します。
+3. 本番と開発のPOS締めデータは相互に表示されません。
 4. ログインユーザーは共通です。
 5. 画面に「本番」または「開発」と表示されます。
 
@@ -20,6 +20,12 @@ CLUB GENESIS 経理システム - 最初に読むファイル
 3. キャストは名前を登録します。
 4. 勤務時間欄では、登録済みの名前を選択して時間を入力します。
 5. 開発と本番の登録名簿は別々です。
+
+POS締め連携
+1. 今後の正しい流れは、POSで締め作業を行い、経理はPOS締めデータを確認します。
+2. POS側は dailyClosings または dailyClosings-dev に締めデータを保存します。
+3. 経理ダッシュボードは dailyClosings / dailyClosings-dev を読み取ります。
+4. POS側の保存形式は POS_CLOSING_SYNC_SPEC.md にあります。
 
 ローカルで開くときの重要事項
 1. index.htmlを直接ダブルクリックしないでください。
