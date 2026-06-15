@@ -5,15 +5,15 @@ import {
   orderBy,
   query,
   where,
-  reportsCollectionName
+  closingsCollectionName
 } from "./firebase-config.js";
 import { requireRole, logout, showMessage, hideMessage } from "./auth.js";
 
 const yen = new Intl.NumberFormat("ja-JP");
-let reports = [];
+let closings = [];
 
 document.getElementById("logoutButton").addEventListener("click", logout);
-document.getElementById("loadButton").addEventListener("click", loadReports);
+document.getElementById("loadButton").addEventListener("click", loadClosings);
 document.getElementById("exportCsvButton").addEventListener("click", exportCsv);
 
 requireRole("accounting", () => {
@@ -21,7 +21,7 @@ requireRole("accounting", () => {
   const { start, end } = currentMonthRange();
   document.getElementById("startDate").value = start;
   document.getElementById("endDate").value = end;
-  loadReports();
+  loadClosings();
 });
 
 function currentMonthRange() {
@@ -32,7 +32,7 @@ function currentMonthRange() {
   return { start, end };
 }
 
-async function loadReports() {
+async function loadClosings() {
   hideMessage("errorMessage");
   const start = document.getElementById("startDate").value;
   const end = document.getElementById("endDate").value;
@@ -43,21 +43,52 @@ async function loadReports() {
 
   try {
     const q = query(
-      collection(db, reportsCollectionName),
-      where("date", ">=", start),
-      where("date", "<=", end),
-      orderBy("date", "asc")
+      collection(db, closingsCollectionName),
+      where("businessDate", ">=", start),
+      where("businessDate", "<=", end),
+      orderBy("businessDate", "asc")
     );
     const snap = await getDocs(q);
-    reports = snap.docs.map((docSnap) => docSnap.data());
+    closings = snap.docs.map((docSnap) => normalizeClosing({ id: docSnap.id, ...docSnap.data() }));
     renderAll(start, end);
   } catch (error) {
-    showMessage("errorMessage", `データ取得に失敗しました。${error.message}`);
+    showMessage("errorMessage", `POS締めデータの取得に失敗しました。${error.message}`);
   }
 }
 
+function normalizeClosing(raw) {
+  const sales = raw.sales || {};
+  const customers = raw.customers || {};
+  const nominations = raw.nominations || raw.shimeiInfo || raw["指名情報"] || {};
+  const cashReconciliation = raw.cashReconciliation || {};
+  const date = raw.businessDate || raw.date || raw.id;
+  const totalSales = Number(sales.totalSales ?? raw.totalSales ?? 0);
+  const totalCustomers = Number(customers.totalCustomers ?? raw.totalCustomers ?? 0);
+
+  return {
+    id: raw.id,
+    businessDate: date,
+    status: raw.status || "submitted",
+    totalSales,
+    cashSales: Number(sales.cashSales ?? raw.cashSales ?? 0),
+    cardSales: Number(sales.cardSales ?? raw.cardSales ?? 0),
+    groupCount: Number(customers.groupCount ?? raw.groupCount ?? 0),
+    totalCustomers,
+    customerUnitPrice: Number(customers.customerUnitPrice ?? raw.customerUnitPrice ?? (totalCustomers > 0 ? Math.floor(totalSales / totalCustomers) : 0)),
+    honShimei: Number(nominations.honShimeiCount ?? nominations.honShimei ?? 0),
+    jonai: Number(nominations.jonaiCount ?? nominations.jonai ?? 0),
+    expenses: raw.expenses || [],
+    allowances: raw.allowances || [],
+    castWork: raw.castWork || raw.castHours || [],
+    staffWork: raw.staffWork || raw.staffHours || [],
+    cashDifference: Number(cashReconciliation.difference ?? raw.cashDifference ?? 0),
+    closedBy: raw.source?.closedBy || raw.closedBy || "",
+    closedAt: raw.source?.closedAt || raw.closedAt || raw.submittedAt || null
+  };
+}
+
 function renderAll(start, end) {
-  const summary = summarize(reports);
+  const summary = summarize(closings);
   renderSummaryCards(summary);
   renderBreakdown("expenseBreakdown", summary.expenseByCategory);
   renderBreakdown("allowanceBreakdown", summary.allowanceByType);
@@ -71,33 +102,38 @@ function summarize(items) {
     totalExpenses: 0,
     totalAllowances: 0,
     grossProfit: 0,
+    cashDifference: 0,
     castHours: 0,
     staffHours: 0,
     expenseByCategory: {},
     allowanceByType: {}
   };
 
-  items.forEach((report) => {
-    result.totalSales += Number(report.totalSales || 0);
-    (report.expenses || []).forEach((expense) => {
+  items.forEach((closing) => {
+    result.totalSales += closing.totalSales;
+    result.cashDifference += closing.cashDifference;
+    closing.expenses.forEach((expense) => {
       const amount = Number(expense.amount || 0);
       result.totalExpenses += amount;
       result.expenseByCategory[expense.category] = (result.expenseByCategory[expense.category] || 0) + amount;
     });
-    (report.allowances || []).forEach((allowance) => {
+    closing.allowances.forEach((allowance) => {
       const amount = Number(allowance.amount || 0);
       result.totalAllowances += amount;
       result.allowanceByType[allowance.type] = (result.allowanceByType[allowance.type] || 0) + amount;
     });
-    result.castHours += (report.castHours || []).reduce((sum, row) => sum + Number(row.hours || 0), 0);
-    const staff = report.staffHours || {};
-    result.staffHours += Array.isArray(staff)
-      ? staff.reduce((sum, row) => sum + Number(row.hours || 0), 0)
-      : ["manager", "bartender", "kitchen", "cleaning", "other"]
-        .reduce((sum, key) => sum + Number(staff[key] || 0), 0);
+    result.castHours += sumWorkHours(closing.castWork);
+    result.staffHours += sumWorkHours(closing.staffWork);
   });
   result.grossProfit = result.totalSales - result.totalExpenses;
   return result;
+}
+
+function sumWorkHours(work) {
+  if (Array.isArray(work)) return work.reduce((sum, row) => sum + Number(row.hours || 0), 0);
+  if (!work || typeof work !== "object") return 0;
+  return ["manager", "bartender", "kitchen", "cleaning", "other"]
+    .reduce((sum, key) => sum + Number(work[key] || 0), 0);
 }
 
 function renderSummaryCards(summary) {
@@ -106,8 +142,8 @@ function renderSummaryCards(summary) {
     ["総経費", `${yen.format(summary.totalExpenses)}円`],
     ["総手当", `${yen.format(summary.totalAllowances)}円`],
     ["推定粗利", `${yen.format(summary.grossProfit)}円`],
-    ["延べキャスト労働時間", `${summary.castHours.toFixed(1)}時間`],
-    ["延べスタッフ労働時間", `${summary.staffHours.toFixed(1)}時間`]
+    ["延べキャスト勤務時間", `${summary.castHours.toFixed(1)}時間`],
+    ["延べスタッフ勤務時間", `${summary.staffHours.toFixed(1)}時間`]
   ];
   const root = document.getElementById("summaryCards");
   root.replaceChildren();
@@ -149,21 +185,23 @@ function renderBreakdown(id, data) {
 function renderTable() {
   const body = document.getElementById("reportTableBody");
   body.replaceChildren();
-  reports.forEach((report) => {
-    const expenseTotal = (report.expenses || []).reduce((sum, row) => sum + Number(row.amount || 0), 0);
-    const allowanceTotal = (report.allowances || []).reduce((sum, row) => sum + Number(row.amount || 0), 0);
+  closings.forEach((closing) => {
+    const expenseTotal = closing.expenses.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+    const allowanceTotal = closing.allowances.reduce((sum, row) => sum + Number(row.amount || 0), 0);
     const values = [
-      report.date,
-      `${yen.format(report.totalSales || 0)}円`,
-      `${yen.format(report.cashSales || 0)}円`,
-      `${yen.format(report.cardSales || 0)}円`,
-      report.totalCustomers || 0,
-      report.groupCount || 0,
-      `${yen.format(report.customerUnitPrice || 0)}円`,
-      shimeiInfo(report).honShimei || 0,
-      shimeiInfo(report).jonai || 0,
+      closing.businessDate,
+      statusLabel(closing.status),
+      `${yen.format(closing.totalSales)}円`,
+      `${yen.format(closing.cashSales)}円`,
+      `${yen.format(closing.cardSales)}円`,
+      closing.totalCustomers,
+      closing.groupCount,
+      `${yen.format(closing.customerUnitPrice)}円`,
+      closing.honShimei,
+      closing.jonai,
       `${yen.format(expenseTotal)}円`,
-      `${yen.format(allowanceTotal)}円`
+      `${yen.format(allowanceTotal)}円`,
+      `${yen.format(closing.cashDifference)}円`
     ];
     const tr = document.createElement("tr");
     values.forEach((value) => {
@@ -176,7 +214,7 @@ function renderTable() {
 }
 
 function renderCalendar(start, end) {
-  const submitted = new Set(reports.map((report) => report.date));
+  const submitted = new Set(closings.map((closing) => closing.businessDate));
   const grid = document.getElementById("calendarGrid");
   grid.replaceChildren();
   for (const date of datesBetween(start, end)) {
@@ -187,7 +225,7 @@ function renderCalendar(start, end) {
     day.textContent = date.slice(8, 10);
     const state = document.createElement("p");
     state.className = "mt-2";
-    state.textContent = future ? "未来日" : submitted.has(date) ? "入力済" : "未入力";
+    state.textContent = future ? "未来日" : submitted.has(date) ? "締め済" : "未締め";
     cell.append(day, state);
     grid.appendChild(cell);
   }
@@ -210,26 +248,28 @@ function todayString() {
 }
 
 function exportCsv() {
-  if (!reports.length) {
-    showMessage("errorMessage", "CSV出力対象のデータがありません。");
+  if (!closings.length) {
+    showMessage("errorMessage", "CSV出力対象のPOS締めデータがありません。");
     return;
   }
   const rows = [
-    ["日付", "総売上", "現金", "カード", "総客数", "組数", "客単価", "本指名", "場内指名", "経費合計", "手当合計"]
+    ["日付", "状態", "総売上", "現金", "カード", "総客数", "組数", "客単価", "本指名", "場内指名", "経費合計", "手当合計", "現金差異"]
   ];
-  reports.forEach((report) => {
+  closings.forEach((closing) => {
     rows.push([
-      report.date,
-      report.totalSales || 0,
-      report.cashSales || 0,
-      report.cardSales || 0,
-      report.totalCustomers || 0,
-      report.groupCount || 0,
-      report.customerUnitPrice || 0,
-      shimeiInfo(report).honShimei || 0,
-      shimeiInfo(report).jonai || 0,
-      (report.expenses || []).reduce((sum, row) => sum + Number(row.amount || 0), 0),
-      (report.allowances || []).reduce((sum, row) => sum + Number(row.amount || 0), 0)
+      closing.businessDate,
+      statusLabel(closing.status),
+      closing.totalSales,
+      closing.cashSales,
+      closing.cardSales,
+      closing.totalCustomers,
+      closing.groupCount,
+      closing.customerUnitPrice,
+      closing.honShimei,
+      closing.jonai,
+      closing.expenses.reduce((sum, row) => sum + Number(row.amount || 0), 0),
+      closing.allowances.reduce((sum, row) => sum + Number(row.amount || 0), 0),
+      closing.cashDifference
     ]);
   });
   const csv = rows.map((row) => row.map(escapeCsv).join(",")).join("\r\n");
@@ -238,7 +278,7 @@ function exportCsv() {
   const a = document.createElement("a");
   const end = document.getElementById("endDate").value.replaceAll("-", "");
   a.href = url;
-  a.download = `keiri_export_${end}.csv`;
+  a.download = `keiri_pos_closing_${end}.csv`;
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -248,6 +288,11 @@ function escapeCsv(value) {
   return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
-function shimeiInfo(report) {
-  return report.shimeiInfo || report["指名情報"] || {};
+function statusLabel(status) {
+  return {
+    draft: "下書き",
+    submitted: "締め済",
+    approved: "承認済",
+    rejected: "差戻し"
+  }[status] || status || "締め済";
 }

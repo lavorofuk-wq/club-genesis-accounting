@@ -29,7 +29,7 @@
       <section class="section-shell">
         <div class="section-title">
           <h2>期間選択</h2>
-          <button id="exportCsvButton" class="primary-button">期間の一覧をCSV出力</button>
+          <button id="exportCsvButton" class="primary-button">POS締め一覧をCSV出力</button>
         </div>
         <div class="grid gap-4 md:grid-cols-3">
           <label>開始日<input id="startDate" type="date" class="form-input mt-2"></label>
@@ -58,12 +58,12 @@
       </section>
 
       <section class="section-shell">
-        <div class="section-title"><h2>日次データ一覧</h2></div>
+        <div class="section-title"><h2>POS締めデータ一覧</h2></div>
         <div class="overflow-x-auto">
           <table class="data-table">
             <thead>
               <tr>
-                <th>日付</th><th>総売上</th><th>現金</th><th>カード</th><th>総客数</th><th>組数</th><th>客単価</th><th>本指名</th><th>場内指名</th><th>経費合計</th><th>手当合計</th>
+                <th>日付</th><th>状態</th><th>総売上</th><th>現金</th><th>カード</th><th>総客数</th><th>組数</th><th>客単価</th><th>本指名</th><th>場内指名</th><th>経費合計</th><th>手当合計</th><th>現金差異</th>
               </tr>
             </thead>
             <tbody id="reportTableBody"></tbody>
@@ -72,7 +72,7 @@
       </section>
 
       <section class="section-shell">
-        <div class="section-title"><h2>入力状況確認</h2></div>
+        <div class="section-title"><h2>締め状況確認</h2></div>
         <div id="calendarGrid" class="calendar-grid"></div>
       </section>
     </div>
