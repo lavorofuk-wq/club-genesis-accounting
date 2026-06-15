@@ -2,7 +2,8 @@ import { auth, db, doc, getDoc } from "./firebase-config.js";
 import {
   signInWithEmailAndPassword,
   signOut,
-  onAuthStateChanged
+  onAuthStateChanged,
+  getIdTokenResult
 } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-auth.js";
 
 const ROLE_ROUTES = {
@@ -43,7 +44,7 @@ export function hideMessage(elementId) {
 }
 
 export async function getUserRole(uid) {
-  const claimRole = await auth.currentUser?.getIdTokenResult()
+  const claimRole = await getIdTokenResult(auth.currentUser)
     .then((token) => token.claims.role)
     .catch(() => null);
   if (claimRole === "shop" || claimRole === "accounting") return claimRole;
@@ -56,6 +57,21 @@ export async function getUserRole(uid) {
   }
   localStorage.setItem("genesisRole", role);
   return role;
+}
+
+function loginErrorMessage(error) {
+  const messages = {
+    "auth/invalid-email": "メールアドレスの形式が正しくありません。",
+    "auth/invalid-credential": "メールアドレスまたはパスワードが違います。",
+    "auth/user-not-found": "このメールアドレスのユーザーがFirebase Authenticationに登録されていません。",
+    "auth/wrong-password": "パスワードが違います。",
+    "auth/user-disabled": "このユーザーはFirebase Authenticationで無効になっています。",
+    "auth/too-many-requests": "ログイン試行が多すぎます。少し時間を置いてから再度お試しください。",
+    "auth/operation-not-allowed": "Firebase Authenticationでメール/パスワード認証が有効になっていません。",
+    "auth/unauthorized-domain": `この開発URLはFirebaseで許可されていません。Authenticationの承認済みドメインに「${location.hostname}」を追加してください。`,
+    "permission-denied": "Firestoreのusers設定またはセキュリティルールを確認してください。"
+  };
+  return messages[error.code] || error.message || "原因不明のエラーです。";
 }
 
 export function requireRole(expectedRole, onReady) {
@@ -104,7 +120,7 @@ if (loginForm) {
       const role = await getUserRole(credential.user.uid);
       location.href = ROLE_ROUTES[role];
     } catch (error) {
-      showMessage("errorMessage", `ログインに失敗しました。${error.message}`);
+      showMessage("errorMessage", `ログインできませんでした。${loginErrorMessage(error)}`);
       loginButton.disabled = false;
     }
   });
