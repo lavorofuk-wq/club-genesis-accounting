@@ -1,4 +1,11 @@
-import { auth, db, doc, getDoc } from "./firebase-config.js";
+import {
+  auth,
+  db,
+  doc,
+  getDoc,
+  environmentName,
+  isProduction
+} from "./firebase-config.js";
 import {
   signInWithEmailAndPassword,
   signOut,
@@ -12,6 +19,14 @@ const ROLE_ROUTES = {
 };
 
 cleanupLegacyPwa();
+showEnvironment();
+
+function showEnvironment() {
+  const badge = document.getElementById("environmentBadge");
+  if (!badge) return;
+  badge.textContent = environmentName;
+  badge.classList.add(isProduction ? "env-production" : "env-development");
+}
 
 async function cleanupLegacyPwa() {
   try {

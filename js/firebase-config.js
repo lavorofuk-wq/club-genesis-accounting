@@ -23,10 +23,18 @@ const fallbackConfig = {
 };
 
 const firebaseConfig = window.FIREBASE_CONFIG || fallbackConfig;
+const productionHosts = new Set([
+  "club-genesis-accounting.vercel.app",
+  "club-genesis-accountin.web.app",
+  "club-genesis-accountin.firebaseapp.com"
+]);
 
 export const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app);
+export const isProduction = productionHosts.has(window.location.hostname);
+export const environmentName = isProduction ? "本番" : "開発";
+export const reportsCollectionName = isProduction ? "dailyReports" : "dailyReports-dev";
 
 export {
   serverTimestamp,

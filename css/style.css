@@ -182,6 +182,29 @@ body {
   color: rgb(187 247 208);
 }
 
+.env-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  border: 1px solid rgb(71 85 105);
+  border-radius: 4px;
+  padding: 2px 7px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.env-production {
+  border-color: rgb(22 163 74);
+  background: rgb(20 83 45 / 0.55);
+  color: rgb(187 247 208);
+}
+
+.env-development {
+  border-color: rgb(217 119 6);
+  background: rgb(120 53 15 / 0.55);
+  color: rgb(254 215 170);
+}
+
 .dynamic-row {
   display: grid;
   grid-template-columns: 1fr;
