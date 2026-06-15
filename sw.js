@@ -1,5 +1,18 @@
-const CACHE = "genesis-accounting-v1";
-const ASSETS = ["./index.html", "./manifest.json"];
-self.addEventListener("install", e => e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS))));
-self.addEventListener("activate", e => e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k))))));
-self.addEventListener("fetch", e => { if (e.request.url.includes("firebase") || e.request.url.includes("gstatic")) return; e.respondWith(caches.match(e.request).then(r => r || fetch(e.request))); });
+// Legacy cleanup only. The old accounting system registered a cache-first
+// service worker, which can keep serving stale index.html after logout.
+self.addEventListener("install", (event) => {
+  self.skipWaiting();
+  event.waitUntil(
+    caches.keys().then((keys) => Promise.all(keys.map((key) => caches.delete(key))))
+  );
+});
+
+self.addEventListener("activate", (event) => {
+  event.waitUntil(
+    Promise.all([
+      caches.keys().then((keys) => Promise.all(keys.map((key) => caches.delete(key)))),
+      self.clients.claim(),
+      self.registration.unregister()
+    ])
+  );
+});
