@@ -91,7 +91,10 @@ function summarize(items) {
     });
     result.castHours += (report.castHours || []).reduce((sum, row) => sum + Number(row.hours || 0), 0);
     const staff = report.staffHours || {};
-    result.staffHours += ["manager", "bartender", "kitchen", "cleaning", "other"].reduce((sum, key) => sum + Number(staff[key] || 0), 0);
+    result.staffHours += Array.isArray(staff)
+      ? staff.reduce((sum, row) => sum + Number(row.hours || 0), 0)
+      : ["manager", "bartender", "kitchen", "cleaning", "other"]
+        .reduce((sum, key) => sum + Number(staff[key] || 0), 0);
   });
   result.grossProfit = result.totalSales - result.totalExpenses;
   return result;

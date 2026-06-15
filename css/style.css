@@ -216,8 +216,8 @@ body {
 }
 
 @media (min-width: 768px) {
-  .dynamic-row.cast-row {
-    grid-template-columns: minmax(160px, 1fr) 150px auto;
+  .dynamic-row.work-row {
+    grid-template-columns: minmax(200px, 1fr) 150px auto;
   }
 
   .dynamic-row.expense-row {
@@ -227,6 +227,40 @@ body {
   .dynamic-row.allowance-row {
     grid-template-columns: 180px 160px minmax(180px, 1fr) auto;
   }
+}
+
+.master-panel {
+  border: 1px solid rgb(30 41 59);
+  border-radius: 8px;
+  background: rgb(2 6 23 / 0.42);
+  padding: 14px;
+}
+
+.master-list {
+  display: grid;
+  gap: 8px;
+}
+
+.master-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid rgb(30 41 59);
+  padding-top: 8px;
+}
+
+.master-item-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: rgb(226 232 240);
+  font-size: 14px;
+}
+
+.master-item-role {
+  margin-left: 8px;
+  color: rgb(148 163 184);
+  font-size: 12px;
 }
 
 .modal-card {

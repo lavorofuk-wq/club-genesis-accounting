@@ -1,32 +1,57 @@
 import {
   db,
+  collection,
   doc,
+  deleteDoc,
+  getDocs,
   getDoc,
   setDoc,
   serverTimestamp,
-  reportsCollectionName
+  reportsCollectionName,
+  staffCollectionName,
+  castCollectionName
 } from "./firebase-config.js";
 import { requireRole, logout, showMessage, hideMessage } from "./auth.js";
 
 const yen = new Intl.NumberFormat("ja-JP");
-const staffKeys = ["manager", "bartender", "kitchen", "cleaning", "other"];
+const staffRoleLabels = {
+  manager: "店長/マネージャー",
+  bartender: "バーテンダー",
+  kitchen: "厨房",
+  cleaning: "清掃",
+  other: "その他"
+};
 let currentUser = null;
 let pendingPayload = null;
 let isSaving = false;
+let staffMembers = [];
+let castMembers = [];
 
 document.getElementById("logoutButton").addEventListener("click", logout);
-document.getElementById("addCastButton").addEventListener("click", () => addCastRow());
+document.getElementById("registerStaffButton").addEventListener("click", registerStaff);
+document.getElementById("registerCastButton").addEventListener("click", registerCast);
+document.getElementById("addStaffWorkButton").addEventListener("click", () => addStaffWorkRow());
+document.getElementById("addCastWorkButton").addEventListener("click", () => addCastWorkRow());
 document.getElementById("addExpenseButton").addEventListener("click", () => addExpenseRow());
 document.getElementById("addAllowanceButton").addEventListener("click", () => addAllowanceRow());
 document.getElementById("copyPreviousButton").addEventListener("click", copyPreviousDay);
 document.getElementById("saveButton").addEventListener("click", openConfirm);
 document.getElementById("confirmSaveButton").addEventListener("click", saveReport);
 
-requireRole("shop", (user) => {
+requireRole("shop", async (user) => {
   currentUser = user;
   document.getElementById("reportForm").classList.remove("hidden");
   document.getElementById("date").value = todayString();
-  addCastRow();
+  try {
+    await loadMasters();
+  } catch (error) {
+    showMessage(
+      "errorMessage",
+      `登録名簿を読み込めませんでした。Firestoreルールを最新版に公開してください。${error.message}`
+    );
+  }
+  addStaffWorkRow();
+  addCastWorkRow();
   addExpenseRow();
   addAllowanceRow();
   wireRealtimeValidation();
@@ -71,16 +96,178 @@ function makeOption(value, label) {
   return option;
 }
 
-function addCastRow(data = {}) {
-  const row = document.createElement("div");
-  row.className = "dynamic-row cast-row";
+async function loadMasters() {
+  const [staffSnapshot, castSnapshot] = await Promise.all([
+    getDocs(collection(db, staffCollectionName)),
+    getDocs(collection(db, castCollectionName))
+  ]);
+  staffMembers = staffSnapshot.docs
+    .map((item) => ({ id: item.id, ...item.data() }))
+    .sort((a, b) => a.name.localeCompare(b.name, "ja"));
+  castMembers = castSnapshot.docs
+    .map((item) => ({ id: item.id, ...item.data() }))
+    .sort((a, b) => a.name.localeCompare(b.name, "ja"));
+  renderMasterLists();
+  refreshWorkSelects();
+}
 
-  const name = document.createElement("input");
-  name.type = "text";
-  name.maxLength = 40;
-  name.placeholder = "キャスト名";
-  name.className = "form-input cast-name";
-  name.value = data.castName || "";
+async function registerStaff() {
+  const nameInput = document.getElementById("newStaffName");
+  const name = nameInput.value.trim();
+  const role = document.getElementById("newStaffRole").value;
+  if (!name) {
+    showMessage("errorMessage", "スタッフ名を入力してください。");
+    return;
+  }
+  if (staffMembers.some((member) => member.name === name)) {
+    showMessage("errorMessage", "同じ名前のスタッフがすでに登録されています。");
+    return;
+  }
+  try {
+    const memberRef = doc(collection(db, staffCollectionName));
+    await setDoc(memberRef, {
+      name,
+      role,
+      createdAt: serverTimestamp(),
+      createdBy: currentUser.uid
+    });
+    nameInput.value = "";
+    hideMessage("errorMessage");
+    showMessage("successMessage", `${name}をスタッフ登録しました。`, false);
+    await loadMasters();
+  } catch (error) {
+    showMessage("errorMessage", `スタッフ登録に失敗しました。${error.message}`);
+  }
+}
+
+async function registerCast() {
+  const nameInput = document.getElementById("newCastName");
+  const name = nameInput.value.trim();
+  if (!name) {
+    showMessage("errorMessage", "キャスト名を入力してください。");
+    return;
+  }
+  if (castMembers.some((member) => member.name === name)) {
+    showMessage("errorMessage", "同じ名前のキャストがすでに登録されています。");
+    return;
+  }
+  try {
+    const memberRef = doc(collection(db, castCollectionName));
+    await setDoc(memberRef, {
+      name,
+      createdAt: serverTimestamp(),
+      createdBy: currentUser.uid
+    });
+    nameInput.value = "";
+    hideMessage("errorMessage");
+    showMessage("successMessage", `${name}をキャスト登録しました。`, false);
+    await loadMasters();
+  } catch (error) {
+    showMessage("errorMessage", `キャスト登録に失敗しました。${error.message}`);
+  }
+}
+
+function renderMasterLists() {
+  renderMasterList("staffMasterList", staffMembers, staffCollectionName, true);
+  renderMasterList("castMasterList", castMembers, castCollectionName, false);
+}
+
+function renderMasterList(elementId, members, collectionName, showRole) {
+  const root = document.getElementById(elementId);
+  root.replaceChildren();
+  if (!members.length) {
+    const empty = document.createElement("p");
+    empty.className = "text-sm text-slate-500";
+    empty.textContent = "まだ登録されていません。";
+    root.appendChild(empty);
+    return;
+  }
+  members.forEach((member) => {
+    const row = document.createElement("div");
+    row.className = "master-item";
+    const label = document.createElement("div");
+    const name = document.createElement("span");
+    name.className = "master-item-name";
+    name.textContent = member.name;
+    label.appendChild(name);
+    if (showRole) {
+      const role = document.createElement("span");
+      role.className = "master-item-role";
+      role.textContent = staffRoleLabels[member.role] || "その他";
+      label.appendChild(role);
+    }
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "danger-button";
+    remove.textContent = "削除";
+    remove.addEventListener("click", () => deleteMember(collectionName, member));
+    row.append(label, remove);
+    root.appendChild(row);
+  });
+}
+
+async function deleteMember(collectionName, member) {
+  if (!confirm(`${member.name}を登録一覧から削除しますか？`)) return;
+  try {
+    await deleteDoc(doc(db, collectionName, member.id));
+    showMessage("successMessage", `${member.name}を削除しました。`, false);
+    await loadMasters();
+  } catch (error) {
+    showMessage("errorMessage", `削除に失敗しました。${error.message}`);
+  }
+}
+
+function refreshWorkSelects() {
+  document.querySelectorAll(".staff-member-select").forEach((select) => {
+    fillMemberSelect(
+      select,
+      staffMembers,
+      true,
+      select.value,
+      select.dataset.savedName || "",
+      select.dataset.savedRole || "other"
+    );
+  });
+  document.querySelectorAll(".cast-member-select").forEach((select) => {
+    fillMemberSelect(select, castMembers, false, select.value, select.dataset.savedName || "");
+  });
+}
+
+function fillMemberSelect(select, members, showRole, selectedId = "", savedName = "", savedRole = "other") {
+  select.replaceChildren(makeOption("", "選択してください"));
+  members.forEach((member) => {
+    const label = showRole
+      ? `${member.name}（${staffRoleLabels[member.role] || "その他"}）`
+      : member.name;
+    select.appendChild(makeOption(member.id, label));
+  });
+  if (selectedId && !members.some((member) => member.id === selectedId) && savedName) {
+    select.appendChild(makeOption(selectedId, `${savedName}（登録削除済み）`));
+  }
+  select.dataset.savedName = savedName;
+  select.dataset.savedRole = savedRole;
+  select.value = selectedId;
+  select.onchange = () => {
+    const selected = members.find((member) => member.id === select.value);
+    select.dataset.savedName = selected?.name || "";
+    select.dataset.savedRole = selected?.role || "other";
+  };
+}
+
+function addStaffWorkRow(data = {}) {
+  const row = document.createElement("div");
+  row.className = "dynamic-row work-row staff-work-row";
+
+  const member = document.createElement("select");
+  member.className = "form-select staff-member-select";
+  fillMemberSelect(
+    member,
+    staffMembers,
+    true,
+    data.staffId || "",
+    data.staffName || "",
+    data.role || "other"
+  );
 
   const hours = document.createElement("input");
   hours.type = "number";
@@ -88,7 +275,7 @@ function addCastRow(data = {}) {
   hours.max = "24";
   hours.step = "0.5";
   hours.placeholder = "時間";
-  hours.className = "form-input cast-hours";
+  hours.className = "form-input staff-work-hours";
   hours.value = data.hours ?? 0;
 
   const remove = document.createElement("button");
@@ -97,8 +284,35 @@ function addCastRow(data = {}) {
   remove.textContent = "削除";
   remove.addEventListener("click", () => row.remove());
 
-  row.append(name, hours, remove);
-  document.getElementById("castRows").appendChild(row);
+  row.append(member, hours, remove);
+  document.getElementById("staffWorkRows").appendChild(row);
+}
+
+function addCastWorkRow(data = {}) {
+  const row = document.createElement("div");
+  row.className = "dynamic-row work-row cast-work-row";
+
+  const member = document.createElement("select");
+  member.className = "form-select cast-member-select";
+  fillMemberSelect(member, castMembers, false, data.castId || "", data.castName || "");
+
+  const hours = document.createElement("input");
+  hours.type = "number";
+  hours.min = "0";
+  hours.max = "24";
+  hours.step = "0.5";
+  hours.placeholder = "勤務時間";
+  hours.className = "form-input cast-work-hours";
+  hours.value = data.hours ?? 0;
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "danger-button";
+  remove.textContent = "削除";
+  remove.addEventListener("click", () => row.remove());
+
+  row.append(member, hours, remove);
+  document.getElementById("castWorkRows").appendChild(row);
 }
 
 function addExpenseRow(data = {}) {
@@ -183,7 +397,7 @@ function wireRealtimeValidation() {
 
 function validateNumberInput(el) {
   const value = Number(el.value || 0);
-  const isHour = el.matches("[data-staff], .cast-hours");
+  const isHour = el.matches(".staff-work-hours, .cast-work-hours");
   const invalid = isHour ? !isHalfHour(value) : value < 0 || !Number.isInteger(value);
   markInvalid(el, invalid);
 }
@@ -208,12 +422,45 @@ function checkSalesWarning() {
 }
 
 function collectRows() {
-  const castHours = [...document.querySelectorAll(".cast-row")]
-    .map((row) => ({
-      castName: row.querySelector(".cast-name").value.trim(),
-      hours: Number(row.querySelector(".cast-hours").value || 0)
-    }))
-    .filter((row) => row.castName || row.hours > 0);
+  const staffHours = [...document.querySelectorAll(".staff-work-row")]
+    .map((row) => {
+      const select = row.querySelector(".staff-member-select");
+      return {
+        staffId: select.value,
+        savedName: select.dataset.savedName || "",
+        savedRole: select.dataset.savedRole || "other",
+        hours: Number(row.querySelector(".staff-work-hours").value || 0)
+      };
+    })
+    .filter((row) => row.staffId || row.hours > 0)
+    .map((row) => {
+      const member = staffMembers.find((item) => item.id === row.staffId);
+      return {
+        staffId: row.staffId,
+        staffName: member?.name || row.savedName,
+        role: member?.role || row.savedRole,
+        hours: row.hours
+      };
+    });
+
+  const castHours = [...document.querySelectorAll(".cast-work-row")]
+    .map((row) => {
+      const select = row.querySelector(".cast-member-select");
+      return {
+        castId: select.value,
+        savedName: select.dataset.savedName || "",
+        hours: Number(row.querySelector(".cast-work-hours").value || 0)
+      };
+    })
+    .filter((row) => row.castId || row.hours > 0)
+    .map((row) => {
+      const member = castMembers.find((item) => item.id === row.castId);
+      return {
+        castId: row.castId,
+        castName: member?.name || row.savedName,
+        hours: row.hours
+      };
+    });
 
   const expenses = [...document.querySelectorAll(".expense-row")]
     .map((row) => ({
@@ -231,7 +478,7 @@ function collectRows() {
     }))
     .filter((row) => row.amount > 0 || row.recipient);
 
-  return { castHours, expenses, allowances };
+  return { staffHours, castHours, expenses, allowances };
 }
 
 function buildPayload() {
@@ -243,14 +490,7 @@ function buildPayload() {
   const payload = {
     reportId: date,
     date,
-    staffHours: {
-      manager: numberFromStaff("manager"),
-      bartender: numberFromStaff("bartender"),
-      kitchen: numberFromStaff("kitchen"),
-      cleaning: numberFromStaff("cleaning"),
-      other: numberFromStaff("other"),
-      otherDetail: textValue("otherDetail")
-    },
+    staffHours: rows.staffHours,
     castHours: rows.castHours,
     totalSales,
     cashSales: numberValue("cashSales"),
@@ -272,21 +512,24 @@ function buildPayload() {
   return payload;
 }
 
-function numberFromStaff(key) {
-  return Number(document.querySelector(`[data-staff="${key}"]`).value || 0);
-}
-
 function validatePayload(payload) {
   const errors = [];
   if (!payload.date) errors.push("日付を入力してください。");
   if (payload.date > todayString()) errors.push("未来の日付は保存できません。");
-  staffKeys.forEach((key) => {
-    if (!isHalfHour(payload.staffHours[key])) errors.push("スタッフ労働時間は0〜24時間、0.5単位で入力してください。");
+  payload.staffHours.forEach((row) => {
+    if (!row.staffId || !row.staffName) errors.push("勤務するスタッフを登録一覧から選択してください。");
+    if (!isHalfHour(row.hours)) errors.push("スタッフ勤務時間は0〜24時間、0.5単位で入力してください。");
   });
   payload.castHours.forEach((row) => {
-    if (!row.castName) errors.push("キャスト名を入力してください。");
-    if (!isHalfHour(row.hours)) errors.push("キャスト労働時間は0〜24時間、0.5単位で入力してください。");
+    if (!row.castId || !row.castName) errors.push("勤務するキャストを登録一覧から選択してください。");
+    if (!isHalfHour(row.hours)) errors.push("キャスト勤務時間は0〜24時間、0.5単位で入力してください。");
   });
+  if (new Set(payload.staffHours.map((row) => row.staffId)).size !== payload.staffHours.length) {
+    errors.push("同じスタッフを複数回選択できません。");
+  }
+  if (new Set(payload.castHours.map((row) => row.castId)).size !== payload.castHours.length) {
+    errors.push("同じキャストを複数回選択できません。");
+  }
   ["totalSales", "cashSales", "cardSales", "groupCount", "totalCustomers"].forEach((key) => {
     if (!isNonNegativeInteger(payload[key])) errors.push("売上・客数は0以上の整数で入力してください。");
   });
@@ -381,10 +624,6 @@ async function copyPreviousDay() {
 
 function applyReportToForm(data) {
   document.getElementById("date").value = data.date;
-  staffKeys.forEach((key) => {
-    document.querySelector(`[data-staff="${key}"]`).value = data.staffHours?.[key] ?? 0;
-  });
-  document.getElementById("otherDetail").value = data.staffHours?.otherDetail || "";
   ["totalSales", "cashSales", "cardSales", "groupCount", "totalCustomers"].forEach((id) => {
     document.getElementById(id).value = data[id] ?? 0;
   });
@@ -392,12 +631,28 @@ function applyReportToForm(data) {
   document.getElementById("honShimei").value = shimei.honShimei ?? 0;
   document.getElementById("jonai").value = shimei.jonai ?? 0;
 
-  document.getElementById("castRows").replaceChildren();
-  (data.castHours?.length ? data.castHours : [{}]).forEach(addCastRow);
+  document.getElementById("staffWorkRows").replaceChildren();
+  const copiedStaffHours = normalizeStaffHours(data.staffHours);
+  (copiedStaffHours.length ? copiedStaffHours : [{}]).forEach(addStaffWorkRow);
+  document.getElementById("castWorkRows").replaceChildren();
+  (data.castHours?.length ? data.castHours : [{}]).forEach(addCastWorkRow);
   document.getElementById("expenseRows").replaceChildren();
   (data.expenses?.length ? data.expenses : [{}]).forEach(addExpenseRow);
   document.getElementById("allowanceRows").replaceChildren();
   (data.allowances?.length ? data.allowances : [{}]).forEach(addAllowanceRow);
   calculateUnitPrice();
   checkSalesWarning();
+}
+
+function normalizeStaffHours(staffHours) {
+  if (Array.isArray(staffHours)) return staffHours;
+  if (!staffHours || typeof staffHours !== "object") return [];
+  return Object.entries(staffRoleLabels)
+    .map(([role, label]) => ({
+      staffId: `legacy-${role}`,
+      staffName: label,
+      role,
+      hours: Number(staffHours[role] || 0)
+    }))
+    .filter((row) => row.hours > 0);
 }

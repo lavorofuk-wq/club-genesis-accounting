@@ -28,6 +28,38 @@
     <form id="reportForm" class="hidden space-y-6" novalidate>
       <section class="section-shell">
         <div class="section-title">
+          <h2>スタッフ・キャスト登録</h2>
+        </div>
+        <div class="grid gap-6 lg:grid-cols-2">
+          <div class="master-panel">
+            <h3 class="text-sm font-semibold text-slate-200">スタッフ登録</h3>
+            <div class="mt-3 grid gap-3 sm:grid-cols-[1fr_160px_auto]">
+              <input id="newStaffName" type="text" maxlength="40" class="form-input" placeholder="スタッフ名">
+              <select id="newStaffRole" class="form-select">
+                <option value="manager">店長/マネージャー</option>
+                <option value="bartender">バーテンダー</option>
+                <option value="kitchen">厨房</option>
+                <option value="cleaning">清掃</option>
+                <option value="other">その他</option>
+              </select>
+              <button id="registerStaffButton" type="button" class="primary-button">登録</button>
+            </div>
+            <div id="staffMasterList" class="master-list mt-4"></div>
+          </div>
+
+          <div class="master-panel">
+            <h3 class="text-sm font-semibold text-slate-200">キャスト登録</h3>
+            <div class="mt-3 grid gap-3 sm:grid-cols-[1fr_auto]">
+              <input id="newCastName" type="text" maxlength="40" class="form-input" placeholder="キャスト名">
+              <button id="registerCastButton" type="button" class="primary-button">登録</button>
+            </div>
+            <div id="castMasterList" class="master-list mt-4"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section-shell">
+        <div class="section-title">
           <h2>営業日</h2>
           <button id="copyPreviousButton" type="button" class="secondary-button">前日のデータをコピー</button>
         </div>
@@ -45,24 +77,22 @@
       </section>
 
       <section class="section-shell">
-        <div class="section-title"><h2>セクションA：スタッフ・キャスト労働時間</h2></div>
-        <div class="grid gap-4 md:grid-cols-3 lg:grid-cols-5">
-          <label class="field-card">店長/マネージャー<input data-staff="manager" type="number" min="0" max="24" step="0.5" value="0" class="form-input mt-2"></label>
-          <label class="field-card">バーテンダー<input data-staff="bartender" type="number" min="0" max="24" step="0.5" value="0" class="form-input mt-2"></label>
-          <label class="field-card">厨房<input data-staff="kitchen" type="number" min="0" max="24" step="0.5" value="0" class="form-input mt-2"></label>
-          <label class="field-card">清掃<input data-staff="cleaning" type="number" min="0" max="24" step="0.5" value="0" class="form-input mt-2"></label>
-          <label class="field-card">その他<input data-staff="other" type="number" min="0" max="24" step="0.5" value="0" class="form-input mt-2"></label>
+        <div class="section-title">
+          <h2>セクションA：スタッフ・キャスト勤務時間</h2>
         </div>
-        <div class="mt-4">
-          <label for="otherDetail" class="form-label">その他スタッフ内訳</label>
-          <input id="otherDetail" type="text" maxlength="100" class="form-input" placeholder="例：ヘルプ、送り補助">
+        <div>
+          <div class="flex items-center justify-between gap-3">
+            <h3 class="text-sm font-semibold text-slate-200">スタッフ勤務時間</h3>
+            <button id="addStaffWorkButton" type="button" class="secondary-button">スタッフ追加</button>
+          </div>
+          <div id="staffWorkRows" class="mt-3 space-y-3"></div>
         </div>
         <div class="mt-6">
           <div class="flex items-center justify-between gap-3">
-            <h3 class="text-sm font-semibold text-slate-200">キャスト労働時間</h3>
-            <button id="addCastButton" type="button" class="secondary-button">キャスト追加</button>
+            <h3 class="text-sm font-semibold text-slate-200">キャスト勤務時間</h3>
+            <button id="addCastWorkButton" type="button" class="secondary-button">キャスト追加</button>
           </div>
-          <div id="castRows" class="mt-3 space-y-3"></div>
+          <div id="castWorkRows" class="mt-3 space-y-3"></div>
         </div>
       </section>
 

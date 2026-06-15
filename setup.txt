@@ -61,6 +61,26 @@ service cloud.firestore {
         request.auth.token.role == 'accounting';
       allow write: false;
     }
+    match /staffMembers/{document} {
+      allow read: if request.auth != null;
+      allow create, update, delete: if request.auth != null &&
+        request.auth.token.role == 'shop';
+    }
+    match /staffMembers-dev/{document} {
+      allow read: if request.auth != null;
+      allow create, update, delete: if request.auth != null &&
+        request.auth.token.role == 'shop';
+    }
+    match /castMembers/{document} {
+      allow read: if request.auth != null;
+      allow create, update, delete: if request.auth != null &&
+        request.auth.token.role == 'shop';
+    }
+    match /castMembers-dev/{document} {
+      allow read: if request.auth != null;
+      allow create, update, delete: if request.auth != null &&
+        request.auth.token.role == 'shop';
+    }
     match /users/{uid} {
       allow read, write: if request.auth != null && request.auth.uid == uid;
     }
@@ -87,6 +107,22 @@ service cloud.firestore {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
       allow create, update: if signedIn() && userRole() == 'shop';
       allow delete: if false;
+    }
+    match /staffMembers/{document} {
+      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow create, update, delete: if signedIn() && userRole() == 'shop';
+    }
+    match /staffMembers-dev/{document} {
+      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow create, update, delete: if signedIn() && userRole() == 'shop';
+    }
+    match /castMembers/{document} {
+      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow create, update, delete: if signedIn() && userRole() == 'shop';
+    }
+    match /castMembers-dev/{document} {
+      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow create, update, delete: if signedIn() && userRole() == 'shop';
     }
     match /users/{uid} {
       allow read: if signedIn() && request.auth.uid == uid;
