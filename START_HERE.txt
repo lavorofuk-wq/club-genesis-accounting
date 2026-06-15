@@ -7,6 +7,12 @@ CLUB GENESIS 経理システム - 最初に読むファイル
 2. データ保存: Cloud Firestore
 3. 公開: Firebase Hosting または Vercel
 
+ローカルで開くときの重要事項
+1. index.htmlを直接ダブルクリックしないでください。
+2. file:/// から始まるURLではFirebaseログインが動きません。
+3. フォルダ内の「起動.bat」をダブルクリックしてください。
+4. 正しいURLは http://localhost:4173/index.html です。
+
 すでにこちらで済ませたこと
 1. ログイン画面を作成しました。
    - index.html
