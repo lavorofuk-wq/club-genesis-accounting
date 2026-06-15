@@ -1,0 +1,108 @@
+CLUB GENESIS 経理システム セットアップ手順
+
+1. Firebaseプロジェクトを作成
+   - Firebaseコンソールで新規プロジェクトを作成します。
+   - 既存設定を使う場合のprojectIdは club-genesis-accountin です。
+
+2. Authenticationを有効化
+   - Firebaseコンソール > Authentication > Sign-in method を開きます。
+   - メール/パスワード認証を有効化します。
+
+3. テストユーザーを作成
+   - Authentication > Users から店舗用ユーザーを作成します。
+     例: shop@example.com
+   - Authentication > Users から経理用ユーザーを作成します。
+     例: accounting@example.com
+   - 作成後、それぞれのUIDを控えます。
+
+4. Firestoreを作成
+   - Firebaseコンソール > Firestore Database でデータベースを作成します。
+   - 最初はテストモードで作成して構いません。
+   - リージョンは運用方針に合わせて選択します。
+
+5. usersコレクションに初期ユーザーを作成
+   - Firestoreで users コレクションを作成します。
+   - 店舗用ユーザーのドキュメントIDはAuthenticationのUIDにします。
+   - 店舗用ユーザーの内容:
+     uid: 店舗用UID
+     email: shop@example.com
+     role: shop
+     createdAt: 現在時刻
+   - 経理用ユーザーのドキュメントIDはAuthenticationのUIDにします。
+   - 経理用ユーザーの内容:
+     uid: 経理用UID
+     email: accounting@example.com
+     role: accounting
+     createdAt: 現在時刻
+
+6. Webアプリを登録
+   - Firebaseコンソール > プロジェクト設定 > マイアプリ からWebアプリを追加します。
+   - 表示されたfirebaseConfigを js/firebase-config.js に反映します。
+   - 現在のファイルには club-genesis-accountin 用の設定が入っています。
+   - 別プロジェクトを使う場合は window.FIREBASE_CONFIG をindex.html/shop.html/accounting.htmlより先に定義するか、fallbackConfigを書き換えてください。
+
+7. Firestoreセキュリティルール
+   - カスタムクレーム role を使う本番推奨ルール:
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /dailyReports/{document} {
+      allow read, write: if request.auth != null &&
+        request.auth.token.role == 'shop';
+      allow read: if request.auth != null &&
+        request.auth.token.role == 'accounting';
+      allow write: if false;
+    }
+    match /users/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+  }
+}
+
+   - カスタムクレームをまだ設定しないデモ運用では、usersコレクションのroleを参照する以下のルールを使用できます。
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+    function userRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+    match /dailyReports/{document} {
+      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow create, update: if signedIn() && userRole() == 'shop';
+      allow delete: if false;
+    }
+    match /users/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow write: if false;
+    }
+  }
+}
+
+8. カスタムクレームを付与する場合
+   - Firebase FunctionsまたはAdmin SDKで対象UIDにroleを設定します。
+   - 店舗用: { role: "shop" }
+   - 経理用: { role: "accounting" }
+   - 付与後、対象ユーザーは一度ログアウトして再ログインしてください。
+
+9. Firebase Hostingへデプロイ
+   - Firebase CLIをインストールします。
+     npm install -g firebase-tools
+   - ログインします。
+     firebase login
+   - 初期化します。
+     firebase init hosting
+   - public directoryはこのプロジェクト直下を指定します。
+   - single-page app rewriteはNoにします。
+   - デプロイします。
+     firebase deploy --only hosting
+
+10. 動作確認
+   - 店舗ユーザーでログインすると shop.html に移動することを確認します。
+   - 経理ユーザーでログインすると accounting.html に移動することを確認します。
+   - 店舗ユーザーで日次データを保存し、経理ユーザーで同じ期間の一覧・集計・CSV出力を確認します。
+   - CSVはUTF-8 with BOMで出力されるため、Excelで開いても日本語が文字化けしにくい形式です。
