@@ -1,4 +1,11 @@
-import { db, doc, getDoc, setDoc, serverTimestamp } from "./firebase-config.js";
+import {
+  db,
+  doc,
+  getDoc,
+  setDoc,
+  serverTimestamp,
+  reportsCollectionName
+} from "./firebase-config.js";
 import { requireRole, logout, showMessage, hideMessage } from "./auth.js";
 
 const yen = new Intl.NumberFormat("ja-JP");
@@ -332,7 +339,7 @@ async function saveReport(event) {
   document.getElementById("confirmSaveButton").disabled = true;
 
   try {
-    const reportRef = doc(db, "dailyReports", pendingPayload.reportId);
+    const reportRef = doc(db, reportsCollectionName, pendingPayload.reportId);
     const existing = await getDoc(reportRef);
     const payload = {
       ...pendingPayload,
@@ -360,7 +367,7 @@ async function copyPreviousDay() {
   }
 
   try {
-    const snap = await getDoc(doc(db, "dailyReports", previousDateString(date)));
+    const snap = await getDoc(doc(db, reportsCollectionName, previousDateString(date)));
     if (!snap.exists()) {
       showMessage("errorMessage", "前日のデータが見つかりません。");
       return;

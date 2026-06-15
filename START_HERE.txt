@@ -7,6 +7,13 @@ CLUB GENESIS 経理システム - 最初に読むファイル
 2. データ保存: Cloud Firestore
 3. 公開: Firebase Hosting または Vercel
 
+本番データと開発データ
+1. 本番サイトは dailyReports に保存します。
+2. dev環境とローカルは dailyReports-dev に保存します。
+3. 本番と開発の日報データは相互に表示されません。
+4. ログインユーザーは共通です。
+5. 画面に「本番」または「開発」と表示されます。
+
 ローカルで開くときの重要事項
 1. index.htmlを直接ダブルクリックしないでください。
 2. file:/// から始まるURLではFirebaseログインが動きません。

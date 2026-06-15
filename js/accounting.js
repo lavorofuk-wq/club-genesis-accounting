@@ -1,4 +1,12 @@
-import { db, collection, getDocs, orderBy, query, where } from "./firebase-config.js";
+import {
+  db,
+  collection,
+  getDocs,
+  orderBy,
+  query,
+  where,
+  reportsCollectionName
+} from "./firebase-config.js";
 import { requireRole, logout, showMessage, hideMessage } from "./auth.js";
 
 const yen = new Intl.NumberFormat("ja-JP");
@@ -35,7 +43,7 @@ async function loadReports() {
 
   try {
     const q = query(
-      collection(db, "dailyReports"),
+      collection(db, reportsCollectionName),
       where("date", ">=", start),
       where("date", "<=", end),
       orderBy("date", "asc")
