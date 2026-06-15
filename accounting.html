@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CLUB GENESIS 経理ダッシュボード</title>
+  <meta name="theme-color" content="#111827">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body class="min-h-screen bg-slate-950 text-slate-100">
+  <header class="app-header">
+    <div>
+      <p class="text-xs tracking-[0.24em] text-amber-300">CLUB GENESIS</p>
+      <h1 class="text-xl font-bold">経理ダッシュボード</h1>
+    </div>
+    <div class="flex items-center gap-3">
+      <span id="userEmail" class="hidden text-xs text-slate-400 sm:inline"></span>
+      <button id="logoutButton" class="secondary-button">ログアウト</button>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-7xl px-4 py-6">
+    <div id="authLoading" class="notice">認証情報を確認しています...</div>
+    <div id="dashboard" class="hidden space-y-6">
+      <section class="section-shell">
+        <div class="section-title">
+          <h2>期間選択</h2>
+          <button id="exportCsvButton" class="primary-button">期間の一覧をCSV出力</button>
+        </div>
+        <div class="grid gap-4 md:grid-cols-3">
+          <label>開始日<input id="startDate" type="date" class="form-input mt-2"></label>
+          <label>終了日<input id="endDate" type="date" class="form-input mt-2"></label>
+          <div class="flex items-end"><button id="loadButton" class="secondary-button w-full">表示更新</button></div>
+        </div>
+        <div id="errorMessage" class="hidden alert alert-error mt-4"></div>
+      </section>
+
+      <section>
+        <div id="summaryCards" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6"></div>
+      </section>
+
+      <section class="section-shell">
+        <div class="section-title"><h2>集計サマリー</h2></div>
+        <div class="grid gap-4 lg:grid-cols-2">
+          <div>
+            <h3 class="mb-3 text-sm font-semibold text-slate-300">経費カテゴリ別内訳</h3>
+            <div id="expenseBreakdown" class="breakdown-list"></div>
+          </div>
+          <div>
+            <h3 class="mb-3 text-sm font-semibold text-slate-300">手当種類別内訳</h3>
+            <div id="allowanceBreakdown" class="breakdown-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section-shell">
+        <div class="section-title"><h2>日次データ一覧</h2></div>
+        <div class="overflow-x-auto">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>日付</th><th>総売上</th><th>現金</th><th>カード</th><th>総客数</th><th>組数</th><th>客単価</th><th>本指名</th><th>場内指名</th><th>経費合計</th><th>手当合計</th>
+              </tr>
+            </thead>
+            <tbody id="reportTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section-shell">
+        <div class="section-title"><h2>入力状況確認</h2></div>
+        <div id="calendarGrid" class="calendar-grid"></div>
+      </section>
+    </div>
+  </main>
+
+  <script type="module" src="js/accounting.js"></script>
+</body>
+</html>
