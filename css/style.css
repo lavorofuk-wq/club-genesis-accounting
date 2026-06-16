@@ -272,6 +272,73 @@ body {
   padding: 22px;
 }
 
+.modal-wide {
+  width: min(94vw, 980px);
+  max-height: 88vh;
+  overflow: auto;
+}
+
+.detail-grid {
+  display: grid;
+  gap: 10px;
+}
+
+@media (min-width: 768px) {
+  .detail-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.detail-block {
+  border: 1px solid rgb(30 41 59);
+  border-radius: 8px;
+  background: rgb(2 6 23 / 0.44);
+  padding: 12px;
+}
+
+.detail-block h3 {
+  margin-bottom: 10px;
+  color: rgb(226 232 240);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.detail-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid rgb(30 41 59);
+  padding: 7px 0;
+  color: rgb(203 213 225);
+  font-size: 13px;
+}
+
+.detail-row:first-of-type {
+  border-top: 0;
+}
+
+.detail-row span:first-child {
+  color: rgb(148 163 184);
+}
+
+.detail-mini-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.detail-mini-table th,
+.detail-mini-table td {
+  border-top: 1px solid rgb(30 41 59);
+  padding: 8px 6px;
+  text-align: right;
+}
+
+.detail-mini-table th:first-child,
+.detail-mini-table td:first-child {
+  text-align: left;
+}
+
 .modal-card::backdrop {
   background: rgb(0 0 0 / 0.66);
 }

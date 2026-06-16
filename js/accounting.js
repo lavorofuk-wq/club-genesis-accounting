@@ -79,11 +79,14 @@ function normalizeClosing(raw) {
     jonai: Number(nominations.jonaiCount ?? nominations.jonai ?? 0),
     expenses: raw.expenses || [],
     allowances: raw.allowances || [],
+    castSales: raw.castSales || [],
     castWork: raw.castWork || raw.castHours || [],
     staffWork: raw.staffWork || raw.staffHours || [],
+    cashReconciliation,
     cashDifference: Number(cashReconciliation.difference ?? raw.cashDifference ?? 0),
     closedBy: raw.source?.closedBy || raw.closedBy || "",
-    closedAt: raw.source?.closedAt || raw.closedAt || raw.submittedAt || null
+    closedAt: raw.source?.closedAt || raw.closedAt || raw.submittedAt || null,
+    source: raw.source || {}
   };
 }
 
@@ -209,6 +212,14 @@ function renderTable() {
       td.textContent = value;
       tr.appendChild(td);
     });
+    const detailTd = document.createElement("td");
+    const detailButton = document.createElement("button");
+    detailButton.type = "button";
+    detailButton.className = "secondary-button";
+    detailButton.textContent = "詳細";
+    detailButton.addEventListener("click", () => openClosingDetail(closing.id));
+    detailTd.appendChild(detailButton);
+    tr.appendChild(detailTd);
     body.appendChild(tr);
   });
 }
@@ -295,4 +306,185 @@ function statusLabel(status) {
     approved: "承認済",
     rejected: "差戻し"
   }[status] || status || "締め済";
+}
+
+function openClosingDetail(closingId) {
+  const closing = closings.find((item) => item.id === closingId);
+  if (!closing) return;
+  document.getElementById("closingDetailTitle").textContent = `${closing.businessDate} 締め詳細`;
+  const body = document.getElementById("closingDetailBody");
+  body.replaceChildren();
+
+  body.appendChild(createSummaryGrid(closing));
+  body.appendChild(createTableBlock("キャスト別売上", ["キャスト", "本指名", "場内延長", "ドリンク", "合計"], closing.castSales, (row) => [
+    row.castName || "",
+    yenCell(row.honShimeiSales),
+    yenCell(row.jonaiExtensionSales),
+    yenCell(row.drinkSales),
+    yenCell(row.totalAttributedSales)
+  ]));
+  body.appendChild(createTableBlock("スタッフ勤務", ["スタッフ", "役職", "開始", "終了", "休憩", "時間"], normalizeWorkRows(closing.staffWork, true), (row) => [
+    row.name,
+    row.role,
+    row.startTime || "",
+    row.endTime || "",
+    `${Number(row.breakMinutes || 0)}分`,
+    `${Number(row.hours || 0).toFixed(1)}時間`
+  ]));
+  body.appendChild(createTableBlock("キャスト勤務", ["キャスト", "開始", "終了", "休憩", "時間"], normalizeWorkRows(closing.castWork, false), (row) => [
+    row.name,
+    row.startTime || "",
+    row.endTime || "",
+    `${Number(row.breakMinutes || 0)}分`,
+    `${Number(row.hours || 0).toFixed(1)}時間`
+  ]));
+  body.appendChild(createTableBlock("経費", ["カテゴリ", "金額", "メモ"], closing.expenses, (row) => [
+    row.category || "",
+    yenCell(row.amount),
+    row.note || ""
+  ]));
+  body.appendChild(createTableBlock("手当", ["種類", "金額", "対象者"], closing.allowances, (row) => [
+    row.type || "",
+    yenCell(row.amount),
+    row.recipientName || row.recipient || ""
+  ]));
+
+  document.getElementById("closingDetailModal").showModal();
+}
+
+function createSummaryGrid(closing) {
+  const grid = document.createElement("div");
+  grid.className = "detail-grid";
+  grid.appendChild(createDetailBlock("売上", [
+    ["状態", statusLabel(closing.status)],
+    ["総売上", yenCell(closing.totalSales)],
+    ["現金", yenCell(closing.cashSales)],
+    ["カード", yenCell(closing.cardSales)],
+    ["客単価", yenCell(closing.customerUnitPrice)]
+  ]));
+  grid.appendChild(createDetailBlock("客数・指名", [
+    ["組数", `${closing.groupCount}組`],
+    ["総客数", `${closing.totalCustomers}名`],
+    ["本指名", `${closing.honShimei}件`],
+    ["場内指名", `${closing.jonai}件`]
+  ]));
+  grid.appendChild(createDetailBlock("現金照合", [
+    ["想定現金", yenCell(closing.cashReconciliation.expectedCash)],
+    ["実在高", yenCell(closing.cashReconciliation.actualCash)],
+    ["差異", yenCell(closing.cashDifference)],
+    ["メモ", closing.cashReconciliation.note || ""]
+  ]));
+  grid.appendChild(createDetailBlock("締め情報", [
+    ["担当", closing.closedBy || ""],
+    ["POS Ver", closing.source.posVersion || ""],
+    ["締め日時", formatTimestamp(closing.closedAt)]
+  ]));
+  return grid;
+}
+
+function createDetailBlock(title, rows) {
+  const block = document.createElement("section");
+  block.className = "detail-block";
+  const heading = document.createElement("h3");
+  heading.textContent = title;
+  block.appendChild(heading);
+  rows.forEach(([label, value]) => {
+    const row = document.createElement("div");
+    row.className = "detail-row";
+    const labelEl = document.createElement("span");
+    labelEl.textContent = label;
+    const valueEl = document.createElement("strong");
+    valueEl.textContent = value ?? "";
+    row.append(labelEl, valueEl);
+    block.appendChild(row);
+  });
+  return block;
+}
+
+function createTableBlock(title, headers, rows, mapRow) {
+  const block = document.createElement("section");
+  block.className = "detail-block";
+  const heading = document.createElement("h3");
+  heading.textContent = title;
+  block.appendChild(heading);
+  if (!rows.length) {
+    const empty = document.createElement("p");
+    empty.className = "text-sm text-slate-500";
+    empty.textContent = "データなし";
+    block.appendChild(empty);
+    return block;
+  }
+  const table = document.createElement("table");
+  table.className = "detail-mini-table";
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  headers.forEach((header) => {
+    const th = document.createElement("th");
+    th.textContent = header;
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  const tbody = document.createElement("tbody");
+  rows.forEach((item) => {
+    const tr = document.createElement("tr");
+    mapRow(item).forEach((value) => {
+      const td = document.createElement("td");
+      td.textContent = value ?? "";
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.append(thead, tbody);
+  block.appendChild(table);
+  return block;
+}
+
+function normalizeWorkRows(work, staff) {
+  if (Array.isArray(work)) {
+    return work.map((row) => ({
+      name: staff ? row.staffName || row.name || "" : row.castName || row.name || "",
+      role: staff ? roleLabel(row.role) : "",
+      startTime: row.startTime || "",
+      endTime: row.endTime || "",
+      breakMinutes: row.breakMinutes || 0,
+      hours: row.hours || 0
+    }));
+  }
+  if (!staff || !work || typeof work !== "object") return [];
+  const labels = {
+    manager: "店長/マネージャー",
+    bartender: "バーテンダー",
+    kitchen: "厨房",
+    cleaning: "清掃",
+    other: "その他"
+  };
+  return Object.entries(labels)
+    .map(([role, label]) => ({
+      name: label,
+      role: label,
+      hours: Number(work[role] || 0)
+    }))
+    .filter((row) => row.hours > 0);
+}
+
+function roleLabel(role) {
+  return {
+    manager: "店長/マネージャー",
+    bartender: "バーテンダー",
+    kitchen: "厨房",
+    cleaning: "清掃",
+    other: "その他"
+  }[role] || role || "";
+}
+
+function yenCell(value) {
+  return `${yen.format(Number(value || 0))}円`;
+}
+
+function formatTimestamp(value) {
+  if (!value) return "";
+  if (typeof value.toDate === "function") return value.toDate().toLocaleString("ja-JP");
+  if (typeof value === "string") return value;
+  if (typeof value.seconds === "number") return new Date(value.seconds * 1000).toLocaleString("ja-JP");
+  return "";
 }
