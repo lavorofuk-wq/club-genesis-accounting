@@ -2,10 +2,8 @@ import {
   db,
   collection,
   getDocs,
-  orderBy,
-  query,
-  where,
-  closingsCollectionName
+  closingsCollectionName,
+  firebaseProjectId
 } from "./firebase-config.js";
 import { requireRole, logout, showMessage, hideMessage } from "./auth.js";
 
@@ -42,17 +40,16 @@ async function loadClosings() {
   }
 
   try {
-    const q = query(
-      collection(db, closingsCollectionName),
-      where("businessDate", ">=", start),
-      where("businessDate", "<=", end),
-      orderBy("businessDate", "asc")
-    );
-    const snap = await getDocs(q);
-    closings = snap.docs.map((docSnap) => normalizeClosing({ id: docSnap.id, ...docSnap.data() }));
+    const snap = await getDocs(collection(db, closingsCollectionName));
+    closings = snap.docs
+      .map((docSnap) => normalizeClosing({ id: docSnap.id, ...docSnap.data() }))
+      .filter((closing) => closing.businessDate >= start && closing.businessDate <= end)
+      .sort((a, b) => a.businessDate.localeCompare(b.businessDate));
+    renderSyncInfo(snap.size, closings.length);
     renderAll(start, end);
   } catch (error) {
     showMessage("errorMessage", `POS締めデータの取得に失敗しました。${error.message}`);
+    renderSyncInfo(0, 0);
   }
 }
 
@@ -97,6 +94,12 @@ function renderAll(start, end) {
   renderBreakdown("allowanceBreakdown", summary.allowanceByType);
   renderTable();
   renderCalendar(start, end);
+}
+
+function renderSyncInfo(totalCount, visibleCount) {
+  const el = document.getElementById("syncInfo");
+  if (!el) return;
+  el.textContent = `接続先: Firebase projectId=${firebaseProjectId} / collection=${closingsCollectionName} / host=${location.hostname} / 読込=${totalCount}件 / 表示=${visibleCount}件`;
 }
 
 function summarize(items) {

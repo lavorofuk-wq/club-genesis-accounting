@@ -17,6 +17,49 @@ service cloud.firestore {
       return userExists() ? get(userPath()).data.role : null;
     }
 
+    function isNonNegativeNumber(value) {
+      return value is number && value >= 0;
+    }
+
+    function isClosingPayload(document) {
+      return request.resource.data.keys().hasAll([
+        'businessDate',
+        'status',
+        'sales',
+        'customers',
+        'nominations',
+        'castSales',
+        'staffWork',
+        'castWork',
+        'expenses',
+        'allowances',
+        'cashReconciliation',
+        'source'
+      ])
+      && request.resource.data.businessDate == document
+      && request.resource.data.businessDate is string
+      && request.resource.data.businessDate.matches('^\\d{4}-\\d{2}-\\d{2}$')
+      && request.resource.data.status == 'submitted'
+      && request.resource.data.sales is map
+      && isNonNegativeNumber(request.resource.data.sales.totalSales)
+      && isNonNegativeNumber(request.resource.data.sales.cashSales)
+      && isNonNegativeNumber(request.resource.data.sales.cardSales)
+      && request.resource.data.customers is map
+      && isNonNegativeNumber(request.resource.data.customers.groupCount)
+      && isNonNegativeNumber(request.resource.data.customers.totalCustomers)
+      && isNonNegativeNumber(request.resource.data.customers.customerUnitPrice)
+      && request.resource.data.nominations is map
+      && isNonNegativeNumber(request.resource.data.nominations.honShimeiCount)
+      && isNonNegativeNumber(request.resource.data.nominations.jonaiCount)
+      && request.resource.data.castSales is list
+      && request.resource.data.staffWork is list
+      && request.resource.data.castWork is list
+      && request.resource.data.expenses is list
+      && request.resource.data.allowances is list
+      && request.resource.data.cashReconciliation is map
+      && request.resource.data.source is map;
+    }
+
     match /dailyReports/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
       allow create, update: if signedIn() && userRole() == 'shop';
@@ -31,13 +74,13 @@ service cloud.firestore {
 
     match /dailyClosings/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && userRole() == 'shop';
+      allow create, update: if (signedIn() && userRole() == 'shop') || isClosingPayload(document);
       allow delete: if false;
     }
 
     match /dailyClosings-dev/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && userRole() == 'shop';
+      allow create, update: if (signedIn() && userRole() == 'shop') || isClosingPayload(document);
       allow delete: if false;
     }
 
