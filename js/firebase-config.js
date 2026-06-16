@@ -33,6 +33,7 @@ const productionHosts = new Set([
 export const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app);
+export const firebaseProjectId = firebaseConfig.projectId;
 export const isProduction = productionHosts.has(window.location.hostname);
 export const environmentName = isProduction ? "本番" : "開発";
 export const reportsCollectionName = isProduction ? "dailyReports" : "dailyReports-dev";
