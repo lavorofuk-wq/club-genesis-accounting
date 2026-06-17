@@ -43,12 +43,13 @@ async function loadClosings() {
     const snap = await getDocs(collection(db, closingsCollectionName));
     closings = snap.docs
       .map((docSnap) => normalizeClosing({ id: docSnap.id, ...docSnap.data() }))
+      .filter((closing) => closing.status === "approved")
       .filter((closing) => closing.businessDate >= start && closing.businessDate <= end)
       .sort((a, b) => a.businessDate.localeCompare(b.businessDate));
     renderSyncInfo(snap.size, closings.length);
     renderAll(start, end);
   } catch (error) {
-    showMessage("errorMessage", `POS締めデータの取得に失敗しました。${error.message}`);
+    showMessage("errorMessage", `経理確定データの取得に失敗しました。${error.message}`);
     renderSyncInfo(0, 0);
   }
 }
@@ -65,7 +66,7 @@ function normalizeClosing(raw) {
   return {
     id: raw.id,
     businessDate: date,
-    status: raw.status || "submitted",
+    status: raw.status || "approved",
     totalSales,
     cashSales: Number(sales.cashSales ?? raw.cashSales ?? 0),
     cardSales: Number(sales.cardSales ?? raw.cardSales ?? 0),
@@ -83,6 +84,8 @@ function normalizeClosing(raw) {
     cashDifference: Number(cashReconciliation.difference ?? raw.cashDifference ?? 0),
     closedBy: raw.source?.closedBy || raw.closedBy || "",
     closedAt: raw.source?.closedAt || raw.closedAt || raw.submittedAt || null,
+    reviewedBy: raw.reviewedEmail || raw.source?.reviewedEmail || raw.reviewedBy || "",
+    reviewedAt: raw.reviewedAt || raw.source?.reviewedAt || null,
     source: raw.source || {}
   };
 }
@@ -99,7 +102,7 @@ function renderAll(start, end) {
 function renderSyncInfo(totalCount, visibleCount) {
   const el = document.getElementById("syncInfo");
   if (!el) return;
-  el.textContent = `接続先: Firebase projectId=${firebaseProjectId} / collection=${closingsCollectionName} / host=${location.hostname} / 読込=${totalCount}件 / 表示=${visibleCount}件`;
+  el.textContent = `接続先: Firebase projectId=${firebaseProjectId} / collection=${closingsCollectionName} / host=${location.hostname} / 全件=${totalCount}件 / 経理確定=${visibleCount}件`;
 }
 
 function summarize(items) {
@@ -138,8 +141,7 @@ function summarize(items) {
 function sumWorkHours(work) {
   if (Array.isArray(work)) return work.reduce((sum, row) => sum + Number(row.hours || 0), 0);
   if (!work || typeof work !== "object") return 0;
-  return ["manager", "bartender", "kitchen", "cleaning", "other"]
-    .reduce((sum, key) => sum + Number(work[key] || 0), 0);
+  return ["manager", "bartender", "kitchen", "cleaning", "other"].reduce((sum, key) => sum + Number(work[key] || 0), 0);
 }
 
 function renderSummaryCards(summary) {
@@ -239,7 +241,7 @@ function renderCalendar(start, end) {
     day.textContent = date.slice(8, 10);
     const state = document.createElement("p");
     state.className = "mt-2";
-    state.textContent = future ? "未来日" : submitted.has(date) ? "締め済" : "未締め";
+    state.textContent = future ? "未来日" : submitted.has(date) ? "経理確定" : "未確定";
     cell.append(day, state);
     grid.appendChild(cell);
   }
@@ -263,7 +265,7 @@ function todayString() {
 
 function exportCsv() {
   if (!closings.length) {
-    showMessage("errorMessage", "CSV出力対象のPOS締めデータがありません。");
+    showMessage("errorMessage", "CSV出力対象の経理確定データがありません。");
     return;
   }
   const rows = [
@@ -292,7 +294,7 @@ function exportCsv() {
   const a = document.createElement("a");
   const end = document.getElementById("endDate").value.replaceAll("-", "");
   a.href = url;
-  a.download = `keiri_pos_closing_${end}.csv`;
+  a.download = `gms_export_${end}.csv`;
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -305,10 +307,10 @@ function escapeCsv(value) {
 function statusLabel(status) {
   return {
     draft: "下書き",
-    submitted: "締め済",
-    approved: "承認済",
+    submitted: "店舗確認待ち",
+    approved: "経理確定",
     rejected: "差戻し"
-  }[status] || status || "締め済";
+  }[status] || status || "経理確定";
 }
 
 function openClosingDetail(closingId) {
@@ -377,10 +379,11 @@ function createSummaryGrid(closing) {
     ["差異", yenCell(closing.cashDifference)],
     ["メモ", closing.cashReconciliation.note || ""]
   ]));
-  grid.appendChild(createDetailBlock("締め情報", [
-    ["担当", closing.closedBy || ""],
+  grid.appendChild(createDetailBlock("確認情報", [
+    ["締め担当", closing.closedBy || ""],
     ["POS Ver", closing.source.posVersion || ""],
-    ["締め日時", formatTimestamp(closing.closedAt)]
+    ["店舗確認者", closing.reviewedBy || ""],
+    ["店舗確認日時", formatTimestamp(closing.reviewedAt)]
   ]));
   return grid;
 }
@@ -462,11 +465,7 @@ function normalizeWorkRows(work, staff) {
     other: "その他"
   };
   return Object.entries(labels)
-    .map(([role, label]) => ({
-      name: label,
-      role: label,
-      hours: Number(work[role] || 0)
-    }))
+    .map(([role, label]) => ({ name: label, role: label, hours: Number(work[role] || 0) }))
     .filter((row) => row.hours > 0);
 }
 

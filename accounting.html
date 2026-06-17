@@ -3,22 +3,22 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CLUB GENESIS 経理ダッシュボード</title>
-  <meta name="theme-color" content="#111827">
+  <title>GMS 経理ダッシュボード</title>
+  <meta name="theme-color" content="#f5f7fb">
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="css/style.css">
 </head>
-<body class="min-h-screen bg-slate-950 text-slate-100">
+<body class="min-h-screen">
   <header class="app-header">
     <div>
-      <p class="text-xs tracking-[0.24em] text-amber-300">CLUB GENESIS</p>
+      <p class="brand-kicker">GMS</p>
       <div class="flex items-center gap-2">
-        <h1 class="text-xl font-bold">経理ダッシュボード</h1>
+        <h1 class="text-xl font-bold text-slate-900">経理ダッシュボード</h1>
         <span id="environmentBadge" class="env-badge"></span>
       </div>
     </div>
     <div class="flex items-center gap-3">
-      <span id="userEmail" class="hidden text-xs text-slate-400 sm:inline"></span>
+      <span id="userEmail" class="hidden text-xs text-slate-500 sm:inline"></span>
       <button id="logoutButton" class="secondary-button">ログアウト</button>
     </div>
   </header>
@@ -29,7 +29,7 @@
       <section class="section-shell">
         <div class="section-title">
           <h2>期間選択</h2>
-          <button id="exportCsvButton" class="primary-button">POS締め一覧をCSV出力</button>
+          <button id="exportCsvButton" class="primary-button">期間の一覧をCSV出力</button>
         </div>
         <div class="grid gap-4 md:grid-cols-3">
           <label>開始日<input id="startDate" type="date" class="form-input mt-2"></label>
@@ -48,18 +48,18 @@
         <div class="section-title"><h2>集計サマリー</h2></div>
         <div class="grid gap-4 lg:grid-cols-2">
           <div>
-            <h3 class="mb-3 text-sm font-semibold text-slate-300">経費カテゴリ別内訳</h3>
+            <h3 class="mb-3 text-sm font-bold text-slate-700">経費カテゴリ別内訳</h3>
             <div id="expenseBreakdown" class="breakdown-list"></div>
           </div>
           <div>
-            <h3 class="mb-3 text-sm font-semibold text-slate-300">手当種類別内訳</h3>
+            <h3 class="mb-3 text-sm font-bold text-slate-700">手当種類別内訳</h3>
             <div id="allowanceBreakdown" class="breakdown-list"></div>
           </div>
         </div>
       </section>
 
       <section class="section-shell">
-        <div class="section-title"><h2>POS締めデータ一覧</h2></div>
+        <div class="section-title"><h2>経理確定データ一覧</h2></div>
         <div class="overflow-x-auto">
           <table class="data-table">
             <thead>
@@ -73,7 +73,7 @@
       </section>
 
       <section class="section-shell">
-        <div class="section-title"><h2>締め状況確認</h2></div>
+        <div class="section-title"><h2>入力状況確認</h2></div>
         <div id="calendarGrid" class="calendar-grid"></div>
       </section>
     </div>
@@ -83,7 +83,7 @@
     <form method="dialog">
       <div class="flex items-start justify-between gap-4">
         <div>
-          <p class="text-xs tracking-[0.24em] text-amber-300">POS CLOSING</p>
+          <p class="brand-kicker">GMS DETAIL</p>
           <h2 id="closingDetailTitle" class="mt-2 text-xl font-bold">締め詳細</h2>
         </div>
         <button value="close" class="secondary-button">閉じる</button>

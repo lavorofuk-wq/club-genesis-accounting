@@ -65,7 +65,9 @@ export async function getUserRole(uid) {
   if (claimRole === "shop" || claimRole === "accounting") return claimRole;
 
   const userSnap = await getDoc(doc(db, "users", uid));
-  if (!userSnap.exists()) throw new Error("usersコレクションにユーザー情報がありません。");
+  if (!userSnap.exists()) {
+    throw new Error("usersコレクションにユーザー情報がありません。FirebaseのusersにUIDとroleを登録してください。");
+  }
   const role = userSnap.data().role;
   if (role !== "shop" && role !== "accounting") {
     throw new Error("ユーザーのroleが不正です。shopまたはaccountingを設定してください。");
@@ -83,7 +85,7 @@ function loginErrorMessage(error) {
     "auth/user-disabled": "このユーザーはFirebase Authenticationで無効になっています。",
     "auth/too-many-requests": "ログイン試行が多すぎます。少し時間を置いてから再度お試しください。",
     "auth/operation-not-allowed": "Firebase Authenticationでメール/パスワード認証が有効になっていません。",
-    "auth/unauthorized-domain": `この開発URLはFirebaseで許可されていません。Authenticationの承認済みドメインに「${location.hostname}」を追加してください。`,
+    "auth/unauthorized-domain": `このURLはFirebaseで許可されていません。Authenticationの承認済みドメインに「${location.hostname}」を追加してください。`,
     "permission-denied": "Firestoreのusers設定またはセキュリティルールを確認してください。"
   };
   return messages[error.code] || error.message || "原因不明のエラーです。";
