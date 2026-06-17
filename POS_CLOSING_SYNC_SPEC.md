@@ -47,8 +47,6 @@ POSからの未確認データ:
   castSales: [],
   staffWork: [],
   castWork: [],
-  expenses: [],
-  allowances: [],
   cashReconciliation: {
     expectedCash: 0,
     actualCash: 0,

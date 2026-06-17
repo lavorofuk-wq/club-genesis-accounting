@@ -31,8 +31,6 @@ service cloud.firestore {
         'castSales',
         'staffWork',
         'castWork',
-        'expenses',
-        'allowances',
         'cashReconciliation',
         'source'
       ])
@@ -54,8 +52,6 @@ service cloud.firestore {
       && request.resource.data.castSales is list
       && request.resource.data.staffWork is list
       && request.resource.data.castWork is list
-      && request.resource.data.expenses is list
-      && request.resource.data.allowances is list
       && request.resource.data.cashReconciliation is map
       && request.resource.data.source is map;
     }
