@@ -26,23 +26,50 @@
   <main class="mx-auto max-w-6xl px-4 py-6">
     <div id="authLoading" class="notice">認証情報を確認しています...</div>
     <form id="reportForm" class="hidden space-y-6" novalidate>
-      <section class="section-shell">
+      <section id="shopHome" class="section-shell">
+        <div>
+          <p class="brand-kicker">SHOP WORKSPACE</p>
+          <h2 class="mt-2 text-xl font-bold text-slate-900">店舗作業ホーム</h2>
+        </div>
+        <div class="shop-home-grid mt-5">
+          <button id="openRegistrationButton" type="button" class="shop-home-action">
+            <span class="shop-home-action-title">登録</span>
+            <span class="shop-home-action-detail">スタッフ登録・キャスト情報</span>
+          </button>
+          <button id="openClosingButton" type="button" class="shop-home-action">
+            <span class="shop-home-action-title">締めデータ作成</span>
+            <span class="shop-home-action-detail">POS締め確認・勤務・売上・経理送信</span>
+          </button>
+        </div>
+      </section>
+
+      <div id="workspaceMessages" class="space-y-3">
+        <div id="warningBanner" class="hidden alert alert-warning"></div>
+        <div id="errorMessage" class="hidden alert alert-error"></div>
+        <div id="successMessage" class="hidden alert alert-success"></div>
+      </div>
+
+      <section class="section-shell hidden" data-workspace="closing">
         <div class="section-title">
           <div>
             <h2>POS締め確認</h2>
             <p class="mt-1 text-sm text-slate-500">POSから届いた締めデータを確認し、必要なら訂正してから経理側へ送信します。</p>
           </div>
-          <button id="reloadPendingButton" type="button" class="secondary-button">再読込</button>
+          <div class="flex gap-2">
+            <button type="button" class="secondary-button" data-home-button>ホームへ戻る</button>
+            <button id="reloadPendingButton" type="button" class="secondary-button">再読込</button>
+          </div>
         </div>
         <div id="pendingClosings" class="pending-list"></div>
       </section>
 
-      <section class="section-shell">
+      <section class="section-shell hidden" data-workspace="registration">
         <div class="section-title">
           <div>
             <h2>スタッフ管理</h2>
             <p class="mt-1 text-sm text-slate-500">スタッフの入店情報を登録し、退店時は在籍状態を変更します。</p>
           </div>
+          <button type="button" class="secondary-button" data-home-button>ホームへ戻る</button>
         </div>
         <div class="staff-registration-grid">
           <label>
@@ -83,7 +110,7 @@
         <div id="staffMasterList" class="master-list mt-5"></div>
       </section>
 
-      <section class="section-shell">
+      <section class="section-shell hidden" data-workspace="registration">
         <div class="section-title">
           <div>
             <h2>キャスト一覧</h2>
@@ -108,7 +135,7 @@
         </div>
       </section>
 
-      <section class="section-shell">
+      <section class="section-shell hidden" data-workspace="closing">
         <div class="section-title">
           <h2>営業日</h2>
           <button id="copyPreviousButton" type="button" class="secondary-button">前日のデータをコピー</button>
@@ -118,15 +145,10 @@
             <label for="date" class="form-label">日付</label>
             <input id="date" type="date" required class="form-input">
           </div>
-          <div class="md:col-span-2">
-            <div id="warningBanner" class="hidden alert alert-warning"></div>
-            <div id="errorMessage" class="hidden alert alert-error"></div>
-            <div id="successMessage" class="hidden alert alert-success"></div>
-          </div>
         </div>
       </section>
 
-      <section class="section-shell">
+      <section class="section-shell hidden" data-workspace="closing">
         <div class="section-title"><h2>勤務時間</h2></div>
         <div>
           <h3 class="text-sm font-bold text-slate-800">スタッフ勤務時間</h3>
@@ -143,7 +165,7 @@
         </div>
       </section>
 
-      <section class="section-shell">
+      <section class="section-shell hidden" data-workspace="closing">
         <div class="section-title"><h2>売上</h2></div>
         <div class="grid gap-4 md:grid-cols-3">
           <label class="field-card">総売上（円）<input id="totalSales" type="number" min="0" step="1" value="0" class="form-input mt-2 money-input"></label>
@@ -152,7 +174,7 @@
         </div>
       </section>
 
-      <section class="section-shell">
+      <section class="section-shell hidden" data-workspace="closing">
         <div class="section-title"><h2>客数情報</h2></div>
         <div class="grid gap-4 md:grid-cols-3">
           <label class="field-card">来店組数<input id="groupCount" type="number" min="0" step="1" value="0" class="form-input mt-2"></label>
@@ -161,7 +183,7 @@
         </div>
       </section>
 
-      <section class="section-shell">
+      <section class="section-shell hidden" data-workspace="closing">
         <div class="section-title"><h2>指名情報</h2></div>
         <div class="grid gap-4 md:grid-cols-2">
           <label class="field-card">本指名（件数）<input id="honShimei" type="number" min="0" step="1" value="0" class="form-input mt-2"></label>
@@ -169,7 +191,7 @@
         </div>
       </section>
 
-      <section class="section-shell">
+      <section class="section-shell hidden" data-workspace="closing">
         <div class="section-title">
           <h2>経費</h2>
           <button id="addExpenseButton" type="button" class="secondary-button">経費追加</button>
@@ -177,7 +199,7 @@
         <div id="expenseRows" class="space-y-3"></div>
       </section>
 
-      <section class="section-shell">
+      <section class="section-shell hidden" data-workspace="closing">
         <div class="section-title">
           <h2>手当</h2>
           <button id="addAllowanceButton" type="button" class="secondary-button">手当追加</button>
@@ -185,7 +207,7 @@
         <div id="allowanceRows" class="space-y-3"></div>
       </section>
 
-      <div class="sticky bottom-0 -mx-4 border-t border-slate-200 bg-white/95 px-4 py-4 backdrop-blur">
+      <div class="sticky bottom-0 -mx-4 hidden border-t border-slate-200 bg-white/95 px-4 py-4 backdrop-blur" data-workspace="closing">
         <button id="saveButton" type="button" class="primary-button w-full md:w-auto">経理へ送信する</button>
       </div>
     </form>

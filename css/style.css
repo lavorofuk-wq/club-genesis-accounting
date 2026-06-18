@@ -79,6 +79,47 @@ body {
   font-weight: 800;
 }
 
+.shop-home-grid {
+  display: grid;
+  gap: 12px;
+}
+
+@media (min-width: 768px) {
+  .shop-home-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.shop-home-action {
+  display: grid;
+  min-height: 132px;
+  align-content: center;
+  gap: 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 22px;
+  color: var(--text);
+  text-align: left;
+}
+
+.shop-home-action:hover {
+  border-color: var(--primary);
+  background: #f8fbff;
+}
+
+.shop-home-action-title {
+  color: var(--primary-dark);
+  font-size: 20px;
+  font-weight: 800;
+}
+
+.shop-home-action-detail {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 .form-label {
   display: block;
   margin-bottom: 8px;

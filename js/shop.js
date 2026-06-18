@@ -48,6 +48,11 @@ let editingStaffId = null;
 let currentCastDetailType = "active";
 
 document.getElementById("logoutButton").addEventListener("click", logout);
+document.getElementById("openRegistrationButton").addEventListener("click", () => showWorkspace("registration"));
+document.getElementById("openClosingButton").addEventListener("click", () => showWorkspace("closing"));
+document.querySelectorAll("[data-home-button]").forEach((button) => {
+  button.addEventListener("click", () => showWorkspace("home"));
+});
 document.getElementById("reloadPendingButton").addEventListener("click", loadPendingClosings);
 document.getElementById("registerStaffButton").addEventListener("click", registerStaff);
 document.getElementById("cancelStaffEditButton").addEventListener("click", resetStaffForm);
@@ -71,6 +76,7 @@ document.getElementById("confirmSaveButton").addEventListener("click", saveRepor
 requireRole("shop", async (user) => {
   currentUser = user;
   document.getElementById("reportForm").classList.remove("hidden");
+  showWorkspace("home");
   document.getElementById("date").value = todayString();
   await loadMasters();
   await syncPosCasts(false);
@@ -79,6 +85,17 @@ requireRole("shop", async (user) => {
   wireRealtimeValidation();
   calculateUnitPrice();
 });
+
+function showWorkspace(workspace) {
+  document.getElementById("shopHome").classList.toggle("hidden", workspace !== "home");
+  document.querySelectorAll("[data-workspace]").forEach((element) => {
+    element.classList.toggle("hidden", element.dataset.workspace !== workspace);
+  });
+  if (workspace === "home") {
+    document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close());
+  }
+  window.scrollTo(0, 0);
+}
 
 function todayString() {
   const d = new Date();
