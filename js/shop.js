@@ -85,6 +85,9 @@ document.getElementById("addAllowanceButton").addEventListener("click", () => ad
 document.getElementById("copyPreviousButton").addEventListener("click", copyPreviousDay);
 document.getElementById("saveButton").addEventListener("click", openConfirm);
 document.getElementById("confirmSaveButton").addEventListener("click", saveReport);
+document.getElementById("cancelConfirmSaveButton").addEventListener("click", () => {
+  document.getElementById("confirmModal").close();
+});
 
 requireRole("shop", async (user) => {
   currentUser = user;
@@ -140,8 +143,8 @@ function textValue(id) {
   return document.getElementById(id).value.trim();
 }
 
-function isHalfHour(value) {
-  return Number.isFinite(value) && value >= 0 && value <= 24 && Math.round(value * 2) === value * 2;
+function isWorkHour(value) {
+  return Number.isFinite(value) && value >= 0 && value <= 24;
 }
 
 function isQuarterHour(value) {
@@ -980,7 +983,7 @@ function addCastWorkRow(data = {}) {
   hours.type = "number";
   hours.min = "0";
   hours.max = "24";
-  hours.step = "0.5";
+  hours.step = "0.01";
   hours.placeholder = "勤務時間";
   hours.className = "form-input cast-work-hours";
   hours.value = data.hours ?? 0;
@@ -1080,7 +1083,7 @@ function wireRealtimeValidation() {
 function validateNumberInput(el) {
   const value = Number(el.value || 0);
   const isHour = el.matches(".cast-work-hours");
-  const invalid = isHour ? !isHalfHour(value) : value < 0 || !Number.isInteger(value);
+  const invalid = isHour ? !isWorkHour(value) : value < 0 || !Number.isInteger(value);
   markInvalid(el, invalid);
 }
 
@@ -1226,7 +1229,7 @@ function validatePayload(payload) {
   });
   payload.castWork.forEach((row) => {
     if (!row.castId && !row.castName) errors.push("勤務するキャストを登録一覧から選択してください。");
-    if (!isHalfHour(row.hours)) errors.push("キャスト勤務時間は0〜24時間、0.5単位で入力してください。");
+    if (!isWorkHour(row.hours)) errors.push("キャスト勤務時間は0〜24時間で入力してください。");
   });
   ["totalSales", "cashSales", "cardSales"].forEach((key) => {
     if (!isNonNegativeInteger(payload.sales[key])) errors.push("売上は0以上の整数で入力してください。");
@@ -1254,6 +1257,7 @@ function openConfirm() {
   const errors = validatePayload(pendingPayload);
   if (errors.length) {
     showMessage("errorMessage", errors.join("\n"));
+    document.getElementById("errorMessage").scrollIntoView();
     return;
   }
   const expenseTotal = pendingPayload.expenses.reduce((sum, row) => sum + row.amount, 0);
@@ -1271,36 +1275,53 @@ function openConfirm() {
     p.textContent = text;
     summary.appendChild(p);
   });
+  hideMessage("confirmSaveError");
   document.getElementById("confirmModal").showModal();
 }
 
-async function saveReport(event) {
-  event.preventDefault();
+async function saveReport() {
   if (isSaving || !pendingPayload) return;
   isSaving = true;
   document.getElementById("saveButton").disabled = true;
   document.getElementById("confirmSaveButton").disabled = true;
+  hideMessage("confirmSaveError");
 
   try {
     await setDoc(doc(db, closingsCollectionName, pendingPayload.businessDate), pendingPayload, { merge: true });
     if (selectedPending?.sourceCollection === shopClosingsCollectionName) {
-      await setDoc(doc(db, shopClosingsCollectionName, selectedPending.businessDate), {
-        status: "approved",
-        reviewedBy: currentUser.uid,
-        reviewedAt: serverTimestamp()
-      }, { merge: true });
+      try {
+        await setDoc(doc(db, shopClosingsCollectionName, selectedPending.businessDate), {
+          status: "approved",
+          reviewedBy: currentUser.uid,
+          reviewedAt: serverTimestamp()
+        }, { merge: true });
+      } catch (sourceError) {
+        console.warn("POS締め状態の更新に失敗しました。", sourceError);
+      }
     }
     document.getElementById("confirmModal").close();
     selectedPending = null;
     await loadClosingLists();
     showMessage("successMessage", "経理側へ送信しました。", false);
   } catch (error) {
-    showMessage("errorMessage", `経理送信に失敗しました。${error.message}`);
+    const message = `経理送信に失敗しました。${firestoreErrorMessage(error)}`;
+    showMessage("confirmSaveError", message);
+    showMessage("errorMessage", message);
   } finally {
     isSaving = false;
     document.getElementById("saveButton").disabled = false;
     document.getElementById("confirmSaveButton").disabled = false;
   }
+}
+
+function firestoreErrorMessage(error) {
+  if (error?.code === "permission-denied") {
+    return "ログインユーザーのroleまたはFirestoreルールを確認してください。";
+  }
+  if (error?.code === "unavailable") {
+    return "Firebaseへ接続できません。通信状態を確認して再度お試しください。";
+  }
+  return error?.message || "原因不明のエラーです。";
 }
 
 async function copyPreviousDay() {

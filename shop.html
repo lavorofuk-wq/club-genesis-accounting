@@ -207,14 +207,15 @@
   </main>
 
   <dialog id="confirmModal" class="modal-card">
-    <form method="dialog">
+    <div>
       <h2 class="text-xl font-bold">経理送信前の確認</h2>
       <div id="confirmSummary" class="mt-4 space-y-2 text-sm text-slate-600"></div>
+      <div id="confirmSaveError" class="hidden alert alert-error mt-4"></div>
       <div class="mt-6 flex justify-end gap-3">
-        <button value="cancel" class="secondary-button">戻る</button>
-        <button id="confirmSaveButton" value="save" class="primary-button">経理へ送信</button>
+        <button id="cancelConfirmSaveButton" type="button" class="secondary-button">戻る</button>
+        <button id="confirmSaveButton" type="button" class="primary-button">経理へ送信</button>
       </div>
-    </form>
+    </div>
   </dialog>
 
   <dialog id="pendingClosingModal" class="modal-card modal-wide">
