@@ -43,17 +43,30 @@ let staffMembers = [];
 let allCastMembers = [];
 let castMembers = [];
 let pendingClosings = [];
+let sentClosings = [];
 let selectedPending = null;
 let editingStaffId = null;
 let currentCastDetailType = "active";
 
 document.getElementById("logoutButton").addEventListener("click", logout);
 document.getElementById("openRegistrationButton").addEventListener("click", () => showWorkspace("registration"));
-document.getElementById("openClosingButton").addEventListener("click", () => showWorkspace("closing"));
+document.getElementById("openClosingButton").addEventListener("click", openPendingClosingModal);
+document.getElementById("openSentClosingsButton").addEventListener("click", openSentClosingModal);
 document.querySelectorAll("[data-home-button]").forEach((button) => {
   button.addEventListener("click", () => showWorkspace("home"));
 });
-document.getElementById("reloadPendingButton").addEventListener("click", loadPendingClosings);
+document.getElementById("closePendingClosingButton").addEventListener("click", () => {
+  document.getElementById("pendingClosingModal").close();
+});
+document.getElementById("closeSentClosingButton").addEventListener("click", () => {
+  document.getElementById("sentClosingModal").close();
+});
+document.getElementById("reloadPendingButton").addEventListener("click", loadClosingLists);
+document.getElementById("sentClosingDateSearch").addEventListener("input", renderSentClosings);
+document.getElementById("clearSentClosingDateButton").addEventListener("click", () => {
+  document.getElementById("sentClosingDateSearch").value = "";
+  renderSentClosings();
+});
 document.getElementById("registerStaffButton").addEventListener("click", registerStaff);
 document.getElementById("cancelStaffEditButton").addEventListener("click", resetStaffForm);
 document.getElementById("syncCastsButton").addEventListener("click", () => syncPosCasts(true));
@@ -80,7 +93,7 @@ requireRole("shop", async (user) => {
   document.getElementById("date").value = todayString();
   await loadMasters();
   await syncPosCasts(false);
-  await loadPendingClosings();
+  await loadClosingLists();
   resetRows();
   wireRealtimeValidation();
   calculateUnitPrice();
@@ -95,6 +108,17 @@ function showWorkspace(workspace) {
     document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close());
   }
   window.scrollTo(0, 0);
+}
+
+function openPendingClosingModal() {
+  renderPendingClosings();
+  document.getElementById("pendingClosingModal").showModal();
+}
+
+function openSentClosingModal() {
+  document.getElementById("sentClosingDateSearch").value = "";
+  renderSentClosings();
+  document.getElementById("sentClosingModal").showModal();
 }
 
 function todayString() {
@@ -262,27 +286,40 @@ function sortCasts(a, b) {
     || sortByName(a, b);
 }
 
-async function loadPendingClosings() {
+async function loadClosingLists() {
   hideMessage("errorMessage");
   try {
     const [shopSnap, closingSnap] = await Promise.all([
       getDocs(collection(db, shopClosingsCollectionName)),
       getDocs(collection(db, closingsCollectionName))
     ]);
-    const items = [
-      ...shopSnap.docs.map((docSnap) => ({ sourceCollection: shopClosingsCollectionName, id: docSnap.id, ...docSnap.data() })),
-      ...closingSnap.docs.map((docSnap) => ({ sourceCollection: closingsCollectionName, id: docSnap.id, ...docSnap.data() }))
-    ];
+    const shopItems = shopSnap.docs.map((docSnap) => ({
+      sourceCollection: shopClosingsCollectionName,
+      id: docSnap.id,
+      ...docSnap.data()
+    }));
+    const closingItems = closingSnap.docs.map((docSnap) => ({
+      sourceCollection: closingsCollectionName,
+      id: docSnap.id,
+      ...docSnap.data()
+    }));
+    const items = [...shopItems, ...closingItems];
     await syncCastLifecycle(items);
+    sentClosings = closingItems
+      .filter((item) => item.status === "approved")
+      .map((item) => ({ ...item, businessDate: item.businessDate || item.date || item.id }))
+      .filter((item) => item.businessDate)
+      .sort((a, b) => b.businessDate.localeCompare(a.businessDate));
+    const sentDates = new Set(sentClosings.map((item) => item.businessDate));
     const map = new Map();
-    items.forEach((item) => {
+    shopItems.forEach((item) => {
       const date = item.businessDate || item.date || item.id;
-      if (!date || item.status === "approved") return;
-      const key = `${date}:${item.sourceCollection}`;
-      map.set(key, { ...item, businessDate: date });
+      if (!date || item.status === "approved" || sentDates.has(date)) return;
+      map.set(date, { ...item, businessDate: date });
     });
     pendingClosings = [...map.values()].sort((a, b) => b.businessDate.localeCompare(a.businessDate));
     renderPendingClosings();
+    renderSentClosings();
   } catch (error) {
     showMessage("errorMessage", `POS締めデータを読み込めませんでした。${error.message}`);
   }
@@ -358,7 +395,7 @@ function renderPendingClosings() {
   if (!pendingClosings.length) {
     const empty = document.createElement("div");
     empty.className = "notice";
-    empty.textContent = "確認待ちのPOS締めデータはありません。手入力で経理へ送信することもできます。";
+    empty.textContent = "経理へ未送信のPOS締めデータはありません。";
     root.appendChild(empty);
     return;
   }
@@ -370,13 +407,44 @@ function renderPendingClosings() {
     const info = document.createElement("div");
     info.innerHTML = `
       <div class="font-bold text-slate-900">${closing.businessDate}</div>
-      <div class="mt-1 text-sm text-slate-600">総売上 ${yen.format(total)}円 / 送信元 ${closing.sourceCollection}</div>
+      <div class="mt-1 text-sm text-slate-600">総売上 ${yen.format(total)}円</div>
     `;
     const button = document.createElement("button");
     button.type = "button";
     button.className = "primary-button";
     button.textContent = "確認する";
     button.addEventListener("click", () => loadClosingIntoForm(closing));
+    row.append(info, button);
+    root.appendChild(row);
+  });
+}
+
+function renderSentClosings() {
+  const root = document.getElementById("sentClosings");
+  const searchDate = document.getElementById("sentClosingDateSearch").value;
+  const items = sentClosings.filter((closing) => !searchDate || closing.businessDate === searchDate);
+  root.replaceChildren();
+  if (!items.length) {
+    const empty = document.createElement("div");
+    empty.className = "notice";
+    empty.textContent = searchDate ? "指定した日付の送信済データはありません。" : "送信済データはありません。";
+    root.appendChild(empty);
+    return;
+  }
+  items.forEach((closing) => {
+    const row = document.createElement("article");
+    row.className = "pending-item";
+    const total = Number(closing.sales?.totalSales ?? closing.totalSales ?? 0);
+    const info = document.createElement("div");
+    info.innerHTML = `
+      <div class="font-bold text-slate-900">${closing.businessDate}</div>
+      <div class="mt-1 text-sm text-slate-600">総売上 ${yen.format(total)}円 / 経理送信済み</div>
+    `;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "secondary-button";
+    button.textContent = "再確認・編集";
+    button.addEventListener("click", () => loadClosingIntoForm(closing, true));
     row.append(info, button);
     root.appendChild(row);
   });
@@ -1224,7 +1292,7 @@ async function saveReport(event) {
     }
     document.getElementById("confirmModal").close();
     selectedPending = null;
-    await loadPendingClosings();
+    await loadClosingLists();
     showMessage("successMessage", "経理側へ送信しました。", false);
   } catch (error) {
     showMessage("errorMessage", `経理送信に失敗しました。${error.message}`);
@@ -1256,11 +1324,19 @@ async function copyPreviousDay() {
   }
 }
 
-function loadClosingIntoForm(closing) {
+function loadClosingIntoForm(closing, isSent = false) {
   selectedPending = closing;
   applyClosingToForm(closing);
+  document.getElementById(isSent ? "sentClosingModal" : "pendingClosingModal").close();
+  showWorkspace("closing");
   hideMessage("errorMessage");
-  showMessage("successMessage", `${closing.businessDate} のPOS締めデータをフォームへ読み込みました。確認後、経理へ送信してください。`, false);
+  showMessage(
+    "successMessage",
+    isSent
+      ? `${closing.businessDate} の送信済データを読み込みました。編集後、経理へ再送信できます。`
+      : `${closing.businessDate} のPOS締めデータを読み込みました。確認後、経理へ送信してください。`,
+    false
+  );
 }
 
 function applyClosingToForm(data) {

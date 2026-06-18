@@ -37,8 +37,12 @@
             <span class="shop-home-action-detail">スタッフ登録・キャスト情報</span>
           </button>
           <button id="openClosingButton" type="button" class="shop-home-action">
-            <span class="shop-home-action-title">締めデータ作成</span>
-            <span class="shop-home-action-detail">POS締め確認・勤務・売上・経理送信</span>
+            <span class="shop-home-action-title">締め作業データ作成</span>
+            <span class="shop-home-action-detail">未送信のPOS締めデータを選択</span>
+          </button>
+          <button id="openSentClosingsButton" type="button" class="shop-home-action">
+            <span class="shop-home-action-title">送信済データ</span>
+            <span class="shop-home-action-detail">送信済みデータの確認・編集・再送信</span>
           </button>
         </div>
       </section>
@@ -48,20 +52,6 @@
         <div id="errorMessage" class="hidden alert alert-error"></div>
         <div id="successMessage" class="hidden alert alert-success"></div>
       </div>
-
-      <section class="section-shell hidden" data-workspace="closing">
-        <div class="section-title">
-          <div>
-            <h2>POS締め確認</h2>
-            <p class="mt-1 text-sm text-slate-500">POSから届いた締めデータを確認し、必要なら訂正してから経理側へ送信します。</p>
-          </div>
-          <div class="flex gap-2">
-            <button type="button" class="secondary-button" data-home-button>ホームへ戻る</button>
-            <button id="reloadPendingButton" type="button" class="secondary-button">再読込</button>
-          </div>
-        </div>
-        <div id="pendingClosings" class="pending-list"></div>
-      </section>
 
       <section class="section-shell hidden" data-workspace="registration">
         <div class="section-title">
@@ -138,7 +128,10 @@
       <section class="section-shell hidden" data-workspace="closing">
         <div class="section-title">
           <h2>営業日</h2>
-          <button id="copyPreviousButton" type="button" class="secondary-button">前日のデータをコピー</button>
+          <div class="flex flex-wrap gap-2">
+            <button type="button" class="secondary-button" data-home-button>ホームへ戻る</button>
+            <button id="copyPreviousButton" type="button" class="secondary-button">前日のデータをコピー</button>
+          </div>
         </div>
         <div class="grid gap-4 md:grid-cols-3">
           <div>
@@ -222,6 +215,46 @@
         <button id="confirmSaveButton" value="save" class="primary-button">経理へ送信</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="pendingClosingModal" class="modal-card modal-wide">
+    <div>
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <p class="brand-kicker">CLOSING DATA</p>
+          <h2 class="mt-2 text-xl font-bold">締めデータ選択</h2>
+          <p class="mt-1 text-sm text-slate-500">経理へ未送信のPOS締めデータだけを表示します。</p>
+        </div>
+        <button id="closePendingClosingButton" type="button" class="secondary-button">閉じる</button>
+      </div>
+      <div class="mt-5 flex justify-end">
+        <button id="reloadPendingButton" type="button" class="secondary-button">再読込</button>
+      </div>
+      <div id="pendingClosings" class="pending-list mt-4"></div>
+    </div>
+  </dialog>
+
+  <dialog id="sentClosingModal" class="modal-card modal-wide">
+    <div>
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <p class="brand-kicker">SENT DATA</p>
+          <h2 class="mt-2 text-xl font-bold">送信済データ</h2>
+          <p class="mt-1 text-sm text-slate-500">選択すると内容を再確認・編集して経理へ再送信できます。</p>
+        </div>
+        <button id="closeSentClosingButton" type="button" class="secondary-button">閉じる</button>
+      </div>
+      <div class="mt-5 grid gap-3 sm:grid-cols-[minmax(180px,280px)_auto]">
+        <label>
+          <span class="form-label">日付検索</span>
+          <input id="sentClosingDateSearch" type="date" class="form-input">
+        </label>
+        <div class="flex items-end">
+          <button id="clearSentClosingDateButton" type="button" class="secondary-button">検索解除</button>
+        </div>
+      </div>
+      <div id="sentClosings" class="pending-list mt-4"></div>
+    </div>
   </dialog>
 
   <dialog id="castDetailModal" class="modal-card modal-wide">
