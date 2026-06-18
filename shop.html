@@ -92,7 +92,20 @@
           <button id="syncCastsButton" type="button" class="secondary-button">POS名簿を再同期</button>
         </div>
         <div id="castSyncStatus" class="notice"></div>
-        <div id="castMasterList" class="cast-master-list mt-4"></div>
+        <div id="castSummaryButtons" class="cast-summary-grid mt-4">
+          <button type="button" class="cast-summary-button" data-cast-detail="active">
+            <span>在籍詳細</span>
+            <strong id="activeCastCount">0名</strong>
+          </button>
+          <button type="button" class="cast-summary-button" data-cast-detail="departed">
+            <span>退店詳細</span>
+            <strong id="departedCastCount">0名</strong>
+          </button>
+          <button type="button" class="cast-summary-button" data-cast-detail="trial">
+            <span>体入詳細</span>
+            <strong id="trialCastCount">0名</strong>
+          </button>
+        </div>
       </section>
 
       <section class="section-shell">
@@ -187,6 +200,24 @@
         <button id="confirmSaveButton" value="save" class="primary-button">経理へ送信</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="castDetailModal" class="modal-card modal-wide">
+    <div>
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <p class="brand-kicker">CAST LIST</p>
+          <h2 id="castDetailTitle" class="mt-2 text-xl font-bold">キャスト詳細</h2>
+        </div>
+        <button id="closeCastDetailButton" type="button" class="secondary-button">閉じる</button>
+      </div>
+      <label class="mt-5 block">
+        <span class="form-label">名前検索</span>
+        <input id="castSearchInput" type="search" maxlength="40" class="form-input" placeholder="キャスト名を入力">
+      </label>
+      <div id="castDetailCount" class="mt-3 text-sm text-slate-500"></div>
+      <div id="castDetailList" class="cast-master-list mt-4"></div>
+    </div>
   </dialog>
 
   <dialog id="castEditModal" class="modal-card">

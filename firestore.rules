@@ -62,8 +62,11 @@ service cloud.firestore {
       && request.resource.data.internalNo is number
       && request.resource.data.internalNo >= 0
       && (request.resource.data.status == 'active'
-        || request.resource.data.status == 'departed')
+        || request.resource.data.status == 'departed'
+        || request.resource.data.status == 'trial')
       && request.resource.data.source == 'pos'
+      && (!request.resource.data.keys().hasAny(['deleted'])
+        || request.resource.data.deleted is bool)
       && (!request.resource.data.keys().hasAny(['rewardSystem'])
         || request.resource.data.rewardSystem == ''
         || request.resource.data.rewardSystem == 'slideHourly'

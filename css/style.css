@@ -275,6 +275,46 @@ body {
   gap: 10px;
 }
 
+.cast-summary-grid {
+  display: grid;
+  gap: 10px;
+}
+
+@media (min-width: 640px) {
+  .cast-summary-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.cast-summary-button {
+  display: flex;
+  min-height: 82px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 16px;
+  color: var(--text);
+  text-align: left;
+}
+
+.cast-summary-button:hover {
+  border-color: var(--primary);
+  background: #f8fbff;
+}
+
+.cast-summary-button span {
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.cast-summary-button strong {
+  color: var(--primary-dark);
+  font-size: 22px;
+}
+
 .cast-master-item {
   display: grid;
   gap: 12px;
@@ -327,6 +367,13 @@ body {
 
 .cast-departed {
   opacity: 0.7;
+}
+
+.cast-master-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .master-item {
@@ -397,6 +444,11 @@ body {
 .staff-status-departed {
   background: #f1f5f9;
   color: var(--muted);
+}
+
+.staff-status-trial {
+  background: #ecfeff;
+  color: #0e7490;
 }
 
 .attendance-picker {

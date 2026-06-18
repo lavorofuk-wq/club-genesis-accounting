@@ -40,16 +40,25 @@ let currentUser = null;
 let pendingPayload = null;
 let isSaving = false;
 let staffMembers = [];
+let allCastMembers = [];
 let castMembers = [];
 let pendingClosings = [];
 let selectedPending = null;
 let editingStaffId = null;
+let currentCastDetailType = "active";
 
 document.getElementById("logoutButton").addEventListener("click", logout);
 document.getElementById("reloadPendingButton").addEventListener("click", loadPendingClosings);
 document.getElementById("registerStaffButton").addEventListener("click", registerStaff);
 document.getElementById("cancelStaffEditButton").addEventListener("click", resetStaffForm);
 document.getElementById("syncCastsButton").addEventListener("click", () => syncPosCasts(true));
+document.querySelectorAll("[data-cast-detail]").forEach((button) => {
+  button.addEventListener("click", () => openCastDetail(button.dataset.castDetail));
+});
+document.getElementById("closeCastDetailButton").addEventListener("click", () => {
+  document.getElementById("castDetailModal").close();
+});
+document.getElementById("castSearchInput").addEventListener("input", renderCastDetailList);
 document.getElementById("castRewardSystem").addEventListener("change", updateGuaranteeNoteVisibility);
 document.getElementById("saveCastProfileButton").addEventListener("click", saveCastProfile);
 document.getElementById("addCastWorkButton").addEventListener("click", () => addCastWorkRow());
@@ -120,7 +129,8 @@ async function loadMasters() {
       getDocs(collection(db, castCollectionName))
     ]);
     staffMembers = staffSnapshot.docs.map((item) => ({ id: item.id, ...item.data() })).sort(sortByName);
-    castMembers = castSnapshot.docs.map((item) => ({ id: item.id, ...item.data() })).sort(sortByName);
+    allCastMembers = castSnapshot.docs.map((item) => ({ id: item.id, ...item.data() })).sort(sortByName);
+    castMembers = allCastMembers.filter((cast) => cast.deleted !== true);
     renderMasterLists();
     refreshWorkSelects();
   } catch (error) {
@@ -141,8 +151,12 @@ async function syncPosCasts(showSuccess) {
     if (!posCasts.length) {
       throw new Error("POSに通常キャストの名簿データがありません。");
     }
-    const localByPosId = new Map(staffSafeCastMembers().filter((cast) => cast.posCastId).map((cast) => [String(cast.posCastId), cast]));
-    const localByName = new Map(staffSafeCastMembers().map((cast) => [String(cast.name || ""), cast]));
+    const localByPosId = new Map(allCastMembers.filter((cast) => cast.posCastId).map((cast) => [String(cast.posCastId), cast]));
+    const localByName = new Map(
+      allCastMembers
+        .filter((cast) => !cast.posCastId)
+        .map((cast) => [String(cast.name || ""), cast])
+    );
     await Promise.all(posCasts.map((posCast) => {
       const existing = localByPosId.get(posCast.posCastId) || localByName.get(posCast.name);
       const changed = !existing
@@ -165,8 +179,8 @@ async function syncPosCasts(showSuccess) {
       }, { merge: true });
     }));
     await loadCastMembers();
-    const activeCount = posCasts.filter((cast) => cast.status === "active").length;
-    const departedCount = posCasts.length - activeCount;
+    const activeCount = castMembers.filter((cast) => cast.status === "active").length;
+    const departedCount = castMembers.filter((cast) => cast.status === "departed").length;
     setCastSyncStatus(`POS名簿と同期済み：在籍中 ${activeCount}名 / 退店済み ${departedCount}名`);
     if (showSuccess) showMessage("successMessage", "POSのキャスト名簿を再同期しました。", false);
   } catch (error) {
@@ -175,10 +189,6 @@ async function syncPosCasts(showSuccess) {
   } finally {
     button.disabled = false;
   }
-}
-
-function staffSafeCastMembers() {
-  return Array.isArray(castMembers) ? castMembers : [];
 }
 
 function normalizePosCast(cast) {
@@ -216,10 +226,11 @@ function setCastSyncStatus(message, isError = false) {
 
 async function loadCastMembers() {
   const snapshot = await getDocs(collection(db, castCollectionName));
-  castMembers = snapshot.docs
+  allCastMembers = snapshot.docs
     .map((item) => ({ id: item.id, ...item.data() }))
     .filter((cast) => cast.source === "pos" || cast.posCastId)
     .sort(sortCasts);
+  castMembers = allCastMembers.filter((cast) => cast.deleted !== true);
   renderCastMasterList();
   refreshWorkSelects();
 }
@@ -288,9 +299,21 @@ async function syncCastLifecycle(closings) {
         posExitedAt: Number(cast.exitedAt || 0)
       });
     });
+    (closing.trialCasts || []).forEach((cast) => {
+      if (cast.castId == null || !String(cast.castName || "").trim()) return;
+      updates.set(String(cast.castId), {
+        posCastId: String(cast.castId),
+        name: String(cast.castName).trim(),
+        internalNo: Number(cast.internalNo || 0),
+        status: "trial",
+        entryDate: cast.trialBizDay || eventDate,
+        posEnteredAt: Number(cast.trialRegisteredAt || 0),
+        posExitedAt: Number(cast.trialEndedAt || 0)
+      });
+    });
   });
   if (!updates.size) return;
-  const byPosId = new Map(castMembers.map((cast) => [String(cast.posCastId || ""), cast]));
+  const byPosId = new Map(allCastMembers.map((cast) => [String(cast.posCastId || ""), cast]));
   await Promise.all([...updates.values()].map((update) => {
     const existing = byPosId.get(update.posCastId);
     const changed = !existing
@@ -477,16 +500,41 @@ function resetStaffForm() {
 }
 
 function renderCastMasterList() {
-  const root = document.getElementById("castMasterList");
+  document.getElementById("activeCastCount").textContent = `${castMembers.filter((cast) => cast.status === "active").length}名`;
+  document.getElementById("departedCastCount").textContent = `${castMembers.filter((cast) => cast.status === "departed").length}名`;
+  document.getElementById("trialCastCount").textContent = `${castMembers.filter((cast) => cast.status === "trial").length}名`;
+  if (document.getElementById("castDetailModal").open) renderCastDetailList();
+}
+
+function openCastDetail(type) {
+  currentCastDetailType = type;
+  document.getElementById("castSearchInput").value = "";
+  document.getElementById("castDetailTitle").textContent = {
+    active: "在籍キャスト詳細",
+    departed: "退店キャスト詳細",
+    trial: "体入キャスト詳細"
+  }[type] || "キャスト詳細";
+  renderCastDetailList();
+  document.getElementById("castDetailModal").showModal();
+}
+
+function renderCastDetailList() {
+  const root = document.getElementById("castDetailList");
+  const queryText = document.getElementById("castSearchInput").value.trim().toLocaleLowerCase("ja");
+  const members = castMembers.filter((cast) =>
+    cast.status === currentCastDetailType
+    && (!queryText || String(cast.name || "").toLocaleLowerCase("ja").includes(queryText))
+  );
+  document.getElementById("castDetailCount").textContent = `${members.length}名を表示`;
   root.replaceChildren();
-  if (!castMembers.length) {
-    const empty = document.createElement("p");
-    empty.className = "text-sm text-slate-500";
-    empty.textContent = "キャストはまだ登録されていません。";
+  if (!members.length) {
+    const empty = document.createElement("div");
+    empty.className = "notice";
+    empty.textContent = queryText ? "検索条件に一致するキャストはいません。" : "対象のキャストはいません。";
     root.appendChild(empty);
     return;
   }
-  castMembers.forEach((member) => {
+  members.forEach((member) => {
     const row = document.createElement("article");
     row.className = `cast-master-item ${member.status === "departed" ? "cast-departed" : ""}`;
     const identity = document.createElement("div");
@@ -497,8 +545,8 @@ function renderCastMasterList() {
     const name = document.createElement("strong");
     name.textContent = member.name;
     const status = document.createElement("span");
-    status.className = `staff-status ${member.status === "departed" ? "staff-status-departed" : "staff-status-active"}`;
-    status.textContent = member.status === "departed" ? "退店済み" : "在籍中";
+    status.className = `staff-status ${member.status === "departed" ? "staff-status-departed" : member.status === "trial" ? "staff-status-trial" : "staff-status-active"}`;
+    status.textContent = member.status === "departed" ? "退店済み" : member.status === "trial" ? "体入" : "在籍中";
     identity.append(number, name, status);
 
     const detail = document.createElement("div");
@@ -519,14 +567,38 @@ function renderCastMasterList() {
     note.textContent = `備考：${member.note || "なし"}`;
     detail.append(profileStatus, reward, dates, guarantee, note);
 
+    const actions = document.createElement("div");
+    actions.className = "cast-master-actions";
     const edit = document.createElement("button");
     edit.type = "button";
     edit.className = "secondary-button";
     edit.textContent = "報酬・情報を編集";
     edit.addEventListener("click", () => openCastEdit(member));
-    row.append(identity, detail, edit);
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "danger-button";
+    remove.textContent = "削除";
+    remove.addEventListener("click", () => deleteCastData(member));
+    actions.append(edit, remove);
+    row.append(identity, detail, actions);
     root.appendChild(row);
   });
+}
+
+async function deleteCastData(member) {
+  if (!confirm(`${member.name}のGMSキャストデータを削除しますか？\n削除後はPOS再同期でも自動復元されません。`)) return;
+  try {
+    await setDoc(doc(db, castCollectionName, member.id), {
+      deleted: true,
+      deletedAt: serverTimestamp(),
+      deletedBy: currentUser.uid,
+      updatedAt: serverTimestamp()
+    }, { merge: true });
+    await loadCastMembers();
+    showMessage("successMessage", `${member.name}のキャストデータを削除しました。`, false);
+  } catch (error) {
+    showMessage("errorMessage", `キャストデータの削除に失敗しました。${error.message}`);
+  }
 }
 
 function isCastProfileComplete(member) {
@@ -588,6 +660,7 @@ async function saveCastProfile() {
     }, { merge: true });
     document.getElementById("castEditModal").close();
     await loadCastMembers();
+    renderCastDetailList();
     hideMessage("errorMessage");
     showMessage("successMessage", `${member.name}の報酬・キャスト情報を保存しました。`, false);
   } catch (error) {
@@ -646,7 +719,7 @@ function fillCastMemberSelect(select, selectedId = "", savedName = "") {
     select.appendChild(makeOption(member.id, member.name));
   });
   if (selectedId && !castMembers.some((member) => member.id === selectedId && member.status !== "departed") && savedName) {
-    select.appendChild(makeOption(selectedId, `${savedName}（現在は退店済み）`));
+    select.appendChild(makeOption(selectedId, `${savedName}（現在は利用不可）`));
   }
   select.dataset.savedName = savedName;
   select.value = selectedId;
