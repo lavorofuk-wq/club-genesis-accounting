@@ -243,8 +243,13 @@ body {
 }
 
 @media (min-width: 768px) {
-  .dynamic-row.work-row {
+  .dynamic-row.cast-work-row {
     grid-template-columns: minmax(200px, 1fr) 150px auto;
+  }
+
+  .dynamic-row.staff-work-row {
+    grid-template-columns: minmax(160px, 1.2fr) 130px 130px 120px auto;
+    align-items: end;
   }
 
   .dynamic-row.expense-row {
@@ -285,6 +290,112 @@ body {
   margin-left: 8px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.staff-registration-grid {
+  display: grid;
+  gap: 12px;
+}
+
+@media (min-width: 768px) {
+  .staff-registration-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.staff-master-info {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.staff-master-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+}
+
+.staff-master-meta {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.staff-status {
+  display: inline-flex;
+  width: fit-content;
+  border-radius: 4px;
+  padding: 2px 7px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.staff-status-active {
+  background: #ecfdf5;
+  color: var(--success);
+}
+
+.staff-status-departed {
+  background: #f1f5f9;
+  color: var(--muted);
+}
+
+.attendance-picker {
+  display: grid;
+  gap: 8px;
+}
+
+@media (min-width: 640px) {
+  .attendance-picker {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1024px) {
+  .attendance-picker {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.attendance-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-muted);
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.attendance-option:has(input:checked) {
+  border-color: var(--primary);
+  background: #eff6ff;
+}
+
+.attendance-option input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--primary);
+}
+
+.work-field-label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.staff-work-name {
+  align-self: center;
+  min-width: 0;
+}
+
+.staff-work-hours {
+  background: #eef4ff;
+  color: var(--primary-dark);
+  font-weight: 800;
 }
 
 .pending-list {

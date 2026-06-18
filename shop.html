@@ -39,33 +39,63 @@
 
       <section class="section-shell">
         <div class="section-title">
-          <h2>スタッフ・キャスト登録</h2>
+          <div>
+            <h2>スタッフ管理</h2>
+            <p class="mt-1 text-sm text-slate-500">スタッフの入店情報を登録し、退店時は在籍状態を変更します。</p>
+          </div>
         </div>
-        <div class="grid gap-6 lg:grid-cols-2">
-          <div class="master-panel">
-            <h3 class="text-sm font-bold text-slate-800">スタッフ登録</h3>
-            <div class="mt-3 grid gap-3 sm:grid-cols-[1fr_160px_auto]">
-              <input id="newStaffName" type="text" maxlength="40" class="form-input" placeholder="スタッフ名">
-              <select id="newStaffRole" class="form-select">
-                <option value="manager">店長/マネージャー</option>
-                <option value="bartender">バーテンダー</option>
-                <option value="kitchen">厨房</option>
-                <option value="cleaning">清掃</option>
-                <option value="other">その他</option>
-              </select>
-              <button id="registerStaffButton" type="button" class="primary-button">登録</button>
-            </div>
-            <div id="staffMasterList" class="master-list mt-4"></div>
+        <div class="staff-registration-grid">
+          <label>
+            <span class="form-label">名前</span>
+            <input id="newStaffName" type="text" maxlength="40" class="form-input" placeholder="スタッフ名">
+          </label>
+          <label>
+            <span class="form-label">雇用形態</span>
+            <select id="newStaffEmploymentType" class="form-select">
+              <option value="employee">社員</option>
+              <option value="partTime">アルバイト</option>
+            </select>
+          </label>
+          <label>
+            <span class="form-label">業務区分</span>
+            <select id="newStaffJobType" class="form-select">
+              <option value="kitchen">キッチンスタッフ</option>
+              <option value="hall">ホールスタッフ</option>
+              <option value="driver">ドライバースタッフ</option>
+            </select>
+          </label>
+          <label>
+            <span class="form-label">給与形態</span>
+            <select id="newStaffPayType" class="form-select">
+              <option value="daily">日給</option>
+              <option value="hourly">時給</option>
+            </select>
+          </label>
+          <label>
+            <span class="form-label">給与金額（円）</span>
+            <input id="newStaffPayAmount" type="number" min="1" step="1" class="form-input" placeholder="例：1200">
+          </label>
+          <div class="flex items-end gap-2">
+            <button id="registerStaffButton" type="button" class="primary-button flex-1">入店登録</button>
+            <button id="cancelStaffEditButton" type="button" class="secondary-button hidden">取消</button>
           </div>
+        </div>
+        <div id="staffMasterList" class="master-list mt-5"></div>
+      </section>
 
-          <div class="master-panel">
-            <h3 class="text-sm font-bold text-slate-800">キャスト登録</h3>
-            <div class="mt-3 grid gap-3 sm:grid-cols-[1fr_auto]">
-              <input id="newCastName" type="text" maxlength="40" class="form-input" placeholder="キャスト名">
-              <button id="registerCastButton" type="button" class="primary-button">登録</button>
-            </div>
-            <div id="castMasterList" class="master-list mt-4"></div>
+      <section class="section-shell">
+        <div class="section-title">
+          <div>
+            <h2>キャスト管理</h2>
+            <p class="mt-1 text-sm text-slate-500">キャスト登録は次の仕様確定後に拡張します。</p>
           </div>
+        </div>
+        <div class="master-panel">
+          <div class="grid gap-3 sm:grid-cols-[1fr_auto]">
+            <input id="newCastName" type="text" maxlength="40" class="form-input" placeholder="キャスト名">
+            <button id="registerCastButton" type="button" class="primary-button">登録</button>
+          </div>
+          <div id="castMasterList" class="master-list mt-4"></div>
         </div>
       </section>
 
@@ -90,11 +120,10 @@
       <section class="section-shell">
         <div class="section-title"><h2>勤務時間</h2></div>
         <div>
-          <div class="flex items-center justify-between gap-3">
-            <h3 class="text-sm font-bold text-slate-800">スタッフ勤務時間</h3>
-            <button id="addStaffWorkButton" type="button" class="secondary-button">スタッフ追加</button>
-          </div>
-          <div id="staffWorkRows" class="mt-3 space-y-3"></div>
+          <h3 class="text-sm font-bold text-slate-800">スタッフ勤務時間</h3>
+          <p class="mt-1 text-sm text-slate-500">当日の出勤者を選択し、開始・終了時刻を15分単位で入力してください。日付をまたぐ勤務にも対応します。</p>
+          <div id="staffAttendancePicker" class="attendance-picker mt-4"></div>
+          <div id="staffWorkRows" class="mt-4 space-y-3"></div>
         </div>
         <div class="mt-6">
           <div class="flex items-center justify-between gap-3">

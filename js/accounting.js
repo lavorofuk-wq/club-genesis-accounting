@@ -328,20 +328,22 @@ function openClosingDetail(closingId) {
     yenCell(row.drinkSales),
     yenCell(row.totalAttributedSales)
   ]));
-  body.appendChild(createTableBlock("スタッフ勤務", ["スタッフ", "役職", "開始", "終了", "休憩", "時間"], normalizeWorkRows(closing.staffWork, true), (row) => [
+  body.appendChild(createTableBlock("スタッフ勤務", ["スタッフ", "雇用形態", "業務区分", "給与形態", "給与金額", "開始", "終了", "時間"], normalizeWorkRows(closing.staffWork, true), (row) => [
     row.name,
-    row.role,
+    row.employmentType,
+    row.jobType,
+    row.payType,
+    row.payAmount,
     row.startTime || "",
     row.endTime || "",
-    `${Number(row.breakMinutes || 0)}分`,
-    `${Number(row.hours || 0).toFixed(1)}時間`
+    formatWorkHours(row.hours)
   ]));
   body.appendChild(createTableBlock("キャスト勤務", ["キャスト", "開始", "終了", "休憩", "時間"], normalizeWorkRows(closing.castWork, false), (row) => [
     row.name,
     row.startTime || "",
     row.endTime || "",
     `${Number(row.breakMinutes || 0)}分`,
-    `${Number(row.hours || 0).toFixed(1)}時間`
+    formatWorkHours(row.hours)
   ]));
   body.appendChild(createTableBlock("経費", ["カテゴリ", "金額", "メモ"], closing.expenses, (row) => [
     row.category || "",
@@ -450,6 +452,10 @@ function normalizeWorkRows(work, staff) {
     return work.map((row) => ({
       name: staff ? row.staffName || row.name || "" : row.castName || row.name || "",
       role: staff ? roleLabel(row.role) : "",
+      employmentType: staff ? employmentTypeLabel(row.employmentType) : "",
+      jobType: staff ? jobTypeLabel(row.jobType, row.role) : "",
+      payType: staff ? payTypeLabel(row.payType) : "",
+      payAmount: staff && row.payAmount ? yenCell(row.payAmount) : "",
       startTime: row.startTime || "",
       endTime: row.endTime || "",
       breakMinutes: row.breakMinutes || 0,
@@ -467,6 +473,33 @@ function normalizeWorkRows(work, staff) {
   return Object.entries(labels)
     .map(([role, label]) => ({ name: label, role: label, hours: Number(work[role] || 0) }))
     .filter((row) => row.hours > 0);
+}
+
+function employmentTypeLabel(type) {
+  return {
+    employee: "社員",
+    partTime: "アルバイト"
+  }[type] || "";
+}
+
+function jobTypeLabel(type, legacyRole) {
+  return {
+    kitchen: "キッチンスタッフ",
+    hall: "ホールスタッフ",
+    driver: "ドライバースタッフ"
+  }[type] || roleLabel(legacyRole);
+}
+
+function payTypeLabel(type) {
+  return {
+    daily: "日給",
+    hourly: "時給"
+  }[type] || "";
+}
+
+function formatWorkHours(value) {
+  const hours = Number(value || 0);
+  return `${hours.toFixed(2).replace(/\.00$/, "").replace(/0$/, "")}時間`;
 }
 
 function roleLabel(role) {

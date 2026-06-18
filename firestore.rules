@@ -21,6 +21,31 @@ service cloud.firestore {
       return value is number && value >= 0;
     }
 
+    function isStaffMember() {
+      return request.resource.data.keys().hasAll([
+        'name',
+        'employmentType',
+        'jobType',
+        'payType',
+        'payAmount',
+        'status'
+      ])
+      && request.resource.data.name is string
+      && request.resource.data.name.size() > 0
+      && request.resource.data.name.size() <= 40
+      && (request.resource.data.employmentType == 'employee'
+        || request.resource.data.employmentType == 'partTime')
+      && (request.resource.data.jobType == 'kitchen'
+        || request.resource.data.jobType == 'hall'
+        || request.resource.data.jobType == 'driver')
+      && (request.resource.data.payType == 'daily'
+        || request.resource.data.payType == 'hourly')
+      && request.resource.data.payAmount is int
+      && request.resource.data.payAmount > 0
+      && (request.resource.data.status == 'active'
+        || request.resource.data.status == 'departed');
+    }
+
     function isClosingPayload(document) {
       return request.resource.data.keys().hasAll([
         'businessDate',
@@ -94,12 +119,14 @@ service cloud.firestore {
 
     match /staffMembers/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update, delete: if signedIn() && userRole() == 'shop';
+      allow create, update: if signedIn() && userRole() == 'shop' && isStaffMember();
+      allow delete: if false;
     }
 
     match /staffMembers-dev/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update, delete: if signedIn() && userRole() == 'shop';
+      allow create, update: if signedIn() && userRole() == 'shop' && isStaffMember();
+      allow delete: if false;
     }
 
     match /castMembers/{document} {

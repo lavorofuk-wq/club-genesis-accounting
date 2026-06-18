@@ -15,12 +15,18 @@ import {
 import { requireRole, logout, showMessage, hideMessage } from "./auth.js";
 
 const yen = new Intl.NumberFormat("ja-JP");
-const staffRoleLabels = {
-  manager: "店長/マネージャー",
-  bartender: "バーテンダー",
-  kitchen: "厨房",
-  cleaning: "清掃",
-  other: "その他"
+const employmentTypeLabels = {
+  employee: "社員",
+  partTime: "アルバイト"
+};
+const jobTypeLabels = {
+  kitchen: "キッチンスタッフ",
+  hall: "ホールスタッフ",
+  driver: "ドライバースタッフ"
+};
+const payTypeLabels = {
+  daily: "日給",
+  hourly: "時給"
 };
 
 let currentUser = null;
@@ -30,12 +36,13 @@ let staffMembers = [];
 let castMembers = [];
 let pendingClosings = [];
 let selectedPending = null;
+let editingStaffId = null;
 
 document.getElementById("logoutButton").addEventListener("click", logout);
 document.getElementById("reloadPendingButton").addEventListener("click", loadPendingClosings);
 document.getElementById("registerStaffButton").addEventListener("click", registerStaff);
+document.getElementById("cancelStaffEditButton").addEventListener("click", resetStaffForm);
 document.getElementById("registerCastButton").addEventListener("click", registerCast);
-document.getElementById("addStaffWorkButton").addEventListener("click", () => addStaffWorkRow());
 document.getElementById("addCastWorkButton").addEventListener("click", () => addCastWorkRow());
 document.getElementById("addExpenseButton").addEventListener("click", () => addExpenseRow());
 document.getElementById("addAllowanceButton").addEventListener("click", () => addAllowanceRow());
@@ -75,6 +82,10 @@ function textValue(id) {
 
 function isHalfHour(value) {
   return Number.isFinite(value) && value >= 0 && value <= 24 && Math.round(value * 2) === value * 2;
+}
+
+function isQuarterHour(value) {
+  return Number.isFinite(value) && value > 0 && value <= 24 && Math.round(value * 4) === value * 4;
 }
 
 function isNonNegativeInteger(value) {
@@ -169,24 +180,56 @@ function renderPendingClosings() {
 async function registerStaff() {
   const nameInput = document.getElementById("newStaffName");
   const name = nameInput.value.trim();
-  const role = document.getElementById("newStaffRole").value;
+  const employmentType = document.getElementById("newStaffEmploymentType").value;
+  const jobType = document.getElementById("newStaffJobType").value;
+  const payType = document.getElementById("newStaffPayType").value;
+  const payAmountInput = document.getElementById("newStaffPayAmount");
+  const payAmount = Number(payAmountInput.value);
   if (!name) {
     showMessage("errorMessage", "スタッフ名を入力してください。");
     return;
   }
-  if (staffMembers.some((member) => member.name === name)) {
-    showMessage("errorMessage", "同じ名前のスタッフがすでに登録されています。");
+  if (staffMembers.some((member) => member.name === name && member.id !== editingStaffId)) {
+    showMessage("errorMessage", "同じ名前のスタッフが登録済みです。退店済みの場合は一覧の「再入店」を使用してください。");
+    return;
+  }
+  if (!employmentTypeLabels[employmentType] || !jobTypeLabels[jobType] || !payTypeLabels[payType]) {
+    showMessage("errorMessage", "雇用形態、業務区分、給与形態を確認してください。");
+    return;
+  }
+  if (!Number.isInteger(payAmount) || payAmount <= 0) {
+    markInvalid(payAmountInput, true);
+    showMessage("errorMessage", "給与金額は1円以上の整数で入力してください。");
     return;
   }
   try {
-    const memberRef = doc(collection(db, staffCollectionName));
-    await setDoc(memberRef, { name, role, createdAt: serverTimestamp(), createdBy: currentUser.uid });
-    nameInput.value = "";
+    const memberRef = editingStaffId
+      ? doc(db, staffCollectionName, editingStaffId)
+      : doc(collection(db, staffCollectionName));
+    const staffData = {
+      name,
+      employmentType,
+      jobType,
+      payType,
+      payAmount,
+      updatedAt: serverTimestamp(),
+      updatedBy: currentUser.uid
+    };
+    if (!editingStaffId) {
+      Object.assign(staffData, {
+        status: "active",
+        joinedAt: serverTimestamp(),
+        createdAt: serverTimestamp(),
+        createdBy: currentUser.uid
+      });
+    }
+    await setDoc(memberRef, staffData, { merge: Boolean(editingStaffId) });
     hideMessage("errorMessage");
-    showMessage("successMessage", `${name}をスタッフ登録しました。`, false);
+    showMessage("successMessage", `${name}のスタッフ情報を${editingStaffId ? "更新" : "入店登録"}しました。`, false);
+    resetStaffForm();
     await loadMasters();
   } catch (error) {
-    showMessage("errorMessage", `スタッフ登録に失敗しました。${error.message}`);
+    showMessage("errorMessage", `スタッフの入店登録に失敗しました。${error.message}`);
   }
 }
 
@@ -214,48 +257,150 @@ async function registerCast() {
 }
 
 function renderMasterLists() {
-  renderMasterList("staffMasterList", staffMembers, staffCollectionName, true);
-  renderMasterList("castMasterList", castMembers, castCollectionName, false);
+  renderStaffMasterList();
+  renderCastMasterList();
+  renderStaffAttendancePicker();
 }
 
-function renderMasterList(elementId, members, collectionName, showRole) {
-  const root = document.getElementById(elementId);
+function renderStaffMasterList() {
+  const root = document.getElementById("staffMasterList");
   root.replaceChildren();
-  if (!members.length) {
+  if (!staffMembers.length) {
     const empty = document.createElement("p");
     empty.className = "text-sm text-slate-500";
-    empty.textContent = "まだ登録されていません。";
+    empty.textContent = "スタッフはまだ登録されていません。";
     root.appendChild(empty);
     return;
   }
-  members.forEach((member) => {
+  staffMembers.forEach((member) => {
     const row = document.createElement("div");
     row.className = "master-item";
-    const label = document.createElement("div");
+    const info = document.createElement("div");
+    info.className = "staff-master-info";
     const name = document.createElement("span");
     name.className = "master-item-name";
     name.textContent = member.name;
-    label.appendChild(name);
-    if (showRole) {
-      const role = document.createElement("span");
-      role.className = "master-item-role";
-      role.textContent = staffRoleLabels[member.role] || "その他";
-      label.appendChild(role);
-    }
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "danger-button";
-    remove.textContent = "削除";
-    remove.addEventListener("click", () => deleteMember(collectionName, member));
-    row.append(label, remove);
+    const status = document.createElement("span");
+    const isActive = member.status !== "departed";
+    status.className = `staff-status ${isActive ? "staff-status-active" : "staff-status-departed"}`;
+    status.textContent = isActive ? "在籍中" : "退店済み";
+    const meta = document.createElement("span");
+    meta.className = "staff-master-meta";
+    meta.textContent = [
+      employmentTypeLabels[member.employmentType] || "雇用形態未設定",
+      jobTypeLabels[member.jobType] || legacyJobTypeLabel(member.role),
+      `${payTypeLabels[member.payType] || "給与形態未設定"} ${member.payAmount ? `${yen.format(member.payAmount)}円` : "金額未設定"}`
+    ].join(" / ");
+    info.append(name, status, meta);
+    const actions = document.createElement("div");
+    actions.className = "staff-master-actions";
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "secondary-button";
+    edit.textContent = "編集";
+    edit.addEventListener("click", () => startStaffEdit(member));
+    const statusAction = document.createElement("button");
+    statusAction.type = "button";
+    statusAction.className = isActive ? "danger-button" : "secondary-button";
+    statusAction.textContent = isActive ? "退店" : "再入店";
+    statusAction.addEventListener("click", () => updateStaffStatus(member, isActive ? "departed" : "active"));
+    actions.append(edit, statusAction);
+    row.append(info, actions);
     root.appendChild(row);
   });
 }
 
-async function deleteMember(collectionName, member) {
+function startStaffEdit(member) {
+  editingStaffId = member.id;
+  document.getElementById("newStaffName").value = member.name || "";
+  document.getElementById("newStaffEmploymentType").value = member.employmentType || "employee";
+  document.getElementById("newStaffJobType").value = member.jobType || legacyJobTypeValue(member.role);
+  document.getElementById("newStaffPayType").value = member.payType || "daily";
+  document.getElementById("newStaffPayAmount").value = member.payAmount || "";
+  document.getElementById("registerStaffButton").textContent = "情報を更新";
+  document.getElementById("cancelStaffEditButton").classList.remove("hidden");
+  document.getElementById("newStaffName").focus();
+}
+
+function resetStaffForm() {
+  editingStaffId = null;
+  document.getElementById("newStaffName").value = "";
+  document.getElementById("newStaffEmploymentType").value = "employee";
+  document.getElementById("newStaffJobType").value = "kitchen";
+  document.getElementById("newStaffPayType").value = "daily";
+  document.getElementById("newStaffPayAmount").value = "";
+  document.getElementById("registerStaffButton").textContent = "入店登録";
+  document.getElementById("cancelStaffEditButton").classList.add("hidden");
+  markInvalid(document.getElementById("newStaffPayAmount"), false);
+}
+
+function renderCastMasterList() {
+  const root = document.getElementById("castMasterList");
+  root.replaceChildren();
+  if (!castMembers.length) {
+    const empty = document.createElement("p");
+    empty.className = "text-sm text-slate-500";
+    empty.textContent = "キャストはまだ登録されていません。";
+    root.appendChild(empty);
+    return;
+  }
+  castMembers.forEach((member) => {
+    const row = document.createElement("div");
+    row.className = "master-item";
+    const name = document.createElement("span");
+    name.className = "master-item-name";
+    name.textContent = member.name;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "danger-button";
+    remove.textContent = "削除";
+    remove.addEventListener("click", () => deleteCast(member));
+    row.append(name, remove);
+    root.appendChild(row);
+  });
+}
+
+function legacyJobTypeLabel(role) {
+  return {
+    manager: "ホールスタッフ",
+    bartender: "ホールスタッフ",
+    kitchen: "キッチンスタッフ",
+    cleaning: "業務区分未設定",
+    other: "業務区分未設定"
+  }[role] || "業務区分未設定";
+}
+
+function legacyJobTypeValue(role) {
+  if (role === "kitchen") return "kitchen";
+  return "hall";
+}
+
+async function updateStaffStatus(member, status) {
+  const actionLabel = status === "departed" ? "退店" : "再入店";
+  if (!confirm(`${member.name}を${actionLabel}として登録しますか？`)) return;
+  try {
+    await setDoc(doc(db, staffCollectionName, member.id), {
+      status,
+      updatedAt: serverTimestamp(),
+      updatedBy: currentUser.uid,
+      ...(status === "departed"
+        ? { departedAt: serverTimestamp() }
+        : { joinedAt: serverTimestamp(), departedAt: null })
+    }, { merge: true });
+    if (status === "departed") {
+      document.querySelector(`.staff-work-row[data-staff-id="${CSS.escape(member.id)}"]`)?.remove();
+    }
+    showMessage("successMessage", `${member.name}を${actionLabel}登録しました。`, false);
+    await loadMasters();
+  } catch (error) {
+    showMessage("errorMessage", `${actionLabel}登録に失敗しました。${error.message}`);
+  }
+}
+
+async function deleteCast(member) {
   if (!confirm(`${member.name}を登録一覧から削除しますか？`)) return;
   try {
-    await deleteDoc(doc(db, collectionName, member.id));
+    await deleteDoc(doc(db, castCollectionName, member.id));
     showMessage("successMessage", `${member.name}を削除しました。`, false);
     await loadMasters();
   } catch (error) {
@@ -264,54 +409,181 @@ async function deleteMember(collectionName, member) {
 }
 
 function refreshWorkSelects() {
-  document.querySelectorAll(".staff-member-select").forEach((select) => {
-    fillMemberSelect(select, staffMembers, true, select.value, select.dataset.savedName || "", select.dataset.savedRole || "other");
-  });
   document.querySelectorAll(".cast-member-select").forEach((select) => {
-    fillMemberSelect(select, castMembers, false, select.value, select.dataset.savedName || "");
+    fillCastMemberSelect(select, select.value, select.dataset.savedName || "");
   });
 }
 
-function fillMemberSelect(select, members, showRole, selectedId = "", savedName = "", savedRole = "other") {
+function fillCastMemberSelect(select, selectedId = "", savedName = "") {
   select.replaceChildren(makeOption("", "選択してください"));
-  members.forEach((member) => {
-    const label = showRole ? `${member.name}（${staffRoleLabels[member.role] || "その他"}）` : member.name;
-    select.appendChild(makeOption(member.id, label));
+  castMembers.forEach((member) => {
+    select.appendChild(makeOption(member.id, member.name));
   });
-  if (selectedId && !members.some((member) => member.id === selectedId) && savedName) {
+  if (selectedId && !castMembers.some((member) => member.id === selectedId) && savedName) {
     select.appendChild(makeOption(selectedId, `${savedName}（登録削除済み）`));
   }
   select.dataset.savedName = savedName;
-  select.dataset.savedRole = savedRole;
   select.value = selectedId;
   select.onchange = () => {
-    const selected = members.find((member) => member.id === select.value);
+    const selected = castMembers.find((member) => member.id === select.value);
     select.dataset.savedName = selected?.name || "";
-    select.dataset.savedRole = selected?.role || "other";
   };
 }
 
+function renderStaffAttendancePicker() {
+  const root = document.getElementById("staffAttendancePicker");
+  const selectedIds = new Set([...document.querySelectorAll(".staff-work-row")].map((row) => row.dataset.staffId));
+  root.replaceChildren();
+  const activeStaff = staffMembers.filter((member) => member.status !== "departed");
+  if (!activeStaff.length) {
+    const empty = document.createElement("div");
+    empty.className = "notice";
+    empty.textContent = "在籍中のスタッフがいません。先にスタッフ管理から入店登録してください。";
+    root.appendChild(empty);
+    return;
+  }
+  activeStaff.forEach((member) => {
+    const label = document.createElement("label");
+    label.className = "attendance-option";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = member.id;
+    checkbox.disabled = !isStaffProfileComplete(member);
+    checkbox.checked = selectedIds.has(member.id);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) {
+        addStaffWorkRow({ staffId: member.id });
+        document.querySelector(`.staff-work-unavailable[data-staff-name="${CSS.escape(member.name)}"]`)?.remove();
+      } else {
+        document.querySelector(`.staff-work-row[data-staff-id="${CSS.escape(member.id)}"]`)?.remove();
+      }
+    });
+    const text = document.createElement("span");
+    const detail = isStaffProfileComplete(member)
+      ? jobTypeLabels[member.jobType]
+      : "スタッフ情報を編集してから選択してください";
+    text.innerHTML = `<strong>${escapeHtml(member.name)}</strong><span class="block text-xs text-slate-500">${escapeHtml(detail)}</span>`;
+    label.append(checkbox, text);
+    root.appendChild(label);
+  });
+}
+
+function isStaffProfileComplete(member) {
+  return Boolean(
+    employmentTypeLabels[member.employmentType]
+    && jobTypeLabels[member.jobType]
+    && payTypeLabels[member.payType]
+    && Number.isInteger(Number(member.payAmount))
+    && Number(member.payAmount) > 0
+  );
+}
+
+function escapeHtml(value) {
+  const span = document.createElement("span");
+  span.textContent = String(value ?? "");
+  return span.innerHTML;
+}
+
 function addStaffWorkRow(data = {}) {
+  const savedName = data.staffName || data.name || "";
+  const staffId = data.staffId || matchStaffIdByName(savedName);
+  const member = staffMembers.find((item) => item.id === staffId);
+  if (!member || !isStaffProfileComplete(member)) {
+    addUnavailableStaffNotice(savedName || member?.name || "未登録スタッフ");
+    return;
+  }
+  if (document.querySelector(`.staff-work-row[data-staff-id="${CSS.escape(staffId)}"]`)) return;
   const row = document.createElement("div");
   row.className = "dynamic-row work-row staff-work-row";
-  const member = document.createElement("select");
-  member.className = "form-select staff-member-select";
-  fillMemberSelect(member, staffMembers, true, data.staffId || "", data.staffName || data.name || "", data.role || "other");
+  row.dataset.staffId = member.id;
+  const name = document.createElement("div");
+  name.className = "staff-work-name";
+  name.innerHTML = `<strong>${escapeHtml(member.name)}</strong><span class="block text-xs text-slate-500">${escapeHtml(payTypeLabels[member.payType] || "給与形態未設定")}</span>`;
+  const isHourly = member.payType === "hourly";
+  const startLabel = createTimeField("開始時刻", "staff-work-start", data.startTime || "", !isHourly);
+  const endLabel = createTimeField("終了時刻", "staff-work-end", data.endTime || "", !isHourly);
   const hours = document.createElement("input");
-  hours.type = "number";
-  hours.min = "0";
-  hours.max = "24";
-  hours.step = "0.5";
-  hours.placeholder = "時間";
+  hours.type = "text";
+  hours.readOnly = true;
   hours.className = "form-input staff-work-hours";
-  hours.value = data.hours ?? 0;
+  hours.value = isHourly && data.startTime && data.endTime ? formatHours(calculateWorkHours(data.startTime, data.endTime)) : "";
+  hours.placeholder = isHourly ? "自動計算" : "日給";
+  const hoursLabel = document.createElement("label");
+  hoursLabel.className = "work-field-label";
+  hoursLabel.append("稼働時間", hours);
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "danger-button";
-  remove.textContent = "削除";
-  remove.addEventListener("click", () => row.remove());
-  row.append(member, hours, remove);
+  remove.textContent = "選択解除";
+  remove.addEventListener("click", () => {
+    row.remove();
+    const checkbox = document.querySelector(`#staffAttendancePicker input[value="${CSS.escape(member.id)}"]`);
+    if (checkbox) checkbox.checked = false;
+  });
+  [startLabel.querySelector("input"), endLabel.querySelector("input")].forEach((input) => {
+    input.addEventListener("input", () => updateStaffWorkHours(row));
+  });
+  row.append(name, startLabel, endLabel, hoursLabel, remove);
   document.getElementById("staffWorkRows").appendChild(row);
+  const checkbox = document.querySelector(`#staffAttendancePicker input[value="${CSS.escape(member.id)}"]`);
+  if (checkbox) checkbox.checked = true;
+}
+
+function addUnavailableStaffNotice(name) {
+  if (document.querySelector(`.staff-work-unavailable[data-staff-name="${CSS.escape(name)}"]`)) return;
+  const notice = document.createElement("div");
+  notice.className = "notice staff-work-unavailable";
+  notice.dataset.staffName = name;
+  notice.textContent = `${name}のスタッフ情報が不足しています。スタッフ管理で情報を編集してから、出勤者として選択してください。`;
+  document.getElementById("staffWorkRows").appendChild(notice);
+}
+
+function createTimeField(labelText, className, value, disabled = false) {
+  const label = document.createElement("label");
+  label.className = "work-field-label";
+  const input = document.createElement("input");
+  input.type = "time";
+  input.step = "900";
+  input.className = `form-input ${className}`;
+  input.value = value;
+  input.disabled = disabled;
+  if (disabled) input.placeholder = "日給は入力不要";
+  label.append(labelText, input);
+  return label;
+}
+
+function matchStaffIdByName(name) {
+  return staffMembers.find((member) => member.name === name)?.id || "";
+}
+
+function calculateWorkHours(startTime, endTime) {
+  if (!startTime || !endTime) return Number.NaN;
+  const [startHour, startMinute] = startTime.split(":").map(Number);
+  const [endHour, endMinute] = endTime.split(":").map(Number);
+  let minutes = endHour * 60 + endMinute - (startHour * 60 + startMinute);
+  if (minutes <= 0) minutes += 24 * 60;
+  return minutes / 60;
+}
+
+function isQuarterTime(time) {
+  if (!/^\d{2}:\d{2}$/.test(time)) return false;
+  const [hour, minute] = time.split(":").map(Number);
+  return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59 && minute % 15 === 0;
+}
+
+function formatHours(hours) {
+  return Number.isFinite(hours) ? `${hours.toFixed(2).replace(/\.00$/, "").replace(/0$/, "")}時間` : "";
+}
+
+function updateStaffWorkHours(row) {
+  const start = row.querySelector(".staff-work-start");
+  const end = row.querySelector(".staff-work-end");
+  const hoursInput = row.querySelector(".staff-work-hours");
+  const hours = calculateWorkHours(start.value, end.value);
+  const valid = isQuarterTime(start.value) && isQuarterTime(end.value) && isQuarterHour(hours);
+  markInvalid(start, start.value !== "" && !isQuarterTime(start.value));
+  markInvalid(end, end.value !== "" && !isQuarterTime(end.value));
+  hoursInput.value = valid ? formatHours(hours) : "";
 }
 
 function addCastWorkRow(data = {}) {
@@ -319,7 +591,7 @@ function addCastWorkRow(data = {}) {
   row.className = "dynamic-row work-row cast-work-row";
   const member = document.createElement("select");
   member.className = "form-select cast-member-select";
-  fillMemberSelect(member, castMembers, false, data.castId || "", data.castName || data.name || "");
+  fillCastMemberSelect(member, data.castId || "", data.castName || data.name || "");
   const hours = document.createElement("input");
   hours.type = "number";
   hours.min = "0";
@@ -398,7 +670,7 @@ function resetRows() {
   document.getElementById("castWorkRows").replaceChildren();
   document.getElementById("expenseRows").replaceChildren();
   document.getElementById("allowanceRows").replaceChildren();
-  addStaffWorkRow();
+  renderStaffAttendancePicker();
   addCastWorkRow();
   addExpenseRow();
   addAllowanceRow();
@@ -407,6 +679,9 @@ function resetRows() {
 function wireRealtimeValidation() {
   document.getElementById("reportForm").addEventListener("input", (event) => {
     if (event.target.matches("input[type='number']")) validateNumberInput(event.target);
+    if (event.target.matches(".staff-work-start, .staff-work-end")) {
+      updateStaffWorkHours(event.target.closest(".staff-work-row"));
+    }
     if (["totalSales", "cashSales", "cardSales", "totalCustomers"].includes(event.target.id)) {
       calculateUnitPrice();
       checkSalesWarning();
@@ -420,7 +695,7 @@ function wireRealtimeValidation() {
 
 function validateNumberInput(el) {
   const value = Number(el.value || 0);
-  const isHour = el.matches(".staff-work-hours, .cast-work-hours");
+  const isHour = el.matches(".cast-work-hours");
   const invalid = isHour ? !isHalfHour(value) : value < 0 || !Number.isInteger(value);
   markInvalid(el, invalid);
 }
@@ -447,16 +722,23 @@ function checkSalesWarning() {
 function collectRows() {
   const staffWork = [...document.querySelectorAll(".staff-work-row")]
     .map((row) => {
-      const select = row.querySelector(".staff-member-select");
-      const member = staffMembers.find((item) => item.id === select.value);
+      const member = staffMembers.find((item) => item.id === row.dataset.staffId);
+      const startTime = row.querySelector(".staff-work-start").value;
+      const endTime = row.querySelector(".staff-work-end").value;
+      const isHourly = member?.payType === "hourly";
       return {
-        staffId: select.value,
-        staffName: member?.name || select.dataset.savedName || "",
-        role: member?.role || select.dataset.savedRole || "other",
-        hours: Number(row.querySelector(".staff-work-hours").value || 0)
+        staffId: member?.id || row.dataset.staffId || "",
+        staffName: member?.name || "",
+        employmentType: member?.employmentType || "",
+        jobType: member?.jobType || "",
+        payType: member?.payType || "",
+        payAmount: Number(member?.payAmount || 0),
+        startTime,
+        endTime,
+        hours: isHourly ? calculateWorkHours(startTime, endTime) : 0
       };
     })
-    .filter((row) => row.staffId || row.staffName || row.hours > 0);
+    .filter((row) => row.staffId || row.staffName);
 
   const castWork = [...document.querySelectorAll(".cast-work-row")]
     .map((row) => {
@@ -551,7 +833,12 @@ function validatePayload(payload) {
   if (payload.businessDate > todayString()) errors.push("未来の日付は送信できません。");
   payload.staffWork.forEach((row) => {
     if (!row.staffId && !row.staffName) errors.push("勤務するスタッフを登録一覧から選択してください。");
-    if (!isHalfHour(row.hours)) errors.push("スタッフ勤務時間は0〜24時間、0.5単位で入力してください。");
+    if (row.payType === "hourly" && (!isQuarterTime(row.startTime) || !isQuarterTime(row.endTime))) {
+      errors.push("スタッフの開始・終了時刻は15分単位で入力してください。");
+    }
+    if (row.payType === "hourly" && !isQuarterHour(row.hours)) {
+      errors.push("時給スタッフの稼働時間は0時間超〜24時間以内で入力してください。");
+    }
   });
   payload.castWork.forEach((row) => {
     if (!row.castId && !row.castName) errors.push("勤務するキャストを登録一覧から選択してください。");
@@ -672,7 +959,7 @@ function applyClosingToForm(data) {
   document.getElementById("jonai").value = nominations.jonaiCount ?? nominations.jonai ?? 0;
   document.getElementById("staffWorkRows").replaceChildren();
   normalizeStaffWork(data.staffWork || data.staffHours).forEach(addStaffWorkRow);
-  if (!document.getElementById("staffWorkRows").children.length) addStaffWorkRow();
+  renderStaffAttendancePicker();
   document.getElementById("castWorkRows").replaceChildren();
   normalizeCastWork(data.castWork || data.castHours).forEach(addCastWorkRow);
   if (!document.getElementById("castWorkRows").children.length) addCastWorkRow();
@@ -685,11 +972,15 @@ function applyClosingToForm(data) {
 }
 
 function normalizeStaffWork(work) {
-  if (Array.isArray(work)) return work.map((row) => ({ ...row, hours: Number(row.hours || 0) }));
+  if (Array.isArray(work)) {
+    return work.map((row) => ({
+      ...row,
+      staffId: row.staffId || matchStaffIdByName(row.staffName || row.name || ""),
+      hours: Number(row.hours || 0)
+    }));
+  }
   if (!work || typeof work !== "object") return [];
-  return Object.entries(staffRoleLabels)
-    .map(([role, label]) => ({ staffName: label, role, hours: Number(work[role] || 0) }))
-    .filter((row) => row.hours > 0);
+  return [];
 }
 
 function normalizeCastWork(work) {
