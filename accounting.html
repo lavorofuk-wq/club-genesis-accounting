@@ -24,7 +24,10 @@
   </header>
 
   <main class="mx-auto max-w-7xl px-4 py-6">
-    <div id="authLoading" class="notice">認証情報を確認しています...</div>
+    <div id="authLoading" class="notice">
+      <span id="authLoadingText">認証情報を確認しています...</span>
+      <button id="authRetryButton" type="button" class="secondary-button ml-3 hidden">再読み込み</button>
+    </div>
     <div id="dashboard" class="hidden space-y-6">
       <div id="errorMessage" class="hidden alert alert-error"></div>
       <div id="successMessage" class="hidden alert alert-success"></div>
@@ -185,6 +188,6 @@
     </div>
   </dialog>
 
-  <script type="module" src="js/accounting.js"></script>
+  <script type="module" src="js/accounting.js?v=1.16.1"></script>
 </body>
 </html>

@@ -17,6 +17,7 @@ const ROLE_ROUTES = {
   shop: "shop.html",
   accounting: "accounting.html"
 };
+const AUTH_TIMEOUT_MS = 15000;
 
 cleanupLegacyPwa();
 showEnvironment();
@@ -92,27 +93,67 @@ function loginErrorMessage(error) {
 }
 
 export function requireRole(expectedRole, onReady) {
+  const loadingEl = document.getElementById("authLoading");
+  const loadingTextEl = document.getElementById("authLoadingText");
+  const retryButton = document.getElementById("authRetryButton");
+  let completed = false;
+  const timeoutId = window.setTimeout(() => {
+    if (completed) return;
+    if (loadingTextEl) {
+      loadingTextEl.textContent = "認証確認に時間がかかっています。通信状態を確認して再読み込みしてください。";
+    } else if (loadingEl) {
+      loadingEl.textContent = "認証確認に時間がかかっています。ページを再読み込みしてください。";
+    }
+    retryButton?.classList.remove("hidden");
+  }, AUTH_TIMEOUT_MS);
+
+  retryButton?.addEventListener("click", () => location.reload());
+
   onAuthStateChanged(auth, async (user) => {
     try {
       if (!user) {
+        completed = true;
+        window.clearTimeout(timeoutId);
         location.href = "index.html";
         return;
       }
-      const role = await getUserRole(user.uid);
+      const role = await withTimeout(
+        getUserRole(user.uid),
+        AUTH_TIMEOUT_MS,
+        "Firebaseの認証情報を取得できませんでした。通信状態を確認して再読み込みしてください。"
+      );
       if (role !== expectedRole) {
+        completed = true;
+        window.clearTimeout(timeoutId);
         location.href = ROLE_ROUTES[role] || "index.html";
         return;
       }
+      completed = true;
+      window.clearTimeout(timeoutId);
       const emailEl = document.getElementById("userEmail");
       if (emailEl) emailEl.textContent = user.email || "";
-      const loadingEl = document.getElementById("authLoading");
       if (loadingEl) loadingEl.classList.add("hidden");
       onReady(user);
     } catch (error) {
-      const loadingEl = document.getElementById("authLoading");
-      if (loadingEl) loadingEl.textContent = error.message;
+      completed = true;
+      window.clearTimeout(timeoutId);
+      if (loadingTextEl) {
+        loadingTextEl.textContent = error.message;
+      } else if (loadingEl) {
+        loadingEl.textContent = error.message;
+      }
+      retryButton?.classList.remove("hidden");
     }
   });
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      window.setTimeout(() => reject(new Error(message)), timeoutMs);
+    })
+  ]);
 }
 
 export async function logout() {

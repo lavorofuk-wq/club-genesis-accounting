@@ -4,7 +4,6 @@ import {
   doc,
   getDocs,
   setDoc,
-  deleteDoc,
   serverTimestamp,
   closingsCollectionName,
   castCollectionName,
@@ -12,6 +11,7 @@ import {
   firebaseProjectId
 } from "./firebase-config.js";
 import { requireRole, logout, showMessage, hideMessage } from "./auth.js";
+import { deleteDoc } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore.js";
 
 const yen = new Intl.NumberFormat("ja-JP");
 const expenseCategories = ["家賃", "水光熱", "酒代", "広告", "人件費", "雑費"];
