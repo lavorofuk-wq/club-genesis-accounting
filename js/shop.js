@@ -309,7 +309,7 @@ async function loadClosingLists() {
     const items = [...shopItems, ...closingItems];
     await syncCastLifecycle(items);
     sentClosings = closingItems
-      .filter((item) => item.status === "approved")
+      .filter((item) => ["submitted", "approved", "finalized"].includes(item.status))
       .map((item) => ({ ...item, businessDate: item.businessDate || item.date || item.id }))
       .filter((item) => item.businessDate)
       .sort((a, b) => b.businessDate.localeCompare(a.businessDate));
@@ -317,7 +317,7 @@ async function loadClosingLists() {
     const map = new Map();
     shopItems.forEach((item) => {
       const date = item.businessDate || item.date || item.id;
-      if (!date || item.status === "approved" || sentDates.has(date)) return;
+      if (!date || ["submitted", "approved", "finalized"].includes(item.status) || sentDates.has(date)) return;
       map.set(date, { ...item, businessDate: date });
     });
     pendingClosings = [...map.values()].sort((a, b) => b.businessDate.localeCompare(a.businessDate));
@@ -1166,7 +1166,7 @@ function buildPayload() {
   const payload = {
     businessDate,
     date: businessDate,
-    status: "approved",
+    status: "submitted",
     sales: {
       totalSales,
       cashSales: numberValue("cashSales"),
@@ -1293,7 +1293,7 @@ async function saveReport() {
     if (selectedPending?.sourceCollection === shopClosingsCollectionName) {
       try {
         await setDoc(doc(db, shopClosingsCollectionName, selectedPending.businessDate), {
-          status: "approved",
+          status: "submitted",
           reviewedBy: currentUser.uid,
           reviewedAt: serverTimestamp()
         }, { merge: true });

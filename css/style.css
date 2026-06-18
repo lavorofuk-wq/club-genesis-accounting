@@ -120,6 +120,69 @@ body {
   line-height: 1.6;
 }
 
+.accounting-home-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.payroll-list {
+  display: grid;
+  gap: 12px;
+}
+
+.payroll-item {
+  display: grid;
+  gap: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  padding: 16px;
+}
+
+.payroll-item h3 {
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.payroll-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.payroll-metrics div {
+  display: grid;
+  gap: 4px;
+  border-left: 2px solid var(--line-strong);
+  padding-left: 10px;
+}
+
+.payroll-metrics span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.payroll-metrics strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+@media (min-width: 768px) {
+  .accounting-home-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .payroll-item {
+    grid-template-columns: minmax(180px, 0.7fr) minmax(0, 1.3fr);
+    align-items: center;
+  }
+
+  .payroll-metrics {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
 .form-label {
   display: block;
   margin-bottom: 8px;

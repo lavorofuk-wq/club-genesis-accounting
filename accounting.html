@@ -26,70 +26,136 @@
   <main class="mx-auto max-w-7xl px-4 py-6">
     <div id="authLoading" class="notice">認証情報を確認しています...</div>
     <div id="dashboard" class="hidden space-y-6">
-      <section class="section-shell">
+      <div id="errorMessage" class="hidden alert alert-error"></div>
+      <div id="successMessage" class="hidden alert alert-success"></div>
+
+      <section id="accountingHome" class="section-shell">
+        <p class="brand-kicker">ACCOUNTING WORKSPACE</p>
+        <h2 class="mt-2 text-xl font-bold text-slate-900">経理ホーム</h2>
+        <div class="accounting-home-grid mt-5">
+          <button type="button" class="shop-home-action" data-accounting-view="received">
+            <span class="shop-home-action-title">受信データ</span>
+            <span class="shop-home-action-detail">店舗送信データの確認・編集・確定</span>
+          </button>
+          <button type="button" class="shop-home-action" data-accounting-view="finalized">
+            <span class="shop-home-action-title">確定データ</span>
+            <span class="shop-home-action-detail">収支・キャスト売上・勤務・経費</span>
+          </button>
+          <button type="button" class="shop-home-action" data-accounting-view="castRewards">
+            <span class="shop-home-action-title">キャスト報酬</span>
+            <span class="shop-home-action-detail">売上・会計・勤務時間から報酬明細を作成</span>
+          </button>
+          <button type="button" class="shop-home-action" data-accounting-view="staffPayroll">
+            <span class="shop-home-action-title">従業員給与</span>
+            <span class="shop-home-action-detail">給与形態・勤務・手当から給与明細を作成</span>
+          </button>
+        </div>
+      </section>
+
+      <section class="section-shell hidden" data-accounting-workspace="received">
         <div class="section-title">
-          <h2>期間選択</h2>
-          <button id="exportCsvButton" class="primary-button">期間の一覧をCSV出力</button>
+          <div>
+            <h2>受信データ</h2>
+            <p class="mt-1 text-sm text-slate-500">店舗から送信された未確定データです。</p>
+          </div>
+          <div class="flex gap-2">
+            <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
+            <button id="reloadReceivedButton" type="button" class="secondary-button">再読込</button>
+          </div>
         </div>
-        <div class="grid gap-4 md:grid-cols-3">
-          <label>開始日<input id="startDate" type="date" class="form-input mt-2"></label>
-          <label>終了日<input id="endDate" type="date" class="form-input mt-2"></label>
-          <div class="flex items-end"><button id="loadButton" class="secondary-button w-full">表示更新</button></div>
-        </div>
-        <div id="errorMessage" class="hidden alert alert-error mt-4"></div>
-        <div id="syncInfo" class="notice mt-4"></div>
+        <div id="receivedDataList" class="pending-list"></div>
       </section>
 
-      <section>
+      <div class="hidden space-y-6" data-accounting-workspace="finalized">
+        <section class="section-shell">
+          <div class="section-title">
+            <h2>確定データ</h2>
+            <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
+          </div>
+          <div class="grid gap-4 md:grid-cols-4">
+            <label>開始日<input id="startDate" type="date" class="form-input mt-2"></label>
+            <label>終了日<input id="endDate" type="date" class="form-input mt-2"></label>
+            <div class="flex items-end"><button id="loadButton" class="secondary-button w-full">表示更新</button></div>
+            <div class="flex items-end"><button id="exportCsvButton" class="primary-button w-full">CSV出力</button></div>
+          </div>
+          <div id="syncInfo" class="notice mt-4"></div>
+        </section>
         <div id="summaryCards" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6"></div>
-      </section>
-
-      <section class="section-shell">
-        <div class="section-title"><h2>集計サマリー</h2></div>
-        <div class="grid gap-4 lg:grid-cols-2">
-          <div>
-            <h3 class="mb-3 text-sm font-bold text-slate-700">経費カテゴリ別内訳</h3>
-            <div id="expenseBreakdown" class="breakdown-list"></div>
+        <section class="section-shell">
+          <div class="section-title"><h2>収支・日次確定データ</h2></div>
+          <div class="overflow-x-auto"><table class="data-table"><thead><tr><th>日付</th><th>総売上</th><th>現金</th><th>カード</th><th>経費</th><th>手当</th><th>推定収支</th><th>詳細</th></tr></thead><tbody id="finalizedTableBody"></tbody></table></div>
+        </section>
+        <section class="section-shell">
+          <div class="section-title"><h2>各キャスト売上データ</h2></div>
+          <div class="overflow-x-auto"><table class="data-table"><thead><tr><th>キャスト</th><th>本指名売上</th><th>場内延長売上</th><th>ドリンク売上</th><th>合計</th></tr></thead><tbody id="castSalesTableBody"></tbody></table></div>
+        </section>
+        <section class="section-shell">
+          <div class="section-title"><h2>勤務時間データ</h2></div>
+          <div class="grid gap-6 lg:grid-cols-2">
+            <div><h3 class="mb-3 text-sm font-bold">キャスト</h3><div id="castWorkSummary" class="breakdown-list"></div></div>
+            <div><h3 class="mb-3 text-sm font-bold">スタッフ</h3><div id="staffWorkSummary" class="breakdown-list"></div></div>
           </div>
-          <div>
-            <h3 class="mb-3 text-sm font-bold text-slate-700">手当種類別内訳</h3>
-            <div id="allowanceBreakdown" class="breakdown-list"></div>
-          </div>
+        </section>
+        <section class="section-shell">
+          <div class="section-title"><h2>経費データ</h2></div>
+          <div id="expenseBreakdown" class="breakdown-list"></div>
+        </section>
+      </div>
+
+      <section class="section-shell hidden" data-accounting-workspace="castRewards">
+        <div class="section-title">
+          <div><h2>キャスト報酬</h2><p class="mt-1 text-sm text-slate-500">報酬計算設定は次の工程で追加します。現在は計算根拠を集計します。</p></div>
+          <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
         </div>
+        <div id="castRewardList" class="payroll-list"></div>
       </section>
 
-      <section class="section-shell">
-        <div class="section-title"><h2>経理確定データ一覧</h2></div>
-        <div class="overflow-x-auto">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th>日付</th><th>状態</th><th>総売上</th><th>現金</th><th>カード</th><th>総客数</th><th>組数</th><th>客単価</th><th>本指名</th><th>場内指名</th><th>経費合計</th><th>手当合計</th><th>現金差異</th><th>詳細</th>
-              </tr>
-            </thead>
-            <tbody id="reportTableBody"></tbody>
-          </table>
+      <section class="section-shell hidden" data-accounting-workspace="staffPayroll">
+        <div class="section-title">
+          <div><h2>従業員給与</h2><p class="mt-1 text-sm text-slate-500">確定データの勤務日数・勤務時間・手当から算出します。</p></div>
+          <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
         </div>
-      </section>
-
-      <section class="section-shell">
-        <div class="section-title"><h2>入力状況確認</h2></div>
-        <div id="calendarGrid" class="calendar-grid"></div>
+        <div id="staffPayrollList" class="payroll-list"></div>
       </section>
     </div>
   </main>
 
-  <dialog id="closingDetailModal" class="modal-card modal-wide">
-    <form method="dialog">
+  <dialog id="receivedEditModal" class="modal-card modal-wide">
+    <div>
       <div class="flex items-start justify-between gap-4">
-        <div>
-          <p class="brand-kicker">GMS DETAIL</p>
-          <h2 id="closingDetailTitle" class="mt-2 text-xl font-bold">締め詳細</h2>
-        </div>
-        <button value="close" class="secondary-button">閉じる</button>
+        <div><p class="brand-kicker">ACCOUNTING REVIEW</p><h2 id="receivedEditTitle" class="mt-2 text-xl font-bold">受信データ確認</h2></div>
+        <button id="closeReceivedEditButton" type="button" class="secondary-button">閉じる</button>
+      </div>
+      <div class="mt-5 grid gap-4 md:grid-cols-3">
+        <label>総売上<input id="editTotalSales" type="number" min="0" step="1" class="form-input mt-2"></label>
+        <label>現金売上<input id="editCashSales" type="number" min="0" step="1" class="form-input mt-2"></label>
+        <label>カード売上<input id="editCardSales" type="number" min="0" step="1" class="form-input mt-2"></label>
+        <label>来店組数<input id="editGroupCount" type="number" min="0" step="1" class="form-input mt-2"></label>
+        <label>総客数<input id="editTotalCustomers" type="number" min="0" step="1" class="form-input mt-2"></label>
+        <label>本指名<input id="editHonShimei" type="number" min="0" step="1" class="form-input mt-2"></label>
+        <label>場内指名<input id="editJonai" type="number" min="0" step="1" class="form-input mt-2"></label>
+      </div>
+      <div class="mt-5 grid gap-5 lg:grid-cols-2">
+        <div><div class="mb-2 flex items-center justify-between"><h3 class="font-bold">経費</h3><button id="addEditExpenseButton" type="button" class="secondary-button">追加</button></div><div id="editExpenseRows" class="space-y-2"></div></div>
+        <div><div class="mb-2 flex items-center justify-between"><h3 class="font-bold">手当</h3><button id="addEditAllowanceButton" type="button" class="secondary-button">追加</button></div><div id="editAllowanceRows" class="space-y-2"></div></div>
+      </div>
+      <div id="receivedTransactionSummary" class="mt-5"></div>
+      <div id="receivedEditError" class="hidden alert alert-error mt-4"></div>
+      <div class="mt-6 flex justify-end gap-3">
+        <button id="saveReceivedDraftButton" type="button" class="secondary-button">編集内容を保存</button>
+        <button id="finalizeReceivedButton" type="button" class="primary-button">経理確定する</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="closingDetailModal" class="modal-card modal-wide">
+    <div>
+      <div class="flex items-start justify-between gap-4">
+        <div><p class="brand-kicker">GMS DETAIL</p><h2 id="closingDetailTitle" class="mt-2 text-xl font-bold">確定データ詳細</h2></div>
+        <button id="closeClosingDetailButton" type="button" class="secondary-button">閉じる</button>
       </div>
       <div id="closingDetailBody" class="mt-5 space-y-5"></div>
-    </form>
+    </div>
   </dialog>
 
   <script type="module" src="js/accounting.js"></script>

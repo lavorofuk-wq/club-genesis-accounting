@@ -102,7 +102,9 @@ service cloud.firestore {
       && request.resource.data.businessDate == document
       && request.resource.data.businessDate is string
       && request.resource.data.businessDate.matches('^\\d{4}-\\d{2}-\\d{2}$')
-      && (request.resource.data.status == 'submitted' || request.resource.data.status == 'approved')
+      && (request.resource.data.status == 'submitted'
+        || request.resource.data.status == 'approved'
+        || request.resource.data.status == 'finalized')
       && request.resource.data.sales is map
       && isNonNegativeNumber(request.resource.data.sales.totalSales)
       && isNonNegativeNumber(request.resource.data.sales.cashSales)
@@ -139,13 +141,21 @@ service cloud.firestore {
 
     match /dailyClosings/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && userRole() == 'shop';
+      allow create: if signedIn() && userRole() == 'shop' && request.resource.data.status == 'submitted';
+      allow update: if signedIn() && (
+        userRole() == 'accounting'
+        || (userRole() == 'shop' && request.resource.data.status == 'submitted')
+      );
       allow delete: if false;
     }
 
     match /dailyClosings-dev/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && userRole() == 'shop';
+      allow create: if signedIn() && userRole() == 'shop' && request.resource.data.status == 'submitted';
+      allow update: if signedIn() && (
+        userRole() == 'accounting'
+        || (userRole() == 'shop' && request.resource.data.status == 'submitted')
+      );
       allow delete: if false;
     }
 
