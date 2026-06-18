@@ -1452,9 +1452,12 @@ function normalizeTransactions(transactions) {
       ? transaction.items.map((item) => ({
         itemId: String(item.itemId || item.id || ""),
         label: String(item.label || ""),
+        category: String(item.category || ""),
         price: Number(item.price || 0),
         quantity: Number(item.quantity ?? item.qty ?? 0),
         castId: String(item.castId || ""),
+        banaiExtCastIds: Array.isArray(item.banaiExtCastIds) ? item.banaiExtCastIds.map(String) : [],
+        banaiExtCastId: String(item.banaiExtCastId || ""),
         isSet: Boolean(item.isSet),
         isHonShimei: Boolean(item.isHonShimei),
         isBanaiShimei: Boolean(item.isBanaiShimei),
