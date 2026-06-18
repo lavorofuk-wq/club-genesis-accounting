@@ -96,9 +96,7 @@ service cloud.firestore {
         'customers',
         'nominations',
         'castSales',
-        'staffWork',
         'castWork',
-        'cashReconciliation',
         'source'
       ])
       && request.resource.data.businessDate == document
@@ -117,9 +115,11 @@ service cloud.firestore {
       && isNonNegativeNumber(request.resource.data.nominations.honShimeiCount)
       && isNonNegativeNumber(request.resource.data.nominations.jonaiCount)
       && request.resource.data.castSales is list
-      && request.resource.data.staffWork is list
       && request.resource.data.castWork is list
-      && request.resource.data.cashReconciliation is map
+      && (!request.resource.data.keys().hasAny(['staffWork'])
+        || request.resource.data.staffWork is list)
+      && (!request.resource.data.keys().hasAny(['cashReconciliation'])
+        || request.resource.data.cashReconciliation is map)
       && request.resource.data.source is map;
     }
 
