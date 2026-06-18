@@ -307,7 +307,13 @@ async function loadClosingLists() {
       ...docSnap.data()
     }));
     const items = [...shopItems, ...closingItems];
-    await syncCastLifecycle(items);
+    let lifecycleSyncError = null;
+    try {
+      await syncCastLifecycle(items);
+    } catch (error) {
+      lifecycleSyncError = error;
+      console.warn("POSキャスト入退店同期に失敗しました。", error);
+    }
     sentClosings = closingItems
       .filter((item) => ["submitted", "approved", "finalized"].includes(item.status))
       .map((item) => ({ ...item, businessDate: item.businessDate || item.date || item.id }))
@@ -317,12 +323,18 @@ async function loadClosingLists() {
     const map = new Map();
     shopItems.forEach((item) => {
       const date = item.businessDate || item.date || item.id;
-      if (!date || ["submitted", "approved", "finalized"].includes(item.status) || sentDates.has(date)) return;
+      if (!date || sentDates.has(date)) return;
       map.set(date, { ...item, businessDate: date });
     });
     pendingClosings = [...map.values()].sort((a, b) => b.businessDate.localeCompare(a.businessDate));
     renderPendingClosings();
     renderSentClosings();
+    if (lifecycleSyncError) {
+      showMessage(
+        "errorMessage",
+        `POS締めデータは読み込みましたが、キャスト入退店同期に失敗しました。${lifecycleSyncError.message}`
+      );
+    }
   } catch (error) {
     showMessage("errorMessage", `POS締めデータを読み込めませんでした。${error.message}`);
   }
@@ -407,10 +419,11 @@ function renderPendingClosings() {
     const row = document.createElement("article");
     row.className = "pending-item";
     const total = Number(closing.sales?.totalSales ?? closing.totalSales ?? 0);
+    const transactionCount = Array.isArray(closing.transactions) ? closing.transactions.length : 0;
     const info = document.createElement("div");
     info.innerHTML = `
       <div class="font-bold text-slate-900">${closing.businessDate}</div>
-      <div class="mt-1 text-sm text-slate-600">総売上 ${yen.format(total)}円</div>
+      <div class="mt-1 text-sm text-slate-600">総売上 ${yen.format(total)}円 / 会計 ${transactionCount}件</div>
     `;
     const button = document.createElement("button");
     button.type = "button";
