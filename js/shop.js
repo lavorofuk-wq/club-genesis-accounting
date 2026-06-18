@@ -78,6 +78,11 @@ document.getElementById("closeCastDetailButton").addEventListener("click", () =>
 });
 document.getElementById("castSearchInput").addEventListener("input", renderCastDetailList);
 document.getElementById("castRewardSystem").addEventListener("change", updateGuaranteeNoteVisibility);
+document.getElementById("castGuaranteedHourlyRate").addEventListener("input", (event) => {
+  const value = Number(event.target.value);
+  const invalid = event.target.value !== "" && (!Number.isInteger(value) || value <= 0);
+  markInvalid(event.target, invalid);
+});
 document.getElementById("saveCastProfileButton").addEventListener("click", saveCastProfile);
 document.getElementById("addCastWorkButton").addEventListener("click", () => addCastWorkRow());
 document.getElementById("addExpenseButton").addEventListener("click", () => addExpenseRow());
@@ -662,7 +667,7 @@ function renderCastDetailList() {
     dates.textContent = `入店日：${member.entryDate || "未設定"}${member.exitedDate ? ` / 退店日：${member.exitedDate}` : ""}`;
     const guarantee = document.createElement("span");
     guarantee.textContent = member.rewardSystem === "guaranteedHourly"
-      ? `保証期限：${member.guaranteeNote || "未設定"}`
+      ? `保証時給：${yen.format(Number(member.guaranteedHourlyRate || 0))}円 / 保証期限：${member.guaranteeNote || "未設定"}`
       : "保証期限：対象外";
     const note = document.createElement("span");
     note.textContent = `備考：${member.note || "なし"}`;
@@ -704,7 +709,12 @@ async function deleteCastData(member) {
 
 function isCastProfileComplete(member) {
   if (!castRewardLabels[member.rewardSystem]) return false;
-  return member.rewardSystem !== "guaranteedHourly" || Boolean(String(member.guaranteeNote || "").trim());
+  return member.rewardSystem !== "guaranteedHourly"
+    || (
+      Boolean(String(member.guaranteeNote || "").trim())
+      && Number.isInteger(Number(member.guaranteedHourlyRate))
+      && Number(member.guaranteedHourlyRate) > 0
+    );
 }
 
 function openCastEdit(member) {
@@ -712,6 +722,7 @@ function openCastEdit(member) {
   document.getElementById("castEditTitle").textContent = `${member.name}のキャスト情報`;
   document.getElementById("castRewardSystem").value = member.rewardSystem || "";
   document.getElementById("castGuaranteeNote").value = member.guaranteeNote || "";
+  document.getElementById("castGuaranteedHourlyRate").value = member.guaranteedHourlyRate || "";
   document.getElementById("castEntryDate").value = member.entryDate || "";
   document.getElementById("castNote").value = member.note || "";
   hideMessage("castEditError");
@@ -722,7 +733,11 @@ function openCastEdit(member) {
 function updateGuaranteeNoteVisibility() {
   const isGuaranteed = document.getElementById("castRewardSystem").value === "guaranteedHourly";
   document.getElementById("castGuaranteeNoteField").classList.toggle("hidden", !isGuaranteed);
-  if (!isGuaranteed) markInvalid(document.getElementById("castGuaranteeNote"), false);
+  document.getElementById("castGuaranteedHourlyRateField").classList.toggle("hidden", !isGuaranteed);
+  if (!isGuaranteed) {
+    markInvalid(document.getElementById("castGuaranteeNote"), false);
+    markInvalid(document.getElementById("castGuaranteedHourlyRate"), false);
+  }
 }
 
 async function saveCastProfile() {
@@ -730,6 +745,7 @@ async function saveCastProfile() {
   const member = castMembers.find((cast) => cast.id === id);
   const rewardSystem = document.getElementById("castRewardSystem").value;
   const guaranteeNote = document.getElementById("castGuaranteeNote").value.trim();
+  const guaranteedHourlyRate = Number(document.getElementById("castGuaranteedHourlyRate").value);
   const entryDate = document.getElementById("castEntryDate").value;
   const note = document.getElementById("castNote").value.trim();
   if (!member) {
@@ -747,12 +763,23 @@ async function saveCastProfile() {
     showMessage("castEditError", "保証時給の場合は、何月分まで保証するかを備考へ記載してください。");
     return;
   }
+  markInvalid(document.getElementById("castGuaranteeNote"), false);
+  if (
+    rewardSystem === "guaranteedHourly"
+    && (!Number.isInteger(guaranteedHourlyRate) || guaranteedHourlyRate <= 0)
+  ) {
+    markInvalid(document.getElementById("castGuaranteedHourlyRate"), true);
+    showMessage("castEditError", "保証時給の場合は、1円以上の保証時給金額を入力してください。");
+    return;
+  }
+  markInvalid(document.getElementById("castGuaranteedHourlyRate"), false);
   const button = document.getElementById("saveCastProfileButton");
   button.disabled = true;
   try {
     await setDoc(doc(db, castCollectionName, id), {
       rewardSystem,
       guaranteeNote: rewardSystem === "guaranteedHourly" ? guaranteeNote : "",
+      guaranteedHourlyRate: rewardSystem === "guaranteedHourly" ? guaranteedHourlyRate : 0,
       entryDate,
       note,
       profileUpdatedAt: serverTimestamp(),

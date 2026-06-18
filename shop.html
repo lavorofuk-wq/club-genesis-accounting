@@ -304,6 +304,10 @@
           <span class="form-label">保証期限の備考（必須）</span>
           <textarea id="castGuaranteeNote" maxlength="200" rows="3" class="form-textarea" placeholder="例：2026年9月分まで保証時給"></textarea>
         </label>
+        <label id="castGuaranteedHourlyRateField" class="hidden">
+          <span class="form-label">保証時給金額（必須）</span>
+          <input id="castGuaranteedHourlyRate" type="number" min="1" step="1" inputmode="numeric" class="form-input" placeholder="例：5000">
+        </label>
         <label>
           <span class="form-label">入店日</span>
           <input id="castEntryDate" type="date" class="form-input">
@@ -321,6 +325,6 @@
     </form>
   </dialog>
 
-  <script type="module" src="js/shop.js?v=1.16.2"></script>
+  <script type="module" src="js/shop.js?v=1.17"></script>
 </body>
 </html>

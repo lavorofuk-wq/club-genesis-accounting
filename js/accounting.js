@@ -591,14 +591,24 @@ function renderCastRewards() {
     const sales = salesRows.find((row) => row.key === key) || {};
     const work = workMap.get(key) || {};
     const member = findMember(castMembers, key, sales.name || work.name);
+    const guaranteedHourlyRate = toNumber(member?.guaranteedHourlyRate);
+    const isGuaranteed = member?.rewardSystem === "guaranteedHourly";
+    const rewardAmount = isGuaranteed && guaranteedHourlyRate > 0
+      ? Math.round(guaranteedHourlyRate * toNumber(work.hours))
+      : null;
+    const rewardStatus = isGuaranteed && guaranteedHourlyRate <= 0
+      ? "保証時給金額未設定"
+      : "報酬設定待ち";
     root.appendChild(createPayrollCard(
       sales.name || work.name || member?.name || "名称未設定",
-      rewardSystemLabel(member?.rewardSystem),
+      isGuaranteed
+        ? `${rewardSystemLabel(member?.rewardSystem)} ${yenCell(guaranteedHourlyRate)}`
+        : rewardSystemLabel(member?.rewardSystem),
       [
         ["売上計算基礎", yenCell(sales.totalAttributedSales)],
         ["勤務日数", `${work.days?.size || 0}日`],
         ["勤務時間", hoursCell(work.hours || 0)],
-        ["報酬額", "報酬設定待ち"]
+        ["報酬額", rewardAmount === null ? rewardStatus : yenCell(rewardAmount)]
       ]
     ));
   });

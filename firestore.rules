@@ -74,6 +74,9 @@ service cloud.firestore {
       && (!request.resource.data.keys().hasAny(['guaranteeNote'])
         || (request.resource.data.guaranteeNote is string
           && request.resource.data.guaranteeNote.size() <= 200))
+      && (!request.resource.data.keys().hasAny(['guaranteedHourlyRate'])
+        || (request.resource.data.guaranteedHourlyRate is int
+          && request.resource.data.guaranteedHourlyRate >= 0))
       && (!request.resource.data.keys().hasAny(['entryDate'])
         || (request.resource.data.entryDate is string
           && (request.resource.data.entryDate == ''
@@ -85,7 +88,9 @@ service cloud.firestore {
       && (!request.resource.data.keys().hasAny(['rewardSystem'])
         || request.resource.data.rewardSystem != 'guaranteedHourly'
         || (request.resource.data.keys().hasAny(['guaranteeNote'])
-          && request.resource.data.guaranteeNote.size() > 0));
+          && request.resource.data.guaranteeNote.size() > 0
+          && request.resource.data.keys().hasAny(['guaranteedHourlyRate'])
+          && request.resource.data.guaranteedHourlyRate > 0));
     }
 
     function isClosingPayload(document) {
