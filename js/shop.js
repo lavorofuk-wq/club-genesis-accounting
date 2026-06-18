@@ -1181,6 +1181,7 @@ function buildPayload() {
       honShimeiCount: numberValue("honShimei"),
       jonaiCount: numberValue("jonai")
     },
+    transactions: normalizeTransactions(selectedPending?.transactions),
     castSales: selectedPending?.castSales || [],
     staffWork: rows.staffWork,
     castWork: rows.castWork,
@@ -1269,6 +1270,7 @@ function openConfirm() {
     `総売上：${yen.format(pendingPayload.sales.totalSales)}円`,
     `現金：${yen.format(pendingPayload.sales.cashSales)}円 / カード：${yen.format(pendingPayload.sales.cardSales)}円`,
     `総客数：${pendingPayload.customers.totalCustomers}名 / 客単価：${yen.format(pendingPayload.customers.customerUnitPrice)}円`,
+    `会計データ：${pendingPayload.transactions.length}件`,
     `経費合計：${yen.format(expenseTotal)}円 / 手当合計：${yen.format(allowanceTotal)}円`
   ].forEach((text) => {
     const p = document.createElement("p");
@@ -1370,6 +1372,7 @@ function applyClosingToForm(data) {
   const nominations = data.nominations || data.shimeiInfo || data["指名情報"] || {};
   document.getElementById("honShimei").value = nominations.honShimeiCount ?? nominations.honShimei ?? 0;
   document.getElementById("jonai").value = nominations.jonaiCount ?? nominations.jonai ?? 0;
+  renderTransactions(data.transactions);
   document.getElementById("staffWorkRows").replaceChildren();
   normalizeStaffWork(data.staffWork || data.staffHours).forEach(addStaffWorkRow);
   renderStaffAttendancePicker();
@@ -1382,6 +1385,109 @@ function applyClosingToForm(data) {
   (data.allowances?.length ? data.allowances : [{}]).forEach(addAllowanceRow);
   calculateUnitPrice();
   checkSalesWarning();
+}
+
+function normalizeTransactions(transactions) {
+  if (!Array.isArray(transactions)) return [];
+  return transactions.map((transaction) => ({
+    transactionId: String(transaction.transactionId || transaction.id || ""),
+    tableId: String(transaction.tableId || ""),
+    tableLabel: String(transaction.tableLabel || ""),
+    startTime: Number(transaction.startTime || 0),
+    endTime: Number(transaction.endTime || 0),
+    guests: Number(transaction.guests || 0),
+    note: String(transaction.note || ""),
+    payMethod: transaction.payMethod === "card" ? "card" : "cash",
+    splits: Array.isArray(transaction.splits)
+      ? transaction.splits.map((split) => ({
+        method: split.method === "card" ? "card" : "cash",
+        amount: Number(split.amount || 0)
+      }))
+      : [],
+    subtotal: Number(transaction.subtotal || 0),
+    discount: Number(transaction.discount || 0),
+    tax: Number(transaction.tax || 0),
+    total: Number(transaction.total || 0),
+    items: Array.isArray(transaction.items)
+      ? transaction.items.map((item) => ({
+        itemId: String(item.itemId || item.id || ""),
+        label: String(item.label || ""),
+        price: Number(item.price || 0),
+        quantity: Number(item.quantity ?? item.qty ?? 0),
+        castId: String(item.castId || ""),
+        isSet: Boolean(item.isSet),
+        isHonShimei: Boolean(item.isHonShimei),
+        isBanaiShimei: Boolean(item.isBanaiShimei),
+        isExtension: Boolean(item.isExtension),
+        isBanaiExtension: Boolean(item.isBanaiExtension),
+        isVipCharge: Boolean(item.isVipCharge),
+        isDiscount: Boolean(item.isDiscount)
+      }))
+      : []
+  }));
+}
+
+function renderTransactions(transactions) {
+  const root = document.getElementById("transactionDetails");
+  const normalized = normalizeTransactions(transactions);
+  root.replaceChildren();
+  if (!normalized.length) {
+    const empty = document.createElement("div");
+    empty.className = "notice";
+    empty.textContent = "この締めデータには会計明細がありません。POS Ver6.52以降の締めデータから連携されます。";
+    root.appendChild(empty);
+    return;
+  }
+  normalized.forEach((transaction) => {
+    const block = document.createElement("article");
+    block.className = "transaction-block";
+    const heading = document.createElement("div");
+    heading.className = "transaction-heading";
+    const title = document.createElement("strong");
+    title.textContent = `${transaction.tableLabel || "テーブル未設定"} / ${transaction.guests}名`;
+    const meta = document.createElement("span");
+    meta.className = "transaction-meta";
+    meta.textContent = `会計ID ${transaction.transactionId || "-"} / ${formatTransactionTime(transaction.startTime)} - ${formatTransactionTime(transaction.endTime)} / ${paymentLabel(transaction)}`;
+    heading.append(title, meta);
+    const summary = document.createElement("div");
+    summary.className = "transaction-meta mb-2";
+    summary.textContent = `小計 ${yen.format(transaction.subtotal)}円 / 割引 ${yen.format(transaction.discount)}円 / 税・SC ${yen.format(transaction.tax)}円 / 合計 ${yen.format(transaction.total)}円`;
+    if (transaction.note) summary.textContent += ` / 備考 ${transaction.note}`;
+    const wrap = document.createElement("div");
+    wrap.className = "transaction-table-wrap";
+    const table = document.createElement("table");
+    table.className = "detail-mini-table";
+    table.innerHTML = "<thead><tr><th>明細</th><th>単価</th><th>数量</th><th>金額</th></tr></thead>";
+    const tbody = document.createElement("tbody");
+    transaction.items.forEach((item) => {
+      const row = document.createElement("tr");
+      [item.label, `${yen.format(item.price)}円`, item.quantity, `${yen.format(item.price * item.quantity)}円`].forEach((value) => {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        row.appendChild(cell);
+      });
+      tbody.appendChild(row);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+    block.append(heading, summary, wrap);
+    root.appendChild(block);
+  });
+}
+
+function formatTransactionTime(value) {
+  const timestamp = Number(value || 0);
+  if (!timestamp) return "--:--";
+  return new Date(timestamp).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
+}
+
+function paymentLabel(transaction) {
+  if (transaction.splits.length) {
+    return transaction.splits
+      .map((split) => `${split.method === "card" ? "カード" : "現金"} ${yen.format(split.amount)}円`)
+      .join(" / ");
+  }
+  return transaction.payMethod === "card" ? "カード" : "現金";
 }
 
 function normalizeStaffWork(work) {

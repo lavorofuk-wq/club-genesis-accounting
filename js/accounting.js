@@ -77,6 +77,7 @@ function normalizeClosing(raw) {
     jonai: Number(nominations.jonaiCount ?? nominations.jonai ?? 0),
     expenses: raw.expenses || [],
     allowances: raw.allowances || [],
+    transactions: normalizeTransactions(raw.transactions),
     castSales: raw.castSales || [],
     castWork: raw.castWork || raw.castHours || [],
     staffWork: raw.staffWork || raw.staffHours || [],
@@ -321,6 +322,32 @@ function openClosingDetail(closingId) {
   body.replaceChildren();
 
   body.appendChild(createSummaryGrid(closing));
+  body.appendChild(createTableBlock("会計データ", ["会計ID", "テーブル", "人数", "入店", "会計", "支払", "小計", "割引", "税・SC", "合計", "備考"], closing.transactions, (row) => [
+    row.transactionId,
+    row.tableLabel,
+    `${row.guests}名`,
+    formatTransactionTime(row.startTime),
+    formatTransactionTime(row.endTime),
+    transactionPaymentLabel(row),
+    yenCell(row.subtotal),
+    yenCell(row.discount),
+    yenCell(row.tax),
+    yenCell(row.total),
+    row.note
+  ]));
+  closing.transactions.forEach((transaction) => {
+    body.appendChild(createTableBlock(
+      `会計明細：${transaction.tableLabel || "テーブル未設定"}`,
+      ["明細", "単価", "数量", "金額"],
+      transaction.items,
+      (item) => [
+        item.label,
+        yenCell(item.price),
+        item.quantity,
+        yenCell(item.price * item.quantity)
+      ]
+    ));
+  });
   body.appendChild(createTableBlock("キャスト別売上", ["キャスト", "本指名", "場内延長", "ドリンク", "合計"], closing.castSales, (row) => [
     row.castName || "",
     yenCell(row.honShimeiSales),
@@ -473,6 +500,46 @@ function normalizeWorkRows(work, staff) {
   return Object.entries(labels)
     .map(([role, label]) => ({ name: label, role: label, hours: Number(work[role] || 0) }))
     .filter((row) => row.hours > 0);
+}
+
+function normalizeTransactions(transactions) {
+  if (!Array.isArray(transactions)) return [];
+  return transactions.map((transaction) => ({
+    transactionId: String(transaction.transactionId || transaction.id || ""),
+    tableLabel: String(transaction.tableLabel || ""),
+    startTime: Number(transaction.startTime || 0),
+    endTime: Number(transaction.endTime || 0),
+    guests: Number(transaction.guests || 0),
+    note: String(transaction.note || ""),
+    payMethod: transaction.payMethod === "card" ? "card" : "cash",
+    splits: Array.isArray(transaction.splits) ? transaction.splits : [],
+    subtotal: Number(transaction.subtotal || 0),
+    discount: Number(transaction.discount || 0),
+    tax: Number(transaction.tax || 0),
+    total: Number(transaction.total || 0),
+    items: Array.isArray(transaction.items)
+      ? transaction.items.map((item) => ({
+        label: String(item.label || ""),
+        price: Number(item.price || 0),
+        quantity: Number(item.quantity ?? item.qty ?? 0)
+      }))
+      : []
+  }));
+}
+
+function formatTransactionTime(value) {
+  const timestamp = Number(value || 0);
+  if (!timestamp) return "";
+  return new Date(timestamp).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
+}
+
+function transactionPaymentLabel(transaction) {
+  if (transaction.splits.length) {
+    return transaction.splits
+      .map((split) => `${split.method === "card" ? "カード" : "現金"} ${yenCell(split.amount)}`)
+      .join(" / ");
+  }
+  return transaction.payMethod === "card" ? "カード" : "現金";
 }
 
 function employmentTypeLabel(type) {

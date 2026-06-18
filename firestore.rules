@@ -116,6 +116,8 @@ service cloud.firestore {
       && isNonNegativeNumber(request.resource.data.nominations.jonaiCount)
       && request.resource.data.castSales is list
       && request.resource.data.castWork is list
+      && (!request.resource.data.keys().hasAny(['transactions'])
+        || request.resource.data.transactions is list)
       && (!request.resource.data.keys().hasAny(['staffWork'])
         || request.resource.data.staffWork is list)
       && (!request.resource.data.keys().hasAny(['cashReconciliation'])

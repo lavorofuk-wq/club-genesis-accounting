@@ -555,6 +555,38 @@ body {
   gap: 10px;
 }
 
+.transaction-list {
+  display: grid;
+  gap: 18px;
+}
+
+.transaction-block {
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.transaction-block:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.transaction-heading {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.transaction-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.transaction-table-wrap {
+  overflow-x: auto;
+}
+
 .pending-item {
   display: grid;
   gap: 8px;
