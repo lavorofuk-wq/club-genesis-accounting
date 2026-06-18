@@ -146,7 +146,9 @@ service cloud.firestore {
         userRole() == 'accounting'
         || (userRole() == 'shop' && request.resource.data.status == 'submitted')
       );
-      allow delete: if false;
+      allow delete: if signedIn()
+        && userRole() == 'accounting'
+        && resource.data.status != 'finalized';
     }
 
     match /dailyClosings-dev/{document} {
@@ -156,7 +158,9 @@ service cloud.firestore {
         userRole() == 'accounting'
         || (userRole() == 'shop' && request.resource.data.status == 'submitted')
       );
-      allow delete: if false;
+      allow delete: if signedIn()
+        && userRole() == 'accounting'
+        && resource.data.status != 'finalized';
     }
 
     match /shopClosings/{document} {

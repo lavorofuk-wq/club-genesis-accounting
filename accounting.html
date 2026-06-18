@@ -148,6 +148,33 @@
     </div>
   </dialog>
 
+  <dialog id="deleteReceivedModal" class="modal-card">
+    <div>
+      <p class="brand-kicker">DELETE RECEIVED DATA</p>
+      <h2 class="mt-2 text-xl font-bold text-slate-900">受信データを削除</h2>
+      <div class="alert alert-error mt-4">
+        <strong id="deleteReceivedTarget"></strong>
+        <p class="mt-1">この操作は取り消せません。確定データは削除対象になりません。</p>
+      </div>
+      <label class="form-label mt-5" for="deleteReceivedInput">
+        確認のため「削除」と入力してください
+      </label>
+      <input
+        id="deleteReceivedInput"
+        type="text"
+        class="form-input"
+        autocomplete="off"
+        maxlength="2"
+        placeholder="削除"
+      >
+      <div id="deleteReceivedError" class="hidden alert alert-error mt-4"></div>
+      <div class="mt-6 flex justify-end gap-3">
+        <button id="cancelDeleteReceivedButton" type="button" class="secondary-button">キャンセル</button>
+        <button id="confirmDeleteReceivedButton" type="button" class="danger-button" disabled>削除確定</button>
+      </div>
+    </div>
+  </dialog>
+
   <dialog id="closingDetailModal" class="modal-card modal-wide">
     <div>
       <div class="flex items-start justify-between gap-4">

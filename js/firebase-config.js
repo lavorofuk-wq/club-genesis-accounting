@@ -12,6 +12,7 @@ import {
   doc,
   getDoc,
   setDoc,
+  deleteDoc,
   query,
   where,
   orderBy,

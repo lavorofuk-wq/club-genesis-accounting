@@ -4,6 +4,7 @@ import {
   doc,
   getDocs,
   setDoc,
+  deleteDoc,
   serverTimestamp,
   closingsCollectionName,
   castCollectionName,
@@ -23,6 +24,7 @@ let visibleFinalized = [];
 let castMembers = [];
 let staffMembers = [];
 let editingClosing = null;
+let deletingClosing = null;
 
 const byId = (id) => document.getElementById(id);
 
@@ -36,6 +38,9 @@ byId("addEditExpenseButton").addEventListener("click", () => addExpenseRow());
 byId("addEditAllowanceButton").addEventListener("click", () => addAllowanceRow());
 byId("saveReceivedDraftButton").addEventListener("click", () => saveReceived(false));
 byId("finalizeReceivedButton").addEventListener("click", () => saveReceived(true));
+byId("cancelDeleteReceivedButton").addEventListener("click", closeDeleteReceivedModal);
+byId("deleteReceivedInput").addEventListener("input", updateDeleteConfirmation);
+byId("confirmDeleteReceivedButton").addEventListener("click", deleteReceived);
 
 document.querySelectorAll("[data-accounting-view]").forEach((button) => {
   button.addEventListener("click", () => showWorkspace(button.dataset.accountingView));
@@ -153,14 +158,61 @@ function renderReceivedList() {
     detail.className = "mt-1 text-sm text-slate-500";
     detail.textContent = `総売上 ${yenCell(closing.totalSales)} / 会計 ${closing.transactions.length}件 / ${statusLabel(closing.status)}`;
     main.append(title, detail);
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "primary-button";
-    button.textContent = "確認・編集";
-    button.addEventListener("click", () => openReceivedEdit(closing.id));
-    item.append(main, button);
+    const actions = document.createElement("div");
+    actions.className = "flex flex-wrap gap-2";
+    const editButton = document.createElement("button");
+    editButton.type = "button";
+    editButton.className = "primary-button";
+    editButton.textContent = "確認・編集";
+    editButton.addEventListener("click", () => openReceivedEdit(closing.id));
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "danger-button";
+    deleteButton.textContent = "削除";
+    deleteButton.addEventListener("click", () => openDeleteReceivedModal(closing.id));
+    actions.append(editButton, deleteButton);
+    item.append(main, actions);
     root.appendChild(item);
   });
+}
+
+function openDeleteReceivedModal(id) {
+  deletingClosing = receivedClosings.find((item) => item.id === id);
+  if (!deletingClosing) return;
+  byId("deleteReceivedTarget").textContent = `${deletingClosing.businessDate} の受信データを完全に削除します。`;
+  byId("deleteReceivedInput").value = "";
+  byId("confirmDeleteReceivedButton").disabled = true;
+  hideMessage("deleteReceivedError");
+  byId("deleteReceivedModal").showModal();
+  byId("deleteReceivedInput").focus();
+}
+
+function closeDeleteReceivedModal() {
+  byId("deleteReceivedModal").close();
+  byId("deleteReceivedInput").value = "";
+  byId("confirmDeleteReceivedButton").disabled = true;
+  hideMessage("deleteReceivedError");
+  deletingClosing = null;
+}
+
+function updateDeleteConfirmation() {
+  byId("confirmDeleteReceivedButton").disabled = byId("deleteReceivedInput").value !== "削除";
+}
+
+async function deleteReceived() {
+  if (!deletingClosing || byId("deleteReceivedInput").value !== "削除") return;
+  const target = deletingClosing;
+  const button = byId("confirmDeleteReceivedButton");
+  button.disabled = true;
+  try {
+    await deleteDoc(doc(db, closingsCollectionName, target.id));
+    closeDeleteReceivedModal();
+    await loadData();
+    showMessage("successMessage", `${target.businessDate} の受信データを削除しました。`);
+  } catch (error) {
+    showMessage("deleteReceivedError", `受信データを削除できませんでした。${error.message}`);
+    updateDeleteConfirmation();
+  }
 }
 
 function openReceivedEdit(id) {
