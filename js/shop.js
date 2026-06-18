@@ -1,16 +1,19 @@
 import {
   db,
+  posDb,
   collection,
   doc,
-  deleteDoc,
   getDocs,
   getDoc,
   setDoc,
+  ref,
+  get,
   serverTimestamp,
   closingsCollectionName,
   shopClosingsCollectionName,
   staffCollectionName,
-  castCollectionName
+  castCollectionName,
+  posCastPath
 } from "./firebase-config.js";
 import { requireRole, logout, showMessage, hideMessage } from "./auth.js";
 
@@ -28,6 +31,10 @@ const payTypeLabels = {
   daily: "日給",
   hourly: "時給"
 };
+const castRewardLabels = {
+  slideHourly: "スライド時給",
+  guaranteedHourly: "保証時給"
+};
 
 let currentUser = null;
 let pendingPayload = null;
@@ -42,7 +49,9 @@ document.getElementById("logoutButton").addEventListener("click", logout);
 document.getElementById("reloadPendingButton").addEventListener("click", loadPendingClosings);
 document.getElementById("registerStaffButton").addEventListener("click", registerStaff);
 document.getElementById("cancelStaffEditButton").addEventListener("click", resetStaffForm);
-document.getElementById("registerCastButton").addEventListener("click", registerCast);
+document.getElementById("syncCastsButton").addEventListener("click", () => syncPosCasts(true));
+document.getElementById("castRewardSystem").addEventListener("change", updateGuaranteeNoteVisibility);
+document.getElementById("saveCastProfileButton").addEventListener("click", saveCastProfile);
 document.getElementById("addCastWorkButton").addEventListener("click", () => addCastWorkRow());
 document.getElementById("addExpenseButton").addEventListener("click", () => addExpenseRow());
 document.getElementById("addAllowanceButton").addEventListener("click", () => addAllowanceRow());
@@ -55,6 +64,7 @@ requireRole("shop", async (user) => {
   document.getElementById("reportForm").classList.remove("hidden");
   document.getElementById("date").value = todayString();
   await loadMasters();
+  await syncPosCasts(false);
   await loadPendingClosings();
   resetRows();
   wireRealtimeValidation();
@@ -118,8 +128,110 @@ async function loadMasters() {
   }
 }
 
+async function syncPosCasts(showSuccess) {
+  const button = document.getElementById("syncCastsButton");
+  button.disabled = true;
+  setCastSyncStatus("POSのキャスト名簿を同期しています。");
+  try {
+    const snapshot = await get(ref(posDb, posCastPath));
+    const rawCasts = snapshot.val();
+    const posCasts = (Array.isArray(rawCasts) ? rawCasts : Object.values(rawCasts || {}))
+      .filter((cast) => cast && cast.castType !== "trial" && cast.id != null && String(cast.name || "").trim())
+      .map(normalizePosCast);
+    if (!posCasts.length) {
+      throw new Error("POSに通常キャストの名簿データがありません。");
+    }
+    const localByPosId = new Map(staffSafeCastMembers().filter((cast) => cast.posCastId).map((cast) => [String(cast.posCastId), cast]));
+    const localByName = new Map(staffSafeCastMembers().map((cast) => [String(cast.name || ""), cast]));
+    await Promise.all(posCasts.map((posCast) => {
+      const existing = localByPosId.get(posCast.posCastId) || localByName.get(posCast.name);
+      const changed = !existing
+        || existing.name !== posCast.name
+        || existing.status !== posCast.status
+        || Number(existing.internalNo || 0) !== posCast.internalNo
+        || (posCast.entryDate && existing.entryDate !== posCast.entryDate)
+        || (posCast.exitedDate && existing.exitedDate !== posCast.exitedDate)
+        || existing.posEnteredAt !== posCast.posEnteredAt
+        || existing.posExitedAt !== posCast.posExitedAt;
+      if (!changed) return Promise.resolve();
+      const sourceData = { ...posCast };
+      if (!sourceData.entryDate) delete sourceData.entryDate;
+      if (!sourceData.exitedDate) delete sourceData.exitedDate;
+      return setDoc(doc(db, castCollectionName, existing?.id || castDocumentId(posCast.posCastId)), {
+        ...sourceData,
+        source: "pos",
+        syncedAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+    }));
+    await loadCastMembers();
+    const activeCount = posCasts.filter((cast) => cast.status === "active").length;
+    const departedCount = posCasts.length - activeCount;
+    setCastSyncStatus(`POS名簿と同期済み：在籍中 ${activeCount}名 / 退店済み ${departedCount}名`);
+    if (showSuccess) showMessage("successMessage", "POSのキャスト名簿を再同期しました。", false);
+  } catch (error) {
+    setCastSyncStatus(`POS名簿の同期に失敗しました。${error.message}`, true);
+    showMessage("errorMessage", `POS名簿の同期に失敗しました。${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function staffSafeCastMembers() {
+  return Array.isArray(castMembers) ? castMembers : [];
+}
+
+function normalizePosCast(cast) {
+  const posCastId = String(cast.id);
+  return {
+    posCastId,
+    name: String(cast.name).trim(),
+    internalNo: Number(cast.internalNo || 0),
+    status: cast.active === false ? "departed" : "active",
+    entryDate: cast.enteredBizDay || timestampToDate(cast.enteredAt || cast.registeredAt),
+    posEnteredAt: Number(cast.enteredAt || cast.registeredAt || 0),
+    posExitedAt: Number(cast.exitedAt || 0),
+    exitedDate: cast.exitedBizDay || timestampToDate(cast.exitedAt)
+  };
+}
+
+function timestampToDate(value) {
+  const timestamp = Number(value || 0);
+  if (!timestamp) return "";
+  const date = new Date(timestamp);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function castDocumentId(posCastId) {
+  return `pos_${String(posCastId).replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+}
+
+function setCastSyncStatus(message, isError = false) {
+  const status = document.getElementById("castSyncStatus");
+  status.textContent = message;
+  status.classList.toggle("alert", isError);
+  status.classList.toggle("alert-error", isError);
+  status.classList.toggle("notice", !isError);
+}
+
+async function loadCastMembers() {
+  const snapshot = await getDocs(collection(db, castCollectionName));
+  castMembers = snapshot.docs
+    .map((item) => ({ id: item.id, ...item.data() }))
+    .filter((cast) => cast.source === "pos" || cast.posCastId)
+    .sort(sortCasts);
+  renderCastMasterList();
+  refreshWorkSelects();
+}
+
 function sortByName(a, b) {
   return String(a.name || "").localeCompare(String(b.name || ""), "ja");
+}
+
+function sortCasts(a, b) {
+  if ((a.status === "departed") !== (b.status === "departed")) return a.status === "departed" ? 1 : -1;
+  return Number(a.internalNo || Number.MAX_SAFE_INTEGER) - Number(b.internalNo || Number.MAX_SAFE_INTEGER)
+    || sortByName(a, b);
 }
 
 async function loadPendingClosings() {
@@ -133,6 +245,7 @@ async function loadPendingClosings() {
       ...shopSnap.docs.map((docSnap) => ({ sourceCollection: shopClosingsCollectionName, id: docSnap.id, ...docSnap.data() })),
       ...closingSnap.docs.map((docSnap) => ({ sourceCollection: closingsCollectionName, id: docSnap.id, ...docSnap.data() }))
     ];
+    await syncCastLifecycle(items);
     const map = new Map();
     items.forEach((item) => {
       const date = item.businessDate || item.date || item.id;
@@ -145,6 +258,58 @@ async function loadPendingClosings() {
   } catch (error) {
     showMessage("errorMessage", `POS締めデータを読み込めませんでした。${error.message}`);
   }
+}
+
+async function syncCastLifecycle(closings) {
+  const updates = new Map();
+  [...closings]
+    .sort((a, b) => String(a.businessDate || a.date || "").localeCompare(String(b.businessDate || b.date || "")))
+    .forEach((closing) => {
+    const eventDate = closing.businessDate || closing.date || "";
+    (closing.enteredCasts || []).forEach((cast) => {
+      if (cast.castId == null || !String(cast.castName || "").trim()) return;
+      updates.set(String(cast.castId), {
+        posCastId: String(cast.castId),
+        name: String(cast.castName).trim(),
+        internalNo: Number(cast.internalNo || 0),
+        status: "active",
+        entryDate: eventDate,
+        posEnteredAt: Number(cast.enteredAt || 0)
+      });
+    });
+    (closing.exitedCasts || []).forEach((cast) => {
+      if (cast.castId == null || !String(cast.castName || "").trim()) return;
+      updates.set(String(cast.castId), {
+        posCastId: String(cast.castId),
+        name: String(cast.castName).trim(),
+        internalNo: Number(cast.internalNo || 0),
+        status: "departed",
+        exitedDate: eventDate,
+        posExitedAt: Number(cast.exitedAt || 0)
+      });
+    });
+  });
+  if (!updates.size) return;
+  const byPosId = new Map(castMembers.map((cast) => [String(cast.posCastId || ""), cast]));
+  await Promise.all([...updates.values()].map((update) => {
+    const existing = byPosId.get(update.posCastId);
+    const changed = !existing
+      || existing.name !== update.name
+      || existing.status !== update.status
+      || Number(existing.internalNo || 0) !== update.internalNo
+      || (update.entryDate && existing.entryDate !== update.entryDate)
+      || (update.exitedDate && existing.exitedDate !== update.exitedDate)
+      || (update.posEnteredAt && existing.posEnteredAt !== update.posEnteredAt)
+      || (update.posExitedAt && existing.posExitedAt !== update.posExitedAt);
+    if (!changed) return Promise.resolve();
+    return setDoc(doc(db, castCollectionName, existing?.id || castDocumentId(update.posCastId)), {
+      ...update,
+      source: "pos",
+      lifecycleSyncedAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    }, { merge: true });
+  }));
+  await loadCastMembers();
 }
 
 function renderPendingClosings() {
@@ -230,29 +395,6 @@ async function registerStaff() {
     await loadMasters();
   } catch (error) {
     showMessage("errorMessage", `スタッフの入店登録に失敗しました。${error.message}`);
-  }
-}
-
-async function registerCast() {
-  const nameInput = document.getElementById("newCastName");
-  const name = nameInput.value.trim();
-  if (!name) {
-    showMessage("errorMessage", "キャスト名を入力してください。");
-    return;
-  }
-  if (castMembers.some((member) => member.name === name)) {
-    showMessage("errorMessage", "同じ名前のキャストがすでに登録されています。");
-    return;
-  }
-  try {
-    const memberRef = doc(collection(db, castCollectionName));
-    await setDoc(memberRef, { name, createdAt: serverTimestamp(), createdBy: currentUser.uid });
-    nameInput.value = "";
-    hideMessage("errorMessage");
-    showMessage("successMessage", `${name}をキャスト登録しました。`, false);
-    await loadMasters();
-  } catch (error) {
-    showMessage("errorMessage", `キャスト登録に失敗しました。${error.message}`);
   }
 }
 
@@ -345,19 +487,114 @@ function renderCastMasterList() {
     return;
   }
   castMembers.forEach((member) => {
-    const row = document.createElement("div");
-    row.className = "master-item";
-    const name = document.createElement("span");
-    name.className = "master-item-name";
+    const row = document.createElement("article");
+    row.className = `cast-master-item ${member.status === "departed" ? "cast-departed" : ""}`;
+    const identity = document.createElement("div");
+    identity.className = "cast-master-name";
+    const number = document.createElement("span");
+    number.className = "text-xs font-bold text-blue-700";
+    number.textContent = member.internalNo ? `No.${String(member.internalNo).padStart(3, "0")}` : "No.-";
+    const name = document.createElement("strong");
     name.textContent = member.name;
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "danger-button";
-    remove.textContent = "削除";
-    remove.addEventListener("click", () => deleteCast(member));
-    row.append(name, remove);
+    const status = document.createElement("span");
+    status.className = `staff-status ${member.status === "departed" ? "staff-status-departed" : "staff-status-active"}`;
+    status.textContent = member.status === "departed" ? "退店済み" : "在籍中";
+    identity.append(number, name, status);
+
+    const detail = document.createElement("div");
+    detail.className = "cast-master-detail";
+    const complete = isCastProfileComplete(member);
+    const profileStatus = document.createElement("span");
+    profileStatus.className = `profile-status ${complete ? "profile-complete" : "profile-incomplete"}`;
+    profileStatus.textContent = complete ? "報酬設定済み" : "報酬設定が必要";
+    const reward = document.createElement("span");
+    reward.textContent = `報酬：${castRewardLabels[member.rewardSystem] || "未設定"}`;
+    const dates = document.createElement("span");
+    dates.textContent = `入店日：${member.entryDate || "未設定"}${member.exitedDate ? ` / 退店日：${member.exitedDate}` : ""}`;
+    const guarantee = document.createElement("span");
+    guarantee.textContent = member.rewardSystem === "guaranteedHourly"
+      ? `保証期限：${member.guaranteeNote || "未設定"}`
+      : "保証期限：対象外";
+    const note = document.createElement("span");
+    note.textContent = `備考：${member.note || "なし"}`;
+    detail.append(profileStatus, reward, dates, guarantee, note);
+
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "secondary-button";
+    edit.textContent = "報酬・情報を編集";
+    edit.addEventListener("click", () => openCastEdit(member));
+    row.append(identity, detail, edit);
     root.appendChild(row);
   });
+}
+
+function isCastProfileComplete(member) {
+  if (!castRewardLabels[member.rewardSystem]) return false;
+  return member.rewardSystem !== "guaranteedHourly" || Boolean(String(member.guaranteeNote || "").trim());
+}
+
+function openCastEdit(member) {
+  document.getElementById("editingCastId").value = member.id;
+  document.getElementById("castEditTitle").textContent = `${member.name}のキャスト情報`;
+  document.getElementById("castRewardSystem").value = member.rewardSystem || "";
+  document.getElementById("castGuaranteeNote").value = member.guaranteeNote || "";
+  document.getElementById("castEntryDate").value = member.entryDate || "";
+  document.getElementById("castNote").value = member.note || "";
+  hideMessage("castEditError");
+  updateGuaranteeNoteVisibility();
+  document.getElementById("castEditModal").showModal();
+}
+
+function updateGuaranteeNoteVisibility() {
+  const isGuaranteed = document.getElementById("castRewardSystem").value === "guaranteedHourly";
+  document.getElementById("castGuaranteeNoteField").classList.toggle("hidden", !isGuaranteed);
+  if (!isGuaranteed) markInvalid(document.getElementById("castGuaranteeNote"), false);
+}
+
+async function saveCastProfile() {
+  const id = document.getElementById("editingCastId").value;
+  const member = castMembers.find((cast) => cast.id === id);
+  const rewardSystem = document.getElementById("castRewardSystem").value;
+  const guaranteeNote = document.getElementById("castGuaranteeNote").value.trim();
+  const entryDate = document.getElementById("castEntryDate").value;
+  const note = document.getElementById("castNote").value.trim();
+  if (!member) {
+    showMessage("castEditError", "キャスト情報が見つかりません。");
+    return;
+  }
+  if (!castRewardLabels[rewardSystem]) {
+    markInvalid(document.getElementById("castRewardSystem"), true);
+    showMessage("castEditError", "報酬システムを選択してください。");
+    return;
+  }
+  markInvalid(document.getElementById("castRewardSystem"), false);
+  if (rewardSystem === "guaranteedHourly" && !guaranteeNote) {
+    markInvalid(document.getElementById("castGuaranteeNote"), true);
+    showMessage("castEditError", "保証時給の場合は、何月分まで保証するかを備考へ記載してください。");
+    return;
+  }
+  const button = document.getElementById("saveCastProfileButton");
+  button.disabled = true;
+  try {
+    await setDoc(doc(db, castCollectionName, id), {
+      rewardSystem,
+      guaranteeNote: rewardSystem === "guaranteedHourly" ? guaranteeNote : "",
+      entryDate,
+      note,
+      profileUpdatedAt: serverTimestamp(),
+      profileUpdatedBy: currentUser.uid,
+      updatedAt: serverTimestamp()
+    }, { merge: true });
+    document.getElementById("castEditModal").close();
+    await loadCastMembers();
+    hideMessage("errorMessage");
+    showMessage("successMessage", `${member.name}の報酬・キャスト情報を保存しました。`, false);
+  } catch (error) {
+    showMessage("castEditError", `キャスト情報の保存に失敗しました。${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function legacyJobTypeLabel(role) {
@@ -397,17 +634,6 @@ async function updateStaffStatus(member, status) {
   }
 }
 
-async function deleteCast(member) {
-  if (!confirm(`${member.name}を登録一覧から削除しますか？`)) return;
-  try {
-    await deleteDoc(doc(db, castCollectionName, member.id));
-    showMessage("successMessage", `${member.name}を削除しました。`, false);
-    await loadMasters();
-  } catch (error) {
-    showMessage("errorMessage", `削除に失敗しました。${error.message}`);
-  }
-}
-
 function refreshWorkSelects() {
   document.querySelectorAll(".cast-member-select").forEach((select) => {
     fillCastMemberSelect(select, select.value, select.dataset.savedName || "");
@@ -416,11 +642,11 @@ function refreshWorkSelects() {
 
 function fillCastMemberSelect(select, selectedId = "", savedName = "") {
   select.replaceChildren(makeOption("", "選択してください"));
-  castMembers.forEach((member) => {
+  castMembers.filter((member) => member.status !== "departed").forEach((member) => {
     select.appendChild(makeOption(member.id, member.name));
   });
-  if (selectedId && !castMembers.some((member) => member.id === selectedId) && savedName) {
-    select.appendChild(makeOption(selectedId, `${savedName}（登録削除済み）`));
+  if (selectedId && !castMembers.some((member) => member.id === selectedId && member.status !== "departed") && savedName) {
+    select.appendChild(makeOption(selectedId, `${savedName}（現在は退店済み）`));
   }
   select.dataset.savedName = savedName;
   select.value = selectedId;
@@ -745,7 +971,7 @@ function collectRows() {
       const select = row.querySelector(".cast-member-select");
       const member = castMembers.find((item) => item.id === select.value);
       return {
-        castId: select.value,
+        castId: member?.posCastId || select.value,
         castName: member?.name || select.dataset.savedName || "",
         hours: Number(row.querySelector(".cast-work-hours").value || 0)
       };
@@ -985,5 +1211,16 @@ function normalizeStaffWork(work) {
 
 function normalizeCastWork(work) {
   if (!Array.isArray(work)) return [];
-  return work.map((row) => ({ ...row, hours: Number(row.hours || 0) }));
+  return work.map((row) => {
+    const member = castMembers.find((cast) =>
+      String(cast.posCastId || "") === String(row.castId || "")
+      || cast.id === row.castId
+      || cast.name === (row.castName || row.name)
+    );
+    return {
+      ...row,
+      castId: member?.id || row.castId || "",
+      hours: Number(row.hours || 0)
+    };
+  });
 }

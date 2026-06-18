@@ -46,6 +46,45 @@ service cloud.firestore {
         || request.resource.data.status == 'departed');
     }
 
+    function isCastMember() {
+      return request.resource.data.keys().hasAll([
+        'posCastId',
+        'name',
+        'internalNo',
+        'status',
+        'source'
+      ])
+      && request.resource.data.posCastId is string
+      && request.resource.data.posCastId.size() > 0
+      && request.resource.data.name is string
+      && request.resource.data.name.size() > 0
+      && request.resource.data.name.size() <= 40
+      && request.resource.data.internalNo is number
+      && request.resource.data.internalNo >= 0
+      && (request.resource.data.status == 'active'
+        || request.resource.data.status == 'departed')
+      && request.resource.data.source == 'pos'
+      && (!request.resource.data.keys().hasAny(['rewardSystem'])
+        || request.resource.data.rewardSystem == ''
+        || request.resource.data.rewardSystem == 'slideHourly'
+        || request.resource.data.rewardSystem == 'guaranteedHourly')
+      && (!request.resource.data.keys().hasAny(['guaranteeNote'])
+        || (request.resource.data.guaranteeNote is string
+          && request.resource.data.guaranteeNote.size() <= 200))
+      && (!request.resource.data.keys().hasAny(['entryDate'])
+        || (request.resource.data.entryDate is string
+          && (request.resource.data.entryDate == ''
+            || request.resource.data.entryDate.matches('^\\d{4}-\\d{2}-\\d{2}$')))
+      )
+      && (!request.resource.data.keys().hasAny(['note'])
+        || (request.resource.data.note is string
+          && request.resource.data.note.size() <= 500))
+      && (!request.resource.data.keys().hasAny(['rewardSystem'])
+        || request.resource.data.rewardSystem != 'guaranteedHourly'
+        || (request.resource.data.keys().hasAny(['guaranteeNote'])
+          && request.resource.data.guaranteeNote.size() > 0));
+    }
+
     function isClosingPayload(document) {
       return request.resource.data.keys().hasAll([
         'businessDate',
@@ -131,12 +170,14 @@ service cloud.firestore {
 
     match /castMembers/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update, delete: if signedIn() && userRole() == 'shop';
+      allow create, update: if signedIn() && userRole() == 'shop' && isCastMember();
+      allow delete: if false;
     }
 
     match /castMembers-dev/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update, delete: if signedIn() && userRole() == 'shop';
+      allow create, update: if signedIn() && userRole() == 'shop' && isCastMember();
+      allow delete: if false;
     }
 
     match /users/{uid} {

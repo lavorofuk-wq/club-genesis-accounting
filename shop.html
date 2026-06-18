@@ -86,17 +86,13 @@
       <section class="section-shell">
         <div class="section-title">
           <div>
-            <h2>キャスト管理</h2>
-            <p class="mt-1 text-sm text-slate-500">キャスト登録は次の仕様確定後に拡張します。</p>
+            <h2>キャスト一覧</h2>
+            <p class="mt-1 text-sm text-slate-500">POSのキャスト名簿と連携しています。キャストの入店・退店操作はPOSで行ってください。</p>
           </div>
+          <button id="syncCastsButton" type="button" class="secondary-button">POS名簿を再同期</button>
         </div>
-        <div class="master-panel">
-          <div class="grid gap-3 sm:grid-cols-[1fr_auto]">
-            <input id="newCastName" type="text" maxlength="40" class="form-input" placeholder="キャスト名">
-            <button id="registerCastButton" type="button" class="primary-button">登録</button>
-          </div>
-          <div id="castMasterList" class="master-list mt-4"></div>
-        </div>
+        <div id="castSyncStatus" class="notice"></div>
+        <div id="castMasterList" class="cast-master-list mt-4"></div>
       </section>
 
       <section class="section-shell">
@@ -189,6 +185,41 @@
       <div class="mt-6 flex justify-end gap-3">
         <button value="cancel" class="secondary-button">戻る</button>
         <button id="confirmSaveButton" value="save" class="primary-button">経理へ送信</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="castEditModal" class="modal-card">
+    <form method="dialog" id="castEditForm">
+      <p class="brand-kicker">CAST PROFILE</p>
+      <h2 id="castEditTitle" class="mt-2 text-xl font-bold">キャスト情報</h2>
+      <input id="editingCastId" type="hidden">
+      <div class="mt-5 space-y-4">
+        <label>
+          <span class="form-label">報酬システム（必須）</span>
+          <select id="castRewardSystem" class="form-select">
+            <option value="">選択してください</option>
+            <option value="slideHourly">スライド時給</option>
+            <option value="guaranteedHourly">保証時給</option>
+          </select>
+        </label>
+        <label id="castGuaranteeNoteField" class="hidden">
+          <span class="form-label">保証期限の備考（必須）</span>
+          <textarea id="castGuaranteeNote" maxlength="200" rows="3" class="form-textarea" placeholder="例：2026年9月分まで保証時給"></textarea>
+        </label>
+        <label>
+          <span class="form-label">入店日</span>
+          <input id="castEntryDate" type="date" class="form-input">
+        </label>
+        <label>
+          <span class="form-label">備考</span>
+          <textarea id="castNote" maxlength="500" rows="4" class="form-textarea" placeholder="経理用の備考"></textarea>
+        </label>
+        <div id="castEditError" class="hidden alert alert-error"></div>
+      </div>
+      <div class="mt-6 flex justify-end gap-3">
+        <button value="cancel" class="secondary-button">戻る</button>
+        <button id="saveCastProfileButton" type="button" class="primary-button">保存</button>
       </div>
     </form>
   </dialog>
