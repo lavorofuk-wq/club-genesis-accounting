@@ -60,6 +60,9 @@ byId("confirmDeleteReceivedButton").addEventListener("click", deleteReceived);
 byId("loadFixedExpenseButton").addEventListener("click", renderFixedExpenseForm);
 byId("saveFixedExpenseButton").addEventListener("click", saveFixedExpenses);
 byId("fixedExpenseMonth").addEventListener("change", renderFixedExpenseForm);
+byId("exportCastRewardsXlsxButton").addEventListener("click", exportCastRewardsXlsx);
+byId("exportStaffPayrollXlsxButton").addEventListener("click", exportStaffPayrollXlsx);
+byId("exportIntroducerFeesXlsxButton").addEventListener("click", exportIntroducerFeesXlsx);
 document.querySelectorAll(".fixed-expense-input").forEach((input) => {
   input.addEventListener("input", updateFixedExpenseTotal);
 });
@@ -1061,6 +1064,8 @@ function calculateCastRewardRows(rewardClosings = rewardMonthClosings()) {
       monthlySales,
       monthlyHonShimeiSales: toNumber(sales.honShimeiSales),
       hours: toNumber(work.hours),
+      days: work.days?.size || 0,
+      shifts: work.shifts || [],
       hourlyRate,
       hourlyBase,
       backs,
@@ -1319,6 +1324,258 @@ function calculateStaffPayrollRows(closings) {
       payable: basePay + allowance
     };
   });
+}
+
+async function exportCastRewardsXlsx() {
+  const month = byId("startDate").value.slice(0, 7);
+  const rows = calculateCastRewardRows();
+  await exportStatementWorkbook({
+    buttonId: "exportCastRewardsXlsxButton",
+    fileName: `cast_rewards_${month.replace("-", "")}.xlsx`,
+    subject: "キャスト報酬明細書",
+    period: `${month.replace("-", "年")}月`,
+    rows,
+    nameForRow: (row) => row.name,
+    detailsForRow: (row) => [
+      ["報酬システム", rewardSystemLabel(row.member?.rewardSystem)],
+      ["月間小計売上", row.monthlySales],
+      ["本指名小計売上", row.monthlyHonShimeiSales],
+      ["適用時給", row.hourlyRate || "未設定"],
+      ["勤務日数", `${row.days}日`],
+      ["月間勤務時間", `${row.hours}時間`],
+      ["時給分", statementAmount(row.hourlyBase)],
+      ["本指名バック", row.backs.hon],
+      ["場内指名バック", row.backs.banai],
+      ["同伴バック", row.backs.dohan],
+      ["VIP室料バック", row.backs.vip],
+      ["キープボトルバック", row.backs.keepBottle],
+      ["シャンパン・ワインバック", row.backs.champagneWine],
+      ["ドリンクバック", row.backs.drink],
+      ["バック合計", row.backs.total],
+      ["時給＋バック", statementAmount(row.hourlyAndBack)],
+      ["売上報酬率", row.salesRewardRate ? `${Math.round(row.salesRewardRate * 100)}%` : "対象外"],
+      ["売上報酬", row.salesReward],
+      ["支給額（高い方）", statementAmount(row.payable)],
+      ...statementShiftRows(row.shifts)
+    ],
+    totalLabel: "支給額",
+    totalForRow: (row) => row.payable
+  });
+}
+
+async function exportStaffPayrollXlsx() {
+  updateVisibleFinalized();
+  const rows = calculateStaffPayrollRows(visibleFinalized);
+  await exportStatementWorkbook({
+    buttonId: "exportStaffPayrollXlsxButton",
+    fileName: `staff_payroll_${byId("startDate").value.replaceAll("-", "")}_${byId("endDate").value.replaceAll("-", "")}.xlsx`,
+    subject: "従業員給与明細書",
+    period: `${byId("startDate").value} ～ ${byId("endDate").value}`,
+    rows,
+    nameForRow: (row) => row.name,
+    detailsForRow: (row) => [
+      ["給与形態", payTypeLabel(row.payType)],
+      ["給与単価", row.payAmount],
+      ["勤務日数", `${row.days.size}日`],
+      ["勤務時間", `${row.hours}時間`],
+      ["基本給与", row.basePay],
+      ["手当", row.allowance],
+      ["支給額", row.payable],
+      ...statementShiftRows(row.shifts)
+    ],
+    totalLabel: "支給額",
+    totalForRow: (row) => row.payable
+  });
+}
+
+async function exportIntroducerFeesXlsx() {
+  const month = byId("startDate").value.slice(0, 7);
+  const rows = calculateIntroducerFeeRows(calculateCastRewardRows());
+  await exportStatementWorkbook({
+    buttonId: "exportIntroducerFeesXlsxButton",
+    fileName: `introducer_fees_${month.replace("-", "")}.xlsx`,
+    subject: "紹介料・顧問料明細書",
+    period: `${month.replace("-", "年")}月`,
+    rows,
+    nameForRow: (row) => `${row.introducerName}（${row.castName}分）`,
+    detailsForRow: (row) => [
+      ["紹介者", row.introducerName],
+      ["対象キャスト", row.castName],
+      ["紹介料システム", introducerFeeSystemLabel(row.feeSystem)],
+      ["本指名小計売上", row.honShimeiSales],
+      ["本指名売上10%", row.sales10],
+      ["キャスト総支給額", statementAmount(row.payable)],
+      ["総支給額10%", statementAmount(row.pay10)],
+      ["採用した紹介料", statementAmount(row.introductionFee)],
+      ["顧問料", row.advisoryFee],
+      ["紹介関連支出", statementAmount(row.totalExpense)]
+    ],
+    totalLabel: "紹介料・顧問料 合計",
+    totalForRow: (row) => row.totalExpense
+  });
+}
+
+function statementAmount(value) {
+  return value === null ? "計算不可" : toNumber(value);
+}
+
+function statementShiftRows(shifts = []) {
+  return shifts.map((shift) => [
+    `勤務 ${shift.date}`,
+    `${shift.startTime || "--:--"} ～ ${shift.endTime || "--:--"} / ${toNumber(shift.hours)}時間`
+  ]);
+}
+
+async function exportStatementWorkbook(config) {
+  const ExcelJS = globalThis.ExcelJS;
+  if (!ExcelJS) {
+    showMessage("errorMessage", "XLSX出力機能を読み込めませんでした。再読み込みしてください。");
+    return;
+  }
+  if (!config.rows.length) {
+    showMessage("errorMessage", "明細書の出力対象データがありません。");
+    return;
+  }
+  const button = byId(config.buttonId);
+  button.disabled = true;
+  hideMessage("errorMessage");
+  try {
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = "GENESIS Management System";
+    workbook.created = new Date();
+    const usedNames = new Set();
+    config.rows.forEach((row, index) => {
+      const displayName = config.nameForRow(row);
+      const sheetName = uniqueSheetName(displayName || `明細${index + 1}`, usedNames);
+      const worksheet = workbook.addWorksheet(sheetName, {
+        pageSetup: {
+          paperSize: 9,
+          orientation: "portrait",
+          fitToPage: true,
+          fitToWidth: 1,
+          fitToHeight: 0,
+          horizontalCentered: true,
+          verticalCentered: false,
+          margins: { left: 0.4, right: 0.4, top: 0.5, bottom: 0.5, header: 0.2, footer: 0.2 }
+        }
+      });
+      buildStatementSheet(worksheet, {
+        subject: config.subject,
+        period: config.period,
+        displayName,
+        details: config.detailsForRow(row),
+        totalLabel: config.totalLabel,
+        total: config.totalForRow(row)
+      });
+    });
+    const buffer = await workbook.xlsx.writeBuffer();
+    downloadXlsx(buffer, config.fileName);
+    showMessage("successMessage", `${config.rows.length}件の明細書をXLSX出力しました。`);
+  } catch (error) {
+    showMessage("errorMessage", `XLSX明細書を出力できませんでした。${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function buildStatementSheet(worksheet, statement) {
+  worksheet.columns = [
+    { key: "label", width: 28 },
+    { key: "value", width: 24 },
+    { key: "unit", width: 10 }
+  ];
+  worksheet.mergeCells("A1:C1");
+  worksheet.getCell("A1").value = "CLUB GENESIS";
+  worksheet.getCell("A1").font = { name: "Yu Gothic", size: 12, bold: true, color: { argb: "FF475569" } };
+  worksheet.getCell("A1").alignment = { horizontal: "center" };
+  worksheet.mergeCells("A2:C2");
+  worksheet.getCell("A2").value = statement.subject;
+  worksheet.getCell("A2").font = { name: "Yu Gothic", size: 18, bold: true, color: { argb: "FF0F172A" } };
+  worksheet.getCell("A2").alignment = { horizontal: "center", vertical: "middle" };
+  worksheet.getRow(2).height = 30;
+  worksheet.addRow([]);
+  worksheet.addRow(["対象期間", statement.period]);
+  worksheet.addRow(["氏名・支払先", statement.displayName]);
+  worksheet.addRow([]);
+  const header = worksheet.addRow(["項目", "内容・金額", "単位"]);
+  header.eachCell((cell) => {
+    cell.font = { name: "Yu Gothic", bold: true, color: { argb: "FFFFFFFF" } };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF334155" } };
+    cell.alignment = { horizontal: "center", vertical: "middle" };
+  });
+  statement.details.forEach(([label, value]) => {
+    const numeric = typeof value === "number" && Number.isFinite(value);
+    const row = worksheet.addRow([label, numeric ? value : String(value ?? ""), numeric ? "円" : ""]);
+    row.getCell(2).alignment = { horizontal: numeric ? "right" : "left", vertical: "middle" };
+    if (numeric) row.getCell(2).numFmt = '#,##0"円"';
+  });
+  worksheet.addRow([]);
+  const totalRow = worksheet.addRow([
+    statement.totalLabel,
+    statement.total === null ? "計算不可" : toNumber(statement.total),
+    statement.total === null ? "" : "円"
+  ]);
+  totalRow.eachCell((cell) => {
+    cell.font = { name: "Yu Gothic", size: 13, bold: true, color: { argb: "FF0F172A" } };
+    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE2E8F0" } };
+  });
+  if (statement.total !== null) {
+    totalRow.getCell(2).numFmt = '#,##0"円"';
+    totalRow.getCell(2).alignment = { horizontal: "right" };
+  }
+  worksheet.addRow([]);
+  worksheet.addRow(["備考", "上記金額を明細として確認しました。"]);
+  worksheet.addRow([]);
+  worksheet.addRow(["受取日", "　　　　　年　　　月　　　日"]);
+  worksheet.addRow(["受取署名", "　　　　　　　　　　　　　　　　　"]);
+  worksheet.mergeCells(`B${worksheet.rowCount}:C${worksheet.rowCount}`);
+  worksheet.eachRow((row, rowNumber) => {
+    row.font = row.font || { name: "Yu Gothic", size: 10 };
+    if (rowNumber >= 4) row.height = 22;
+    row.eachCell({ includeEmpty: true }, (cell) => {
+      cell.font = { name: "Yu Gothic", size: cell.font?.size || 10, bold: cell.font?.bold || false, color: cell.font?.color };
+      cell.alignment = { vertical: "middle", wrapText: true, ...cell.alignment };
+      if (rowNumber >= 4 && rowNumber <= worksheet.rowCount - 4) {
+        cell.border = {
+          top: { style: "thin", color: { argb: "FFCBD5E1" } },
+          left: { style: "thin", color: { argb: "FFCBD5E1" } },
+          bottom: { style: "thin", color: { argb: "FFCBD5E1" } },
+          right: { style: "thin", color: { argb: "FFCBD5E1" } }
+        };
+      }
+    });
+  });
+  worksheet.headerFooter.oddFooter = "&CGENESIS Management System";
+  worksheet.pageSetup.printArea = `A1:C${worksheet.rowCount}`;
+  worksheet.pageSetup.printTitlesRow = "1:7";
+  worksheet.views = [{ showGridLines: false }];
+}
+
+function uniqueSheetName(name, usedNames) {
+  const base = String(name).replace(/[\\/*?:[\]]/g, " ").trim().slice(0, 31) || "明細";
+  let candidate = base;
+  let suffix = 2;
+  while (usedNames.has(candidate)) {
+    const tail = `_${suffix}`;
+    candidate = `${base.slice(0, 31 - tail.length)}${tail}`;
+    suffix += 1;
+  }
+  usedNames.add(candidate);
+  return candidate;
+}
+
+function downloadXlsx(buffer, fileName) {
+  const blob = new Blob([buffer], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 function createPayrollCard(title, subtitle, metrics) {

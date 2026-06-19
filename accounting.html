@@ -128,7 +128,10 @@
       <section class="section-shell hidden" data-accounting-workspace="castRewards">
         <div class="section-title">
           <div><h2>キャスト報酬</h2><p class="mt-1 text-sm text-slate-500">報酬計算設定は次の工程で追加します。現在は計算根拠を集計します。</p></div>
-          <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
+          <div class="flex flex-wrap gap-2">
+            <button id="exportCastRewardsXlsxButton" type="button" class="primary-button">明細書をXLSX出力</button>
+            <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
+          </div>
         </div>
         <div id="castRewardList" class="payroll-list"></div>
       </section>
@@ -144,7 +147,10 @@
       <section class="section-shell hidden" data-accounting-workspace="staffPayroll">
         <div class="section-title">
           <div><h2>従業員給与</h2><p class="mt-1 text-sm text-slate-500">確定データの勤務日数・勤務時間・手当から算出します。</p></div>
-          <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
+          <div class="flex flex-wrap gap-2">
+            <button id="exportStaffPayrollXlsxButton" type="button" class="primary-button">明細書をXLSX出力</button>
+            <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
+          </div>
         </div>
         <div id="staffPayrollList" class="payroll-list"></div>
       </section>
@@ -155,7 +161,10 @@
             <h2>紹介料・顧問料</h2>
             <p class="mt-1 text-sm text-slate-500">月間の本指名小計売上とキャスト総支給額を基準に支出額を算出します。場内延長売上は紹介料の対象外です。</p>
           </div>
-          <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
+          <div class="flex flex-wrap gap-2">
+            <button id="exportIntroducerFeesXlsxButton" type="button" class="primary-button">明細書をXLSX出力</button>
+            <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
+          </div>
         </div>
         <div id="introducerFeeSummary" class="grid gap-4 sm:grid-cols-3"></div>
         <div id="introducerFeeList" class="payroll-list mt-5"></div>
@@ -259,6 +268,7 @@
     </div>
   </dialog>
 
-  <script type="module" src="js/accounting.js?v=1.25.1"></script>
+  <script src="js/vendor/exceljs.min.js"></script>
+  <script type="module" src="js/accounting.js?v=1.26"></script>
 </body>
 </html>
