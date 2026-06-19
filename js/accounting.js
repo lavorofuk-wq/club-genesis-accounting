@@ -572,6 +572,26 @@ function renderFinalizedTable() {
   });
 }
 
+function banaiExtensionSalesPhases(items) {
+  const phases = new Map();
+  let currentCastIds = [];
+  items.forEach((item) => {
+    if (item.isBanaiExtension) {
+      currentCastIds = [...new Set([
+        ...item.banaiExtCastIds,
+        item.banaiExtCastId,
+        item.castId
+      ].filter(Boolean).map(String))];
+    }
+    if (!currentCastIds.length || item.isDiscount) return;
+    const sortedIds = [...currentCastIds].sort();
+    const key = sortedIds.join("|");
+    if (!phases.has(key)) phases.set(key, { castIds: sortedIds, subtotal: 0 });
+    phases.get(key).subtotal += item.price * item.quantity;
+  });
+  return [...phases.values()];
+}
+
 function aggregateCastSales(items) {
   const map = new Map();
   const ensure = (id, name = "") => {
@@ -612,16 +632,10 @@ function aggregateCastSales(items) {
         });
         return;
       }
-      transaction.items
-        .filter((item) => item.isBanaiExtension)
-        .forEach((item) => {
-          const castIds = [...new Set([
-            ...item.banaiExtCastIds,
-            item.banaiExtCastId
-          ].filter(Boolean))];
-          if (!castIds.length) return;
-          const share = Math.floor((item.price * item.quantity) / castIds.length);
-          castIds.forEach((castId) => {
+      banaiExtensionSalesPhases(transaction.items)
+        .forEach((phase) => {
+          const share = Math.floor(phase.subtotal / phase.castIds.length);
+          phase.castIds.forEach((castId) => {
             const current = ensure(castId);
             current.jonaiExtensionSales += share;
             current.totalAttributedSales += share;
@@ -1163,7 +1177,8 @@ function normalizeTransactions(rows) {
       isHonShimei: Boolean(item.isHonShimei),
       isBanaiShimei: Boolean(item.isBanaiShimei),
       isBanaiExtension: Boolean(item.isBanaiExtension),
-      isVipCharge: Boolean(item.isVipCharge)
+      isVipCharge: Boolean(item.isVipCharge),
+      isDiscount: Boolean(item.isDiscount)
     })) : []
   }));
 }
