@@ -36,6 +36,8 @@ const castRewardLabels = {
   slideHourly: "スライド時給",
   guaranteedHourly: "保証時給"
 };
+const expenseCategories = ["酒代", "広告宣伝①", "広告宣伝②", "消耗品/備品", "交際費", "交通費", "その他", "美容室"];
+const allowanceTypes = ["美容室", "遠方手当", "送迎手当", "その他"];
 const introducerFeeSystemLabels = {
   sales10: "売上10%",
   pay10: "総支給額10%",
@@ -1118,15 +1120,14 @@ function addStaffWorkRow(data = {}) {
   const name = document.createElement("div");
   name.className = "staff-work-name";
   name.innerHTML = `<strong>${escapeHtml(member.name)}</strong><span class="block text-xs text-slate-500">${escapeHtml(payTypeLabels[member.payType] || "給与形態未設定")}</span>`;
-  const isHourly = member.payType === "hourly";
-  const startLabel = createTimeField("開始時刻", "staff-work-start", data.startTime || "", !isHourly);
-  const endLabel = createTimeField("終了時刻", "staff-work-end", data.endTime || "", !isHourly);
+  const startLabel = createTimeField("開始時刻", "staff-work-start", data.startTime || "");
+  const endLabel = createTimeField("終了時刻", "staff-work-end", data.endTime || "");
   const hours = document.createElement("input");
   hours.type = "text";
   hours.readOnly = true;
   hours.className = "form-input staff-work-hours";
-  hours.value = isHourly && data.startTime && data.endTime ? formatHours(calculateWorkHours(data.startTime, data.endTime)) : "";
-  hours.placeholder = isHourly ? "自動計算" : "日給";
+  hours.value = data.startTime && data.endTime ? formatHours(calculateWorkHours(data.startTime, data.endTime)) : "";
+  hours.placeholder = "自動計算";
   const hoursLabel = document.createElement("label");
   hoursLabel.className = "work-field-label";
   hoursLabel.append("稼働時間", hours);
@@ -1211,21 +1212,43 @@ function addCastWorkRow(data = {}) {
   const member = document.createElement("select");
   member.className = "form-select cast-member-select";
   fillCastMemberSelect(member, data.castId || "", data.castName || data.name || "");
+  const memberLabel = document.createElement("label");
+  memberLabel.className = "work-field-label";
+  memberLabel.append("キャスト", member);
+  const startLabel = createTimeField("開始時刻", "cast-work-start", data.startTime || "");
+  const endLabel = createTimeField("終了時刻", "cast-work-end", data.endTime || "");
   const hours = document.createElement("input");
-  hours.type = "number";
-  hours.min = "0";
-  hours.max = "24";
-  hours.step = "0.01";
-  hours.placeholder = "勤務時間";
+  hours.type = "text";
+  hours.readOnly = true;
+  hours.placeholder = "自動計算";
   hours.className = "form-input cast-work-hours";
-  hours.value = data.hours ?? 0;
+  hours.value = data.startTime && data.endTime
+    ? formatHours(calculateWorkHours(data.startTime, data.endTime))
+    : data.hours ? formatHours(Number(data.hours)) : "";
+  const hoursLabel = document.createElement("label");
+  hoursLabel.className = "work-field-label";
+  hoursLabel.append("勤務時間", hours);
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "danger-button";
   remove.textContent = "削除";
   remove.addEventListener("click", () => row.remove());
-  row.append(member, hours, remove);
+  [startLabel.querySelector("input"), endLabel.querySelector("input")].forEach((input) => {
+    input.addEventListener("input", () => updateCastWorkHours(row));
+  });
+  row.append(memberLabel, startLabel, endLabel, hoursLabel, remove);
   document.getElementById("castWorkRows").appendChild(row);
+}
+
+function updateCastWorkHours(row) {
+  const start = row.querySelector(".cast-work-start");
+  const end = row.querySelector(".cast-work-end");
+  const hoursInput = row.querySelector(".cast-work-hours");
+  const hours = calculateWorkHours(start.value, end.value);
+  const valid = isQuarterTime(start.value) && isQuarterTime(end.value) && isQuarterHour(hours);
+  markInvalid(start, start.value !== "" && !isQuarterTime(start.value));
+  markInvalid(end, end.value !== "" && !isQuarterTime(end.value));
+  hoursInput.value = valid ? formatHours(hours) : "";
 }
 
 function addExpenseRow(data = {}) {
@@ -1233,8 +1256,11 @@ function addExpenseRow(data = {}) {
   row.className = "dynamic-row expense-row";
   const category = document.createElement("select");
   category.className = "form-select expense-category";
-  ["家賃", "水光熱", "酒代", "広告", "人件費", "雑費"].forEach((item) => category.appendChild(makeOption(item, item)));
-  category.value = data.category || "雑費";
+  expenseCategories.forEach((item) => category.appendChild(makeOption(item, item)));
+  if (data.category && !expenseCategories.includes(data.category)) {
+    category.appendChild(makeOption(data.category, `${data.category}（旧データ）`));
+  }
+  category.value = data.category || "酒代";
   const amount = document.createElement("input");
   amount.type = "number";
   amount.min = "0";
@@ -1244,9 +1270,17 @@ function addExpenseRow(data = {}) {
   const note = document.createElement("input");
   note.type = "text";
   note.maxLength = 120;
-  note.placeholder = "メモ";
+  note.placeholder = "その他の備考（必須）";
   note.className = "form-input expense-note";
   note.value = data.note || "";
+  const updateNote = () => {
+    const required = category.value === "その他";
+    note.classList.toggle("hidden", !required);
+    note.required = required;
+    if (!required) markInvalid(note, false);
+  };
+  category.addEventListener("change", updateNote);
+  note.addEventListener("input", () => markInvalid(note, category.value === "その他" && !note.value.trim()));
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "danger-button";
@@ -1254,6 +1288,7 @@ function addExpenseRow(data = {}) {
   remove.addEventListener("click", () => row.remove());
   row.append(category, amount, note, remove);
   document.getElementById("expenseRows").appendChild(row);
+  updateNote();
 }
 
 function addAllowanceRow(data = {}) {
@@ -1261,27 +1296,80 @@ function addAllowanceRow(data = {}) {
   row.className = "dynamic-row allowance-row";
   const type = document.createElement("select");
   type.className = "form-select allowance-type";
-  ["夜手当", "役職手当", "交通費", "その他"].forEach((item) => type.appendChild(makeOption(item, item)));
-  type.value = data.type || "夜手当";
+  allowanceTypes.forEach((item) => type.appendChild(makeOption(item, item)));
+  if (data.type && !allowanceTypes.includes(data.type)) {
+    type.appendChild(makeOption(data.type, `${data.type}（旧データ）`));
+  }
+  type.value = data.type || "美容室";
   const amount = document.createElement("input");
   amount.type = "number";
   amount.min = "0";
   amount.step = "1";
   amount.className = "form-input allowance-amount";
   amount.value = data.amount ?? 0;
-  const recipient = document.createElement("input");
-  recipient.type = "text";
-  recipient.maxLength = 60;
-  recipient.placeholder = "支給対象者";
-  recipient.className = "form-input allowance-recipient";
-  recipient.value = data.recipientName || data.recipient || "";
+  const recipient = document.createElement("select");
+  recipient.className = "form-select allowance-recipient";
+  const note = document.createElement("input");
+  note.type = "text";
+  note.maxLength = 120;
+  note.placeholder = "その他の備考（必須）";
+  note.className = "form-input allowance-note";
+  note.value = data.note || "";
+  const refreshRecipient = () => {
+    const savedId = data.recipientId || recipient.value;
+    const savedName = data.recipientName || data.recipient || recipient.dataset.savedName || "";
+    const members = type.value === "美容室"
+      ? castMembers.filter((member) => member.status === "active")
+      : staffMembers.filter((member) => member.status !== "departed");
+    recipient.replaceChildren(makeOption("", "支給対象者を選択"));
+    members.forEach((member) => {
+      const option = makeOption(member.id, member.name);
+      option.dataset.name = member.name;
+      recipient.appendChild(option);
+    });
+    const matched = members.find((member) =>
+      member.id === savedId
+      || member.name === savedName
+      || (type.value === "美容室" && String(member.posCastId || "") === String(savedId || ""))
+    );
+    if (matched) {
+      recipient.value = matched.id;
+      recipient.dataset.savedName = matched.name;
+    } else if (savedName) {
+      const option = makeOption(savedId || `legacy:${savedName}`, `${savedName}（旧データ）`);
+      option.dataset.name = savedName;
+      recipient.appendChild(option);
+      recipient.value = option.value;
+      recipient.dataset.savedName = savedName;
+    }
+  };
+  const updateNote = () => {
+    const required = type.value === "その他";
+    note.classList.toggle("hidden", !required);
+    note.required = required;
+    if (!required) markInvalid(note, false);
+  };
+  type.addEventListener("change", () => {
+    recipient.dataset.savedName = "";
+    data.recipientId = "";
+    data.recipientName = "";
+    data.recipient = "";
+    refreshRecipient();
+    updateNote();
+  });
+  recipient.addEventListener("change", () => {
+    recipient.dataset.savedName = recipient.selectedOptions[0]?.dataset.name || "";
+  });
+  note.addEventListener("input", () => markInvalid(note, type.value === "その他" && !note.value.trim()));
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "danger-button";
   remove.textContent = "削除";
   remove.addEventListener("click", () => row.remove());
-  row.append(type, amount, recipient, remove);
+  row.append(type, amount, recipient, note, remove);
   document.getElementById("allowanceRows").appendChild(row);
+  refreshRecipient();
+  updateNote();
 }
 
 function resetRows() {
@@ -1300,6 +1388,9 @@ function wireRealtimeValidation() {
     if (event.target.matches("input[type='number']")) validateNumberInput(event.target);
     if (event.target.matches(".staff-work-start, .staff-work-end")) {
       updateStaffWorkHours(event.target.closest(".staff-work-row"));
+    }
+    if (event.target.matches(".cast-work-start, .cast-work-end")) {
+      updateCastWorkHours(event.target.closest(".cast-work-row"));
     }
     if (["totalSales", "cashSales", "cardSales", "totalCustomers"].includes(event.target.id)) {
       calculateUnitPrice();
@@ -1344,7 +1435,6 @@ function collectRows() {
       const member = staffMembers.find((item) => item.id === row.dataset.staffId);
       const startTime = row.querySelector(".staff-work-start").value;
       const endTime = row.querySelector(".staff-work-end").value;
-      const isHourly = member?.payType === "hourly";
       return {
         staffId: member?.id || row.dataset.staffId || "",
         staffName: member?.name || "",
@@ -1354,7 +1444,7 @@ function collectRows() {
         payAmount: Number(member?.payAmount || 0),
         startTime,
         endTime,
-        hours: isHourly ? calculateWorkHours(startTime, endTime) : 0
+        hours: calculateWorkHours(startTime, endTime)
       };
     })
     .filter((row) => row.staffId || row.staffName);
@@ -1363,10 +1453,14 @@ function collectRows() {
     .map((row) => {
       const select = row.querySelector(".cast-member-select");
       const member = castMembers.find((item) => item.id === select.value);
+      const startTime = row.querySelector(".cast-work-start").value;
+      const endTime = row.querySelector(".cast-work-end").value;
       return {
         castId: member?.posCastId || select.value,
         castName: member?.name || select.dataset.savedName || "",
-        hours: Number(row.querySelector(".cast-work-hours").value || 0)
+        startTime,
+        endTime,
+        hours: calculateWorkHours(startTime, endTime)
       };
     })
     .filter((row) => row.castId || row.castName || row.hours > 0);
@@ -1377,15 +1471,22 @@ function collectRows() {
       amount: Number(row.querySelector(".expense-amount").value || 0),
       note: row.querySelector(".expense-note").value.trim()
     }))
-    .filter((row) => row.amount > 0 || row.note);
+    .filter((row) => row.amount > 0 || row.note || row.category === "その他");
 
   const allowances = [...document.querySelectorAll(".allowance-row")]
-    .map((row) => ({
-      type: row.querySelector(".allowance-type").value,
-      amount: Number(row.querySelector(".allowance-amount").value || 0),
-      recipient: row.querySelector(".allowance-recipient").value.trim()
-    }))
-    .filter((row) => row.amount > 0 || row.recipient);
+    .map((row) => {
+      const recipient = row.querySelector(".allowance-recipient");
+      const recipientName = recipient.selectedOptions[0]?.dataset.name || recipient.dataset.savedName || "";
+      return {
+        type: row.querySelector(".allowance-type").value,
+        amount: Number(row.querySelector(".allowance-amount").value || 0),
+        recipientId: recipient.value,
+        recipient: recipientName,
+        recipientName,
+        note: row.querySelector(".allowance-note").value.trim()
+      };
+    })
+    .filter((row) => row.amount > 0 || row.recipient || row.note || row.type === "その他");
 
   return { staffWork, castWork, expenses, allowances };
 }
@@ -1453,16 +1554,19 @@ function validatePayload(payload) {
   if (payload.businessDate > todayString()) errors.push("未来の日付は送信できません。");
   payload.staffWork.forEach((row) => {
     if (!row.staffId && !row.staffName) errors.push("勤務するスタッフを登録一覧から選択してください。");
-    if (row.payType === "hourly" && (!isQuarterTime(row.startTime) || !isQuarterTime(row.endTime))) {
+    if (!isQuarterTime(row.startTime) || !isQuarterTime(row.endTime)) {
       errors.push("スタッフの開始・終了時刻は15分単位で入力してください。");
     }
-    if (row.payType === "hourly" && !isQuarterHour(row.hours)) {
-      errors.push("時給スタッフの稼働時間は0時間超〜24時間以内で入力してください。");
+    if (!isQuarterHour(row.hours)) {
+      errors.push("スタッフの稼働時間は0時間超〜24時間以内で入力してください。");
     }
   });
   payload.castWork.forEach((row) => {
     if (!row.castId && !row.castName) errors.push("勤務するキャストを登録一覧から選択してください。");
-    if (!isWorkHour(row.hours)) errors.push("キャスト勤務時間は0〜24時間で入力してください。");
+    if (!isQuarterTime(row.startTime) || !isQuarterTime(row.endTime)) {
+      errors.push("キャストの開始・終了時刻は15分単位で入力してください。");
+    }
+    if (!isQuarterHour(row.hours)) errors.push("キャスト勤務時間は0時間超〜24時間以内で入力してください。");
   });
   ["totalSales", "cashSales", "cardSales"].forEach((key) => {
     if (!isNonNegativeInteger(payload.sales[key])) errors.push("売上は0以上の整数で入力してください。");
@@ -1475,9 +1579,19 @@ function validatePayload(payload) {
   });
   payload.expenses.forEach((row) => {
     if (!row.category || !isNonNegativeInteger(row.amount)) errors.push("経費のカテゴリと金額を確認してください。");
+    if (row.category === "その他" && !row.note) errors.push("経費「その他」の備考を入力してください。");
   });
   payload.allowances.forEach((row) => {
     if (!row.type || !isNonNegativeInteger(row.amount) || !row.recipient) errors.push("手当の種類、金額、支給対象者を確認してください。");
+    if (row.type === "その他" && !row.note) errors.push("手当「その他」の備考を入力してください。");
+    const isCastRecipient = castMembers.some((member) => member.id === row.recipientId && member.status === "active");
+    const isStaffRecipient = staffMembers.some((member) => member.id === row.recipientId && member.status !== "departed");
+    if (row.type === "美容室" && !isCastRecipient && !String(row.recipientId).startsWith("legacy:")) {
+      errors.push("美容室手当の対象者は在籍キャストから選択してください。");
+    }
+    if (row.type !== "美容室" && !isStaffRecipient && !String(row.recipientId).startsWith("legacy:")) {
+      errors.push(`${row.type}の対象者は在籍スタッフから選択してください。`);
+    }
   });
   return [...new Set(errors)];
 }

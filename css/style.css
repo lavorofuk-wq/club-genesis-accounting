@@ -347,9 +347,23 @@ body {
   padding: 12px;
 }
 
+.cast-work-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.cast-work-row .danger-button {
+  justify-self: end;
+}
+
 @media (min-width: 768px) {
   .dynamic-row.cast-work-row {
-    grid-template-columns: minmax(200px, 1fr) 150px auto;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: end;
+  }
+
+  .cast-work-row .danger-button {
+    grid-column: 1 / -1;
   }
 
   .dynamic-row.staff-work-row {
@@ -362,7 +376,13 @@ body {
   }
 
   .dynamic-row.allowance-row {
-    grid-template-columns: 180px 160px minmax(180px, 1fr) auto;
+    grid-template-columns: 150px 140px minmax(170px, 1fr) minmax(180px, 1fr) auto;
+  }
+}
+
+@media (min-width: 1024px) {
+  .cast-work-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

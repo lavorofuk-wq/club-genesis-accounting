@@ -15,8 +15,8 @@ import { requireRole, logout, showMessage, hideMessage } from "./auth.js";
 import { deleteDoc } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore.js";
 
 const yen = new Intl.NumberFormat("ja-JP");
-const expenseCategories = ["家賃", "水光熱", "酒代", "広告", "人件費", "雑費"];
-const allowanceTypes = ["夜手当", "役職手当", "交通費", "その他"];
+const expenseCategories = ["酒代", "広告宣伝①", "広告宣伝②", "消耗品/備品", "交際費", "交通費", "その他", "美容室"];
+const allowanceTypes = ["美容室", "遠方手当", "送迎手当", "その他"];
 let currentUser = null;
 let allClosings = [];
 let receivedClosings = [];
@@ -242,7 +242,7 @@ function openReceivedEdit(id) {
 
 function addExpenseRow(value = {}) {
   byId("editExpenseRows").appendChild(createMoneyRow("expense", expenseCategories, {
-    label: value.category || "雑費",
+    label: value.category || "酒代",
     amount: value.amount || 0,
     detail: value.note || ""
   }));
@@ -252,7 +252,9 @@ function addAllowanceRow(value = {}) {
   byId("editAllowanceRows").appendChild(createMoneyRow("allowance", allowanceTypes, {
     label: value.type || "その他",
     amount: value.amount || 0,
-    detail: value.recipientName || value.recipient || ""
+    detail: value.recipientName || value.recipient || "",
+    recipientId: value.recipientId || "",
+    note: value.note || ""
   }));
 }
 
@@ -268,25 +270,90 @@ function createMoneyRow(kind, options, value) {
     el.selected = option === value.label;
     select.appendChild(el);
   });
+  if (value.label && !options.includes(value.label)) {
+    const legacy = document.createElement("option");
+    legacy.value = value.label;
+    legacy.textContent = `${value.label}（旧データ）`;
+    legacy.selected = true;
+    select.appendChild(legacy);
+  }
   const amount = document.createElement("input");
   amount.type = "number";
   amount.min = "0";
   amount.step = "1";
   amount.className = "form-input edit-amount";
   amount.value = value.amount;
-  const detail = document.createElement("input");
-  detail.type = "text";
-  detail.maxLength = "100";
-  detail.className = "form-input edit-detail";
-  detail.placeholder = kind === "expense" ? "メモ" : "支給対象者";
-  detail.value = value.detail;
+  const detail = kind === "expense" ? document.createElement("input") : document.createElement("select");
+  detail.className = kind === "expense" ? "form-input edit-detail" : "form-select edit-detail";
+  const note = document.createElement("input");
+  note.type = "text";
+  note.maxLength = "120";
+  note.className = "form-input edit-note";
+  note.placeholder = "その他の備考（必須）";
+  note.value = kind === "expense" ? value.detail : value.note;
+  if (kind === "expense") {
+    detail.type = "text";
+    detail.maxLength = "120";
+    detail.placeholder = "その他の備考（必須）";
+    detail.value = value.detail;
+  }
+  const refreshRecipient = () => {
+    if (kind !== "allowance") return;
+    const members = select.value === "美容室"
+      ? castMembers.filter((member) => member.status === "active")
+      : staffMembers.filter((member) => member.status !== "departed");
+    detail.replaceChildren(makeSelectOption("", "支給対象者を選択"));
+    members.forEach((member) => {
+      const option = makeSelectOption(member.id, member.name);
+      option.dataset.name = member.name;
+      detail.appendChild(option);
+    });
+    const matched = members.find((member) =>
+      member.id === value.recipientId
+      || member.name === value.detail
+      || (select.value === "美容室" && String(member.posCastId || "") === String(value.recipientId || ""))
+    );
+    if (matched) {
+      detail.value = matched.id;
+    } else if (value.detail) {
+      const legacy = makeSelectOption(value.recipientId || `legacy:${value.detail}`, `${value.detail}（旧データ）`);
+      legacy.dataset.name = value.detail;
+      detail.appendChild(legacy);
+      detail.value = legacy.value;
+    }
+  };
+  const updateNote = () => {
+    const required = select.value === "その他";
+    const target = kind === "expense" ? detail : note;
+    target.classList.toggle("hidden", !required);
+    if (!required) target.classList.remove("invalid");
+  };
+  select.addEventListener("change", () => {
+    if (kind === "allowance") {
+      value.recipientId = "";
+      value.detail = "";
+      refreshRecipient();
+    }
+    updateNote();
+  });
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "danger-button";
   remove.textContent = "削除";
   remove.addEventListener("click", () => row.remove());
-  row.append(select, amount, detail, remove);
+  row.append(select, amount, detail);
+  if (kind === "allowance") row.appendChild(note);
+  row.appendChild(remove);
+  refreshRecipient();
+  updateNote();
   return row;
+}
+
+function makeSelectOption(value, label) {
+  const option = document.createElement("option");
+  option.value = value;
+  option.textContent = label;
+  return option;
 }
 
 function renderReceivedTransactions(closing) {
@@ -383,11 +450,24 @@ function collectMoneyRows(rootId, labelKey) {
   return [...byId(rootId).querySelectorAll(".dynamic-row")].map((row) => {
     const label = row.querySelector(".edit-label").value;
     const amount = Number(row.querySelector(".edit-amount").value);
-    const detail = row.querySelector(".edit-detail").value.trim();
+    const detailControl = row.querySelector(".edit-detail");
+    const detail = detailControl.tagName === "SELECT"
+      ? detailControl.selectedOptions[0]?.dataset.name || ""
+      : detailControl.value.trim();
+    const recipientId = detailControl.tagName === "SELECT" ? detailControl.value : "";
+    const note = row.querySelector(".edit-note")?.value.trim() || (labelKey === "category" ? detail : "");
     if (!Number.isInteger(amount) || amount < 0) throw new Error("経費・手当の金額は0以上の整数で入力してください。");
+    if (label === "その他" && !note) throw new Error("「その他」の備考を入力してください。");
+    if (labelKey === "type" && !detail) throw new Error("手当の支給対象者を選択してください。");
+    if (labelKey === "type" && !String(recipientId).startsWith("legacy:")) {
+      const isCast = castMembers.some((member) => member.id === recipientId && member.status === "active");
+      const isStaff = staffMembers.some((member) => member.id === recipientId && member.status !== "departed");
+      if (label === "美容室" && !isCast) throw new Error("美容室手当の対象者は在籍キャストから選択してください。");
+      if (label !== "美容室" && !isStaff) throw new Error(`${label}の対象者は在籍スタッフから選択してください。`);
+    }
     return labelKey === "category"
       ? { category: label, amount, note: detail }
-      : { type: label, amount, recipient: detail, recipientName: detail };
+      : { type: label, amount, recipientId, recipient: detail, recipientName: detail, note };
   });
 }
 
@@ -583,9 +663,15 @@ function aggregateWork(items, key) {
   items.forEach((closing) => {
     closing[key].forEach((row) => {
       const id = String(row.id || row.name);
-      const current = map.get(id) || { id, name: row.name, hours: 0, days: new Set(), payType: row.payType, payAmount: row.payAmount };
+      const current = map.get(id) || { id, name: row.name, hours: 0, days: new Set(), shifts: [], payType: row.payType, payAmount: row.payAmount };
       current.hours += row.hours;
       current.days.add(closing.businessDate);
+      current.shifts.push({
+        date: closing.businessDate,
+        startTime: row.startTime,
+        endTime: row.endTime,
+        hours: row.hours
+      });
       current.payType ||= row.payType;
       current.payAmount ||= row.payAmount;
       map.set(id, current);
@@ -605,7 +691,11 @@ function renderWorkSummary(id, rows) {
     const item = document.createElement("div");
     item.className = "breakdown-item";
     const name = document.createElement("span");
-    name.textContent = row.name;
+    const timeSummary = row.shifts
+      .filter((shift) => shift.startTime && shift.endTime)
+      .map((shift) => `${shift.date.slice(5)} ${shift.startTime}-${shift.endTime}`)
+      .join(" / ");
+    name.textContent = timeSummary ? `${row.name} / ${timeSummary}` : row.name;
     const value = document.createElement("strong");
     value.textContent = `${row.days.size}日 / ${hoursCell(row.hours)}`;
     item.append(name, value);
@@ -990,6 +1080,12 @@ function openClosingDetail(id) {
   });
   body.appendChild(createTableBlock("経費", ["カテゴリ", "金額", "メモ"], closing.expenses, (row) => [row.category, yenCell(row.amount), row.note || ""]));
   body.appendChild(createTableBlock("手当", ["種類", "金額", "対象者"], closing.allowances, (row) => [row.type, yenCell(row.amount), row.recipientName || row.recipient || ""]));
+  body.appendChild(createTableBlock("スタッフ勤務", ["スタッフ", "開始", "終了", "勤務時間"], closing.staffWork, (row) => [
+    row.name, row.startTime || "", row.endTime || "", hoursCell(row.hours)
+  ]));
+  body.appendChild(createTableBlock("キャスト勤務", ["キャスト", "開始", "終了", "勤務時間"], closing.castWork, (row) => [
+    row.name, row.startTime || "", row.endTime || "", hoursCell(row.hours)
+  ]));
   byId("closingDetailModal").showModal();
 }
 
@@ -1100,6 +1196,8 @@ function normalizeWorkRows(work, staff) {
   return work.map((row) => ({
     id: String(row.staffId || row.castId || row.posCastId || row.id || row.staffName || row.castName || row.name || ""),
     name: String(staff ? row.staffName || row.name || "" : row.castName || row.name || ""),
+    startTime: String(row.startTime || ""),
+    endTime: String(row.endTime || ""),
     hours: toNumber(row.hours),
     payType: String(row.payType || ""),
     payAmount: toNumber(row.payAmount)
