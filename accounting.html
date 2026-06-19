@@ -52,6 +52,10 @@
             <span class="shop-home-action-title">従業員給与</span>
             <span class="shop-home-action-detail">給与形態・勤務・手当から給与明細を作成</span>
           </button>
+          <button type="button" class="shop-home-action" data-accounting-view="introducerFees">
+            <span class="shop-home-action-title">紹介料</span>
+            <span class="shop-home-action-detail">キャスト売上・総支給額から紹介料と顧問料を算出</span>
+          </button>
         </div>
       </section>
 
@@ -119,6 +123,18 @@
           <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
         </div>
         <div id="staffPayrollList" class="payroll-list"></div>
+      </section>
+
+      <section class="section-shell hidden" data-accounting-workspace="introducerFees">
+        <div class="section-title">
+          <div>
+            <h2>紹介料・顧問料</h2>
+            <p class="mt-1 text-sm text-slate-500">月間の小計売上とキャスト総支給額を基準に支出額を算出します。</p>
+          </div>
+          <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
+        </div>
+        <div id="introducerFeeSummary" class="grid gap-4 sm:grid-cols-3"></div>
+        <div id="introducerFeeList" class="payroll-list mt-5"></div>
       </section>
     </div>
   </main>
@@ -188,6 +204,6 @@
     </div>
   </dialog>
 
-  <script type="module" src="js/accounting.js?v=1.18"></script>
+  <script type="module" src="js/accounting.js?v=1.21"></script>
 </body>
 </html>

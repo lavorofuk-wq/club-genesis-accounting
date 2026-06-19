@@ -8,6 +8,7 @@ import {
   closingsCollectionName,
   castCollectionName,
   staffCollectionName,
+  introducerCollectionName,
   firebaseProjectId
 } from "./firebase-config.js";
 import { requireRole, logout, showMessage, hideMessage } from "./auth.js";
@@ -23,6 +24,7 @@ let finalizedClosings = [];
 let visibleFinalized = [];
 let castMembers = [];
 let staffMembers = [];
+let introducers = [];
 let editingClosing = null;
 let deletingClosing = null;
 
@@ -72,16 +74,18 @@ function showWorkspace(name) {
   if (name === "finalized") renderFinalizedView();
   if (name === "castRewards") renderCastRewards();
   if (name === "staffPayroll") renderStaffPayroll();
+  if (name === "introducerFees") renderIntroducerFees();
 }
 
 async function loadData() {
   hideMessage("errorMessage");
   hideMessage("successMessage");
   try {
-    const [closingSnap, castSnap, staffSnap] = await Promise.all([
+    const [closingSnap, castSnap, staffSnap, introducerSnap] = await Promise.all([
       getDocs(collection(db, closingsCollectionName)),
       getDocs(collection(db, castCollectionName)),
-      getDocs(collection(db, staffCollectionName))
+      getDocs(collection(db, staffCollectionName)),
+      getDocs(collection(db, introducerCollectionName))
     ]);
     allClosings = closingSnap.docs.map((item) => normalizeClosing(item.id, item.data()));
     receivedClosings = allClosings
@@ -92,6 +96,7 @@ async function loadData() {
       .sort((a, b) => a.businessDate.localeCompare(b.businessDate));
     castMembers = castSnap.docs.map((item) => ({ id: item.id, ...item.data() }));
     staffMembers = staffSnap.docs.map((item) => ({ id: item.id, ...item.data() }));
+    introducers = introducerSnap.docs.map((item) => ({ id: item.id, ...item.data() }));
     renderReceivedList();
     renderFinalizedView();
   } catch (error) {
@@ -489,16 +494,69 @@ function renderFinalizedTable() {
 
 function aggregateCastSales(items) {
   const map = new Map();
+  const ensure = (id, name = "") => {
+    const key = String(id || name || "unknown");
+    if (!map.has(key)) {
+      map.set(key, {
+        key,
+        name: name || castNameForId(key) || "名称未設定",
+        honShimeiSales: 0,
+        jonaiExtensionSales: 0,
+        drinkSales: 0,
+        totalAttributedSales: 0
+      });
+    }
+    return map.get(key);
+  };
   items.forEach((closing) => {
-    closing.castSales.forEach((row) => {
-      const name = String(row.castName || row.name || "名称未設定");
-      const key = String(row.castId || row.posCastId || name);
-      const current = map.get(key) || { key, name, honShimeiSales: 0, jonaiExtensionSales: 0, drinkSales: 0, totalAttributedSales: 0 };
-      current.honShimeiSales += toNumber(row.honShimeiSales);
-      current.jonaiExtensionSales += toNumber(row.jonaiExtensionSales);
-      current.drinkSales += toNumber(row.drinkSales);
-      current.totalAttributedSales += toNumber(row.totalAttributedSales);
-      map.set(key, current);
+    if (!closing.transactions.length) {
+      closing.castSales.forEach((row) => {
+        const current = ensure(row.castId || row.posCastId, row.castName || row.name);
+        current.honShimeiSales += toNumber(row.honShimeiSales);
+        current.jonaiExtensionSales += toNumber(row.jonaiExtensionSales);
+        current.drinkSales += toNumber(row.drinkSales);
+        current.totalAttributedSales += toNumber(row.totalAttributedSales);
+      });
+      return;
+    }
+    closing.transactions.forEach((transaction) => {
+      const honCasts = [...new Map(
+        transaction.items
+          .filter((item) => item.isHonShimei && item.castId)
+          .map((item) => [item.castId, item])
+      ).values()];
+      if (honCasts.length) {
+        const share = Math.floor(transaction.subtotal / honCasts.length);
+        honCasts.forEach((item) => {
+          const current = ensure(item.castId);
+          current.honShimeiSales += share;
+          current.totalAttributedSales += share;
+        });
+        return;
+      }
+      transaction.items
+        .filter((item) => item.isBanaiExtension)
+        .forEach((item) => {
+          const castIds = [...new Set([
+            ...item.banaiExtCastIds,
+            item.banaiExtCastId
+          ].filter(Boolean))];
+          if (!castIds.length) return;
+          const share = Math.floor((item.price * item.quantity) / castIds.length);
+          castIds.forEach((castId) => {
+            const current = ensure(castId);
+            current.jonaiExtensionSales += share;
+            current.totalAttributedSales += share;
+          });
+        });
+      transaction.items
+        .filter((item) => item.category === "castDrink" && item.castId)
+        .forEach((item) => {
+          const amount = item.price * item.quantity;
+          const current = ensure(item.castId);
+          current.drinkSales += amount;
+          current.totalAttributedSales += amount;
+        });
     });
   });
   return [...map.values()].sort((a, b) => b.totalAttributedSales - a.totalAttributedSales);
@@ -576,12 +634,7 @@ function renderBreakdown(id, data) {
 }
 
 function renderCastRewards() {
-  const rewardClosings = rewardMonthClosings();
-  const salesRows = aggregateCastSales(rewardClosings);
-  const workRows = aggregateWork(rewardClosings, "castWork");
-  const backRows = aggregateCastBacks(rewardClosings);
-  const workMap = new Map(workRows.map((row) => [row.id, row]));
-  const backMap = new Map(backRows.map((row) => [row.id, row]));
+  const rewardRows = calculateCastRewardRows();
   const root = byId("castRewardList");
   root.replaceChildren();
   const month = byId("startDate").value.slice(0, 7);
@@ -589,51 +642,172 @@ function renderCastRewards() {
   period.className = "notice";
   period.textContent = `${month.replace("-", "年")}月の確定データで月間報酬を計算しています。`;
   root.appendChild(period);
-  if (!salesRows.length && !workRows.length && !backRows.length) {
+  if (!rewardRows.length) {
     root.appendChild(emptyMessage("この月のキャスト報酬計算対象はありません。"));
     return;
   }
-  const keys = new Set([
-    ...salesRows.map((row) => row.key),
-    ...workRows.map((row) => row.id),
-    ...backRows.map((row) => row.id)
-  ]);
-  [...keys].forEach((key) => {
-    const sales = salesRows.find((row) => row.key === key) || {};
+  rewardRows.forEach((row) => {
+    root.appendChild(createPayrollCard(
+      row.name,
+      `${month} / ${rewardSystemLabel(row.member?.rewardSystem)}${row.calculationError ? `（${row.calculationError}）` : ""}`,
+      [
+        ["月間小計売上", yenCell(row.monthlySales)],
+        ["適用時給", row.hourlyRate ? yenCell(row.hourlyRate) : "未設定"],
+        ["月間勤務時間", hoursCell(row.hours)],
+        ["時給分", row.hourlyBase === null ? "計算不可" : yenCell(row.hourlyBase)],
+        ["本指名バック", `${row.backs.honCount}回 / ${yenCell(row.backs.hon)}`],
+        ["場内指名バック", `${row.backs.banaiCount}回 / ${yenCell(row.backs.banai)}`],
+        ["同伴バック", `${row.backs.dohanCount}回 / ${yenCell(row.backs.dohan)}`],
+        ["VIP室料バック", yenCell(row.backs.vip)],
+        ["ボトル類バック", yenCell(row.backs.keepBottle + row.backs.champagneWine)],
+        ["ドリンクバック", yenCell(row.backs.drink)],
+        ["バック合計", yenCell(row.backs.total)],
+        ["時給＋バック", row.hourlyAndBack === null ? "計算不可" : yenCell(row.hourlyAndBack)],
+        ["売上報酬", row.salesRewardRate ? `${Math.round(row.salesRewardRate * 100)}% / ${yenCell(row.salesReward)}` : "対象外"],
+        ["支給額（高い方）", row.payable === null ? "計算不可" : yenCell(row.payable)]
+      ]
+    ));
+  });
+}
+
+function calculateCastRewardRows() {
+  const rewardClosings = rewardMonthClosings();
+  const salesRows = aggregateCastSales(rewardClosings);
+  const workRows = aggregateWork(rewardClosings, "castWork");
+  const backRows = aggregateCastBacks(rewardClosings);
+  const salesMap = new Map(salesRows.map((row) => [row.key, row]));
+  const workMap = new Map(workRows.map((row) => [row.id, row]));
+  const backMap = new Map(backRows.map((row) => [row.id, row]));
+  const keys = new Set([...salesMap.keys(), ...workMap.keys(), ...backMap.keys()]);
+  return [...keys].map((key) => {
+    const sales = salesMap.get(key) || {};
     const work = workMap.get(key) || {};
     const backs = backMap.get(key) || emptyCastBack(key, sales.name || work.name);
     const member = findMember(castMembers, key, sales.name || work.name);
     const monthlySales = toNumber(sales.totalAttributedSales);
+    const rewardSystem = member?.rewardSystem || "";
     const guaranteedHourlyRate = toNumber(member?.guaranteedHourlyRate);
-    const isGuaranteed = member?.rewardSystem === "guaranteedHourly";
-    const hourlyRate = isGuaranteed ? guaranteedHourlyRate : slideHourlyRate(monthlySales);
-    const hourlyBase = Math.round(hourlyRate * toNumber(work.hours));
-    const hourlyAndBack = hourlyBase + backs.total;
+    const hourlyRate = rewardSystem === "slideHourly"
+      ? slideHourlyRate(monthlySales)
+      : rewardSystem === "guaranteedHourly"
+        ? guaranteedHourlyRate
+        : 0;
+    const calculationError = !rewardSystem
+      ? "報酬システム未設定"
+      : rewardSystem === "guaranteedHourly" && guaranteedHourlyRate <= 0
+        ? "保証時給金額未設定"
+        : "";
+    const hourlyBase = calculationError ? null : Math.round(hourlyRate * toNumber(work.hours));
+    const hourlyAndBack = hourlyBase === null ? null : hourlyBase + backs.total;
     const salesRewardRate = castSalesRewardRate(monthlySales);
     const salesReward = Math.floor(monthlySales * salesRewardRate);
-    const payable = Math.max(hourlyAndBack, salesReward);
-    const hourlySettingMissing = isGuaranteed && guaranteedHourlyRate <= 0;
+    return {
+      key,
+      name: sales.name || work.name || backs.name || member?.name || "名称未設定",
+      member,
+      monthlySales,
+      hours: toNumber(work.hours),
+      hourlyRate,
+      hourlyBase,
+      backs,
+      hourlyAndBack,
+      salesRewardRate,
+      salesReward,
+      payable: hourlyAndBack === null ? null : Math.max(hourlyAndBack, salesReward),
+      calculationError
+    };
+  }).sort((a, b) => b.monthlySales - a.monthlySales);
+}
+
+function renderIntroducerFees() {
+  const root = byId("introducerFeeList");
+  const summaryRoot = byId("introducerFeeSummary");
+  root.replaceChildren();
+  summaryRoot.replaceChildren();
+  const month = byId("startDate").value.slice(0, 7);
+  const rows = calculateCastRewardRows()
+    .filter((row) => row.member?.introducerId)
+    .map((row) => calculateIntroducerFee(row));
+  const totals = rows.reduce((result, row) => {
+    if (row.introductionFee === null) {
+      result.unresolved += 1;
+    } else {
+      result.introduction += row.introductionFee;
+    }
+    result.advisory += row.advisoryFee;
+    if (row.totalExpense !== null) result.expense += row.totalExpense;
+    return result;
+  }, { introduction: 0, advisory: 0, expense: 0, unresolved: 0 });
+  renderIntroducerSummary(summaryRoot, [
+    ["紹介料合計", totals.unresolved ? `計算不可 ${totals.unresolved}名` : yenCell(totals.introduction)],
+    ["顧問料合計", yenCell(totals.advisory)],
+    ["紹介関連支出合計", totals.unresolved ? `計算不可 ${totals.unresolved}名` : yenCell(totals.expense)]
+  ]);
+  if (!rows.length) {
+    root.appendChild(emptyMessage("紹介者が設定されたキャストはありません。"));
+    return;
+  }
+  rows.forEach((row) => {
     root.appendChild(createPayrollCard(
-      sales.name || work.name || backs.name || member?.name || "名称未設定",
-      `${month} / ${rewardSystemLabel(member?.rewardSystem)}${hourlySettingMissing ? "（保証時給金額未設定）" : ""}`,
+      row.castName,
+      `${month} / 紹介者：${row.introducerName} / ${introducerFeeSystemLabel(row.feeSystem)}`,
       [
-        ["月間売上", yenCell(monthlySales)],
-        ["適用時給", hourlySettingMissing ? "未設定" : yenCell(hourlyRate)],
-        ["月間勤務時間", hoursCell(work.hours || 0)],
-        ["時給分", hourlySettingMissing ? "計算不可" : yenCell(hourlyBase)],
-        ["本指名バック", `${backs.honCount}回 / ${yenCell(backs.hon)}`],
-        ["場内指名バック", `${backs.banaiCount}回 / ${yenCell(backs.banai)}`],
-        ["同伴バック", `${backs.dohanCount}回 / ${yenCell(backs.dohan)}`],
-        ["VIP室料バック", yenCell(backs.vip)],
-        ["ボトル類バック", yenCell(backs.keepBottle + backs.champagneWine)],
-        ["ドリンクバック", yenCell(backs.drink)],
-        ["バック合計", yenCell(backs.total)],
-        ["時給＋バック", hourlySettingMissing ? "計算不可" : yenCell(hourlyAndBack)],
-        ["売上報酬", salesRewardRate ? `${Math.round(salesRewardRate * 100)}% / ${yenCell(salesReward)}` : "対象外"],
-        ["支給額（高い方）", hourlySettingMissing && !salesRewardRate ? "計算不可" : yenCell(payable)]
+        ["月間小計売上", yenCell(row.monthlySales)],
+        ["売上10%", yenCell(row.sales10)],
+        ["キャスト総支給額", row.payable === null ? "計算不可" : yenCell(row.payable)],
+        ["総支給額10%", row.pay10 === null ? "計算不可" : yenCell(row.pay10)],
+        ["採用した紹介料", row.introductionFee === null ? "計算不可" : yenCell(row.introductionFee)],
+        ["顧問料", yenCell(row.advisoryFee)],
+        ["紹介関連支出", row.totalExpense === null ? "計算不可" : yenCell(row.totalExpense)]
       ]
     ));
   });
+}
+
+function calculateIntroducerFee(reward) {
+  const member = reward.member || {};
+  const introducer = introducers.find((item) => item.id === member.introducerId);
+  const feeSystem = member.introducerFeeSystem || introducer?.feeSystem || "";
+  const sales10 = Math.floor(reward.monthlySales * 0.10);
+  const pay10 = reward.payable === null ? null : Math.floor(reward.payable * 0.10);
+  let introductionFee = null;
+  if (feeSystem === "sales10") introductionFee = sales10;
+  if (feeSystem === "pay10" && pay10 !== null) introductionFee = pay10;
+  if (feeSystem === "higher10" && pay10 !== null) introductionFee = Math.max(sales10, pay10);
+  const advisoryFee = member.advisoryFeeEnabled ? toNumber(member.advisoryFeeAmount) : 0;
+  return {
+    castName: reward.name,
+    introducerName: member.introducerName || introducer?.name || "名称未設定",
+    feeSystem,
+    monthlySales: reward.monthlySales,
+    payable: reward.payable,
+    sales10,
+    pay10,
+    introductionFee,
+    advisoryFee,
+    totalExpense: introductionFee === null ? null : introductionFee + advisoryFee
+  };
+}
+
+function renderIntroducerSummary(root, cards) {
+  cards.forEach(([label, value]) => {
+    const card = document.createElement("article");
+    card.className = "summary-card";
+    const key = document.createElement("p");
+    key.textContent = label;
+    const amount = document.createElement("strong");
+    amount.textContent = value;
+    card.append(key, amount);
+    root.appendChild(card);
+  });
+}
+
+function introducerFeeSystemLabel(value) {
+  return {
+    sales10: "売上10%",
+    pay10: "総支給額10%",
+    higher10: "売上10%か総支給額10%の高い方"
+  }[value] || "紹介料システム未設定";
 }
 
 function rewardMonthClosings() {
@@ -896,8 +1070,11 @@ function normalizeTransactions(rows) {
       price: toNumber(item.price),
       quantity: toNumber(item.quantity ?? item.qty),
       castId: String(item.castId || ""),
+      banaiExtCastIds: Array.isArray(item.banaiExtCastIds) ? item.banaiExtCastIds.map(String) : [],
+      banaiExtCastId: String(item.banaiExtCastId || ""),
       isHonShimei: Boolean(item.isHonShimei),
       isBanaiShimei: Boolean(item.isBanaiShimei),
+      isBanaiExtension: Boolean(item.isBanaiExtension),
       isVipCharge: Boolean(item.isVipCharge)
     })) : []
   }));
