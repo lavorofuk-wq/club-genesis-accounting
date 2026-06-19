@@ -9,6 +9,7 @@ import {
   castCollectionName,
   staffCollectionName,
   introducerCollectionName,
+  fixedExpenseCollectionName,
   firebaseProjectId
 } from "./firebase-config.js";
 import { requireRole, logout, showMessage, hideMessage } from "./auth.js";
@@ -17,6 +18,15 @@ import { deleteDoc } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-fi
 const yen = new Intl.NumberFormat("ja-JP");
 const expenseCategories = ["酒代", "広告宣伝①", "広告宣伝②", "消耗品/備品", "交際費", "交通費", "その他", "美容室"];
 const allowanceTypes = ["美容室", "遠方手当", "送迎手当", "その他"];
+const fixedExpenseFields = [
+  ["rent", "賃料"],
+  ["karaoke", "カラオケ"],
+  ["towel", "おしぼり"],
+  ["leasekin", "リースキン"],
+  ["landline", "固定電話"],
+  ["saibuGas", "西部ガス"],
+  ["usen", "USEN"]
+];
 let currentUser = null;
 let allClosings = [];
 let receivedClosings = [];
@@ -25,6 +35,8 @@ let visibleFinalized = [];
 let castMembers = [];
 let staffMembers = [];
 let introducers = [];
+let fixedExpenseRecords = [];
+let fixedExpenseLoadError = null;
 let editingClosing = null;
 let deletingClosing = null;
 
@@ -43,6 +55,12 @@ byId("finalizeReceivedButton").addEventListener("click", () => saveReceived(true
 byId("cancelDeleteReceivedButton").addEventListener("click", closeDeleteReceivedModal);
 byId("deleteReceivedInput").addEventListener("input", updateDeleteConfirmation);
 byId("confirmDeleteReceivedButton").addEventListener("click", deleteReceived);
+byId("loadFixedExpenseButton").addEventListener("click", renderFixedExpenseForm);
+byId("saveFixedExpenseButton").addEventListener("click", saveFixedExpenses);
+byId("fixedExpenseMonth").addEventListener("change", renderFixedExpenseForm);
+document.querySelectorAll(".fixed-expense-input").forEach((input) => {
+  input.addEventListener("input", updateFixedExpenseTotal);
+});
 
 document.querySelectorAll("[data-accounting-view]").forEach((button) => {
   button.addEventListener("click", () => showWorkspace(button.dataset.accountingView));
@@ -57,6 +75,7 @@ requireRole("accounting", async (user) => {
   const { start, end } = currentMonthRange();
   byId("startDate").value = start;
   byId("endDate").value = end;
+  byId("fixedExpenseMonth").value = start.slice(0, 7);
   showHome();
   await loadData();
 });
@@ -75,17 +94,19 @@ function showWorkspace(name) {
   if (name === "castRewards") renderCastRewards();
   if (name === "staffPayroll") renderStaffPayroll();
   if (name === "introducerFees") renderIntroducerFees();
+  if (name === "fixedExpenses") renderFixedExpenseForm();
 }
 
 async function loadData() {
   hideMessage("errorMessage");
   hideMessage("successMessage");
   try {
-    const [closingSnap, castSnap, staffSnap, introducerSnap] = await Promise.all([
+    const [closingSnap, castSnap, staffSnap, introducerSnap, fixedExpenseSnap] = await Promise.all([
       getDocs(collection(db, closingsCollectionName)),
       getDocs(collection(db, castCollectionName)),
       getDocs(collection(db, staffCollectionName)),
-      getDocs(collection(db, introducerCollectionName))
+      getDocs(collection(db, introducerCollectionName)),
+      getDocs(collection(db, fixedExpenseCollectionName)).catch((error) => ({ docs: [], error }))
     ]);
     allClosings = closingSnap.docs.map((item) => normalizeClosing(item.id, item.data()));
     receivedClosings = allClosings
@@ -97,8 +118,11 @@ async function loadData() {
     castMembers = castSnap.docs.map((item) => ({ id: item.id, ...item.data() }));
     staffMembers = staffSnap.docs.map((item) => ({ id: item.id, ...item.data() }));
     introducers = introducerSnap.docs.map((item) => ({ id: item.id, ...item.data() }));
+    fixedExpenseLoadError = fixedExpenseSnap.error || null;
+    fixedExpenseRecords = fixedExpenseSnap.docs.map((item) => normalizeFixedExpense(item.id, item.data()));
     renderReceivedList();
     renderFinalizedView();
+    renderFixedExpenseForm();
   } catch (error) {
     showMessage("errorMessage", `データの取得に失敗しました。${error.message}`);
   }
@@ -144,6 +168,105 @@ function normalizeMoneyRows(rows, labelKey) {
     [labelKey]: String(row[labelKey] || ""),
     amount: toNumber(row.amount)
   }));
+}
+
+function normalizeFixedExpense(id, raw = {}) {
+  const normalized = { id, month: String(raw.month || id) };
+  fixedExpenseFields.forEach(([key]) => {
+    normalized[key] = toNumber(raw[key]);
+  });
+  return normalized;
+}
+
+function fixedExpenseForMonth(month) {
+  return fixedExpenseRecords.find((item) => item.month === month) || normalizeFixedExpense(month);
+}
+
+function alcoholExpenseForMonth(month, closings = finalizedClosings) {
+  return closings
+    .filter((closing) => closing.businessDate.startsWith(`${month}-`))
+    .reduce((total, closing) => total + closing.expenses
+      .filter((expense) => expense.category === "酒代")
+      .reduce((sum, expense) => sum + expense.amount, 0), 0);
+}
+
+function renderFixedExpenseForm() {
+  const month = byId("fixedExpenseMonth").value;
+  if (!month) return;
+  const record = fixedExpenseForMonth(month);
+  document.querySelectorAll(".fixed-expense-input").forEach((input) => {
+    input.value = String(record[input.dataset.fixedExpenseKey] || 0);
+    markFixedExpenseInvalid(input, false);
+  });
+  byId("fixedExpenseAlcohol").value = String(alcoholExpenseForMonth(month));
+  byId("fixedExpenseStatus").textContent = fixedExpenseLoadError
+    ? `固定費データを取得できません。Firestoreルールの fixedExpenses 権限を反映してください。酒代の自動集計のみ表示しています。`
+    : fixedExpenseRecords.some((item) => item.month === month)
+      ? `${month.replace("-", "年")}月の保存済み固定費を表示しています。酒代は確定データから再集計しています。`
+      : `${month.replace("-", "年")}月は未保存です。酒代は確定データから自動集計しています。`;
+  updateFixedExpenseTotal();
+}
+
+function collectFixedExpenseValues() {
+  const values = {};
+  document.querySelectorAll(".fixed-expense-input").forEach((input) => {
+    const amount = Number(input.value);
+    const valid = Number.isInteger(amount) && amount >= 0;
+    markFixedExpenseInvalid(input, !valid);
+    if (!valid) throw new Error("固定費は0以上の整数で入力してください。");
+    values[input.dataset.fixedExpenseKey] = amount;
+  });
+  return values;
+}
+
+function markFixedExpenseInvalid(input, invalid) {
+  input.classList.toggle("invalid", invalid);
+  input.setAttribute("aria-invalid", String(invalid));
+}
+
+function updateFixedExpenseTotal() {
+  let total = toNumber(byId("fixedExpenseAlcohol").value);
+  document.querySelectorAll(".fixed-expense-input").forEach((input) => {
+    const amount = Number(input.value);
+    const valid = Number.isInteger(amount) && amount >= 0;
+    markFixedExpenseInvalid(input, !valid);
+    if (valid) total += amount;
+  });
+  byId("fixedExpenseTotal").textContent = yenCell(total);
+}
+
+async function saveFixedExpenses() {
+  const button = byId("saveFixedExpenseButton");
+  const month = byId("fixedExpenseMonth").value;
+  if (!/^\d{4}-\d{2}$/.test(month)) {
+    showMessage("errorMessage", "固定費の対象月を選択してください。");
+    return;
+  }
+  hideMessage("errorMessage");
+  hideMessage("successMessage");
+  try {
+    const values = collectFixedExpenseValues();
+    button.disabled = true;
+    await setDoc(doc(db, fixedExpenseCollectionName, month), {
+      month,
+      ...values,
+      updatedBy: currentUser.email || currentUser.uid,
+      updatedAt: serverTimestamp()
+    }, { merge: true });
+    const normalized = normalizeFixedExpense(month, { month, ...values });
+    fixedExpenseRecords = [
+      ...fixedExpenseRecords.filter((item) => item.month !== month),
+      normalized
+    ].sort((a, b) => a.month.localeCompare(b.month));
+    fixedExpenseLoadError = null;
+    renderFixedExpenseForm();
+    renderFinalizedView();
+    showMessage("successMessage", `${month.replace("-", "年")}月の固定費を保存しました。`);
+  } catch (error) {
+    showMessage("errorMessage", `固定費を保存できませんでした。${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function renderReceivedList() {
@@ -488,17 +611,26 @@ function renderFinalizedView() {
   renderWorkSummary("castWorkSummary", aggregateWork(visibleFinalized, "castWork"));
   renderWorkSummary("staffWorkSummary", aggregateWork(visibleFinalized, "staffWork"));
   renderBreakdown("expenseBreakdown", summary.expenseByCategory);
+  renderBreakdown("calculatedExpenseBreakdown", summary.calculatedExpenseBreakdown);
 }
 
 function summarize(items) {
+  const start = byId("startDate").value;
+  const end = byId("endDate").value;
   const result = {
     totalSales: 0,
     totalExpenses: 0,
-    totalAllowances: 0,
+    fixedExpenses: 0,
+    castRewards: 0,
+    staffPayroll: 0,
+    introducerExpenses: 0,
+    totalOutflow: 0,
+    unresolvedPayments: 0,
     grossProfit: 0,
     castHours: 0,
     staffHours: 0,
-    expenseByCategory: {}
+    expenseByCategory: {},
+    calculatedExpenseBreakdown: {}
   };
   items.forEach((closing) => {
     result.totalSales += closing.totalSales;
@@ -508,20 +640,50 @@ function summarize(items) {
       result.totalExpenses += row.amount;
       result.expenseByCategory[row.category || "未分類"] = (result.expenseByCategory[row.category || "未分類"] || 0) + row.amount;
     });
-    closing.allowances.forEach((row) => {
-      result.totalAllowances += row.amount;
+  });
+  monthsInRange(start, end).forEach((month) => {
+    const fixed = fixedExpenseForMonth(month);
+    fixedExpenseFields.forEach(([key, label]) => {
+      const amount = toNumber(fixed[key]);
+      result.fixedExpenses += amount;
+      result.expenseByCategory[label] = (result.expenseByCategory[label] || 0) + amount;
     });
   });
-  result.grossProfit = result.totalSales - result.totalExpenses;
+  const monthGroups = groupClosingsByMonth(items);
+  const rewardRows = [...monthGroups.values()].flatMap((closings) => calculateCastRewardRows(closings));
+  rewardRows.forEach((row) => {
+    if (row.payable === null) result.unresolvedPayments += 1;
+    else result.castRewards += row.payable;
+  });
+  const staffRows = calculateStaffPayrollRows(items);
+  result.staffPayroll = staffRows.reduce((sum, row) => sum + row.payable, 0);
+  const introducerRows = rewardRows
+    .filter((row) => row.member?.introducerId)
+    .map((row) => calculateIntroducerFee(row));
+  introducerRows.forEach((row) => {
+    if (row.totalExpense === null) result.unresolvedPayments += 1;
+    else result.introducerExpenses += row.totalExpense;
+  });
+  result.totalExpenses += result.fixedExpenses;
+  result.totalOutflow = result.totalExpenses + result.castRewards + result.staffPayroll + result.introducerExpenses;
+  result.grossProfit = result.totalSales - result.totalOutflow;
+  result.calculatedExpenseBreakdown = {
+    "キャスト報酬": result.castRewards,
+    "スタッフ給与": result.staffPayroll,
+    "紹介料・顧問料": result.introducerExpenses
+  };
   return result;
 }
 
 function renderSummaryCards(summary) {
   const cards = [
     ["総売上", yenCell(summary.totalSales)],
-    ["総経費", yenCell(summary.totalExpenses)],
-    ["総手当", yenCell(summary.totalAllowances)],
-    ["推定収支", yenCell(summary.grossProfit)],
+    ["経費合計", yenCell(summary.totalExpenses)],
+    ["キャスト報酬", summary.unresolvedPayments ? `${yenCell(summary.castRewards)}ほか未計算` : yenCell(summary.castRewards)],
+    ["スタッフ給与", yenCell(summary.staffPayroll)],
+    ["紹介料・顧問料", yenCell(summary.introducerExpenses)],
+    ["総支出", summary.unresolvedPayments ? `${yenCell(summary.totalOutflow)}ほか未計算` : yenCell(summary.totalOutflow)],
+    ["最終収支", summary.unresolvedPayments ? "未計算項目あり" : yenCell(summary.grossProfit)],
     ["キャスト勤務", hoursCell(summary.castHours)],
     ["スタッフ勤務", hoursCell(summary.staffHours)]
   ];
@@ -764,8 +926,7 @@ function renderCastRewards() {
   });
 }
 
-function calculateCastRewardRows() {
-  const rewardClosings = rewardMonthClosings();
+function calculateCastRewardRows(rewardClosings = rewardMonthClosings()) {
   const salesRows = aggregateCastSales(rewardClosings);
   const workRows = aggregateWork(rewardClosings, "castWork");
   const backRows = aggregateCastBacks(rewardClosings);
@@ -820,9 +981,7 @@ function renderIntroducerFees() {
   root.replaceChildren();
   summaryRoot.replaceChildren();
   const month = byId("startDate").value.slice(0, 7);
-  const rows = calculateCastRewardRows()
-    .filter((row) => row.member?.introducerId)
-    .map((row) => calculateIntroducerFee(row));
+  const rows = calculateIntroducerFeeRows(calculateCastRewardRows());
   const totals = rows.reduce((result, row) => {
     if (row.introductionFee === null) {
       result.unresolved += 1;
@@ -857,6 +1016,12 @@ function renderIntroducerFees() {
       ]
     ));
   });
+}
+
+function calculateIntroducerFeeRows(rewardRows) {
+  return rewardRows
+    .filter((row) => row.member?.introducerId)
+    .map((row) => calculateIntroducerFee(row));
 }
 
 function calculateIntroducerFee(reward) {
@@ -1016,7 +1181,7 @@ function dohanBackAmount(startTime) {
 
 function renderStaffPayroll() {
   updateVisibleFinalized();
-  const rows = aggregateWork(visibleFinalized, "staffWork");
+  const rows = calculateStaffPayrollRows(visibleFinalized);
   const root = byId("staffPayrollList");
   root.replaceChildren();
   if (!rows.length) {
@@ -1024,24 +1189,37 @@ function renderStaffPayroll() {
     return;
   }
   rows.forEach((row) => {
+    root.appendChild(createPayrollCard(
+      row.name,
+      `${payTypeLabel(row.payType)} ${yenCell(row.payAmount)}`,
+      [
+        ["勤務日数", `${row.days.size}日`],
+        ["勤務時間", hoursCell(row.hours)],
+        ["基本給与", yenCell(row.basePay)],
+        ["手当", yenCell(row.allowance)],
+        ["支給見込", yenCell(row.payable)]
+      ]
+    ));
+  });
+}
+
+function calculateStaffPayrollRows(closings) {
+  return aggregateWork(closings, "staffWork").map((row) => {
     const member = findMember(staffMembers, row.id, row.name);
     const payType = row.payType || member?.payType || "";
     const payAmount = toNumber(row.payAmount || member?.payAmount);
     const basePay = payType === "hourly" ? Math.round(payAmount * row.hours) : payAmount * row.days.size;
-    const allowance = visibleFinalized.reduce((total, closing) => total + closing.allowances
+    const allowance = closings.reduce((total, closing) => total + closing.allowances
       .filter((item) => (item.recipientName || item.recipient || "") === row.name)
       .reduce((sum, item) => sum + item.amount, 0), 0);
-    root.appendChild(createPayrollCard(
-      row.name,
-      `${payTypeLabel(payType)} ${yenCell(payAmount)}`,
-      [
-        ["勤務日数", `${row.days.size}日`],
-        ["勤務時間", hoursCell(row.hours)],
-        ["基本給与", yenCell(basePay)],
-        ["手当", yenCell(allowance)],
-        ["支給見込", yenCell(basePay + allowance)]
-      ]
-    ));
+    return {
+      ...row,
+      payType,
+      payAmount,
+      basePay,
+      allowance,
+      payable: basePay + allowance
+    };
   });
 }
 
@@ -1141,6 +1319,18 @@ function exportCsv() {
       closing.honShimei, closing.jonai, expense, allowance, closing.totalSales - expense
     ]);
   });
+  const summary = summarize(visibleFinalized);
+  rows.push(
+    [],
+    ["期間集計"],
+    ["総売上", summary.totalSales],
+    ["経費合計", summary.totalExpenses],
+    ["キャスト報酬", summary.castRewards],
+    ["スタッフ給与", summary.staffPayroll],
+    ["紹介料・顧問料", summary.introducerExpenses],
+    ["総支出", summary.totalOutflow],
+    ["最終収支", summary.unresolvedPayments ? "未計算項目あり" : summary.grossProfit]
+  );
   const csv = rows.map((row) => row.map(escapeCsv).join(",")).join("\r\n");
   const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -1258,6 +1448,28 @@ function currentMonthRange() {
   const start = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
   const last = new Date(now.getFullYear(), now.getMonth() + 1, 0);
   return { start, end: formatDate(last) };
+}
+
+function monthsInRange(start, end) {
+  if (!start || !end) return [];
+  const months = [];
+  const cursor = new Date(`${start.slice(0, 7)}-01T00:00:00`);
+  const last = new Date(`${end.slice(0, 7)}-01T00:00:00`);
+  while (cursor <= last) {
+    months.push(`${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}`);
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+  return months;
+}
+
+function groupClosingsByMonth(closings) {
+  const groups = new Map();
+  closings.forEach((closing) => {
+    const month = closing.businessDate.slice(0, 7);
+    if (!groups.has(month)) groups.set(month, []);
+    groups.get(month).push(closing);
+  });
+  return groups;
 }
 
 function todayString() {

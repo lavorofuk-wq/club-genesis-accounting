@@ -131,6 +131,35 @@ service cloud.firestore {
       && request.resource.data.note.size() <= 500;
     }
 
+    function isFixedExpense(document) {
+      return request.resource.data.keys().hasAll([
+        'month',
+        'rent',
+        'karaoke',
+        'towel',
+        'leasekin',
+        'landline',
+        'saibuGas',
+        'usen'
+      ])
+      && request.resource.data.month == document
+      && request.resource.data.month.matches('^\\d{4}-\\d{2}$')
+      && request.resource.data.rent is int
+      && request.resource.data.karaoke is int
+      && request.resource.data.towel is int
+      && request.resource.data.leasekin is int
+      && request.resource.data.landline is int
+      && request.resource.data.saibuGas is int
+      && request.resource.data.usen is int
+      && request.resource.data.rent >= 0
+      && request.resource.data.karaoke >= 0
+      && request.resource.data.towel >= 0
+      && request.resource.data.leasekin >= 0
+      && request.resource.data.landline >= 0
+      && request.resource.data.saibuGas >= 0
+      && request.resource.data.usen >= 0;
+    }
+
     function isClosingPayload(document) {
       return request.resource.data.keys().hasAll([
         'businessDate',
@@ -251,6 +280,18 @@ service cloud.firestore {
     match /introducers-dev/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
       allow create, update: if signedIn() && userRole() == 'shop' && isIntroducer();
+      allow delete: if false;
+    }
+
+    match /fixedExpenses/{document} {
+      allow read: if signedIn() && userRole() == 'accounting';
+      allow create, update: if signedIn() && userRole() == 'accounting' && isFixedExpense(document);
+      allow delete: if false;
+    }
+
+    match /fixedExpenses-dev/{document} {
+      allow read: if signedIn() && userRole() == 'accounting';
+      allow create, update: if signedIn() && userRole() == 'accounting' && isFixedExpense(document);
       allow delete: if false;
     }
 

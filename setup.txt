@@ -31,6 +31,7 @@ GENESIS Management System（GMS）セットアップ手順
 
 5. Firestoreルールを反映
    - このリポジトリの firestore.rules が最新版です。
+   - 経費入力で使用する fixedExpenses / fixedExpenses-dev の権限もこのルールに含まれます。
    - Firebase CLIでログインしてから反映します。
 
    npx firebase-tools login
@@ -51,6 +52,8 @@ GENESIS Management System（GMS）セットアップ手順
    - POSから締めデータを送信します。
    - 店舗作業フォームで確認待ちデータを開き、経理へ送信します。
    - 経理ダッシュボードに経理確定データが表示されることを確認します。
+   - 経理ホームの「経費入力」で対象月を選び、固定費を保存できることを確認します。
+   - 酒代は同月の確定データにある「酒代」経費から自動集計されます。
 
 9. CSV
    - CSVはUTF-8 with BOMで出力します。

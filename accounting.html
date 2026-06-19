@@ -56,6 +56,10 @@
             <span class="shop-home-action-title">紹介料</span>
             <span class="shop-home-action-detail">キャスト売上・総支給額から紹介料と顧問料を算出</span>
           </button>
+          <button type="button" class="shop-home-action" data-accounting-view="fixedExpenses">
+            <span class="shop-home-action-title">経費入力</span>
+            <span class="shop-home-action-detail">月別固定費の入力と酒代の自動集計</span>
+          </button>
         </div>
       </section>
 
@@ -104,8 +108,12 @@
           </div>
         </section>
         <section class="section-shell">
-          <div class="section-title"><h2>経費データ</h2></div>
+          <div class="section-title"><h2>経費・支出データ</h2></div>
           <div id="expenseBreakdown" class="breakdown-list"></div>
+        </section>
+        <section class="section-shell">
+          <div class="section-title"><h2>給与・報酬・紹介関連支出</h2></div>
+          <div id="calculatedExpenseBreakdown" class="breakdown-list"></div>
         </section>
       </div>
 
@@ -135,6 +143,37 @@
         </div>
         <div id="introducerFeeSummary" class="grid gap-4 sm:grid-cols-3"></div>
         <div id="introducerFeeList" class="payroll-list mt-5"></div>
+      </section>
+
+      <section class="section-shell hidden" data-accounting-workspace="fixedExpenses">
+        <div class="section-title">
+          <div>
+            <h2>経費入力</h2>
+            <p class="mt-1 text-sm text-slate-500">固定費を月別に保存します。酒代は確定データの経費から自動集計されます。</p>
+          </div>
+          <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
+        </div>
+        <div class="mt-5 grid gap-4 md:grid-cols-3">
+          <label>対象月<input id="fixedExpenseMonth" type="month" class="form-input mt-2"></label>
+          <div class="flex items-end"><button id="loadFixedExpenseButton" type="button" class="secondary-button w-full">対象月を表示</button></div>
+          <div class="flex items-end"><button id="saveFixedExpenseButton" type="button" class="primary-button w-full">固定費を保存</button></div>
+        </div>
+        <div id="fixedExpenseStatus" class="notice mt-4"></div>
+        <div id="fixedExpenseGrid" class="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <label>賃料<input type="number" min="0" step="1" class="form-input mt-2 fixed-expense-input" data-fixed-expense-key="rent"></label>
+          <label>カラオケ<input type="number" min="0" step="1" class="form-input mt-2 fixed-expense-input" data-fixed-expense-key="karaoke"></label>
+          <label>おしぼり<input type="number" min="0" step="1" class="form-input mt-2 fixed-expense-input" data-fixed-expense-key="towel"></label>
+          <label>リースキン<input type="number" min="0" step="1" class="form-input mt-2 fixed-expense-input" data-fixed-expense-key="leasekin"></label>
+          <label>固定電話<input type="number" min="0" step="1" class="form-input mt-2 fixed-expense-input" data-fixed-expense-key="landline"></label>
+          <label>西部ガス<input type="number" min="0" step="1" class="form-input mt-2 fixed-expense-input" data-fixed-expense-key="saibuGas"></label>
+          <label>USEN<input type="number" min="0" step="1" class="form-input mt-2 fixed-expense-input" data-fixed-expense-key="usen"></label>
+          <label>酒代（自動）
+            <input id="fixedExpenseAlcohol" type="number" class="form-input mt-2" readonly>
+          </label>
+        </div>
+        <div class="mt-5 flex justify-end">
+          <div class="summary-card min-w-64"><p>固定費表 合計</p><strong id="fixedExpenseTotal">0円</strong></div>
+        </div>
       </section>
     </div>
   </main>
@@ -204,6 +243,6 @@
     </div>
   </dialog>
 
-  <script type="module" src="js/accounting.js?v=1.23.3"></script>
+  <script type="module" src="js/accounting.js?v=1.24"></script>
 </body>
 </html>
