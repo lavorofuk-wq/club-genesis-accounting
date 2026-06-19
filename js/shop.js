@@ -13,6 +13,7 @@ import {
   shopClosingsCollectionName,
   staffCollectionName,
   castCollectionName,
+  introducerCollectionName,
   posCastPath
 } from "./firebase-config.js";
 import { requireRole, logout, showMessage, hideMessage } from "./auth.js";
@@ -35,6 +36,11 @@ const castRewardLabels = {
   slideHourly: "スライド時給",
   guaranteedHourly: "保証時給"
 };
+const introducerFeeSystemLabels = {
+  sales10: "売上10%",
+  pay10: "総支給額10%",
+  higher10: "売上10%か総支給額10%の高い方"
+};
 
 let currentUser = null;
 let pendingPayload = null;
@@ -42,10 +48,12 @@ let isSaving = false;
 let staffMembers = [];
 let allCastMembers = [];
 let castMembers = [];
+let introducers = [];
 let pendingClosings = [];
 let sentClosings = [];
 let selectedPending = null;
 let editingStaffId = null;
+let editingIntroducerId = null;
 let currentCastDetailType = "active";
 
 document.getElementById("logoutButton").addEventListener("click", logout);
@@ -69,6 +77,8 @@ document.getElementById("clearSentClosingDateButton").addEventListener("click", 
 });
 document.getElementById("registerStaffButton").addEventListener("click", registerStaff);
 document.getElementById("cancelStaffEditButton").addEventListener("click", resetStaffForm);
+document.getElementById("saveIntroducerButton").addEventListener("click", saveIntroducer);
+document.getElementById("cancelIntroducerEditButton").addEventListener("click", resetIntroducerForm);
 document.getElementById("syncCastsButton").addEventListener("click", () => syncPosCasts(true));
 document.querySelectorAll("[data-cast-detail]").forEach((button) => {
   button.addEventListener("click", () => openCastDetail(button.dataset.castDetail));
@@ -78,7 +88,13 @@ document.getElementById("closeCastDetailButton").addEventListener("click", () =>
 });
 document.getElementById("castSearchInput").addEventListener("input", renderCastDetailList);
 document.getElementById("castRewardSystem").addEventListener("change", updateGuaranteeNoteVisibility);
+document.getElementById("castIntroducerId").addEventListener("change", updateCastAdvisoryFeeVisibility);
 document.getElementById("castGuaranteedHourlyRate").addEventListener("input", (event) => {
+  const value = Number(event.target.value);
+  const invalid = event.target.value !== "" && (!Number.isInteger(value) || value <= 0);
+  markInvalid(event.target, invalid);
+});
+document.getElementById("castAdvisoryFeeAmount").addEventListener("input", (event) => {
   const value = Number(event.target.value);
   const invalid = event.target.value !== "" && (!Number.isInteger(value) || value <= 0);
   markInvalid(event.target, invalid);
@@ -173,14 +189,20 @@ function makeOption(value, label) {
 
 async function loadMasters() {
   try {
-    const [staffSnapshot, castSnapshot] = await Promise.all([
+    const [staffSnapshot, castSnapshot, introducerSnapshot] = await Promise.all([
       getDocs(collection(db, staffCollectionName)),
-      getDocs(collection(db, castCollectionName))
+      getDocs(collection(db, castCollectionName)),
+      getDocs(collection(db, introducerCollectionName))
     ]);
     staffMembers = staffSnapshot.docs.map((item) => ({ id: item.id, ...item.data() })).sort(sortByName);
     allCastMembers = castSnapshot.docs.map((item) => ({ id: item.id, ...item.data() })).sort(sortByName);
     castMembers = allCastMembers.filter((cast) => cast.deleted !== true);
+    introducers = introducerSnapshot.docs
+      .map((item) => ({ id: item.id, ...item.data() }))
+      .sort(sortByName);
     renderMasterLists();
+    renderIntroducerList();
+    refreshCastIntroducerSelect();
     refreshWorkSelects();
   } catch (error) {
     showMessage("errorMessage", `登録名簿を読み込めませんでした。Firestoreルールを確認してください。${error.message}`);
@@ -605,6 +627,127 @@ function resetStaffForm() {
   markInvalid(document.getElementById("newStaffPayAmount"), false);
 }
 
+async function saveIntroducer() {
+  const name = document.getElementById("introducerName").value.trim();
+  const feeSystem = document.getElementById("introducerFeeSystem").value;
+  const advisoryFeeEnabled = document.getElementById("introducerAdvisoryFeeEnabled").value === "true";
+  const note = document.getElementById("introducerNote").value.trim();
+  if (!name) {
+    markInvalid(document.getElementById("introducerName"), true);
+    showMessage("errorMessage", "紹介者名を入力してください。");
+    return;
+  }
+  markInvalid(document.getElementById("introducerName"), false);
+  if (!introducerFeeSystemLabels[feeSystem]) {
+    markInvalid(document.getElementById("introducerFeeSystem"), true);
+    showMessage("errorMessage", "紹介料システムを選択してください。");
+    return;
+  }
+  markInvalid(document.getElementById("introducerFeeSystem"), false);
+  if (introducers.some((item) => item.name === name && item.id !== editingIntroducerId)) {
+    showMessage("errorMessage", "同じ名前の紹介者が登録済みです。");
+    return;
+  }
+  const button = document.getElementById("saveIntroducerButton");
+  button.disabled = true;
+  try {
+    const target = editingIntroducerId
+      ? doc(db, introducerCollectionName, editingIntroducerId)
+      : doc(collection(db, introducerCollectionName));
+    await setDoc(target, {
+      name,
+      feeSystem,
+      advisoryFeeEnabled,
+      note,
+      updatedAt: serverTimestamp(),
+      updatedBy: currentUser.uid,
+      ...(editingIntroducerId ? {} : {
+        createdAt: serverTimestamp(),
+        createdBy: currentUser.uid
+      })
+    }, { merge: Boolean(editingIntroducerId) });
+    showMessage("successMessage", `${name}の紹介者情報を${editingIntroducerId ? "更新" : "登録"}しました。`, false);
+    resetIntroducerForm();
+    await loadMasters();
+  } catch (error) {
+    showMessage("errorMessage", `紹介者情報を保存できませんでした。${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function renderIntroducerList() {
+  const root = document.getElementById("introducerList");
+  root.replaceChildren();
+  if (!introducers.length) {
+    const empty = document.createElement("div");
+    empty.className = "notice";
+    empty.textContent = "紹介者はまだ登録されていません。";
+    root.appendChild(empty);
+    return;
+  }
+  introducers.forEach((introducer) => {
+    const row = document.createElement("article");
+    row.className = "master-item";
+    const info = document.createElement("div");
+    info.className = "staff-master-info";
+    const name = document.createElement("strong");
+    name.textContent = introducer.name;
+    const meta = document.createElement("span");
+    meta.className = "staff-master-meta";
+    meta.textContent = [
+      introducerFeeSystemLabels[introducer.feeSystem] || "紹介料未設定",
+      `顧問料：${introducer.advisoryFeeEnabled ? "発生" : "無し"}`,
+      `備考：${introducer.note || "なし"}`
+    ].join(" / ");
+    info.append(name, meta);
+    const actions = document.createElement("div");
+    actions.className = "staff-master-actions";
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "secondary-button";
+    edit.textContent = "編集";
+    edit.addEventListener("click", () => startIntroducerEdit(introducer));
+    actions.appendChild(edit);
+    row.append(info, actions);
+    root.appendChild(row);
+  });
+}
+
+function startIntroducerEdit(introducer) {
+  editingIntroducerId = introducer.id;
+  document.getElementById("editingIntroducerId").value = introducer.id;
+  document.getElementById("introducerName").value = introducer.name || "";
+  document.getElementById("introducerFeeSystem").value = introducer.feeSystem || "sales10";
+  document.getElementById("introducerAdvisoryFeeEnabled").value = introducer.advisoryFeeEnabled ? "true" : "false";
+  document.getElementById("introducerNote").value = introducer.note || "";
+  document.getElementById("saveIntroducerButton").textContent = "更新";
+  document.getElementById("cancelIntroducerEditButton").classList.remove("hidden");
+  document.getElementById("introducerName").focus();
+}
+
+function resetIntroducerForm() {
+  editingIntroducerId = null;
+  document.getElementById("editingIntroducerId").value = "";
+  document.getElementById("introducerName").value = "";
+  document.getElementById("introducerFeeSystem").value = "sales10";
+  document.getElementById("introducerAdvisoryFeeEnabled").value = "false";
+  document.getElementById("introducerNote").value = "";
+  document.getElementById("saveIntroducerButton").textContent = "登録";
+  document.getElementById("cancelIntroducerEditButton").classList.add("hidden");
+  markInvalid(document.getElementById("introducerName"), false);
+}
+
+function refreshCastIntroducerSelect(selectedId = "") {
+  const select = document.getElementById("castIntroducerId");
+  const value = selectedId || select.value;
+  select.replaceChildren(makeOption("", "紹介者なし"));
+  introducers.forEach((introducer) => {
+    select.appendChild(makeOption(introducer.id, introducer.name));
+  });
+  if (value && introducers.some((introducer) => introducer.id === value)) select.value = value;
+}
+
 function renderCastMasterList() {
   document.getElementById("activeCastCount").textContent = `${castMembers.filter((cast) => cast.status === "active").length}名`;
   document.getElementById("departedCastCount").textContent = `${castMembers.filter((cast) => cast.status === "departed").length}名`;
@@ -669,9 +812,13 @@ function renderCastDetailList() {
     guarantee.textContent = member.rewardSystem === "guaranteedHourly"
       ? `保証時給：${yen.format(Number(member.guaranteedHourlyRate || 0))}円 / 保証期限：${member.guaranteeNote || "未設定"}`
       : "保証期限：対象外";
+    const introducer = document.createElement("span");
+    introducer.textContent = member.introducerId
+      ? `紹介者：${member.introducerName || introducers.find((item) => item.id === member.introducerId)?.name || "未設定"}${Number(member.advisoryFeeAmount || 0) > 0 ? ` / 顧問料：${yen.format(member.advisoryFeeAmount)}円` : ""}`
+      : "紹介者：なし";
     const note = document.createElement("span");
     note.textContent = `備考：${member.note || "なし"}`;
-    detail.append(profileStatus, reward, dates, guarantee, note);
+    detail.append(profileStatus, reward, dates, guarantee, introducer, note);
 
     const actions = document.createElement("div");
     actions.className = "cast-master-actions";
@@ -709,12 +856,15 @@ async function deleteCastData(member) {
 
 function isCastProfileComplete(member) {
   if (!castRewardLabels[member.rewardSystem]) return false;
-  return member.rewardSystem !== "guaranteedHourly"
+  const rewardComplete = member.rewardSystem !== "guaranteedHourly"
     || (
       Boolean(String(member.guaranteeNote || "").trim())
       && Number.isInteger(Number(member.guaranteedHourlyRate))
       && Number(member.guaranteedHourlyRate) > 0
     );
+  const advisoryComplete = !member.advisoryFeeEnabled
+    || (Number.isInteger(Number(member.advisoryFeeAmount)) && Number(member.advisoryFeeAmount) > 0);
+  return rewardComplete && advisoryComplete;
 }
 
 function openCastEdit(member) {
@@ -724,9 +874,12 @@ function openCastEdit(member) {
   document.getElementById("castGuaranteeNote").value = member.guaranteeNote || "";
   document.getElementById("castGuaranteedHourlyRate").value = member.guaranteedHourlyRate || "";
   document.getElementById("castEntryDate").value = member.entryDate || "";
+  refreshCastIntroducerSelect(member.introducerId || "");
+  document.getElementById("castAdvisoryFeeAmount").value = member.advisoryFeeAmount || "";
   document.getElementById("castNote").value = member.note || "";
   hideMessage("castEditError");
   updateGuaranteeNoteVisibility();
+  updateCastAdvisoryFeeVisibility();
   document.getElementById("castEditModal").showModal();
 }
 
@@ -740,6 +893,13 @@ function updateGuaranteeNoteVisibility() {
   }
 }
 
+function updateCastAdvisoryFeeVisibility() {
+  const introducer = introducers.find((item) => item.id === document.getElementById("castIntroducerId").value);
+  const required = Boolean(introducer?.advisoryFeeEnabled);
+  document.getElementById("castAdvisoryFeeField").classList.toggle("hidden", !required);
+  if (!required) markInvalid(document.getElementById("castAdvisoryFeeAmount"), false);
+}
+
 async function saveCastProfile() {
   const id = document.getElementById("editingCastId").value;
   const member = castMembers.find((cast) => cast.id === id);
@@ -747,6 +907,9 @@ async function saveCastProfile() {
   const guaranteeNote = document.getElementById("castGuaranteeNote").value.trim();
   const guaranteedHourlyRate = Number(document.getElementById("castGuaranteedHourlyRate").value);
   const entryDate = document.getElementById("castEntryDate").value;
+  const introducerId = document.getElementById("castIntroducerId").value;
+  const introducer = introducers.find((item) => item.id === introducerId);
+  const advisoryFeeAmount = Number(document.getElementById("castAdvisoryFeeAmount").value);
   const note = document.getElementById("castNote").value.trim();
   if (!member) {
     showMessage("castEditError", "キャスト情報が見つかりません。");
@@ -773,6 +936,21 @@ async function saveCastProfile() {
     return;
   }
   markInvalid(document.getElementById("castGuaranteedHourlyRate"), false);
+  if (introducerId && !introducer) {
+    markInvalid(document.getElementById("castIntroducerId"), true);
+    showMessage("castEditError", "選択した紹介者情報が見つかりません。紹介者一覧を再読み込みしてください。");
+    return;
+  }
+  markInvalid(document.getElementById("castIntroducerId"), false);
+  if (
+    introducer?.advisoryFeeEnabled
+    && (!Number.isInteger(advisoryFeeAmount) || advisoryFeeAmount <= 0)
+  ) {
+    markInvalid(document.getElementById("castAdvisoryFeeAmount"), true);
+    showMessage("castEditError", "顧問料が発生する紹介者の場合は、1円以上の顧問料金額を入力してください。");
+    return;
+  }
+  markInvalid(document.getElementById("castAdvisoryFeeAmount"), false);
   const button = document.getElementById("saveCastProfileButton");
   button.disabled = true;
   try {
@@ -781,6 +959,11 @@ async function saveCastProfile() {
       guaranteeNote: rewardSystem === "guaranteedHourly" ? guaranteeNote : "",
       guaranteedHourlyRate: rewardSystem === "guaranteedHourly" ? guaranteedHourlyRate : 0,
       entryDate,
+      introducerId: introducer?.id || "",
+      introducerName: introducer?.name || "",
+      introducerFeeSystem: introducer?.feeSystem || "",
+      advisoryFeeEnabled: Boolean(introducer?.advisoryFeeEnabled),
+      advisoryFeeAmount: introducer?.advisoryFeeEnabled ? advisoryFeeAmount : 0,
       note,
       profileUpdatedAt: serverTimestamp(),
       profileUpdatedBy: currentUser.uid,

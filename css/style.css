@@ -508,8 +508,17 @@ body {
   gap: 12px;
 }
 
+.introducer-registration-grid {
+  display: grid;
+  gap: 12px;
+}
+
 @media (min-width: 768px) {
   .staff-registration-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .introducer-registration-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }

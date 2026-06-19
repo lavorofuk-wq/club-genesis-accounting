@@ -56,6 +56,7 @@ export const closingsCollectionName = isProduction ? "dailyClosings" : "dailyClo
 export const shopClosingsCollectionName = isProduction ? "shopClosings" : "shopClosings-dev";
 export const staffCollectionName = isProduction ? "staffMembers" : "staffMembers-dev";
 export const castCollectionName = isProduction ? "castMembers" : "castMembers-dev";
+export const introducerCollectionName = isProduction ? "introducers" : "introducers-dev";
 export const posCastPath = isProduction ? "pos/casts" : "pos-dev/casts";
 
 export {

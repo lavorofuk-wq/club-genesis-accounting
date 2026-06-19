@@ -125,6 +125,46 @@
         </div>
       </section>
 
+      <section class="section-shell hidden" data-workspace="registration">
+        <div class="section-title">
+          <div>
+            <h2>紹介者管理</h2>
+            <p class="mt-1 text-sm text-slate-500">キャストに紐付ける紹介者と紹介料の条件を登録します。</p>
+          </div>
+        </div>
+        <input id="editingIntroducerId" type="hidden">
+        <div class="introducer-registration-grid">
+          <label>
+            <span class="form-label">紹介者名</span>
+            <input id="introducerName" type="text" maxlength="40" class="form-input" placeholder="紹介者名">
+          </label>
+          <label>
+            <span class="form-label">紹介料システム</span>
+            <select id="introducerFeeSystem" class="form-select">
+              <option value="sales10">売上10%</option>
+              <option value="pay10">総支給額10%</option>
+              <option value="higher10">売上10%か総支給額10%の高い方</option>
+            </select>
+          </label>
+          <label>
+            <span class="form-label">顧問料</span>
+            <select id="introducerAdvisoryFeeEnabled" class="form-select">
+              <option value="false">無し</option>
+              <option value="true">発生</option>
+            </select>
+          </label>
+          <label class="md:col-span-2">
+            <span class="form-label">備考</span>
+            <textarea id="introducerNote" maxlength="500" rows="3" class="form-textarea" placeholder="紹介条件など"></textarea>
+          </label>
+          <div class="flex items-end gap-2">
+            <button id="saveIntroducerButton" type="button" class="primary-button flex-1">登録</button>
+            <button id="cancelIntroducerEditButton" type="button" class="secondary-button hidden">取消</button>
+          </div>
+        </div>
+        <div id="introducerList" class="master-list mt-5"></div>
+      </section>
+
       <section class="section-shell hidden" data-workspace="closing">
         <div class="section-title">
           <h2>営業日</h2>
@@ -313,6 +353,16 @@
           <input id="castEntryDate" type="date" class="form-input">
         </label>
         <label>
+          <span class="form-label">紹介者</span>
+          <select id="castIntroducerId" class="form-select">
+            <option value="">紹介者なし</option>
+          </select>
+        </label>
+        <label id="castAdvisoryFeeField" class="hidden">
+          <span class="form-label">顧問料金額（必須）</span>
+          <input id="castAdvisoryFeeAmount" type="number" min="1" step="1" inputmode="numeric" class="form-input" placeholder="例：30000">
+        </label>
+        <label>
           <span class="form-label">備考</span>
           <textarea id="castNote" maxlength="500" rows="4" class="form-textarea" placeholder="経理用の備考"></textarea>
         </label>
@@ -325,6 +375,6 @@
     </form>
   </dialog>
 
-  <script type="module" src="js/shop.js?v=1.18"></script>
+  <script type="module" src="js/shop.js?v=1.19"></script>
 </body>
 </html>

@@ -77,6 +77,22 @@ service cloud.firestore {
       && (!request.resource.data.keys().hasAny(['guaranteedHourlyRate'])
         || (request.resource.data.guaranteedHourlyRate is int
           && request.resource.data.guaranteedHourlyRate >= 0))
+      && (!request.resource.data.keys().hasAny(['introducerId'])
+        || (request.resource.data.introducerId is string
+          && request.resource.data.introducerId.size() <= 100))
+      && (!request.resource.data.keys().hasAny(['introducerName'])
+        || (request.resource.data.introducerName is string
+          && request.resource.data.introducerName.size() <= 40))
+      && (!request.resource.data.keys().hasAny(['introducerFeeSystem'])
+        || request.resource.data.introducerFeeSystem == ''
+        || request.resource.data.introducerFeeSystem == 'sales10'
+        || request.resource.data.introducerFeeSystem == 'pay10'
+        || request.resource.data.introducerFeeSystem == 'higher10')
+      && (!request.resource.data.keys().hasAny(['advisoryFeeEnabled'])
+        || request.resource.data.advisoryFeeEnabled is bool)
+      && (!request.resource.data.keys().hasAny(['advisoryFeeAmount'])
+        || (request.resource.data.advisoryFeeAmount is int
+          && request.resource.data.advisoryFeeAmount >= 0))
       && (!request.resource.data.keys().hasAny(['entryDate'])
         || (request.resource.data.entryDate is string
           && (request.resource.data.entryDate == ''
@@ -90,7 +106,29 @@ service cloud.firestore {
         || (request.resource.data.keys().hasAny(['guaranteeNote'])
           && request.resource.data.guaranteeNote.size() > 0
           && request.resource.data.keys().hasAny(['guaranteedHourlyRate'])
-          && request.resource.data.guaranteedHourlyRate > 0));
+          && request.resource.data.guaranteedHourlyRate > 0))
+      && (!request.resource.data.keys().hasAny(['advisoryFeeEnabled'])
+        || request.resource.data.advisoryFeeEnabled == false
+        || (request.resource.data.keys().hasAny(['advisoryFeeAmount'])
+          && request.resource.data.advisoryFeeAmount > 0));
+    }
+
+    function isIntroducer() {
+      return request.resource.data.keys().hasAll([
+        'name',
+        'feeSystem',
+        'advisoryFeeEnabled',
+        'note'
+      ])
+      && request.resource.data.name is string
+      && request.resource.data.name.size() > 0
+      && request.resource.data.name.size() <= 40
+      && (request.resource.data.feeSystem == 'sales10'
+        || request.resource.data.feeSystem == 'pay10'
+        || request.resource.data.feeSystem == 'higher10')
+      && request.resource.data.advisoryFeeEnabled is bool
+      && request.resource.data.note is string
+      && request.resource.data.note.size() <= 500;
     }
 
     function isClosingPayload(document) {
@@ -201,6 +239,18 @@ service cloud.firestore {
     match /castMembers-dev/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
       allow create, update: if signedIn() && userRole() == 'shop' && isCastMember();
+      allow delete: if false;
+    }
+
+    match /introducers/{document} {
+      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow create, update: if signedIn() && userRole() == 'shop' && isIntroducer();
+      allow delete: if false;
+    }
+
+    match /introducers-dev/{document} {
+      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow create, update: if signedIn() && userRole() == 'shop' && isIntroducer();
       allow delete: if false;
     }
 
