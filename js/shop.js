@@ -77,6 +77,13 @@ document.getElementById("clearSentClosingDateButton").addEventListener("click", 
 });
 document.getElementById("registerStaffButton").addEventListener("click", registerStaff);
 document.getElementById("cancelStaffEditButton").addEventListener("click", resetStaffForm);
+document.getElementById("openStaffListButton").addEventListener("click", () => {
+  renderStaffMasterList();
+  document.getElementById("staffListModal").showModal();
+});
+document.getElementById("closeStaffListButton").addEventListener("click", () => {
+  document.getElementById("staffListModal").close();
+});
 document.getElementById("saveIntroducerButton").addEventListener("click", saveIntroducer);
 document.getElementById("cancelIntroducerEditButton").addEventListener("click", resetIntroducerForm);
 document.getElementById("syncCastsButton").addEventListener("click", () => syncPosCasts(true));
@@ -604,6 +611,7 @@ function renderStaffMasterList() {
 }
 
 function startStaffEdit(member) {
+  document.getElementById("staffListModal").close();
   editingStaffId = member.id;
   document.getElementById("newStaffName").value = member.name || "";
   document.getElementById("newStaffEmploymentType").value = member.employmentType || "employee";
@@ -613,6 +621,7 @@ function startStaffEdit(member) {
   document.getElementById("registerStaffButton").textContent = "情報を更新";
   document.getElementById("cancelStaffEditButton").classList.remove("hidden");
   document.getElementById("newStaffName").focus();
+  document.getElementById("newStaffName").scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 function resetStaffForm() {

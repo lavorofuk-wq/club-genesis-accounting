@@ -59,7 +59,10 @@
             <h2>スタッフ管理</h2>
             <p class="mt-1 text-sm text-slate-500">スタッフの入店情報を登録し、退店時は在籍状態を変更します。</p>
           </div>
-          <button type="button" class="secondary-button" data-home-button>ホームへ戻る</button>
+          <div class="flex flex-wrap gap-2">
+            <button id="openStaffListButton" type="button" class="secondary-button">スタッフ一覧</button>
+            <button type="button" class="secondary-button" data-home-button>ホームへ戻る</button>
+          </div>
         </div>
         <div class="staff-registration-grid">
           <label>
@@ -97,7 +100,6 @@
             <button id="cancelStaffEditButton" type="button" class="secondary-button hidden">取消</button>
           </div>
         </div>
-        <div id="staffMasterList" class="master-list mt-5"></div>
       </section>
 
       <section class="section-shell hidden" data-workspace="registration">
@@ -326,6 +328,19 @@
     </div>
   </dialog>
 
+  <dialog id="staffListModal" class="modal-card modal-wide">
+    <div>
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <p class="brand-kicker">STAFF LIST</p>
+          <h2 class="mt-2 text-xl font-bold">スタッフ一覧</h2>
+        </div>
+        <button id="closeStaffListButton" type="button" class="secondary-button">閉じる</button>
+      </div>
+      <div id="staffMasterList" class="master-list mt-5"></div>
+    </div>
+  </dialog>
+
   <dialog id="castEditModal" class="modal-card">
     <form method="dialog" id="castEditForm">
       <p class="brand-kicker">CAST PROFILE</p>
@@ -375,6 +390,6 @@
     </form>
   </dialog>
 
-  <script type="module" src="js/shop.js?v=1.19"></script>
+  <script type="module" src="js/shop.js?v=1.20"></script>
 </body>
 </html>
