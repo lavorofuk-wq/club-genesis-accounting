@@ -48,6 +48,10 @@
             <span class="shop-home-action-title">キャスト報酬</span>
             <span class="shop-home-action-detail">売上・会計・勤務時間から報酬明細を作成</span>
           </button>
+          <button type="button" class="shop-home-action" data-accounting-view="trialCastRewards">
+            <span class="shop-home-action-title">体入キャスト報酬</span>
+            <span class="shop-home-action-detail">体入勤務時間と当日時給から報酬を算出</span>
+          </button>
           <button type="button" class="shop-home-action" data-accounting-view="staffPayroll">
             <span class="shop-home-action-title">従業員給与</span>
             <span class="shop-home-action-detail">給与形態・勤務・手当から給与明細を作成</span>
@@ -108,6 +112,10 @@
           </div>
         </section>
         <section class="section-shell">
+          <div class="section-title"><h2>体入キャスト勤務時間</h2></div>
+          <div id="trialCastWorkSummary" class="breakdown-list"></div>
+        </section>
+        <section class="section-shell">
           <div class="section-title"><h2>経費・支出データ</h2></div>
           <div id="expenseBreakdown" class="breakdown-list"></div>
         </section>
@@ -123,6 +131,14 @@
           <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
         </div>
         <div id="castRewardList" class="payroll-list"></div>
+      </section>
+
+      <section class="section-shell hidden" data-accounting-workspace="trialCastRewards">
+        <div class="section-title">
+          <div><h2>体入キャスト報酬</h2><p class="mt-1 text-sm text-slate-500">体入キャストは当日時給と勤務時間だけで計算し、紹介料の対象には含めません。</p></div>
+          <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
+        </div>
+        <div id="trialCastRewardList" class="payroll-list"></div>
       </section>
 
       <section class="section-shell hidden" data-accounting-workspace="staffPayroll">
@@ -243,6 +259,6 @@
     </div>
   </dialog>
 
-  <script type="module" src="js/accounting.js?v=1.24"></script>
+  <script type="module" src="js/accounting.js?v=1.25"></script>
 </body>
 </html>

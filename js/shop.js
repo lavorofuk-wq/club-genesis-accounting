@@ -14,6 +14,7 @@ import {
   staffCollectionName,
   castCollectionName,
   introducerCollectionName,
+  trialCastCollectionName,
   posCastPath
 } from "./firebase-config.js";
 import { requireRole, logout, showMessage, hideMessage } from "./auth.js";
@@ -1037,10 +1038,10 @@ function refreshWorkSelects() {
 
 function fillCastMemberSelect(select, selectedId = "", savedName = "") {
   select.replaceChildren(makeOption("", "選択してください"));
-  castMembers.filter((member) => member.status !== "departed").forEach((member) => {
+  castMembers.filter((member) => member.status === "active").forEach((member) => {
     select.appendChild(makeOption(member.id, member.name));
   });
-  if (selectedId && !castMembers.some((member) => member.id === selectedId && member.status !== "departed") && savedName) {
+  if (selectedId && !castMembers.some((member) => member.id === selectedId && member.status === "active") && savedName) {
     select.appendChild(makeOption(selectedId, `${savedName}（現在は利用不可）`));
   }
   select.dataset.savedName = savedName;
@@ -1375,6 +1376,8 @@ function addAllowanceRow(data = {}) {
 function resetRows() {
   document.getElementById("staffWorkRows").replaceChildren();
   document.getElementById("castWorkRows").replaceChildren();
+  document.getElementById("trialCastWorkRows").replaceChildren();
+  document.getElementById("trialCastWorkSection").classList.add("hidden");
   document.getElementById("expenseRows").replaceChildren();
   document.getElementById("allowanceRows").replaceChildren();
   renderStaffAttendancePicker();
@@ -1465,6 +1468,16 @@ function collectRows() {
     })
     .filter((row) => row.castId || row.castName || row.hours > 0);
 
+  const trialWork = [...document.querySelectorAll(".trial-cast-work-row")].map((row) => ({
+    castId: row.dataset.castId || "",
+    castName: row.dataset.castName || "",
+    startTime: row.dataset.startTime || "",
+    endTime: row.dataset.endTime || "",
+    hours: Number(row.dataset.hours || 0),
+    introducerName: row.querySelector(".trial-introducer-name").value.trim(),
+    hourlyRate: Number(row.querySelector(".trial-hourly-rate").value || 0)
+  }));
+
   const expenses = [...document.querySelectorAll(".expense-row")]
     .map((row) => ({
       category: row.querySelector(".expense-category").value,
@@ -1488,7 +1501,7 @@ function collectRows() {
     })
     .filter((row) => row.amount > 0 || row.recipient || row.note || row.type === "その他");
 
-  return { staffWork, castWork, expenses, allowances };
+  return { staffWork, castWork, trialWork, expenses, allowances };
 }
 
 function buildPayload() {
@@ -1518,6 +1531,7 @@ function buildPayload() {
     castSales: selectedPending?.castSales || [],
     staffWork: rows.staffWork,
     castWork: rows.castWork,
+    trialWork: rows.trialWork,
     staffHours: rows.staffWork,
     castHours: rows.castWork,
     expenses: rows.expenses,
@@ -1568,6 +1582,14 @@ function validatePayload(payload) {
     }
     if (!isQuarterHour(row.hours)) errors.push("キャスト勤務時間は0時間超〜24時間以内で入力してください。");
   });
+  payload.trialWork.forEach((row) => {
+    if (!row.castId || !row.castName) errors.push("体入キャスト情報を確認してください。");
+    if (!isQuarterTime(row.startTime) || !isQuarterTime(row.endTime) || !isQuarterHour(row.hours)) {
+      errors.push(`${row.castName || "体入キャスト"}の勤務時間を確認してください。`);
+    }
+    if (!row.introducerName) errors.push(`${row.castName || "体入キャスト"}の紹介者を入力してください。`);
+    if (!Number.isInteger(row.hourlyRate) || row.hourlyRate <= 0) errors.push(`${row.castName || "体入キャスト"}の当日時給を1円以上で入力してください。`);
+  });
   ["totalSales", "cashSales", "cardSales"].forEach((key) => {
     if (!isNonNegativeInteger(payload.sales[key])) errors.push("売上は0以上の整数で入力してください。");
   });
@@ -1617,6 +1639,7 @@ function openConfirm() {
     `現金：${yen.format(pendingPayload.sales.cashSales)}円 / カード：${yen.format(pendingPayload.sales.cardSales)}円`,
     `総客数：${pendingPayload.customers.totalCustomers}名 / 客単価：${yen.format(pendingPayload.customers.customerUnitPrice)}円`,
     `会計データ：${pendingPayload.transactions.length}件`,
+    `体入キャスト：${pendingPayload.trialWork.length}名`,
     `経費合計：${yen.format(expenseTotal)}円 / 手当合計：${yen.format(allowanceTotal)}円`
   ].forEach((text) => {
     const p = document.createElement("p");
@@ -1636,6 +1659,17 @@ async function saveReport() {
 
   try {
     await setDoc(doc(db, closingsCollectionName, pendingPayload.businessDate), pendingPayload, { merge: true });
+    await Promise.all(pendingPayload.trialWork.map((row) => setDoc(
+      doc(db, trialCastCollectionName, trialCastRecordId(pendingPayload.businessDate, row.castId)),
+      {
+        ...row,
+        businessDate: pendingPayload.businessDate,
+        sourceClosingId: pendingPayload.businessDate,
+        updatedBy: currentUser.uid,
+        updatedAt: serverTimestamp()
+      },
+      { merge: true }
+    )));
     if (selectedPending?.sourceCollection === shopClosingsCollectionName) {
       try {
         await setDoc(doc(db, shopClosingsCollectionName, selectedPending.businessDate), {
@@ -1722,9 +1756,18 @@ function applyClosingToForm(data) {
   document.getElementById("staffWorkRows").replaceChildren();
   normalizeStaffWork(data.staffWork || data.staffHours).forEach(addStaffWorkRow);
   renderStaffAttendancePicker();
+  const normalizedWork = normalizeCastWork(data.castWork || data.castHours);
+  const trialIds = new Set((data.trialCasts || []).map((cast) => String(cast.castId || "")));
+  const trialWork = Array.isArray(data.trialWork) && data.trialWork.length
+    ? data.trialWork
+    : normalizedWork.filter((row) => row.isTrial || trialIds.has(String(row.posCastId || row.castId || "")));
+  const regularWork = normalizedWork.filter((row) => !trialWork.some((trial) =>
+    String(trial.posCastId || trial.castId) === String(row.posCastId || row.castId)
+  ));
   document.getElementById("castWorkRows").replaceChildren();
-  normalizeCastWork(data.castWork || data.castHours).forEach(addCastWorkRow);
+  regularWork.forEach(addCastWorkRow);
   if (!document.getElementById("castWorkRows").children.length) addCastWorkRow();
+  renderTrialCastWork(trialWork, data.trialCasts || []);
   document.getElementById("expenseRows").replaceChildren();
   (data.expenses?.length ? data.expenses : [{}]).forEach(addExpenseRow);
   document.getElementById("allowanceRows").replaceChildren();
@@ -1862,7 +1905,52 @@ function normalizeCastWork(work) {
     return {
       ...row,
       castId: member?.id || row.castId || "",
+      posCastId: member?.posCastId || row.castId || "",
+      isTrial: row.isTrial === true || row.castType === "trial" || member?.status === "trial",
       hours: Number(row.hours || 0)
     };
   });
+}
+
+function renderTrialCastWork(work, trialCasts) {
+  const section = document.getElementById("trialCastWorkSection");
+  const root = document.getElementById("trialCastWorkRows");
+  root.replaceChildren();
+  const trialMap = new Map(trialCasts.map((cast) => [String(cast.castId || ""), cast]));
+  work.forEach((row) => {
+    const trial = trialMap.get(String(row.posCastId || row.castId || "")) || {};
+    const item = document.createElement("article");
+    item.className = "dynamic-row trial-cast-work-row";
+    item.dataset.castId = String(row.posCastId || row.castId || trial.castId || "");
+    item.dataset.castName = row.castName || row.name || trial.castName || "";
+    item.dataset.startTime = row.startTime || "";
+    item.dataset.endTime = row.endTime || "";
+    item.dataset.hours = String(row.hours || calculateWorkHours(row.startTime, row.endTime) || 0);
+    const identity = document.createElement("div");
+    identity.innerHTML = `<strong>${escapeHtml(item.dataset.castName)}</strong><span class="block text-xs text-slate-500">${escapeHtml(item.dataset.startTime)}-${escapeHtml(item.dataset.endTime)} / ${escapeHtml(formatHours(Number(item.dataset.hours)))}</span>`;
+    const introducer = document.createElement("input");
+    introducer.type = "text";
+    introducer.maxLength = 40;
+    introducer.placeholder = "紹介者（必須）";
+    introducer.className = "form-input trial-introducer-name";
+    introducer.value = row.introducerName || "";
+    const hourlyRate = document.createElement("input");
+    hourlyRate.type = "number";
+    hourlyRate.min = "1";
+    hourlyRate.step = "1";
+    hourlyRate.placeholder = "当日時給（必須）";
+    hourlyRate.className = "form-input trial-hourly-rate";
+    hourlyRate.value = row.hourlyRate || "";
+    hourlyRate.addEventListener("input", () => {
+      const amount = Number(hourlyRate.value);
+      markInvalid(hourlyRate, hourlyRate.value !== "" && (!Number.isInteger(amount) || amount <= 0));
+    });
+    item.append(identity, introducer, hourlyRate);
+    root.appendChild(item);
+  });
+  section.classList.toggle("hidden", !work.length);
+}
+
+function trialCastRecordId(date, castId) {
+  return `${date}_${String(castId).replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 }

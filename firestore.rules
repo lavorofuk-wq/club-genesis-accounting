@@ -160,6 +160,22 @@ service cloud.firestore {
       && request.resource.data.usen >= 0;
     }
 
+    function isTrialCastRecord() {
+      return request.resource.data.businessDate is string
+      && request.resource.data.businessDate.matches('^\\d{4}-\\d{2}-\\d{2}$')
+      && request.resource.data.castId is string
+      && request.resource.data.castId.size() > 0
+      && request.resource.data.castName is string
+      && request.resource.data.castName.size() > 0
+      && request.resource.data.castName.size() <= 40
+      && request.resource.data.introducerName is string
+      && request.resource.data.introducerName.size() > 0
+      && request.resource.data.introducerName.size() <= 40
+      && request.resource.data.hourlyRate is int
+      && request.resource.data.hourlyRate > 0
+      && isNonNegativeNumber(request.resource.data.hours);
+    }
+
     function isClosingPayload(document) {
       return request.resource.data.keys().hasAll([
         'businessDate',
@@ -292,6 +308,18 @@ service cloud.firestore {
     match /fixedExpenses-dev/{document} {
       allow read: if signedIn() && userRole() == 'accounting';
       allow create, update: if signedIn() && userRole() == 'accounting' && isFixedExpense(document);
+      allow delete: if false;
+    }
+
+    match /trialCastRecords/{document} {
+      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow create, update: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting') && isTrialCastRecord();
+      allow delete: if false;
+    }
+
+    match /trialCastRecords-dev/{document} {
+      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow create, update: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting') && isTrialCastRecord();
       allow delete: if false;
     }
 

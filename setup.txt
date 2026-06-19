@@ -32,6 +32,7 @@ GENESIS Management System（GMS）セットアップ手順
 5. Firestoreルールを反映
    - このリポジトリの firestore.rules が最新版です。
    - 経費入力で使用する fixedExpenses / fixedExpenses-dev の権限もこのルールに含まれます。
+   - 体入キャスト一覧で使用する trialCastRecords / trialCastRecords-dev の権限も含まれます。
    - Firebase CLIでログインしてから反映します。
 
    npx firebase-tools login

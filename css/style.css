@@ -378,6 +378,11 @@ body {
   .dynamic-row.allowance-row {
     grid-template-columns: 150px 140px minmax(170px, 1fr) minmax(180px, 1fr) auto;
   }
+
+  .dynamic-row.trial-cast-work-row {
+    grid-template-columns: minmax(220px, 1.4fr) minmax(160px, 1fr) minmax(160px, 1fr);
+    align-items: end;
+  }
 }
 
 @media (min-width: 1024px) {

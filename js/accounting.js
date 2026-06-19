@@ -10,6 +10,7 @@ import {
   staffCollectionName,
   introducerCollectionName,
   fixedExpenseCollectionName,
+  trialCastCollectionName,
   firebaseProjectId
 } from "./firebase-config.js";
 import { requireRole, logout, showMessage, hideMessage } from "./auth.js";
@@ -36,6 +37,7 @@ let castMembers = [];
 let staffMembers = [];
 let introducers = [];
 let fixedExpenseRecords = [];
+let trialCastRecords = [];
 let fixedExpenseLoadError = null;
 let editingClosing = null;
 let deletingClosing = null;
@@ -92,6 +94,7 @@ function showWorkspace(name) {
   });
   if (name === "finalized") renderFinalizedView();
   if (name === "castRewards") renderCastRewards();
+  if (name === "trialCastRewards") renderTrialCastRewards();
   if (name === "staffPayroll") renderStaffPayroll();
   if (name === "introducerFees") renderIntroducerFees();
   if (name === "fixedExpenses") renderFixedExpenseForm();
@@ -101,12 +104,13 @@ async function loadData() {
   hideMessage("errorMessage");
   hideMessage("successMessage");
   try {
-    const [closingSnap, castSnap, staffSnap, introducerSnap, fixedExpenseSnap] = await Promise.all([
+    const [closingSnap, castSnap, staffSnap, introducerSnap, fixedExpenseSnap, trialCastSnap] = await Promise.all([
       getDocs(collection(db, closingsCollectionName)),
       getDocs(collection(db, castCollectionName)),
       getDocs(collection(db, staffCollectionName)),
       getDocs(collection(db, introducerCollectionName)),
-      getDocs(collection(db, fixedExpenseCollectionName)).catch((error) => ({ docs: [], error }))
+      getDocs(collection(db, fixedExpenseCollectionName)).catch((error) => ({ docs: [], error })),
+      getDocs(collection(db, trialCastCollectionName)).catch(() => ({ docs: [] }))
     ]);
     allClosings = closingSnap.docs.map((item) => normalizeClosing(item.id, item.data()));
     receivedClosings = allClosings
@@ -120,6 +124,7 @@ async function loadData() {
     introducers = introducerSnap.docs.map((item) => ({ id: item.id, ...item.data() }));
     fixedExpenseLoadError = fixedExpenseSnap.error || null;
     fixedExpenseRecords = fixedExpenseSnap.docs.map((item) => normalizeFixedExpense(item.id, item.data()));
+    trialCastRecords = trialCastSnap.docs.map((item) => ({ id: item.id, ...item.data() }));
     renderReceivedList();
     renderFinalizedView();
     renderFixedExpenseForm();
@@ -151,7 +156,8 @@ function normalizeClosing(id, raw) {
     allowances: normalizeMoneyRows(raw.allowances, "type"),
     transactions: normalizeTransactions(raw.transactions),
     castSales: Array.isArray(raw.castSales) ? raw.castSales : [],
-    castWork: normalizeWorkRows(raw.castWork || raw.castHours, false),
+    castWork: normalizeWorkRows(raw.castWork || raw.castHours, false).filter((row) => !row.isTrial),
+    trialWork: normalizeTrialWork(raw.trialWork, raw.castWork || raw.castHours, raw.trialCasts),
     staffWork: normalizeWorkRows(raw.staffWork || raw.staffHours, true),
     cashReconciliation: raw.cashReconciliation || {},
     cashDifference: toNumber(raw.cashReconciliation?.difference ?? raw.cashDifference),
@@ -168,6 +174,23 @@ function normalizeMoneyRows(rows, labelKey) {
     [labelKey]: String(row[labelKey] || ""),
     amount: toNumber(row.amount)
   }));
+}
+
+function normalizeTrialWork(trialWork, castWork, trialCasts) {
+  if (Array.isArray(trialWork) && trialWork.length) {
+    return trialWork.map((row) => ({
+      id: String(row.castId || row.id || row.castName || ""),
+      name: String(row.castName || row.name || ""),
+      startTime: String(row.startTime || ""),
+      endTime: String(row.endTime || ""),
+      hours: toNumber(row.hours),
+      introducerName: String(row.introducerName || ""),
+      hourlyRate: toNumber(row.hourlyRate),
+      isTrial: true
+    }));
+  }
+  const trialIds = new Set((trialCasts || []).map((cast) => String(cast.castId || "")));
+  return normalizeWorkRows(castWork, false).filter((row) => row.isTrial || trialIds.has(String(row.id)));
 }
 
 function normalizeFixedExpense(id, raw = {}) {
@@ -492,6 +515,12 @@ function renderReceivedTransactions(closing) {
     closing.transactions,
     (row) => [row.tableLabel, row.guests, paymentLabel(row), yenCell(row.subtotal), yenCell(row.discount), yenCell(row.total)]
   ));
+  root.appendChild(createTableBlock(
+    "体入キャスト情報",
+    ["体入キャスト", "開始", "終了", "勤務時間", "紹介者", "当日時給"],
+    closing.trialWork,
+    (row) => [row.name, row.startTime, row.endTime, hoursCell(row.hours), row.introducerName, yenCell(row.hourlyRate)]
+  ));
 }
 
 async function saveReceived(finalize) {
@@ -536,6 +565,25 @@ async function saveReceived(finalize) {
       update.finalizedAt = serverTimestamp();
     }
     await setDoc(doc(db, closingsCollectionName, editingClosing.id), update, { merge: true });
+    if (finalize) {
+      await Promise.all(editingClosing.trialWork.map((row) => setDoc(
+        doc(db, trialCastCollectionName, trialCastRecordId(editingClosing.businessDate, row.id)),
+        {
+          businessDate: editingClosing.businessDate,
+          castId: row.id,
+          castName: row.name,
+          startTime: row.startTime,
+          endTime: row.endTime,
+          hours: row.hours,
+          introducerName: row.introducerName,
+          hourlyRate: row.hourlyRate,
+          sourceClosingId: editingClosing.id,
+          updatedBy: currentUser.uid,
+          updatedAt: serverTimestamp()
+        },
+        { merge: true }
+      )));
+    }
     byId("receivedEditModal").close();
     editingClosing = null;
     await loadData();
@@ -566,6 +614,12 @@ function collectReceivedValues() {
   });
   result.expenses = collectMoneyRows("editExpenseRows", "category");
   result.allowances = collectMoneyRows("editAllowanceRows", "type");
+  editingClosing.trialWork.forEach((row) => {
+    if (!row.name || !row.introducerName) throw new Error("体入キャスト名と紹介者を確認してください。");
+    if (row.hours <= 0 || !Number.isInteger(row.hourlyRate) || row.hourlyRate <= 0) {
+      throw new Error(`${row.name}の勤務時間または当日時給を確認してください。`);
+    }
+  });
   return result;
 }
 
@@ -610,6 +664,7 @@ function renderFinalizedView() {
   renderCastSales();
   renderWorkSummary("castWorkSummary", aggregateWork(visibleFinalized, "castWork"));
   renderWorkSummary("staffWorkSummary", aggregateWork(visibleFinalized, "staffWork"));
+  renderWorkSummary("trialCastWorkSummary", aggregateWork(visibleFinalized, "trialWork"));
   renderBreakdown("expenseBreakdown", summary.expenseByCategory);
   renderBreakdown("calculatedExpenseBreakdown", summary.calculatedExpenseBreakdown);
 }
@@ -623,6 +678,7 @@ function summarize(items) {
     fixedExpenses: 0,
     castRewards: 0,
     staffPayroll: 0,
+    trialCastRewards: 0,
     introducerExpenses: 0,
     totalOutflow: 0,
     unresolvedPayments: 0,
@@ -657,6 +713,7 @@ function summarize(items) {
   });
   const staffRows = calculateStaffPayrollRows(items);
   result.staffPayroll = staffRows.reduce((sum, row) => sum + row.payable, 0);
+  result.trialCastRewards = calculateTrialCastRewardRows(items).reduce((sum, row) => sum + row.payable, 0);
   const introducerRows = rewardRows
     .filter((row) => row.member?.introducerId)
     .map((row) => calculateIntroducerFee(row));
@@ -665,10 +722,11 @@ function summarize(items) {
     else result.introducerExpenses += row.totalExpense;
   });
   result.totalExpenses += result.fixedExpenses;
-  result.totalOutflow = result.totalExpenses + result.castRewards + result.staffPayroll + result.introducerExpenses;
+  result.totalOutflow = result.totalExpenses + result.castRewards + result.trialCastRewards + result.staffPayroll + result.introducerExpenses;
   result.grossProfit = result.totalSales - result.totalOutflow;
   result.calculatedExpenseBreakdown = {
     "キャスト報酬": result.castRewards,
+    "体入キャスト報酬": result.trialCastRewards,
     "スタッフ給与": result.staffPayroll,
     "紹介料・顧問料": result.introducerExpenses
   };
@@ -680,6 +738,7 @@ function renderSummaryCards(summary) {
     ["総売上", yenCell(summary.totalSales)],
     ["経費合計", yenCell(summary.totalExpenses)],
     ["キャスト報酬", summary.unresolvedPayments ? `${yenCell(summary.castRewards)}ほか未計算` : yenCell(summary.castRewards)],
+    ["体入キャスト報酬", yenCell(summary.trialCastRewards)],
     ["スタッフ給与", yenCell(summary.staffPayroll)],
     ["紹介料・顧問料", yenCell(summary.introducerExpenses)],
     ["総支出", summary.unresolvedPayments ? `${yenCell(summary.totalOutflow)}ほか未計算` : yenCell(summary.totalOutflow)],
@@ -926,6 +985,43 @@ function renderCastRewards() {
   });
 }
 
+function renderTrialCastRewards() {
+  updateVisibleFinalized();
+  const root = byId("trialCastRewardList");
+  root.replaceChildren();
+  const rows = calculateTrialCastRewardRows(visibleFinalized);
+  if (!rows.length) {
+    root.appendChild(emptyMessage("指定期間の体入キャスト勤務データはありません。"));
+    return;
+  }
+  rows.forEach((row) => {
+    root.appendChild(createPayrollCard(
+      row.name,
+      `${row.businessDate} / 紹介者：${row.introducerName || "未入力"}`,
+      [
+        ["勤務時間", hoursCell(row.hours)],
+        ["当日時給", yenCell(row.hourlyRate)],
+        ["体入報酬", yenCell(row.payable)]
+      ]
+    ));
+  });
+  const saved = trialCastRecords
+    .filter((row) => row.businessDate >= byId("startDate").value && row.businessDate <= byId("endDate").value)
+    .length;
+  const notice = document.createElement("div");
+  notice.className = "notice";
+  notice.textContent = `体入キャスト一覧 保存済み ${saved}件`;
+  root.prepend(notice);
+}
+
+function calculateTrialCastRewardRows(closings) {
+  return closings.flatMap((closing) => closing.trialWork.map((row) => ({
+    ...row,
+    businessDate: closing.businessDate,
+    payable: Math.round(toNumber(row.hours) * toNumber(row.hourlyRate))
+  }))).sort((a, b) => b.businessDate.localeCompare(a.businessDate) || a.name.localeCompare(b.name, "ja"));
+}
+
 function calculateCastRewardRows(rewardClosings = rewardMonthClosings()) {
   const salesRows = aggregateCastSales(rewardClosings);
   const workRows = aggregateWork(rewardClosings, "castWork");
@@ -933,12 +1029,14 @@ function calculateCastRewardRows(rewardClosings = rewardMonthClosings()) {
   const salesMap = new Map(salesRows.map((row) => [row.key, row]));
   const workMap = new Map(workRows.map((row) => [row.id, row]));
   const backMap = new Map(backRows.map((row) => [row.id, row]));
+  const trialIds = new Set(rewardClosings.flatMap((closing) => closing.trialWork.map((row) => String(row.id))));
   const keys = new Set([...salesMap.keys(), ...workMap.keys(), ...backMap.keys()]);
   return [...keys].map((key) => {
     const sales = salesMap.get(key) || {};
     const work = workMap.get(key) || {};
     const backs = backMap.get(key) || emptyCastBack(key, sales.name || work.name);
     const member = findMember(castMembers, key, sales.name || work.name);
+    if (member?.status === "trial" || trialIds.has(String(key))) return null;
     const monthlySales = toNumber(sales.totalAttributedSales);
     const rewardSystem = member?.rewardSystem || "";
     const guaranteedHourlyRate = toNumber(member?.guaranteedHourlyRate);
@@ -972,7 +1070,7 @@ function calculateCastRewardRows(rewardClosings = rewardMonthClosings()) {
       payable: hourlyAndBack === null ? null : Math.max(hourlyAndBack, salesReward),
       calculationError
     };
-  }).sort((a, b) => b.monthlySales - a.monthlySales);
+  }).filter(Boolean).sort((a, b) => b.monthlySales - a.monthlySales);
 }
 
 function renderIntroducerFees() {
@@ -1270,6 +1368,9 @@ function openClosingDetail(id) {
   body.appendChild(createTableBlock("キャスト勤務", ["キャスト", "開始", "終了", "勤務時間"], closing.castWork, (row) => [
     row.name, row.startTime || "", row.endTime || "", hoursCell(row.hours)
   ]));
+  body.appendChild(createTableBlock("体入キャスト勤務", ["体入キャスト", "開始", "終了", "勤務時間", "紹介者", "当日時給", "報酬"], closing.trialWork, (row) => [
+    row.name, row.startTime || "", row.endTime || "", hoursCell(row.hours), row.introducerName || "", yenCell(row.hourlyRate), yenCell(row.hours * row.hourlyRate)
+  ]));
   byId("closingDetailModal").showModal();
 }
 
@@ -1326,6 +1427,7 @@ function exportCsv() {
     ["総売上", summary.totalSales],
     ["経費合計", summary.totalExpenses],
     ["キャスト報酬", summary.castRewards],
+    ["体入キャスト報酬", summary.trialCastRewards],
     ["スタッフ給与", summary.staffPayroll],
     ["紹介料・顧問料", summary.introducerExpenses],
     ["総支出", summary.totalOutflow],
@@ -1397,7 +1499,10 @@ function normalizeWorkRows(work, staff) {
     endTime: String(row.endTime || ""),
     hours: toNumber(row.hours),
     payType: String(row.payType || ""),
-    payAmount: toNumber(row.payAmount)
+    payAmount: toNumber(row.payAmount),
+    isTrial: row.isTrial === true || row.castType === "trial",
+    introducerName: String(row.introducerName || ""),
+    hourlyRate: toNumber(row.hourlyRate)
   })).filter((row) => row.name);
 }
 
@@ -1470,6 +1575,10 @@ function groupClosingsByMonth(closings) {
     groups.get(month).push(closing);
   });
   return groups;
+}
+
+function trialCastRecordId(date, castId) {
+  return `${date}_${String(castId).replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 }
 
 function todayString() {
