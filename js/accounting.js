@@ -582,7 +582,6 @@ function aggregateCastSales(items) {
         name: name || castNameForId(key) || "名称未設定",
         honShimeiSales: 0,
         jonaiExtensionSales: 0,
-        drinkSales: 0,
         totalAttributedSales: 0
       });
     }
@@ -594,8 +593,7 @@ function aggregateCastSales(items) {
         const current = ensure(row.castId || row.posCastId, row.castName || row.name);
         current.honShimeiSales += toNumber(row.honShimeiSales);
         current.jonaiExtensionSales += toNumber(row.jonaiExtensionSales);
-        current.drinkSales += toNumber(row.drinkSales);
-        current.totalAttributedSales += toNumber(row.totalAttributedSales);
+        current.totalAttributedSales += toNumber(row.honShimeiSales) + toNumber(row.jonaiExtensionSales);
       });
       return;
     }
@@ -629,14 +627,6 @@ function aggregateCastSales(items) {
             current.totalAttributedSales += share;
           });
         });
-      transaction.items
-        .filter((item) => item.category === "castDrink" && item.castId)
-        .forEach((item) => {
-          const amount = item.price * item.quantity;
-          const current = ensure(item.castId);
-          current.drinkSales += amount;
-          current.totalAttributedSales += amount;
-        });
     });
   });
   return [...map.values()].sort((a, b) => b.totalAttributedSales - a.totalAttributedSales);
@@ -647,12 +637,12 @@ function renderCastSales() {
   body.replaceChildren();
   const rows = aggregateCastSales(visibleFinalized);
   if (!rows.length) {
-    appendEmptyTableRow(body, 5, "キャスト売上データはありません。");
+    appendEmptyTableRow(body, 4, "キャスト売上データはありません。");
     return;
   }
   rows.forEach((row) => {
     const tr = document.createElement("tr");
-    [row.name, yenCell(row.honShimeiSales), yenCell(row.jonaiExtensionSales), yenCell(row.drinkSales), yenCell(row.totalAttributedSales)]
+    [row.name, yenCell(row.honShimeiSales), yenCell(row.jonaiExtensionSales), yenCell(row.totalAttributedSales)]
       .forEach((value) => appendCell(tr, value));
     body.appendChild(tr);
   });
