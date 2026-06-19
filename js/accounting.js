@@ -796,6 +796,7 @@ function calculateCastRewardRows() {
       name: sales.name || work.name || backs.name || member?.name || "名称未設定",
       member,
       monthlySales,
+      monthlyHonShimeiSales: toNumber(sales.honShimeiSales),
       hours: toNumber(work.hours),
       hourlyRate,
       hourlyBase,
@@ -842,8 +843,8 @@ function renderIntroducerFees() {
       row.castName,
       `${month} / 紹介者：${row.introducerName} / ${introducerFeeSystemLabel(row.feeSystem)}`,
       [
-        ["月間小計売上", yenCell(row.monthlySales)],
-        ["売上10%", yenCell(row.sales10)],
+        ["本指名小計売上", yenCell(row.honShimeiSales)],
+        ["本指名売上10%", yenCell(row.sales10)],
         ["キャスト総支給額", row.payable === null ? "計算不可" : yenCell(row.payable)],
         ["総支給額10%", row.pay10 === null ? "計算不可" : yenCell(row.pay10)],
         ["採用した紹介料", row.introductionFee === null ? "計算不可" : yenCell(row.introductionFee)],
@@ -858,7 +859,8 @@ function calculateIntroducerFee(reward) {
   const member = reward.member || {};
   const introducer = introducers.find((item) => item.id === member.introducerId);
   const feeSystem = member.introducerFeeSystem || introducer?.feeSystem || "";
-  const sales10 = Math.floor(reward.monthlySales * 0.10);
+  const honShimeiSales = toNumber(reward.monthlyHonShimeiSales);
+  const sales10 = Math.floor(honShimeiSales * 0.10);
   const pay10 = reward.payable === null ? null : Math.floor(reward.payable * 0.10);
   let introductionFee = null;
   if (feeSystem === "sales10") introductionFee = sales10;
@@ -869,7 +871,7 @@ function calculateIntroducerFee(reward) {
     castName: reward.name,
     introducerName: member.introducerName || introducer?.name || "名称未設定",
     feeSystem,
-    monthlySales: reward.monthlySales,
+    honShimeiSales,
     payable: reward.payable,
     sales10,
     pay10,
