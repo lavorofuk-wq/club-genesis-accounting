@@ -3,19 +3,20 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CLUB GENESIS 経理システム ログイン</title>
-  <meta name="theme-color" content="#111827">
+  <title>GENESIS Management System ログイン</title>
+  <meta name="theme-color" content="#f5f7fb">
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="css/style.css">
 </head>
-<body class="min-h-screen bg-slate-950 text-slate-100">
-  <main class="min-h-screen grid place-items-center px-4">
+<body class="min-h-screen">
+  <main class="grid min-h-screen place-items-center px-4">
     <section class="auth-panel w-full max-w-md">
       <div class="mb-8 text-center">
-        <p class="text-sm tracking-[0.28em] text-amber-300">CLUB GENESIS</p>
-        <h1 class="mt-3 text-3xl font-bold">経理システム</h1>
-        <div class="mt-2 flex items-center justify-center gap-2">
-          <span class="text-sm text-slate-400">Ver1.7.2</span>
+        <p class="brand-kicker">CLUB GENESIS</p>
+        <h1 class="mt-3 text-3xl font-bold text-slate-900">GENESIS Management System</h1>
+        <p class="mt-2 text-sm font-semibold text-slate-500">GMS</p>
+        <div class="mt-3 flex items-center justify-center gap-2">
+          <span class="text-sm text-slate-500">Ver1.25</span>
           <span id="environmentBadge" class="env-badge"></span>
         </div>
       </div>
@@ -38,13 +39,13 @@
   <script>
     if (location.protocol === "file:") {
       document.body.innerHTML = `
-        <main class="min-h-screen grid place-items-center px-4">
+        <main class="grid min-h-screen place-items-center px-4">
           <section class="auth-panel w-full max-w-lg">
-            <p class="text-sm tracking-[0.24em] text-amber-300">CLUB GENESIS</p>
-            <h1 class="mt-3 text-2xl font-bold">この開き方ではログインできません</h1>
-            <p class="mt-5 leading-7 text-slate-300">
+            <p class="brand-kicker">CLUB GENESIS</p>
+            <h1 class="mt-3 text-2xl font-bold text-slate-900">この開き方ではログインできません</h1>
+            <p class="mt-5 leading-7 text-slate-600">
               index.htmlを直接開くと、ブラウザがFirebaseのログイン処理を止めます。
-              この画面を閉じて、フォルダ内の「起動.bat」をダブルクリックしてください。
+              フォルダ内の「起動.bat」をダブルクリックして、表示されたURLから開いてください。
             </p>
           </section>
         </main>`;

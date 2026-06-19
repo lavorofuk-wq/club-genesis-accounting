@@ -3,22 +3,22 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CLUB GENESIS 店舗入力</title>
-  <meta name="theme-color" content="#111827">
+  <title>GMS 店舗作業フォーム</title>
+  <meta name="theme-color" content="#f5f7fb">
   <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="css/style.css">
 </head>
-<body class="min-h-screen bg-slate-950 text-slate-100">
+<body class="min-h-screen">
   <header class="app-header">
     <div>
-      <p class="text-xs tracking-[0.24em] text-amber-300">CLUB GENESIS</p>
+      <p class="brand-kicker">GMS</p>
       <div class="flex items-center gap-2">
-        <h1 class="text-xl font-bold">店舗入力フォーム</h1>
+        <h1 class="text-xl font-bold text-slate-900">店舗作業フォーム</h1>
         <span id="environmentBadge" class="env-badge"></span>
       </div>
     </div>
     <div class="flex items-center gap-3">
-      <span id="userEmail" class="hidden text-xs text-slate-400 sm:inline"></span>
+      <span id="userEmail" class="hidden text-xs text-slate-500 sm:inline"></span>
       <button id="logoutButton" class="secondary-button">ログアウト</button>
     </div>
   </header>
@@ -26,82 +26,187 @@
   <main class="mx-auto max-w-6xl px-4 py-6">
     <div id="authLoading" class="notice">認証情報を確認しています...</div>
     <form id="reportForm" class="hidden space-y-6" novalidate>
-      <div class="alert alert-warning">
-        この画面はPOS締め連携までの手入力バックアップです。今後の正しい運用は、POSの締め作業モードから経理へ自動連携します。
+      <section id="shopHome" class="section-shell">
+        <div>
+          <p class="brand-kicker">SHOP WORKSPACE</p>
+          <h2 class="mt-2 text-xl font-bold text-slate-900">店舗作業ホーム</h2>
+        </div>
+        <div class="shop-home-grid mt-5">
+          <button id="openRegistrationButton" type="button" class="shop-home-action">
+            <span class="shop-home-action-title">登録</span>
+            <span class="shop-home-action-detail">スタッフ登録・キャスト情報</span>
+          </button>
+          <button id="openClosingButton" type="button" class="shop-home-action">
+            <span class="shop-home-action-title">締め作業データ作成</span>
+            <span class="shop-home-action-detail">未送信のPOS締めデータを選択</span>
+          </button>
+          <button id="openSentClosingsButton" type="button" class="shop-home-action">
+            <span class="shop-home-action-title">送信済データ</span>
+            <span class="shop-home-action-detail">送信済みデータの確認・編集・再送信</span>
+          </button>
+        </div>
+      </section>
+
+      <div id="workspaceMessages" class="space-y-3">
+        <div id="warningBanner" class="hidden alert alert-warning"></div>
+        <div id="errorMessage" class="hidden alert alert-error"></div>
+        <div id="successMessage" class="hidden alert alert-success"></div>
       </div>
 
-      <section class="section-shell">
+      <section class="section-shell hidden" data-workspace="registration">
         <div class="section-title">
-          <h2>スタッフ・キャスト登録</h2>
-        </div>
-        <div class="grid gap-6 lg:grid-cols-2">
-          <div class="master-panel">
-            <h3 class="text-sm font-semibold text-slate-200">スタッフ登録</h3>
-            <div class="mt-3 grid gap-3 sm:grid-cols-[1fr_160px_auto]">
-              <input id="newStaffName" type="text" maxlength="40" class="form-input" placeholder="スタッフ名">
-              <select id="newStaffRole" class="form-select">
-                <option value="manager">店長/マネージャー</option>
-                <option value="bartender">バーテンダー</option>
-                <option value="kitchen">厨房</option>
-                <option value="cleaning">清掃</option>
-                <option value="other">その他</option>
-              </select>
-              <button id="registerStaffButton" type="button" class="primary-button">登録</button>
-            </div>
-            <div id="staffMasterList" class="master-list mt-4"></div>
+          <div>
+            <h2>スタッフ管理</h2>
+            <p class="mt-1 text-sm text-slate-500">スタッフの入店情報を登録し、退店時は在籍状態を変更します。</p>
           </div>
-
-          <div class="master-panel">
-            <h3 class="text-sm font-semibold text-slate-200">キャスト登録</h3>
-            <div class="mt-3 grid gap-3 sm:grid-cols-[1fr_auto]">
-              <input id="newCastName" type="text" maxlength="40" class="form-input" placeholder="キャスト名">
-              <button id="registerCastButton" type="button" class="primary-button">登録</button>
-            </div>
-            <div id="castMasterList" class="master-list mt-4"></div>
+          <div class="flex flex-wrap gap-2">
+            <button id="openStaffListButton" type="button" class="secondary-button">スタッフ一覧</button>
+            <button type="button" class="secondary-button" data-home-button>ホームへ戻る</button>
+          </div>
+        </div>
+        <div class="staff-registration-grid">
+          <label>
+            <span class="form-label">名前</span>
+            <input id="newStaffName" type="text" maxlength="40" class="form-input" placeholder="スタッフ名">
+          </label>
+          <label>
+            <span class="form-label">雇用形態</span>
+            <select id="newStaffEmploymentType" class="form-select">
+              <option value="employee">社員</option>
+              <option value="partTime">アルバイト</option>
+            </select>
+          </label>
+          <label>
+            <span class="form-label">業務区分</span>
+            <select id="newStaffJobType" class="form-select">
+              <option value="kitchen">キッチンスタッフ</option>
+              <option value="hall">ホールスタッフ</option>
+              <option value="driver">ドライバースタッフ</option>
+            </select>
+          </label>
+          <label>
+            <span class="form-label">給与形態</span>
+            <select id="newStaffPayType" class="form-select">
+              <option value="daily">日給</option>
+              <option value="hourly">時給</option>
+            </select>
+          </label>
+          <label>
+            <span class="form-label">給与金額（円）</span>
+            <input id="newStaffPayAmount" type="number" min="1" step="1" class="form-input" placeholder="例：1200">
+          </label>
+          <div class="flex items-end gap-2">
+            <button id="registerStaffButton" type="button" class="primary-button flex-1">入店登録</button>
+            <button id="cancelStaffEditButton" type="button" class="secondary-button hidden">取消</button>
           </div>
         </div>
       </section>
 
-      <section class="section-shell">
+      <section class="section-shell hidden" data-workspace="registration">
+        <div class="section-title">
+          <div>
+            <h2>キャスト一覧</h2>
+            <p class="mt-1 text-sm text-slate-500">POSのキャスト名簿と連携しています。キャストの入店・退店操作はPOSで行ってください。</p>
+          </div>
+          <button id="syncCastsButton" type="button" class="secondary-button">POS名簿を再同期</button>
+        </div>
+        <div id="castSyncStatus" class="notice"></div>
+        <div id="castSummaryButtons" class="cast-summary-grid mt-4">
+          <button type="button" class="cast-summary-button" data-cast-detail="active">
+            <span>在籍詳細</span>
+            <strong id="activeCastCount">0名</strong>
+          </button>
+          <button type="button" class="cast-summary-button" data-cast-detail="departed">
+            <span>退店詳細</span>
+            <strong id="departedCastCount">0名</strong>
+          </button>
+          <button type="button" class="cast-summary-button" data-cast-detail="trial">
+            <span>体入詳細</span>
+            <strong id="trialCastCount">0名</strong>
+          </button>
+        </div>
+      </section>
+
+      <section class="section-shell hidden" data-workspace="registration">
+        <div class="section-title">
+          <div>
+            <h2>紹介者管理</h2>
+            <p class="mt-1 text-sm text-slate-500">キャストに紐付ける紹介者と紹介料の条件を登録します。</p>
+          </div>
+        </div>
+        <input id="editingIntroducerId" type="hidden">
+        <div class="introducer-registration-grid">
+          <label>
+            <span class="form-label">紹介者名</span>
+            <input id="introducerName" type="text" maxlength="40" class="form-input" placeholder="紹介者名">
+          </label>
+          <label>
+            <span class="form-label">紹介料システム</span>
+            <select id="introducerFeeSystem" class="form-select">
+              <option value="sales10">売上10%</option>
+              <option value="pay10">総支給額10%</option>
+              <option value="higher10">売上10%か総支給額10%の高い方</option>
+            </select>
+          </label>
+          <label>
+            <span class="form-label">顧問料</span>
+            <select id="introducerAdvisoryFeeEnabled" class="form-select">
+              <option value="false">無し</option>
+              <option value="true">発生</option>
+            </select>
+          </label>
+          <label class="md:col-span-2">
+            <span class="form-label">備考</span>
+            <textarea id="introducerNote" maxlength="500" rows="3" class="form-textarea" placeholder="紹介条件など"></textarea>
+          </label>
+          <div class="flex items-end gap-2">
+            <button id="saveIntroducerButton" type="button" class="primary-button flex-1">登録</button>
+            <button id="cancelIntroducerEditButton" type="button" class="secondary-button hidden">取消</button>
+          </div>
+        </div>
+        <div id="introducerList" class="master-list mt-5"></div>
+      </section>
+
+      <section class="section-shell hidden" data-workspace="closing">
         <div class="section-title">
           <h2>営業日</h2>
-          <button id="copyPreviousButton" type="button" class="secondary-button">前日のデータをコピー</button>
+          <div class="flex flex-wrap gap-2">
+            <button type="button" class="secondary-button" data-home-button>ホームへ戻る</button>
+            <button id="copyPreviousButton" type="button" class="secondary-button">前日のデータをコピー</button>
+          </div>
         </div>
         <div class="grid gap-4 md:grid-cols-3">
           <div>
             <label for="date" class="form-label">日付</label>
             <input id="date" type="date" required class="form-input">
           </div>
-          <div class="md:col-span-2">
-            <div id="warningBanner" class="hidden alert alert-warning"></div>
-            <div id="errorMessage" class="hidden alert alert-error"></div>
-            <div id="successMessage" class="hidden alert alert-success"></div>
-          </div>
         </div>
       </section>
 
-      <section class="section-shell">
-        <div class="section-title">
-          <h2>セクションA：スタッフ・キャスト勤務時間</h2>
-        </div>
+      <section class="section-shell hidden" data-workspace="closing">
+        <div class="section-title"><h2>勤務時間</h2></div>
         <div>
-          <div class="flex items-center justify-between gap-3">
-            <h3 class="text-sm font-semibold text-slate-200">スタッフ勤務時間</h3>
-            <button id="addStaffWorkButton" type="button" class="secondary-button">スタッフ追加</button>
-          </div>
-          <div id="staffWorkRows" class="mt-3 space-y-3"></div>
+          <h3 class="text-sm font-bold text-slate-800">スタッフ勤務時間</h3>
+          <p class="mt-1 text-sm text-slate-500">当日の出勤者を選択し、開始・終了時刻を15分単位で入力してください。給与形態にかかわらず勤務時間を記録します。</p>
+          <div id="staffAttendancePicker" class="attendance-picker mt-4"></div>
+          <div id="staffWorkRows" class="mt-4 space-y-3"></div>
         </div>
         <div class="mt-6">
           <div class="flex items-center justify-between gap-3">
-            <h3 class="text-sm font-semibold text-slate-200">キャスト勤務時間</h3>
+            <h3 class="text-sm font-bold text-slate-800">キャスト勤務時間</h3>
             <button id="addCastWorkButton" type="button" class="secondary-button">キャスト追加</button>
           </div>
-          <div id="castWorkRows" class="mt-3 space-y-3"></div>
+          <div id="castWorkRows" class="cast-work-grid mt-3"></div>
+        </div>
+        <div id="trialCastWorkSection" class="mt-6 hidden">
+          <h3 class="text-sm font-bold text-slate-800">体入キャスト情報</h3>
+          <p class="mt-1 text-sm text-slate-500">POSから受信した体入キャストの勤務時間を確認し、紹介者と当日の体入時給を入力してください。</p>
+          <div id="trialCastWorkRows" class="mt-3 space-y-3"></div>
         </div>
       </section>
 
-      <section class="section-shell">
-        <div class="section-title"><h2>セクションB：売上</h2></div>
+      <section class="section-shell hidden" data-workspace="closing">
+        <div class="section-title"><h2>売上</h2></div>
         <div class="grid gap-4 md:grid-cols-3">
           <label class="field-card">総売上（円）<input id="totalSales" type="number" min="0" step="1" value="0" class="form-input mt-2 money-input"></label>
           <label class="field-card">現金会計売上（円）<input id="cashSales" type="number" min="0" step="1" value="0" class="form-input mt-2 money-input"></label>
@@ -109,8 +214,8 @@
         </div>
       </section>
 
-      <section class="section-shell">
-        <div class="section-title"><h2>セクションC：客数情報</h2></div>
+      <section class="section-shell hidden" data-workspace="closing">
+        <div class="section-title"><h2>客数情報</h2></div>
         <div class="grid gap-4 md:grid-cols-3">
           <label class="field-card">来店組数<input id="groupCount" type="number" min="0" step="1" value="0" class="form-input mt-2"></label>
           <label class="field-card">総客数<input id="totalCustomers" type="number" min="0" step="1" value="0" class="form-input mt-2"></label>
@@ -118,47 +223,178 @@
         </div>
       </section>
 
-      <section class="section-shell">
-        <div class="section-title"><h2>セクションD：指名情報</h2></div>
+      <section class="section-shell hidden" data-workspace="closing">
+        <div class="section-title"><h2>指名情報</h2></div>
         <div class="grid gap-4 md:grid-cols-2">
           <label class="field-card">本指名（件数）<input id="honShimei" type="number" min="0" step="1" value="0" class="form-input mt-2"></label>
           <label class="field-card">場内指名（件数）<input id="jonai" type="number" min="0" step="1" value="0" class="form-input mt-2"></label>
         </div>
       </section>
 
-      <section class="section-shell">
+      <section class="section-shell hidden" data-workspace="closing">
         <div class="section-title">
-          <h2>セクションE：経費</h2>
+          <div>
+            <h2>会計データ・会計明細</h2>
+            <p class="mt-1 text-sm text-slate-500">POSから送信された会計済みデータです。経理へそのまま引き継ぎます。</p>
+          </div>
+        </div>
+        <div id="transactionDetails" class="transaction-list"></div>
+      </section>
+
+      <section class="section-shell hidden" data-workspace="closing">
+        <div class="section-title">
+          <h2>経費</h2>
           <button id="addExpenseButton" type="button" class="secondary-button">経費追加</button>
         </div>
         <div id="expenseRows" class="space-y-3"></div>
       </section>
 
-      <section class="section-shell">
+      <section class="section-shell hidden" data-workspace="closing">
         <div class="section-title">
-          <h2>セクションF：手当</h2>
+          <h2>手当</h2>
           <button id="addAllowanceButton" type="button" class="secondary-button">手当追加</button>
         </div>
         <div id="allowanceRows" class="space-y-3"></div>
       </section>
 
-      <div class="sticky bottom-0 -mx-4 border-t border-slate-800 bg-slate-950/95 px-4 py-4 backdrop-blur">
-        <button id="saveButton" type="button" class="primary-button w-full md:w-auto">保存する</button>
+      <div class="sticky bottom-0 -mx-4 hidden border-t border-slate-200 bg-white/95 px-4 py-4 backdrop-blur" data-workspace="closing">
+        <button id="saveButton" type="button" class="primary-button w-full md:w-auto">経理へ送信する</button>
       </div>
     </form>
   </main>
 
   <dialog id="confirmModal" class="modal-card">
-    <form method="dialog">
-      <h2 class="text-xl font-bold">保存前確認</h2>
-      <div id="confirmSummary" class="mt-4 space-y-2 text-sm text-slate-300"></div>
+    <div>
+      <h2 class="text-xl font-bold">経理送信前の確認</h2>
+      <div id="confirmSummary" class="mt-4 space-y-2 text-sm text-slate-600"></div>
+      <div id="confirmSaveError" class="hidden alert alert-error mt-4"></div>
+      <div class="mt-6 flex justify-end gap-3">
+        <button id="cancelConfirmSaveButton" type="button" class="secondary-button">戻る</button>
+        <button id="confirmSaveButton" type="button" class="primary-button">経理へ送信</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="pendingClosingModal" class="modal-card modal-wide">
+    <div>
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <p class="brand-kicker">CLOSING DATA</p>
+          <h2 class="mt-2 text-xl font-bold">締めデータ選択</h2>
+          <p class="mt-1 text-sm text-slate-500">経理へ未送信のPOS締めデータだけを表示します。</p>
+        </div>
+        <button id="closePendingClosingButton" type="button" class="secondary-button">閉じる</button>
+      </div>
+      <div class="mt-5 flex justify-end">
+        <button id="reloadPendingButton" type="button" class="secondary-button">再読込</button>
+      </div>
+      <div id="pendingClosings" class="pending-list mt-4"></div>
+    </div>
+  </dialog>
+
+  <dialog id="sentClosingModal" class="modal-card modal-wide">
+    <div>
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <p class="brand-kicker">SENT DATA</p>
+          <h2 class="mt-2 text-xl font-bold">送信済データ</h2>
+          <p class="mt-1 text-sm text-slate-500">選択すると内容を再確認・編集して経理へ再送信できます。</p>
+        </div>
+        <button id="closeSentClosingButton" type="button" class="secondary-button">閉じる</button>
+      </div>
+      <div class="mt-5 grid gap-3 sm:grid-cols-[minmax(180px,280px)_auto]">
+        <label>
+          <span class="form-label">日付検索</span>
+          <input id="sentClosingDateSearch" type="date" class="form-input">
+        </label>
+        <div class="flex items-end">
+          <button id="clearSentClosingDateButton" type="button" class="secondary-button">検索解除</button>
+        </div>
+      </div>
+      <div id="sentClosings" class="pending-list mt-4"></div>
+    </div>
+  </dialog>
+
+  <dialog id="castDetailModal" class="modal-card modal-wide">
+    <div>
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <p class="brand-kicker">CAST LIST</p>
+          <h2 id="castDetailTitle" class="mt-2 text-xl font-bold">キャスト詳細</h2>
+        </div>
+        <button id="closeCastDetailButton" type="button" class="secondary-button">閉じる</button>
+      </div>
+      <label class="mt-5 block">
+        <span class="form-label">名前検索</span>
+        <input id="castSearchInput" type="search" maxlength="40" class="form-input" placeholder="キャスト名を入力">
+      </label>
+      <div id="castDetailCount" class="mt-3 text-sm text-slate-500"></div>
+      <div id="castDetailList" class="cast-master-list mt-4"></div>
+    </div>
+  </dialog>
+
+  <dialog id="staffListModal" class="modal-card modal-wide">
+    <div>
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <p class="brand-kicker">STAFF LIST</p>
+          <h2 class="mt-2 text-xl font-bold">スタッフ一覧</h2>
+        </div>
+        <button id="closeStaffListButton" type="button" class="secondary-button">閉じる</button>
+      </div>
+      <div id="staffMasterList" class="master-list mt-5"></div>
+    </div>
+  </dialog>
+
+  <dialog id="castEditModal" class="modal-card">
+    <form method="dialog" id="castEditForm">
+      <p class="brand-kicker">CAST PROFILE</p>
+      <h2 id="castEditTitle" class="mt-2 text-xl font-bold">キャスト情報</h2>
+      <input id="editingCastId" type="hidden">
+      <div class="mt-5 space-y-4">
+        <label>
+          <span class="form-label">報酬システム（必須）</span>
+          <select id="castRewardSystem" class="form-select">
+            <option value="">選択してください</option>
+            <option value="slideHourly">スライド時給</option>
+            <option value="guaranteedHourly">保証時給</option>
+          </select>
+        </label>
+        <label id="castGuaranteeNoteField" class="hidden">
+          <span class="form-label">保証期限の備考（必須）</span>
+          <textarea id="castGuaranteeNote" maxlength="200" rows="3" class="form-textarea" placeholder="例：2026年9月分まで保証時給"></textarea>
+        </label>
+        <label id="castGuaranteedHourlyRateField" class="hidden">
+          <span class="form-label">保証時給金額（必須）</span>
+          <input id="castGuaranteedHourlyRate" type="number" min="1" step="1" inputmode="numeric" class="form-input" placeholder="例：5000">
+        </label>
+        <label>
+          <span class="form-label">入店日</span>
+          <input id="castEntryDate" type="date" class="form-input">
+        </label>
+        <label>
+          <span class="form-label">紹介者</span>
+          <select id="castIntroducerId" class="form-select">
+            <option value="">紹介者なし</option>
+          </select>
+        </label>
+        <label id="castAdvisoryFeeField" class="hidden">
+          <span class="form-label">顧問料金額（必須）</span>
+          <input id="castAdvisoryFeeAmount" type="number" min="1" step="1" inputmode="numeric" class="form-input" placeholder="例：30000">
+        </label>
+        <label>
+          <span class="form-label">備考</span>
+          <textarea id="castNote" maxlength="500" rows="4" class="form-textarea" placeholder="経理用の備考"></textarea>
+        </label>
+        <div id="castEditError" class="hidden alert alert-error"></div>
+      </div>
       <div class="mt-6 flex justify-end gap-3">
         <button value="cancel" class="secondary-button">戻る</button>
-        <button id="confirmSaveButton" value="save" class="primary-button">Firestoreへ保存</button>
+        <button id="saveCastProfileButton" type="button" class="primary-button">保存</button>
       </div>
     </form>
   </dialog>
 
-  <script type="module" src="js/shop.js"></script>
+  <script type="module" src="js/shop.js?v=1.25"></script>
 </body>
 </html>

@@ -21,6 +21,161 @@ service cloud.firestore {
       return value is number && value >= 0;
     }
 
+    function isStaffMember() {
+      return request.resource.data.keys().hasAll([
+        'name',
+        'employmentType',
+        'jobType',
+        'payType',
+        'payAmount',
+        'status'
+      ])
+      && request.resource.data.name is string
+      && request.resource.data.name.size() > 0
+      && request.resource.data.name.size() <= 40
+      && (request.resource.data.employmentType == 'employee'
+        || request.resource.data.employmentType == 'partTime')
+      && (request.resource.data.jobType == 'kitchen'
+        || request.resource.data.jobType == 'hall'
+        || request.resource.data.jobType == 'driver')
+      && (request.resource.data.payType == 'daily'
+        || request.resource.data.payType == 'hourly')
+      && request.resource.data.payAmount is int
+      && request.resource.data.payAmount > 0
+      && (request.resource.data.status == 'active'
+        || request.resource.data.status == 'departed');
+    }
+
+    function isCastMember() {
+      return request.resource.data.keys().hasAll([
+        'posCastId',
+        'name',
+        'internalNo',
+        'status',
+        'source'
+      ])
+      && request.resource.data.posCastId is string
+      && request.resource.data.posCastId.size() > 0
+      && request.resource.data.name is string
+      && request.resource.data.name.size() > 0
+      && request.resource.data.name.size() <= 40
+      && request.resource.data.internalNo is number
+      && request.resource.data.internalNo >= 0
+      && (request.resource.data.status == 'active'
+        || request.resource.data.status == 'departed'
+        || request.resource.data.status == 'trial')
+      && request.resource.data.source == 'pos'
+      && (!request.resource.data.keys().hasAny(['deleted'])
+        || request.resource.data.deleted is bool)
+      && (!request.resource.data.keys().hasAny(['rewardSystem'])
+        || request.resource.data.rewardSystem == ''
+        || request.resource.data.rewardSystem == 'slideHourly'
+        || request.resource.data.rewardSystem == 'guaranteedHourly')
+      && (!request.resource.data.keys().hasAny(['guaranteeNote'])
+        || (request.resource.data.guaranteeNote is string
+          && request.resource.data.guaranteeNote.size() <= 200))
+      && (!request.resource.data.keys().hasAny(['guaranteedHourlyRate'])
+        || (request.resource.data.guaranteedHourlyRate is int
+          && request.resource.data.guaranteedHourlyRate >= 0))
+      && (!request.resource.data.keys().hasAny(['introducerId'])
+        || (request.resource.data.introducerId is string
+          && request.resource.data.introducerId.size() <= 100))
+      && (!request.resource.data.keys().hasAny(['introducerName'])
+        || (request.resource.data.introducerName is string
+          && request.resource.data.introducerName.size() <= 40))
+      && (!request.resource.data.keys().hasAny(['introducerFeeSystem'])
+        || request.resource.data.introducerFeeSystem == ''
+        || request.resource.data.introducerFeeSystem == 'sales10'
+        || request.resource.data.introducerFeeSystem == 'pay10'
+        || request.resource.data.introducerFeeSystem == 'higher10')
+      && (!request.resource.data.keys().hasAny(['advisoryFeeEnabled'])
+        || request.resource.data.advisoryFeeEnabled is bool)
+      && (!request.resource.data.keys().hasAny(['advisoryFeeAmount'])
+        || (request.resource.data.advisoryFeeAmount is int
+          && request.resource.data.advisoryFeeAmount >= 0))
+      && (!request.resource.data.keys().hasAny(['entryDate'])
+        || (request.resource.data.entryDate is string
+          && (request.resource.data.entryDate == ''
+            || request.resource.data.entryDate.matches('^\\d{4}-\\d{2}-\\d{2}$')))
+      )
+      && (!request.resource.data.keys().hasAny(['note'])
+        || (request.resource.data.note is string
+          && request.resource.data.note.size() <= 500))
+      && (!request.resource.data.keys().hasAny(['rewardSystem'])
+        || request.resource.data.rewardSystem != 'guaranteedHourly'
+        || (request.resource.data.keys().hasAny(['guaranteeNote'])
+          && request.resource.data.guaranteeNote.size() > 0
+          && request.resource.data.keys().hasAny(['guaranteedHourlyRate'])
+          && request.resource.data.guaranteedHourlyRate > 0))
+      && (!request.resource.data.keys().hasAny(['advisoryFeeEnabled'])
+        || request.resource.data.advisoryFeeEnabled == false
+        || (request.resource.data.keys().hasAny(['advisoryFeeAmount'])
+          && request.resource.data.advisoryFeeAmount > 0));
+    }
+
+    function isIntroducer() {
+      return request.resource.data.keys().hasAll([
+        'name',
+        'feeSystem',
+        'advisoryFeeEnabled',
+        'note'
+      ])
+      && request.resource.data.name is string
+      && request.resource.data.name.size() > 0
+      && request.resource.data.name.size() <= 40
+      && (request.resource.data.feeSystem == 'sales10'
+        || request.resource.data.feeSystem == 'pay10'
+        || request.resource.data.feeSystem == 'higher10')
+      && request.resource.data.advisoryFeeEnabled is bool
+      && request.resource.data.note is string
+      && request.resource.data.note.size() <= 500;
+    }
+
+    function isFixedExpense(document) {
+      return request.resource.data.keys().hasAll([
+        'month',
+        'rent',
+        'karaoke',
+        'towel',
+        'leasekin',
+        'landline',
+        'saibuGas',
+        'usen'
+      ])
+      && request.resource.data.month == document
+      && request.resource.data.month.matches('^\\d{4}-\\d{2}$')
+      && request.resource.data.rent is int
+      && request.resource.data.karaoke is int
+      && request.resource.data.towel is int
+      && request.resource.data.leasekin is int
+      && request.resource.data.landline is int
+      && request.resource.data.saibuGas is int
+      && request.resource.data.usen is int
+      && request.resource.data.rent >= 0
+      && request.resource.data.karaoke >= 0
+      && request.resource.data.towel >= 0
+      && request.resource.data.leasekin >= 0
+      && request.resource.data.landline >= 0
+      && request.resource.data.saibuGas >= 0
+      && request.resource.data.usen >= 0;
+    }
+
+    function isTrialCastRecord() {
+      return request.resource.data.businessDate is string
+      && request.resource.data.businessDate.matches('^\\d{4}-\\d{2}-\\d{2}$')
+      && request.resource.data.castId is string
+      && request.resource.data.castId.size() > 0
+      && request.resource.data.castName is string
+      && request.resource.data.castName.size() > 0
+      && request.resource.data.castName.size() <= 40
+      && request.resource.data.introducerName is string
+      && request.resource.data.introducerName.size() > 0
+      && request.resource.data.introducerName.size() <= 40
+      && request.resource.data.hourlyRate is int
+      && request.resource.data.hourlyRate > 0
+      && isNonNegativeNumber(request.resource.data.hours);
+    }
+
     function isClosingPayload(document) {
       return request.resource.data.keys().hasAll([
         'businessDate',
@@ -29,17 +184,15 @@ service cloud.firestore {
         'customers',
         'nominations',
         'castSales',
-        'staffWork',
         'castWork',
-        'expenses',
-        'allowances',
-        'cashReconciliation',
         'source'
       ])
       && request.resource.data.businessDate == document
       && request.resource.data.businessDate is string
       && request.resource.data.businessDate.matches('^\\d{4}-\\d{2}-\\d{2}$')
-      && request.resource.data.status == 'submitted'
+      && (request.resource.data.status == 'submitted'
+        || request.resource.data.status == 'approved'
+        || request.resource.data.status == 'finalized')
       && request.resource.data.sales is map
       && isNonNegativeNumber(request.resource.data.sales.totalSales)
       && isNonNegativeNumber(request.resource.data.sales.cashSales)
@@ -52,11 +205,13 @@ service cloud.firestore {
       && isNonNegativeNumber(request.resource.data.nominations.honShimeiCount)
       && isNonNegativeNumber(request.resource.data.nominations.jonaiCount)
       && request.resource.data.castSales is list
-      && request.resource.data.staffWork is list
       && request.resource.data.castWork is list
-      && request.resource.data.expenses is list
-      && request.resource.data.allowances is list
-      && request.resource.data.cashReconciliation is map
+      && (!request.resource.data.keys().hasAny(['transactions'])
+        || request.resource.data.transactions is list)
+      && (!request.resource.data.keys().hasAny(['staffWork'])
+        || request.resource.data.staffWork is list)
+      && (!request.resource.data.keys().hasAny(['cashReconciliation'])
+        || request.resource.data.cashReconciliation is map)
       && request.resource.data.source is map;
     }
 
@@ -74,34 +229,98 @@ service cloud.firestore {
 
     match /dailyClosings/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if (signedIn() && userRole() == 'shop') || isClosingPayload(document);
-      allow delete: if false;
+      allow create: if signedIn() && userRole() == 'shop' && request.resource.data.status == 'submitted';
+      allow update: if signedIn() && (
+        userRole() == 'accounting'
+        || (userRole() == 'shop' && request.resource.data.status == 'submitted')
+      );
+      allow delete: if signedIn()
+        && userRole() == 'accounting'
+        && resource.data.status != 'finalized';
     }
 
     match /dailyClosings-dev/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if (signedIn() && userRole() == 'shop') || isClosingPayload(document);
+      allow create: if signedIn() && userRole() == 'shop' && request.resource.data.status == 'submitted';
+      allow update: if signedIn() && (
+        userRole() == 'accounting'
+        || (userRole() == 'shop' && request.resource.data.status == 'submitted')
+      );
+      allow delete: if signedIn()
+        && userRole() == 'accounting'
+        && resource.data.status != 'finalized';
+    }
+
+    match /shopClosings/{document} {
+      allow read: if signedIn() && userRole() == 'shop';
+      allow create, update: if (isClosingPayload(document) && request.resource.data.status == 'submitted') || (signedIn() && userRole() == 'shop');
+      allow delete: if false;
+    }
+
+    match /shopClosings-dev/{document} {
+      allow read: if signedIn() && userRole() == 'shop';
+      allow create, update: if (isClosingPayload(document) && request.resource.data.status == 'submitted') || (signedIn() && userRole() == 'shop');
       allow delete: if false;
     }
 
     match /staffMembers/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update, delete: if signedIn() && userRole() == 'shop';
+      allow create, update: if signedIn() && userRole() == 'shop' && isStaffMember();
+      allow delete: if false;
     }
 
     match /staffMembers-dev/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update, delete: if signedIn() && userRole() == 'shop';
+      allow create, update: if signedIn() && userRole() == 'shop' && isStaffMember();
+      allow delete: if false;
     }
 
     match /castMembers/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update, delete: if signedIn() && userRole() == 'shop';
+      allow create, update: if signedIn() && userRole() == 'shop' && isCastMember();
+      allow delete: if false;
     }
 
     match /castMembers-dev/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update, delete: if signedIn() && userRole() == 'shop';
+      allow create, update: if signedIn() && userRole() == 'shop' && isCastMember();
+      allow delete: if false;
+    }
+
+    match /introducers/{document} {
+      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow create, update: if signedIn() && userRole() == 'shop' && isIntroducer();
+      allow delete: if false;
+    }
+
+    match /introducers-dev/{document} {
+      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow create, update: if signedIn() && userRole() == 'shop' && isIntroducer();
+      allow delete: if false;
+    }
+
+    match /fixedExpenses/{document} {
+      allow read: if signedIn() && userRole() == 'accounting';
+      allow create, update: if signedIn() && userRole() == 'accounting' && isFixedExpense(document);
+      allow delete: if false;
+    }
+
+    match /fixedExpenses-dev/{document} {
+      allow read: if signedIn() && userRole() == 'accounting';
+      allow create, update: if signedIn() && userRole() == 'accounting' && isFixedExpense(document);
+      allow delete: if false;
+    }
+
+    match /trialCastRecords/{document} {
+      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow create, update: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting') && isTrialCastRecord();
+      allow delete: if false;
+    }
+
+    match /trialCastRecords-dev/{document} {
+      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow create, update: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting') && isTrialCastRecord();
+      allow delete: if false;
     }
 
     match /users/{uid} {

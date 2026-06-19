@@ -1,8 +1,8 @@
-CLUB GENESIS 経理システム セットアップ手順
+GENESIS Management System（GMS）セットアップ手順
 
-1. Firebaseプロジェクトを作成
-   - Firebaseコンソールで新規プロジェクトを作成します。
-   - 既存設定を使う場合のprojectIdは club-genesis-accountin です。
+1. Firebaseプロジェクトを確認
+   - projectId は club-genesis-accountin です。
+   - 別プロジェクトを使う場合は js/firebase-config.js の fallbackConfig を変更します。
 
 2. Authenticationを有効化
    - Firebaseコンソール > Authentication > Sign-in method を開きます。
@@ -15,156 +15,47 @@ CLUB GENESIS 経理システム セットアップ手順
      例: accounting@example.com
    - 作成後、それぞれのUIDを控えます。
 
-4. Firestoreを作成
-   - Firebaseコンソール > Firestore Database でデータベースを作成します。
-   - 最初はテストモードで作成して構いません。
-   - リージョンは運用方針に合わせて選択します。
-
-5. usersコレクションに初期ユーザーを作成
+4. usersコレクションを作成
    - Firestoreで users コレクションを作成します。
-   - 店舗用ユーザーのドキュメントIDはAuthenticationのUIDにします。
-   - 店舗用ユーザーの内容:
+   - ドキュメントIDはAuthenticationのUIDにします。
+   - 店舗用ユーザー:
      uid: 店舗用UID
      email: shop@example.com
      role: shop
      createdAt: 現在時刻
-   - 経理用ユーザーのドキュメントIDはAuthenticationのUIDにします。
-   - 経理用ユーザーの内容:
+   - 経理用ユーザー:
      uid: 経理用UID
      email: accounting@example.com
      role: accounting
      createdAt: 現在時刻
 
-6. Webアプリを登録
-   - Firebaseコンソール > プロジェクト設定 > マイアプリ からWebアプリを追加します。
-   - 表示されたfirebaseConfigを js/firebase-config.js に反映します。
-   - 現在のファイルには club-genesis-accountin 用の設定が入っています。
-   - 別プロジェクトを使う場合は window.FIREBASE_CONFIG をindex.html/shop.html/accounting.htmlより先に定義するか、fallbackConfigを書き換えてください。
+5. Firestoreルールを反映
+   - このリポジトリの firestore.rules が最新版です。
+   - 経費入力で使用する fixedExpenses / fixedExpenses-dev の権限もこのルールに含まれます。
+   - 体入キャスト一覧で使用する trialCastRecords / trialCastRecords-dev の権限も含まれます。
+   - Firebase CLIでログインしてから反映します。
 
-7. Firestoreセキュリティルール
-   - カスタムクレーム role を使う本番推奨ルール:
+   npx firebase-tools login
+   npx firebase-tools deploy --only firestore:rules --project club-genesis-accountin
 
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    match /dailyReports/{document} {
-      allow read, write: if request.auth != null &&
-        request.auth.token.role == 'shop';
-      allow read: if request.auth != null &&
-        request.auth.token.role == 'accounting';
-      allow write: if false;
-    }
-    match /dailyReports-dev/{document} {
-      allow read, write: if request.auth != null &&
-        request.auth.token.role == 'shop';
-      allow read: if request.auth != null &&
-        request.auth.token.role == 'accounting';
-      allow write: false;
-    }
-    match /dailyClosings/{document} {
-      allow read, write: if request.auth != null &&
-        request.auth.token.role == 'shop';
-      allow read: if request.auth != null &&
-        request.auth.token.role == 'accounting';
-      allow delete: if false;
-    }
-    match /dailyClosings-dev/{document} {
-      allow read, write: if request.auth != null &&
-        request.auth.token.role == 'shop';
-      allow read: if request.auth != null &&
-        request.auth.token.role == 'accounting';
-      allow delete: if false;
-    }
-    match /staffMembers/{document} {
-      allow read: if request.auth != null;
-      allow create, update, delete: if request.auth != null &&
-        request.auth.token.role == 'shop';
-    }
-    match /staffMembers-dev/{document} {
-      allow read: if request.auth != null;
-      allow create, update, delete: if request.auth != null &&
-        request.auth.token.role == 'shop';
-    }
-    match /castMembers/{document} {
-      allow read: if request.auth != null;
-      allow create, update, delete: if request.auth != null &&
-        request.auth.token.role == 'shop';
-    }
-    match /castMembers-dev/{document} {
-      allow read: if request.auth != null;
-      allow create, update, delete: if request.auth != null &&
-        request.auth.token.role == 'shop';
-    }
-    match /users/{uid} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
-    }
-  }
-}
+6. POS連携先
+   - POSは締めデータを shopClosings / shopClosings-dev に送ります。
+   - 店舗作業フォームが内容を確認・訂正し、dailyClosings / dailyClosings-dev に経理確定データとして送信します。
+   - 経理ダッシュボードは dailyClosings / dailyClosings-dev の status: approved のみ表示します。
 
-   - カスタムクレームをまだ設定しないデモ運用では、usersコレクションのroleを参照する以下のルールを使用できます。
+7. Hosting
+   - VercelまたはFirebase Hostingで公開します。
+   - mainブランチは本番、devブランチは開発確認用です。
 
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    function signedIn() {
-      return request.auth != null;
-    }
-    function userRole() {
-      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
-    }
-    match /dailyReports/{document} {
-      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && userRole() == 'shop';
-      allow delete: if false;
-    }
-    match /dailyReports-dev/{document} {
-      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && userRole() == 'shop';
-      allow delete: if false;
-    }
-    match /staffMembers/{document} {
-      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update, delete: if signedIn() && userRole() == 'shop';
-    }
-    match /staffMembers-dev/{document} {
-      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update, delete: if signedIn() && userRole() == 'shop';
-    }
-    match /castMembers/{document} {
-      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update, delete: if signedIn() && userRole() == 'shop';
-    }
-    match /castMembers-dev/{document} {
-      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update, delete: if signedIn() && userRole() == 'shop';
-    }
-    match /users/{uid} {
-      allow read: if signedIn() && request.auth.uid == uid;
-      allow write: if false;
-    }
-  }
-}
+8. 動作確認
+   - 店舗ユーザーでログインすると shop.html（店舗作業フォーム）に移動します。
+   - 経理ユーザーでログインすると accounting.html（経理ダッシュボード）に移動します。
+   - POSから締めデータを送信します。
+   - 店舗作業フォームで確認待ちデータを開き、経理へ送信します。
+   - 経理ダッシュボードに経理確定データが表示されることを確認します。
+   - 経理ホームの「経費入力」で対象月を選び、固定費を保存できることを確認します。
+   - 酒代は同月の確定データにある「酒代」経費から自動集計されます。
 
-8. カスタムクレームを付与する場合
-   - Firebase FunctionsまたはAdmin SDKで対象UIDにroleを設定します。
-   - 店舗用: { role: "shop" }
-   - 経理用: { role: "accounting" }
-   - 付与後、対象ユーザーは一度ログアウトして再ログインしてください。
-
-9. Firebase Hostingへデプロイ
-   - Firebase CLIをインストールします。
-     npm install -g firebase-tools
-   - ログインします。
-     firebase login
-   - 初期化します。
-     firebase init hosting
-   - public directoryはこのプロジェクト直下を指定します。
-   - single-page app rewriteはNoにします。
-   - デプロイします。
-     firebase deploy --only hosting
-
-10. 動作確認
-   - 店舗ユーザーでログインすると shop.html に移動することを確認します。
-   - 経理ユーザーでログインすると accounting.html に移動することを確認します。
-   - 店舗ユーザーで日次データを保存し、経理ユーザーで同じ期間の一覧・集計・CSV出力を確認します。
-   - CSVはUTF-8 with BOMで出力されるため、Excelで開いても日本語が文字化けしにくい形式です。
+9. CSV
+   - CSVはUTF-8 with BOMで出力します。
+   - Excelで開いても日本語が文字化けしにくい形式です。
