@@ -11,6 +11,7 @@ import {
   introducerCollectionName,
   fixedExpenseCollectionName,
   trialCastCollectionName,
+  employeeSalaryCollectionName,
   firebaseProjectId
 } from "./firebase-config.js";
 import { requireRole, logout, showMessage, hideMessage } from "./auth.js";
@@ -38,6 +39,7 @@ let staffMembers = [];
 let introducers = [];
 let fixedExpenseRecords = [];
 let trialCastRecords = [];
+let employeeSalaryRecords = [];
 let fixedExpenseLoadError = null;
 let editingClosing = null;
 let deletingClosing = null;
@@ -63,6 +65,9 @@ byId("fixedExpenseMonth").addEventListener("change", renderFixedExpenseForm);
 byId("exportCastRewardsXlsxButton").addEventListener("click", exportCastRewardsXlsx);
 byId("exportStaffPayrollXlsxButton").addEventListener("click", exportStaffPayrollXlsx);
 byId("exportIntroducerFeesXlsxButton").addEventListener("click", exportIntroducerFeesXlsx);
+byId("loadStaffSalaryButton").addEventListener("click", renderStaffPayroll);
+byId("staffSalaryMonth").addEventListener("change", renderStaffPayroll);
+byId("saveEmployeeSalariesButton").addEventListener("click", saveEmployeeSalaries);
 document.querySelectorAll(".fixed-expense-input").forEach((input) => {
   input.addEventListener("input", updateFixedExpenseTotal);
 });
@@ -81,6 +86,7 @@ requireRole("accounting", async (user) => {
   byId("startDate").value = start;
   byId("endDate").value = end;
   byId("fixedExpenseMonth").value = start.slice(0, 7);
+  byId("staffSalaryMonth").value = start.slice(0, 7);
   showHome();
   await loadData();
 });
@@ -107,13 +113,14 @@ async function loadData() {
   hideMessage("errorMessage");
   hideMessage("successMessage");
   try {
-    const [closingSnap, castSnap, staffSnap, introducerSnap, fixedExpenseSnap, trialCastSnap] = await Promise.all([
+    const [closingSnap, castSnap, staffSnap, introducerSnap, fixedExpenseSnap, trialCastSnap, employeeSalarySnap] = await Promise.all([
       getDocs(collection(db, closingsCollectionName)),
       getDocs(collection(db, castCollectionName)),
       getDocs(collection(db, staffCollectionName)),
       getDocs(collection(db, introducerCollectionName)),
       getDocs(collection(db, fixedExpenseCollectionName)).catch((error) => ({ docs: [], error })),
-      getDocs(collection(db, trialCastCollectionName)).catch(() => ({ docs: [] }))
+      getDocs(collection(db, trialCastCollectionName)).catch(() => ({ docs: [] })),
+      getDocs(collection(db, employeeSalaryCollectionName)).catch(() => ({ docs: [] }))
     ]);
     allClosings = closingSnap.docs.map((item) => normalizeClosing(item.id, item.data()));
     receivedClosings = allClosings
@@ -128,6 +135,7 @@ async function loadData() {
     fixedExpenseLoadError = fixedExpenseSnap.error || null;
     fixedExpenseRecords = fixedExpenseSnap.docs.map((item) => normalizeFixedExpense(item.id, item.data()));
     trialCastRecords = trialCastSnap.docs.map((item) => ({ id: item.id, ...item.data() }));
+    employeeSalaryRecords = employeeSalarySnap.docs.map((item) => ({ id: item.id, ...item.data() }));
     renderReceivedList();
     renderFinalizedView();
     renderFixedExpenseForm();
@@ -685,6 +693,9 @@ function summarize(items) {
     introducerExpenses: 0,
     totalOutflow: 0,
     unresolvedPayments: 0,
+    unresolvedCastRewards: 0,
+    missingEmployeeSalaries: 0,
+    unresolvedIntroducerFees: 0,
     grossProfit: 0,
     castHours: 0,
     staffHours: 0,
@@ -711,17 +722,27 @@ function summarize(items) {
   const monthGroups = groupClosingsByMonth(items);
   const rewardRows = [...monthGroups.values()].flatMap((closings) => calculateCastRewardRows(closings));
   rewardRows.forEach((row) => {
-    if (row.payable === null) result.unresolvedPayments += 1;
+    if (row.payable === null) {
+      result.unresolvedPayments += 1;
+      result.unresolvedCastRewards += 1;
+    }
     else result.castRewards += row.payable;
   });
-  const staffRows = calculateStaffPayrollRows(items);
+  const staffRows = monthsInRange(start, end).flatMap((month) =>
+    calculateStaffPayrollRows(items.filter((closing) => closing.businessDate.startsWith(`${month}-`)), month)
+  );
+  result.missingEmployeeSalaries = staffRows.filter((row) => row.salaryMissing).length;
+  result.unresolvedPayments += result.missingEmployeeSalaries;
   result.staffPayroll = staffRows.reduce((sum, row) => sum + row.payable, 0);
   result.trialCastRewards = calculateTrialCastRewardRows(items).reduce((sum, row) => sum + row.payable, 0);
   const introducerRows = rewardRows
     .filter((row) => row.member?.introducerId)
     .map((row) => calculateIntroducerFee(row));
   introducerRows.forEach((row) => {
-    if (row.totalExpense === null) result.unresolvedPayments += 1;
+    if (row.totalExpense === null) {
+      result.unresolvedPayments += 1;
+      result.unresolvedIntroducerFees += 1;
+    }
     else result.introducerExpenses += row.totalExpense;
   });
   result.totalExpenses += result.fixedExpenses;
@@ -740,10 +761,10 @@ function renderSummaryCards(summary) {
   const cards = [
     ["総売上", yenCell(summary.totalSales)],
     ["経費合計", yenCell(summary.totalExpenses)],
-    ["キャスト報酬", summary.unresolvedPayments ? `${yenCell(summary.castRewards)}ほか未計算` : yenCell(summary.castRewards)],
+    ["キャスト報酬", summary.unresolvedCastRewards ? `${yenCell(summary.castRewards)}ほか未計算` : yenCell(summary.castRewards)],
     ["体入キャスト報酬", yenCell(summary.trialCastRewards)],
-    ["スタッフ給与", yenCell(summary.staffPayroll)],
-    ["紹介料・顧問料", yenCell(summary.introducerExpenses)],
+    ["スタッフ給与", summary.missingEmployeeSalaries ? `${yenCell(summary.staffPayroll)} / 月給未設定${summary.missingEmployeeSalaries}名` : yenCell(summary.staffPayroll)],
+    ["紹介料・顧問料", summary.unresolvedIntroducerFees ? `${yenCell(summary.introducerExpenses)}ほか未計算` : yenCell(summary.introducerExpenses)],
     ["総支出", summary.unresolvedPayments ? `${yenCell(summary.totalOutflow)}ほか未計算` : yenCell(summary.totalOutflow)],
     ["最終収支", summary.unresolvedPayments ? "未計算項目あり" : yenCell(summary.grossProfit)],
     ["キャスト勤務", hoursCell(summary.castHours)],
@@ -1283,47 +1304,131 @@ function dohanBackAmount(startTime) {
 }
 
 function renderStaffPayroll() {
-  updateVisibleFinalized();
-  const rows = calculateStaffPayrollRows(visibleFinalized);
+  const month = byId("staffSalaryMonth").value || byId("startDate").value.slice(0, 7);
+  byId("staffSalaryMonth").value = month;
+  const monthClosings = finalizedClosings.filter((closing) => closing.businessDate.startsWith(`${month}-`));
+  const rows = calculateStaffPayrollRows(monthClosings, month);
   const root = byId("staffPayrollList");
   root.replaceChildren();
+  byId("staffSalaryStatus").textContent = `${month.replace("-", "年")}月の給与を表示しています。社員は月給、アルバイトは勤務実績から計算します。`;
   if (!rows.length) {
     root.appendChild(emptyMessage("指定期間の従業員給与計算対象はありません。"));
     return;
   }
   rows.forEach((row) => {
-    root.appendChild(createPayrollCard(
+    const card = createPayrollCard(
       row.name,
-      `${payTypeLabel(row.payType)} ${yenCell(row.payAmount)}`,
+      row.isEmployee ? "社員 / 月給" : `${payTypeLabel(row.payType)} ${yenCell(row.payAmount)}`,
       [
         ["勤務日数", `${row.days.size}日`],
         ["勤務時間", hoursCell(row.hours)],
         ["基本給与", yenCell(row.basePay)],
         ["手当", yenCell(row.allowance)],
-        ["支給見込", yenCell(row.payable)]
+        ["支給見込", row.salaryMissing ? "月給未設定" : yenCell(row.payable)]
       ]
-    ));
+    );
+    if (row.isEmployee) {
+      const salaryField = document.createElement("label");
+      salaryField.className = "mt-4 block max-w-xs";
+      salaryField.innerHTML = `<span class="form-label">月給（円）</span>`;
+      const input = document.createElement("input");
+      input.type = "number";
+      input.min = "1";
+      input.step = "1";
+      input.className = "form-input employee-monthly-salary";
+      input.dataset.staffId = row.id;
+      input.dataset.staffName = row.name;
+      input.value = row.monthlySalary || "";
+      input.placeholder = "月給を入力";
+      input.addEventListener("input", () => {
+        const value = Number(input.value);
+        input.classList.toggle("invalid", input.value !== "" && (!Number.isInteger(value) || value <= 0));
+      });
+      salaryField.appendChild(input);
+      card.appendChild(salaryField);
+    }
+    root.appendChild(card);
   });
 }
 
-function calculateStaffPayrollRows(closings) {
-  return aggregateWork(closings, "staffWork").map((row) => {
+function calculateStaffPayrollRows(closings, month = closings[0]?.businessDate?.slice(0, 7) || "") {
+  const workRows = aggregateWork(closings, "staffWork");
+  const workMap = new Map(workRows.map((row) => [String(row.id), row]));
+  const employees = staffMembers.filter((member) => member.employmentType === "employee" && member.status !== "departed");
+  const keys = new Set([...workMap.keys(), ...employees.map((member) => String(member.id))]);
+  return [...keys].map((key) => {
+    const row = workMap.get(key) || { id: key, name: "", hours: 0, days: new Set(), shifts: [], payType: "", payAmount: 0 };
     const member = findMember(staffMembers, row.id, row.name);
-    const payType = row.payType || member?.payType || "";
-    const payAmount = toNumber(row.payAmount || member?.payAmount);
-    const basePay = payType === "hourly" ? Math.round(payAmount * row.hours) : payAmount * row.days.size;
+    const isEmployee = member?.employmentType === "employee";
+    const salaryRecord = employeeSalaryRecords.find((item) => item.month === month && String(item.staffId) === String(member?.id || row.id));
+    const monthlySalary = toNumber(salaryRecord?.monthlySalary);
+    const payType = isEmployee ? "monthly" : row.payType || member?.payType || "";
+    const payAmount = isEmployee ? monthlySalary : toNumber(row.payAmount || member?.payAmount);
+    const basePay = isEmployee
+      ? monthlySalary
+      : payType === "hourly" ? Math.round(payAmount * row.hours) : payAmount * row.days.size;
     const allowance = closings.reduce((total, closing) => total + closing.allowances
-      .filter((item) => (item.recipientName || item.recipient || "") === row.name)
+      .filter((item) => (item.recipientName || item.recipient || "") === (row.name || member?.name))
       .reduce((sum, item) => sum + item.amount, 0), 0);
     return {
       ...row,
+      name: row.name || member?.name || "名称未設定",
+      isEmployee,
+      month,
+      monthlySalary,
+      salaryMissing: isEmployee && monthlySalary <= 0,
       payType,
       payAmount,
       basePay,
       allowance,
       payable: basePay + allowance
     };
-  });
+  }).sort((a, b) => Number(b.isEmployee) - Number(a.isEmployee) || a.name.localeCompare(b.name, "ja"));
+}
+
+async function saveEmployeeSalaries() {
+  const month = byId("staffSalaryMonth").value;
+  const button = byId("saveEmployeeSalariesButton");
+  if (!/^\d{4}-\d{2}$/.test(month)) {
+    showMessage("errorMessage", "月給の対象月を選択してください。");
+    return;
+  }
+  const inputs = [...document.querySelectorAll(".employee-monthly-salary")];
+  try {
+    const values = inputs.map((input) => {
+      const monthlySalary = Number(input.value);
+      const valid = Number.isInteger(monthlySalary) && monthlySalary > 0;
+      input.classList.toggle("invalid", !valid);
+      if (!valid) throw new Error(`${input.dataset.staffName}の月給を1円以上の整数で入力してください。`);
+      return {
+        staffId: input.dataset.staffId,
+        staffName: input.dataset.staffName,
+        monthlySalary
+      };
+    });
+    button.disabled = true;
+    await Promise.all(values.map((value) => setDoc(
+      doc(db, employeeSalaryCollectionName, employeeSalaryRecordId(month, value.staffId)),
+      {
+        month,
+        ...value,
+        updatedBy: currentUser.uid,
+        updatedAt: serverTimestamp()
+      },
+      { merge: true }
+    )));
+    employeeSalaryRecords = [
+      ...employeeSalaryRecords.filter((item) => item.month !== month),
+      ...values.map((value) => ({ id: employeeSalaryRecordId(month, value.staffId), month, ...value }))
+    ];
+    renderStaffPayroll();
+    renderFinalizedView();
+    showMessage("successMessage", `${month.replace("-", "年")}月の社員月給を保存しました。`);
+  } catch (error) {
+    showMessage("errorMessage", error.message);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function exportCastRewardsXlsx() {
@@ -1364,27 +1469,29 @@ async function exportCastRewardsXlsx() {
 }
 
 async function exportStaffPayrollXlsx() {
-  updateVisibleFinalized();
-  const rows = calculateStaffPayrollRows(visibleFinalized);
+  const month = byId("staffSalaryMonth").value || byId("startDate").value.slice(0, 7);
+  const monthClosings = finalizedClosings.filter((closing) => closing.businessDate.startsWith(`${month}-`));
+  const rows = calculateStaffPayrollRows(monthClosings, month);
   await exportStatementWorkbook({
     buttonId: "exportStaffPayrollXlsxButton",
-    fileName: `staff_payroll_${byId("startDate").value.replaceAll("-", "")}_${byId("endDate").value.replaceAll("-", "")}.xlsx`,
+    fileName: `staff_payroll_${month.replace("-", "")}.xlsx`,
     subject: "従業員給与明細書",
-    period: `${byId("startDate").value} ～ ${byId("endDate").value}`,
+    period: `${month.replace("-", "年")}月`,
     rows,
     nameForRow: (row) => row.name,
     detailsForRow: (row) => [
+      ["雇用形態", row.isEmployee ? "社員" : "アルバイト"],
       ["給与形態", payTypeLabel(row.payType)],
-      ["給与単価", row.payAmount],
+      [row.isEmployee ? "月給" : "給与単価", row.salaryMissing ? "未設定" : row.payAmount],
       ["勤務日数", `${row.days.size}日`],
       ["勤務時間", `${row.hours}時間`],
       ["基本給与", row.basePay],
       ["手当", row.allowance],
-      ["支給額", row.payable],
+      ["支給額", row.salaryMissing ? "計算不可" : row.payable],
       ...statementShiftRows(row.shifts)
     ],
     totalLabel: "支給額",
-    totalForRow: (row) => row.payable
+    totalForRow: (row) => row.salaryMissing ? null : row.payable
   });
 }
 
@@ -1802,7 +1909,7 @@ function rewardSystemLabel(value) {
 }
 
 function payTypeLabel(value) {
-  return { daily: "日給", hourly: "時給" }[value] || "給与形態未設定";
+  return { daily: "日給", hourly: "時給", monthly: "月給" }[value] || "給与形態未設定";
 }
 
 function currentMonthRange() {
@@ -1836,6 +1943,10 @@ function groupClosingsByMonth(closings) {
 
 function trialCastRecordId(date, castId) {
   return `${date}_${String(castId).replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+}
+
+function employeeSalaryRecordId(month, staffId) {
+  return `${month}_${String(staffId).replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 }
 
 function todayString() {

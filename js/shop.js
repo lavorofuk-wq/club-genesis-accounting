@@ -80,6 +80,8 @@ document.getElementById("clearSentClosingDateButton").addEventListener("click", 
 });
 document.getElementById("registerStaffButton").addEventListener("click", registerStaff);
 document.getElementById("cancelStaffEditButton").addEventListener("click", resetStaffForm);
+document.getElementById("newStaffEmploymentType").addEventListener("change", updateStaffEmploymentFields);
+updateStaffEmploymentFields();
 document.getElementById("openStaffListButton").addEventListener("click", () => {
   renderStaffMasterList();
   document.getElementById("staffListModal").showModal();
@@ -507,10 +509,11 @@ async function registerStaff() {
   const nameInput = document.getElementById("newStaffName");
   const name = nameInput.value.trim();
   const employmentType = document.getElementById("newStaffEmploymentType").value;
-  const jobType = document.getElementById("newStaffJobType").value;
-  const payType = document.getElementById("newStaffPayType").value;
+  const isEmployee = employmentType === "employee";
+  const jobType = isEmployee ? "" : document.getElementById("newStaffJobType").value;
+  const payType = isEmployee ? "" : document.getElementById("newStaffPayType").value;
   const payAmountInput = document.getElementById("newStaffPayAmount");
-  const payAmount = Number(payAmountInput.value);
+  const payAmount = isEmployee ? 0 : Number(payAmountInput.value);
   if (!name) {
     showMessage("errorMessage", "スタッフ名を入力してください。");
     return;
@@ -519,11 +522,11 @@ async function registerStaff() {
     showMessage("errorMessage", "同じ名前のスタッフが登録済みです。退店済みの場合は一覧の「再入店」を使用してください。");
     return;
   }
-  if (!employmentTypeLabels[employmentType] || !jobTypeLabels[jobType] || !payTypeLabels[payType]) {
+  if (!employmentTypeLabels[employmentType] || (!isEmployee && (!jobTypeLabels[jobType] || !payTypeLabels[payType]))) {
     showMessage("errorMessage", "雇用形態、業務区分、給与形態を確認してください。");
     return;
   }
-  if (!Number.isInteger(payAmount) || payAmount <= 0) {
+  if (!isEmployee && (!Number.isInteger(payAmount) || payAmount <= 0)) {
     markInvalid(payAmountInput, true);
     showMessage("errorMessage", "給与金額は1円以上の整数で入力してください。");
     return;
@@ -589,11 +592,13 @@ function renderStaffMasterList() {
     status.textContent = isActive ? "在籍中" : "退店済み";
     const meta = document.createElement("span");
     meta.className = "staff-master-meta";
-    meta.textContent = [
-      employmentTypeLabels[member.employmentType] || "雇用形態未設定",
-      jobTypeLabels[member.jobType] || legacyJobTypeLabel(member.role),
-      `${payTypeLabels[member.payType] || "給与形態未設定"} ${member.payAmount ? `${yen.format(member.payAmount)}円` : "金額未設定"}`
-    ].join(" / ");
+    meta.textContent = member.employmentType === "employee"
+      ? "社員 / 月給は経理で設定"
+      : [
+        employmentTypeLabels[member.employmentType] || "雇用形態未設定",
+        jobTypeLabels[member.jobType] || legacyJobTypeLabel(member.role),
+        `${payTypeLabels[member.payType] || "給与形態未設定"} ${member.payAmount ? `${yen.format(member.payAmount)}円` : "金額未設定"}`
+      ].join(" / ");
     info.append(name, status, meta);
     const actions = document.createElement("div");
     actions.className = "staff-master-actions";
@@ -621,6 +626,7 @@ function startStaffEdit(member) {
   document.getElementById("newStaffJobType").value = member.jobType || legacyJobTypeValue(member.role);
   document.getElementById("newStaffPayType").value = member.payType || "daily";
   document.getElementById("newStaffPayAmount").value = member.payAmount || "";
+  updateStaffEmploymentFields();
   document.getElementById("registerStaffButton").textContent = "情報を更新";
   document.getElementById("cancelStaffEditButton").classList.remove("hidden");
   document.getElementById("newStaffName").focus();
@@ -637,6 +643,22 @@ function resetStaffForm() {
   document.getElementById("registerStaffButton").textContent = "入店登録";
   document.getElementById("cancelStaffEditButton").classList.add("hidden");
   markInvalid(document.getElementById("newStaffPayAmount"), false);
+  updateStaffEmploymentFields();
+}
+
+function updateStaffEmploymentFields() {
+  const isEmployee = document.getElementById("newStaffEmploymentType").value === "employee";
+  ["newStaffJobType", "newStaffPayType", "newStaffPayAmount"].forEach((id) => {
+    const input = document.getElementById(id);
+    input.disabled = isEmployee;
+    if (isEmployee) {
+      if (id === "newStaffPayAmount") input.value = "";
+      input.classList.remove("invalid");
+    }
+  });
+  ["staffJobTypeField", "staffPayTypeField", "staffPayAmountField"].forEach((id) => {
+    document.getElementById(id).classList.toggle("opacity-50", isEmployee);
+  });
 }
 
 async function saveIntroducer() {
@@ -1082,7 +1104,7 @@ function renderStaffAttendancePicker() {
     });
     const text = document.createElement("span");
     const detail = isStaffProfileComplete(member)
-      ? jobTypeLabels[member.jobType]
+      ? member.employmentType === "employee" ? "社員" : jobTypeLabels[member.jobType]
       : "スタッフ情報を編集してから選択してください";
     text.innerHTML = `<strong>${escapeHtml(member.name)}</strong><span class="block text-xs text-slate-500">${escapeHtml(detail)}</span>`;
     label.append(checkbox, text);
@@ -1091,6 +1113,7 @@ function renderStaffAttendancePicker() {
 }
 
 function isStaffProfileComplete(member) {
+  if (member.employmentType === "employee") return true;
   return Boolean(
     employmentTypeLabels[member.employmentType]
     && jobTypeLabels[member.jobType]
@@ -1120,7 +1143,7 @@ function addStaffWorkRow(data = {}) {
   row.dataset.staffId = member.id;
   const name = document.createElement("div");
   name.className = "staff-work-name";
-  name.innerHTML = `<strong>${escapeHtml(member.name)}</strong><span class="block text-xs text-slate-500">${escapeHtml(payTypeLabels[member.payType] || "給与形態未設定")}</span>`;
+  name.innerHTML = `<strong>${escapeHtml(member.name)}</strong><span class="block text-xs text-slate-500">${escapeHtml(member.employmentType === "employee" ? "社員" : payTypeLabels[member.payType] || "給与形態未設定")}</span>`;
   const startLabel = createTimeField("開始時刻", "staff-work-start", data.startTime || "");
   const endLabel = createTimeField("終了時刻", "staff-work-end", data.endTime || "");
   const hours = document.createElement("input");
@@ -1442,9 +1465,9 @@ function collectRows() {
         staffId: member?.id || row.dataset.staffId || "",
         staffName: member?.name || "",
         employmentType: member?.employmentType || "",
-        jobType: member?.jobType || "",
-        payType: member?.payType || "",
-        payAmount: Number(member?.payAmount || 0),
+        jobType: member?.employmentType === "employee" ? "" : member?.jobType || "",
+        payType: member?.employmentType === "employee" ? "" : member?.payType || "",
+        payAmount: member?.employmentType === "employee" ? 0 : Number(member?.payAmount || 0),
         startTime,
         endTime,
         hours: calculateWorkHours(startTime, endTime)

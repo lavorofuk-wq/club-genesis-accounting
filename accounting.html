@@ -152,6 +152,12 @@
             <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
           </div>
         </div>
+        <div class="mb-5 grid gap-4 md:grid-cols-3">
+          <label>対象月<input id="staffSalaryMonth" type="month" class="form-input mt-2"></label>
+          <div class="flex items-end"><button id="loadStaffSalaryButton" type="button" class="secondary-button w-full">対象月を表示</button></div>
+          <div class="flex items-end"><button id="saveEmployeeSalariesButton" type="button" class="primary-button w-full">社員月給を保存</button></div>
+        </div>
+        <div id="staffSalaryStatus" class="notice mb-5"></div>
         <div id="staffPayrollList" class="payroll-list"></div>
       </section>
 
@@ -269,6 +275,6 @@
   </dialog>
 
   <script src="js/vendor/exceljs.min.js"></script>
-  <script type="module" src="js/accounting.js?v=1.26"></script>
+  <script type="module" src="js/accounting.js?v=1.27"></script>
 </body>
 </html>

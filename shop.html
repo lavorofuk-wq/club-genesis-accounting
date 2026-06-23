@@ -76,7 +76,7 @@
               <option value="partTime">アルバイト</option>
             </select>
           </label>
-          <label>
+          <label id="staffJobTypeField">
             <span class="form-label">業務区分</span>
             <select id="newStaffJobType" class="form-select">
               <option value="kitchen">キッチンスタッフ</option>
@@ -84,14 +84,14 @@
               <option value="driver">ドライバースタッフ</option>
             </select>
           </label>
-          <label>
+          <label id="staffPayTypeField">
             <span class="form-label">給与形態</span>
             <select id="newStaffPayType" class="form-select">
               <option value="daily">日給</option>
               <option value="hourly">時給</option>
             </select>
           </label>
-          <label>
+          <label id="staffPayAmountField">
             <span class="form-label">給与金額（円）</span>
             <input id="newStaffPayAmount" type="number" min="1" step="1" class="form-input" placeholder="例：1200">
           </label>
@@ -395,6 +395,6 @@
     </form>
   </dialog>
 
-  <script type="module" src="js/shop.js?v=1.26"></script>
+  <script type="module" src="js/shop.js?v=1.27"></script>
 </body>
 </html>

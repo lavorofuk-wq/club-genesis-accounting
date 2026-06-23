@@ -35,13 +35,24 @@ service cloud.firestore {
       && request.resource.data.name.size() <= 40
       && (request.resource.data.employmentType == 'employee'
         || request.resource.data.employmentType == 'partTime')
-      && (request.resource.data.jobType == 'kitchen'
-        || request.resource.data.jobType == 'hall'
-        || request.resource.data.jobType == 'driver')
-      && (request.resource.data.payType == 'daily'
-        || request.resource.data.payType == 'hourly')
-      && request.resource.data.payAmount is int
-      && request.resource.data.payAmount > 0
+      && (request.resource.data.employmentType == 'employee'
+        ? (request.resource.data.jobType == ''
+          && request.resource.data.payType == ''
+          && request.resource.data.payAmount == 0)
+          || ((request.resource.data.jobType == 'kitchen'
+            || request.resource.data.jobType == 'hall'
+            || request.resource.data.jobType == 'driver')
+            && (request.resource.data.payType == 'daily'
+              || request.resource.data.payType == 'hourly')
+            && request.resource.data.payAmount is int
+            && request.resource.data.payAmount > 0)
+        : (request.resource.data.jobType == 'kitchen'
+          || request.resource.data.jobType == 'hall'
+          || request.resource.data.jobType == 'driver')
+          && (request.resource.data.payType == 'daily'
+            || request.resource.data.payType == 'hourly')
+          && request.resource.data.payAmount is int
+          && request.resource.data.payAmount > 0)
       && (request.resource.data.status == 'active'
         || request.resource.data.status == 'departed');
     }
@@ -174,6 +185,18 @@ service cloud.firestore {
       && request.resource.data.hourlyRate is int
       && request.resource.data.hourlyRate > 0
       && isNonNegativeNumber(request.resource.data.hours);
+    }
+
+    function isEmployeeSalary() {
+      return request.resource.data.month is string
+      && request.resource.data.month.matches('^\\d{4}-\\d{2}$')
+      && request.resource.data.staffId is string
+      && request.resource.data.staffId.size() > 0
+      && request.resource.data.staffName is string
+      && request.resource.data.staffName.size() > 0
+      && request.resource.data.staffName.size() <= 40
+      && request.resource.data.monthlySalary is int
+      && request.resource.data.monthlySalary > 0;
     }
 
     function isClosingPayload(document) {
@@ -320,6 +343,18 @@ service cloud.firestore {
     match /trialCastRecords-dev/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
       allow create, update: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting') && isTrialCastRecord();
+      allow delete: if false;
+    }
+
+    match /employeeSalaries/{document} {
+      allow read: if signedIn() && userRole() == 'accounting';
+      allow create, update: if signedIn() && userRole() == 'accounting' && isEmployeeSalary();
+      allow delete: if false;
+    }
+
+    match /employeeSalaries-dev/{document} {
+      allow read: if signedIn() && userRole() == 'accounting';
+      allow create, update: if signedIn() && userRole() == 'accounting' && isEmployeeSalary();
       allow delete: if false;
     }
 
