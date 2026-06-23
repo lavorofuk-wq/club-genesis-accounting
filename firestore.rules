@@ -199,6 +199,14 @@ service cloud.firestore {
       && request.resource.data.monthlySalary > 0;
     }
 
+    function isLiquorCost() {
+      return request.resource.data.brandName is string
+      && request.resource.data.brandName.size() > 0
+      && request.resource.data.brandName.size() <= 80
+      && request.resource.data.costAmount is int
+      && request.resource.data.costAmount >= 0;
+    }
+
     function isClosingPayload(document) {
       return request.resource.data.keys().hasAll([
         'businessDate',
@@ -332,6 +340,18 @@ service cloud.firestore {
       allow read: if signedIn() && userRole() == 'accounting';
       allow create, update: if signedIn() && userRole() == 'accounting' && isFixedExpense(document);
       allow delete: if false;
+    }
+
+    match /liquorCosts/{document} {
+      allow read: if signedIn() && userRole() == 'accounting';
+      allow create, update: if signedIn() && userRole() == 'accounting' && isLiquorCost();
+      allow delete: if signedIn() && userRole() == 'accounting';
+    }
+
+    match /liquorCosts-dev/{document} {
+      allow read: if signedIn() && userRole() == 'accounting';
+      allow create, update: if signedIn() && userRole() == 'accounting' && isLiquorCost();
+      allow delete: if signedIn() && userRole() == 'accounting';
     }
 
     match /trialCastRecords/{document} {

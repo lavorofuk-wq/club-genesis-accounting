@@ -12,6 +12,7 @@ import {
   fixedExpenseCollectionName,
   trialCastCollectionName,
   employeeSalaryCollectionName,
+  liquorCostCollectionName,
   firebaseProjectId
 } from "./firebase-config.js";
 import { requireRole, logout, showMessage, hideMessage } from "./auth.js";
@@ -40,9 +41,12 @@ let introducers = [];
 let fixedExpenseRecords = [];
 let trialCastRecords = [];
 let employeeSalaryRecords = [];
+let liquorCostRecords = [];
 let fixedExpenseLoadError = null;
+let liquorCostLoadError = null;
 let editingClosing = null;
 let deletingClosing = null;
+let editingLiquorCostId = "";
 
 const byId = (id) => document.getElementById(id);
 
@@ -71,6 +75,8 @@ byId("saveEmployeeSalariesButton").addEventListener("click", saveEmployeeSalarie
 byId("castRewardSystemSearch").addEventListener("input", renderCastRewardSystem);
 byId("castRewardSystemFilter").addEventListener("change", renderCastRewardSystem);
 byId("castRewardStatusFilter").addEventListener("change", renderCastRewardSystem);
+byId("saveLiquorCostButton").addEventListener("click", saveLiquorCost);
+byId("cancelLiquorCostEditButton").addEventListener("click", resetLiquorCostForm);
 document.querySelectorAll(".fixed-expense-input").forEach((input) => {
   input.addEventListener("input", updateFixedExpenseTotal);
 });
@@ -111,20 +117,22 @@ function showWorkspace(name) {
   if (name === "staffPayroll") renderStaffPayroll();
   if (name === "introducerFees") renderIntroducerFees();
   if (name === "fixedExpenses") renderFixedExpenseForm();
+  if (name === "liquorCosts") renderLiquorCostSettings();
 }
 
 async function loadData() {
   hideMessage("errorMessage");
   hideMessage("successMessage");
   try {
-    const [closingSnap, castSnap, staffSnap, introducerSnap, fixedExpenseSnap, trialCastSnap, employeeSalarySnap] = await Promise.all([
+    const [closingSnap, castSnap, staffSnap, introducerSnap, fixedExpenseSnap, trialCastSnap, employeeSalarySnap, liquorCostSnap] = await Promise.all([
       getDocs(collection(db, closingsCollectionName)),
       getDocs(collection(db, castCollectionName)),
       getDocs(collection(db, staffCollectionName)),
       getDocs(collection(db, introducerCollectionName)),
       getDocs(collection(db, fixedExpenseCollectionName)).catch((error) => ({ docs: [], error })),
       getDocs(collection(db, trialCastCollectionName)).catch(() => ({ docs: [] })),
-      getDocs(collection(db, employeeSalaryCollectionName)).catch(() => ({ docs: [] }))
+      getDocs(collection(db, employeeSalaryCollectionName)).catch(() => ({ docs: [] })),
+      getDocs(collection(db, liquorCostCollectionName)).catch((error) => ({ docs: [], error }))
     ]);
     allClosings = closingSnap.docs.map((item) => normalizeClosing(item.id, item.data()));
     receivedClosings = allClosings
@@ -140,9 +148,12 @@ async function loadData() {
     fixedExpenseRecords = fixedExpenseSnap.docs.map((item) => normalizeFixedExpense(item.id, item.data()));
     trialCastRecords = trialCastSnap.docs.map((item) => ({ id: item.id, ...item.data() }));
     employeeSalaryRecords = employeeSalarySnap.docs.map((item) => ({ id: item.id, ...item.data() }));
+    liquorCostLoadError = liquorCostSnap.error || null;
+    liquorCostRecords = liquorCostSnap.docs.map((item) => normalizeLiquorCost(item.id, item.data()));
     renderReceivedList();
     renderFinalizedView();
     renderFixedExpenseForm();
+    renderLiquorCostSettings();
   } catch (error) {
     showMessage("errorMessage", `データの取得に失敗しました。${error.message}`);
   }
@@ -302,6 +313,119 @@ async function saveFixedExpenses() {
     showMessage("successMessage", `${month.replace("-", "年")}月の固定費を保存しました。`);
   } catch (error) {
     showMessage("errorMessage", `固定費を保存できませんでした。${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function normalizeLiquorCost(id, raw = {}) {
+  return {
+    id,
+    brandName: String(raw.brandName || "").trim(),
+    costAmount: toNumber(raw.costAmount)
+  };
+}
+
+function normalizeBrandName(value) {
+  return String(value || "").normalize("NFKC").trim().toLocaleLowerCase("ja");
+}
+
+function liquorCostForItem(item) {
+  const brandKey = normalizeBrandName(item.label);
+  return liquorCostRecords.find((record) => normalizeBrandName(record.brandName) === brandKey) || null;
+}
+
+function renderLiquorCostSettings() {
+  const body = byId("liquorCostTableBody");
+  body.replaceChildren();
+  const rows = [...liquorCostRecords].sort((a, b) => a.brandName.localeCompare(b.brandName, "ja"));
+  byId("liquorCostStatus").textContent = liquorCostLoadError
+    ? "酒代原価を取得できません。Firestoreルールの liquorCosts 権限を反映してください。"
+    : `登録済み ${rows.length}銘柄`;
+  if (!rows.length) {
+    appendEmptyTableRow(body, 3, "酒代原価はまだ登録されていません。");
+    return;
+  }
+  rows.forEach((record) => {
+    const tr = document.createElement("tr");
+    appendCell(tr, record.brandName);
+    appendCell(tr, yenCell(record.costAmount));
+    const actionCell = document.createElement("td");
+    const editButton = document.createElement("button");
+    editButton.type = "button";
+    editButton.className = "secondary-button";
+    editButton.textContent = "編集";
+    editButton.addEventListener("click", () => editLiquorCost(record.id));
+    actionCell.appendChild(editButton);
+    tr.appendChild(actionCell);
+    body.appendChild(tr);
+  });
+}
+
+function editLiquorCost(id) {
+  const record = liquorCostRecords.find((item) => item.id === id);
+  if (!record) return;
+  editingLiquorCostId = id;
+  byId("liquorCostBrandName").value = record.brandName;
+  byId("liquorCostAmount").value = String(record.costAmount);
+  byId("saveLiquorCostButton").textContent = "更新する";
+  byId("cancelLiquorCostEditButton").classList.remove("hidden");
+  byId("liquorCostBrandName").focus();
+}
+
+function resetLiquorCostForm() {
+  editingLiquorCostId = "";
+  byId("liquorCostBrandName").value = "";
+  byId("liquorCostAmount").value = "";
+  byId("saveLiquorCostButton").textContent = "登録する";
+  byId("cancelLiquorCostEditButton").classList.add("hidden");
+}
+
+async function saveLiquorCost() {
+  const brandName = byId("liquorCostBrandName").value.normalize("NFKC").trim();
+  const costAmount = Number(byId("liquorCostAmount").value);
+  if (!brandName || brandName.length > 80) {
+    showMessage("errorMessage", "銘柄名を80文字以内で入力してください。");
+    return;
+  }
+  if (!Number.isInteger(costAmount) || costAmount < 0) {
+    showMessage("errorMessage", "酒代原価を0円以上の整数で入力してください。");
+    return;
+  }
+  const duplicate = liquorCostRecords.find((record) =>
+    record.id !== editingLiquorCostId
+    && normalizeBrandName(record.brandName) === normalizeBrandName(brandName)
+  );
+  if (duplicate) {
+    showMessage("errorMessage", "同じ銘柄名の原価が既に登録されています。既存行の編集を使用してください。");
+    return;
+  }
+  const button = byId("saveLiquorCostButton");
+  hideMessage("errorMessage");
+  hideMessage("successMessage");
+  try {
+    button.disabled = true;
+    const recordRef = editingLiquorCostId
+      ? doc(db, liquorCostCollectionName, editingLiquorCostId)
+      : doc(collection(db, liquorCostCollectionName));
+    await setDoc(recordRef, {
+      brandName,
+      costAmount,
+      updatedBy: currentUser.email || currentUser.uid,
+      updatedAt: serverTimestamp()
+    }, { merge: true });
+    const record = normalizeLiquorCost(recordRef.id, { brandName, costAmount });
+    liquorCostRecords = [
+      ...liquorCostRecords.filter((item) => item.id !== recordRef.id),
+      record
+    ];
+    liquorCostLoadError = null;
+    resetLiquorCostForm();
+    renderLiquorCostSettings();
+    renderCastRewards();
+    showMessage("successMessage", `${brandName}の酒代原価を保存しました。`);
+  } catch (error) {
+    showMessage("errorMessage", `酒代原価を保存できませんでした。${error.message}`);
   } finally {
     button.disabled = false;
   }
@@ -1002,7 +1126,11 @@ function renderCastRewards() {
         ["場内指名バック", `${row.backs.banaiCount}回 / ${yenCell(row.backs.banai)}`],
         ["同伴バック", `${row.backs.dohanCount}回 / ${yenCell(row.backs.dohan)}`],
         ["VIP室料バック", yenCell(row.backs.vip)],
-        ["ボトル類バック", yenCell(row.backs.keepBottle + row.backs.champagneWine)],
+        ["キープボトルバック", yenCell(row.backs.keepBottle)],
+        ["シャンパン・ワイン販売額", yenCell(row.backs.champagneWineGross)],
+        ["シャンパン・ワイン原価", yenCell(row.backs.champagneWineCost)],
+        ["シャンパン・ワイン原価引後", yenCell(row.backs.champagneWineNet)],
+        ["シャンパン・ワインバック", yenCell(row.backs.champagneWine)],
         ["ドリンクバック", yenCell(row.backs.drink)],
         ["バック合計", yenCell(row.backs.total)],
         ["時給＋バック", row.hourlyAndBack === null ? "計算不可" : yenCell(row.hourlyAndBack)],
@@ -1065,6 +1193,10 @@ function calculateCastRewardRows(rewardClosings = rewardMonthClosings()) {
     const backs = backMap.get(key) || emptyCastBack(key, sales.name || work.name);
     const member = findMember(castMembers, key, sales.name || work.name);
     if (member?.status === "trial" || trialIds.has(String(key))) return null;
+    const missingLiquorCosts = Array.isArray(backs.missingLiquorCosts)
+      ? backs.missingLiquorCosts
+      : [...(backs.missingLiquorCosts || [])];
+    backs.missingLiquorCosts = missingLiquorCosts;
     const monthlySales = toNumber(sales.totalAttributedSales);
     const rewardSystem = member?.rewardSystem || "";
     const guaranteedHourlyRate = toNumber(member?.guaranteedHourlyRate);
@@ -1073,11 +1205,15 @@ function calculateCastRewardRows(rewardClosings = rewardMonthClosings()) {
       : rewardSystem === "guaranteedHourly"
         ? guaranteedHourlyRate
         : 0;
-    const calculationError = !rewardSystem
+    const rewardError = !rewardSystem
       ? "報酬システム未設定"
       : rewardSystem === "guaranteedHourly" && guaranteedHourlyRate <= 0
         ? "保証時給金額未設定"
         : "";
+    const liquorCostError = missingLiquorCosts.length
+      ? `酒代原価未設定：${missingLiquorCosts.join("、")}`
+      : "";
+    const calculationError = [rewardError, liquorCostError].filter(Boolean).join(" / ");
     const hourlyBase = calculationError ? null : Math.round(hourlyRate * toNumber(work.hours));
     const hourlyAndBack = hourlyBase === null ? null : hourlyBase + backs.total;
     const salesRewardRate = castSalesRewardRate(monthlySales);
@@ -1261,7 +1397,38 @@ function aggregateCastBacks(items) {
       };
       sharedBack(["vipRoom"], 0.10, "vip");
       sharedBack(["keepBottle"], 0.10, "keepBottle");
-      sharedBack(["champagne", "wine"], 0.20, "champagneWine");
+
+      if (honCasts.length) {
+        const champagneItems = transaction.items.filter((item) =>
+          ["champagneWine", "champagne", "wine"].includes(item.category)
+        );
+        let grossTotal = 0;
+        let costTotal = 0;
+        let netTotal = 0;
+        const missingCosts = new Set();
+        champagneItems.forEach((item) => {
+          const quantity = toNumber(item.quantity);
+          const gross = toNumber(item.price) * quantity;
+          const costRecord = liquorCostForItem(item);
+          grossTotal += gross;
+          if (!costRecord) {
+            missingCosts.add(item.label || "名称未設定");
+            return;
+          }
+          const cost = costRecord.costAmount * quantity;
+          costTotal += cost;
+          netTotal += Math.max(0, gross - cost);
+        });
+        const share = Math.floor(Math.floor(netTotal * 0.20) / honCasts.length);
+        honCasts.forEach((item) => {
+          const row = ensure(item.castId, castNameForId(item.castId));
+          row.champagneWine += share;
+          row.champagneWineGross += Math.floor(grossTotal / honCasts.length);
+          row.champagneWineCost += Math.floor(costTotal / honCasts.length);
+          row.champagneWineNet += Math.floor(netTotal / honCasts.length);
+          missingCosts.forEach((label) => row.missingLiquorCosts.add(label));
+        });
+      }
 
       transaction.items
         .filter((item) => item.category === "castDrink" && item.castId)
@@ -1272,6 +1439,7 @@ function aggregateCastBacks(items) {
   });
   return [...map.values()].map((row) => ({
     ...row,
+    missingLiquorCosts: [...row.missingLiquorCosts].sort((a, b) => a.localeCompare(b, "ja")),
     total: row.hon + row.banai + row.dohan + row.vip + row.keepBottle + row.champagneWine + row.drink
   }));
 }
@@ -1289,6 +1457,10 @@ function emptyCastBack(id, name = "") {
     vip: 0,
     keepBottle: 0,
     champagneWine: 0,
+    champagneWineGross: 0,
+    champagneWineCost: 0,
+    champagneWineNet: 0,
+    missingLiquorCosts: new Set(),
     drink: 0,
     total: 0
   };
@@ -1512,6 +1684,9 @@ async function exportCastRewardsXlsx() {
       ["同伴バック", row.backs.dohan],
       ["VIP室料バック", row.backs.vip],
       ["キープボトルバック", row.backs.keepBottle],
+      ["シャンパン・ワイン販売額", row.backs.champagneWineGross],
+      ["シャンパン・ワイン原価", row.backs.champagneWineCost],
+      ["シャンパン・ワイン原価引後", row.backs.champagneWineNet],
       ["シャンパン・ワインバック", row.backs.champagneWine],
       ["ドリンクバック", row.backs.drink],
       ["バック合計", row.backs.total],
@@ -1778,8 +1953,8 @@ function openClosingDetail(id) {
     row.tableLabel, row.guests, paymentLabel(row), yenCell(row.subtotal), yenCell(row.discount), yenCell(row.total)
   ]));
   closing.transactions.forEach((transaction) => {
-    body.appendChild(createTableBlock(`会計明細 ${transaction.tableLabel || ""}`, ["明細", "単価", "数量", "金額"], transaction.items, (item) => [
-      item.label, yenCell(item.price), item.quantity, yenCell(item.price * item.quantity)
+    body.appendChild(createTableBlock(`会計明細 ${transaction.tableLabel || ""}`, ["明細", "分類", "単価", "数量", "金額"], transaction.items, (item) => [
+      item.label, transactionItemCategoryLabel(item.category), yenCell(item.price), item.quantity, yenCell(item.price * item.quantity)
     ]));
   });
   body.appendChild(createTableBlock("経費", ["カテゴリ", "金額", "メモ"], closing.expenses, (row) => [row.category, yenCell(row.amount), row.note || ""]));
@@ -1910,6 +2085,16 @@ function transactionItemCategory(item) {
   if (/ワイン/.test(label)) return "wine";
   if (/キープ|ボトル/.test(label)) return "keepBottle";
   return "";
+}
+
+function transactionItemCategoryLabel(category) {
+  return {
+    champagneWine: "シャンパン・ワイン",
+    champagne: "シャンパン・ワイン",
+    wine: "シャンパン・ワイン",
+    keepBottle: "キープボトル",
+    castDrink: "キャストドリンク"
+  }[category] || "その他";
 }
 
 function normalizeWorkRows(work, staff) {

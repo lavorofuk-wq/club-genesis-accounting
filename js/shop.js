@@ -1872,11 +1872,11 @@ function renderTransactions(transactions) {
     wrap.className = "transaction-table-wrap";
     const table = document.createElement("table");
     table.className = "detail-mini-table";
-    table.innerHTML = "<thead><tr><th>明細</th><th>単価</th><th>数量</th><th>金額</th></tr></thead>";
+    table.innerHTML = "<thead><tr><th>明細</th><th>分類</th><th>単価</th><th>数量</th><th>金額</th></tr></thead>";
     const tbody = document.createElement("tbody");
     transaction.items.forEach((item) => {
       const row = document.createElement("tr");
-      [item.label, `${yen.format(item.price)}円`, item.quantity, `${yen.format(item.price * item.quantity)}円`].forEach((value) => {
+      [item.label, transactionItemCategoryLabel(item.category), `${yen.format(item.price)}円`, item.quantity, `${yen.format(item.price * item.quantity)}円`].forEach((value) => {
         const cell = document.createElement("td");
         cell.textContent = value;
         row.appendChild(cell);
@@ -1894,6 +1894,16 @@ function formatTransactionTime(value) {
   const timestamp = Number(value || 0);
   if (!timestamp) return "--:--";
   return new Date(timestamp).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
+}
+
+function transactionItemCategoryLabel(category) {
+  return {
+    champagneWine: "シャンパン・ワイン",
+    champagne: "シャンパン・ワイン",
+    wine: "シャンパン・ワイン",
+    keepBottle: "キープボトル",
+    castDrink: "キャストドリンク"
+  }[category] || "その他";
 }
 
 function paymentLabel(transaction) {

@@ -60,6 +60,7 @@ export const introducerCollectionName = isProduction ? "introducers" : "introduc
 export const fixedExpenseCollectionName = isProduction ? "fixedExpenses" : "fixedExpenses-dev";
 export const trialCastCollectionName = isProduction ? "trialCastRecords" : "trialCastRecords-dev";
 export const employeeSalaryCollectionName = isProduction ? "employeeSalaries" : "employeeSalaries-dev";
+export const liquorCostCollectionName = isProduction ? "liquorCosts" : "liquorCosts-dev";
 export const posCastPath = isProduction ? "pos/casts" : "pos-dev/casts";
 
 export {

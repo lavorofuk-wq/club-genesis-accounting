@@ -68,6 +68,10 @@
             <span class="shop-home-action-title">経費入力</span>
             <span class="shop-home-action-detail">月別固定費の入力と酒代の自動集計</span>
           </button>
+          <button type="button" class="shop-home-action" data-accounting-view="liquorCosts">
+            <span class="shop-home-action-title">酒代原価設定</span>
+            <span class="shop-home-action-detail">シャンパン・ワインの銘柄別原価を登録・編集</span>
+          </button>
         </div>
       </section>
 
@@ -180,8 +184,8 @@
                 <tr><td>場内指名</td><td>1回 500円</td></tr>
                 <tr><td>同伴</td><td>21:00までの入店 3,000円 / 21:30まで 2,000円</td></tr>
                 <tr><td>VIP室料</td><td>本指名テーブルの室料10%。本指名複数人は人数割りして切り捨て</td></tr>
-                <tr><td>キープボトル</td><td>本指名テーブルの対象小計10%</td></tr>
-                <tr><td>シャンパン・ワイン</td><td>本指名テーブルの対象小計20%</td></tr>
+                <tr><td>キープボトル</td><td>本指名テーブルの対象小計10%。本指名複数人は人数割りして切り捨て</td></tr>
+                <tr><td>シャンパン・ワイン</td><td>販売額から銘柄別酒代原価を引いた金額の20%。本指名複数人は人数割りして切り捨て</td></tr>
                 <tr><td>キャストドリンク</td><td>注文された当該キャストへ小計10%。キャスト売上には加算しない</td></tr>
               </tbody>
             </table>
@@ -308,6 +312,32 @@
           <div class="summary-card min-w-64"><p>固定費表 合計</p><strong id="fixedExpenseTotal">0円</strong></div>
         </div>
       </section>
+
+      <section class="section-shell hidden" data-accounting-workspace="liquorCosts">
+        <div class="section-title">
+          <div>
+            <h2>酒代原価設定</h2>
+            <p class="mt-1 text-sm text-slate-500">POSのシャンパン・ワインと同じ銘柄名で、1本あたりの原価を登録してください。</p>
+          </div>
+          <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
+        </div>
+        <div class="notice mt-4">原価未登録の銘柄を含む報酬は、過払い防止のため計算不可になります。</div>
+        <div class="mt-5 grid gap-4 md:grid-cols-3">
+          <label>銘柄名<input id="liquorCostBrandName" type="text" maxlength="80" class="form-input mt-2" placeholder="例：アルマンド・ゴールド"></label>
+          <label>1本あたりの原価<input id="liquorCostAmount" type="number" min="0" step="1" class="form-input mt-2" placeholder="30000"></label>
+          <div class="flex items-end gap-2">
+            <button id="saveLiquorCostButton" type="button" class="primary-button flex-1">登録する</button>
+            <button id="cancelLiquorCostEditButton" type="button" class="secondary-button hidden">編集解除</button>
+          </div>
+        </div>
+        <div id="liquorCostStatus" class="notice mt-4"></div>
+        <div class="mt-5 overflow-x-auto">
+          <table class="data-table">
+            <thead><tr><th>銘柄名</th><th>1本あたり原価</th><th>操作</th></tr></thead>
+            <tbody id="liquorCostTableBody"></tbody>
+          </table>
+        </div>
+      </section>
     </div>
   </main>
 
@@ -377,6 +407,6 @@
   </dialog>
 
   <script src="js/vendor/exceljs.min.js"></script>
-  <script type="module" src="js/accounting.js?v=1.28"></script>
+  <script type="module" src="js/accounting.js?v=1.29"></script>
 </body>
 </html>
