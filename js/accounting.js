@@ -1275,7 +1275,9 @@ function renderIntroducerFees() {
         ["キャスト総支給額", row.payable === null ? "計算不可" : yenCell(row.payable)],
         ["総支給額10%", row.pay10 === null ? "計算不可" : yenCell(row.pay10)],
         ["採用した紹介料", row.introductionFee === null ? "計算不可" : yenCell(row.introductionFee)],
-        ["顧問料", yenCell(row.advisoryFee)],
+        ["出勤日数", `${row.attendanceDays}日`],
+        ["顧問料単価（1出勤）", yenCell(row.advisoryFeeUnit)],
+        ["顧問料", `${row.attendanceDays}日 × ${yenCell(row.advisoryFeeUnit)} = ${yenCell(row.advisoryFee)}`],
         ["紹介関連支出", row.totalExpense === null ? "計算不可" : yenCell(row.totalExpense)]
       ]
     ));
@@ -1299,7 +1301,9 @@ function calculateIntroducerFee(reward) {
   if (feeSystem === "sales10") introductionFee = sales10;
   if (feeSystem === "pay10" && pay10 !== null) introductionFee = pay10;
   if (feeSystem === "higher10" && pay10 !== null) introductionFee = Math.max(sales10, pay10);
-  const advisoryFee = member.advisoryFeeEnabled ? toNumber(member.advisoryFeeAmount) : 0;
+  const attendanceDays = Math.max(0, Math.floor(toNumber(reward.days)));
+  const advisoryFeeUnit = member.advisoryFeeEnabled ? toNumber(member.advisoryFeeAmount) : 0;
+  const advisoryFee = advisoryFeeUnit * attendanceDays;
   return {
     castName: reward.name,
     introducerName: member.introducerName || introducer?.name || "名称未設定",
@@ -1309,6 +1313,8 @@ function calculateIntroducerFee(reward) {
     sales10,
     pay10,
     introductionFee,
+    attendanceDays,
+    advisoryFeeUnit,
     advisoryFee,
     totalExpense: introductionFee === null ? null : introductionFee + advisoryFee
   };
@@ -1747,6 +1753,8 @@ async function exportIntroducerFeesXlsx() {
       ["キャスト総支給額", statementAmount(row.payable)],
       ["総支給額10%", statementAmount(row.pay10)],
       ["採用した紹介料", statementAmount(row.introductionFee)],
+      ["出勤日数", `${row.attendanceDays}日`],
+      ["顧問料単価（1出勤）", row.advisoryFeeUnit],
       ["顧問料", row.advisoryFee],
       ["紹介関連支出", statementAmount(row.totalExpense)]
     ],

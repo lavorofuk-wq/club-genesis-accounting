@@ -848,7 +848,7 @@ function renderCastDetailList() {
       : "保証期限：対象外";
     const introducer = document.createElement("span");
     introducer.textContent = member.introducerId
-      ? `紹介者：${member.introducerName || introducers.find((item) => item.id === member.introducerId)?.name || "未設定"}${Number(member.advisoryFeeAmount || 0) > 0 ? ` / 顧問料：${yen.format(member.advisoryFeeAmount)}円` : ""}`
+      ? `紹介者：${member.introducerName || introducers.find((item) => item.id === member.introducerId)?.name || "未設定"}${Number(member.advisoryFeeAmount || 0) > 0 ? ` / 顧問料：1出勤 ${yen.format(member.advisoryFeeAmount)}円` : ""}`
       : "紹介者：なし";
     const note = document.createElement("span");
     note.textContent = `備考：${member.note || "なし"}`;
@@ -981,7 +981,7 @@ async function saveCastProfile() {
     && (!Number.isInteger(advisoryFeeAmount) || advisoryFeeAmount <= 0)
   ) {
     markInvalid(document.getElementById("castAdvisoryFeeAmount"), true);
-    showMessage("castEditError", "顧問料が発生する紹介者の場合は、1円以上の顧問料金額を入力してください。");
+    showMessage("castEditError", "顧問料が発生する紹介者の場合は、1出勤あたり1円以上の顧問料金額を入力してください。");
     return;
   }
   markInvalid(document.getElementById("castAdvisoryFeeAmount"), false);
