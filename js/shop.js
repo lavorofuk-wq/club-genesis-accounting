@@ -6,6 +6,8 @@ import {
   getDocs,
   getDoc,
   setDoc,
+  query,
+  where,
   ref,
   get,
   serverTimestamp,
@@ -358,14 +360,22 @@ async function loadClosingLists() {
       .map((item) => ({ ...item, businessDate: item.businessDate || item.date || item.id }))
       .filter((item) => item.businessDate)
       .sort((a, b) => b.businessDate.localeCompare(a.businessDate));
-    const sentDates = new Set(sentClosings.map((item) => item.businessDate));
-    const map = new Map();
-    shopItems.forEach((item) => {
+    const processedSourceIds = new Set(sentClosings
+      .map((item) => String(item.source?.sourceDocumentId || item.source?.submissionId || ""))
+      .filter(Boolean));
+    const legacySentDates = new Set(sentClosings
+      .filter((item) => !item.source?.sourceDocumentId && !item.source?.submissionId)
+      .map((item) => item.businessDate));
+    pendingClosings = shopItems.flatMap((item) => {
       const date = item.businessDate || item.date || item.id;
-      if (!date || sentDates.has(date)) return;
-      map.set(date, { ...item, businessDate: date });
-    });
-    pendingClosings = [...map.values()].sort((a, b) => b.businessDate.localeCompare(a.businessDate));
+      if (!date || item.status === "reviewed" || processedSourceIds.has(item.id)) return [];
+      if (item.id === date && legacySentDates.has(date)) return [];
+      return [{ ...item, businessDate: date }];
+    }).sort((a, b) =>
+      b.businessDate.localeCompare(a.businessDate)
+      || closingSubmittedMillis(b) - closingSubmittedMillis(a)
+      || b.id.localeCompare(a.id)
+    );
     renderPendingClosings();
     renderSentClosings();
     if (lifecycleSyncError) {
@@ -459,10 +469,12 @@ function renderPendingClosings() {
     row.className = "pending-item";
     const total = Number(closing.sales?.totalSales ?? closing.totalSales ?? 0);
     const transactionCount = Array.isArray(closing.transactions) ? closing.transactions.length : 0;
+    const duplicateCount = pendingClosings.filter((item) => item.businessDate === closing.businessDate).length;
+    const duplicateLabel = duplicateCount > 1 ? ` / 重複受信 ${duplicateCount}件` : "";
     const info = document.createElement("div");
     info.innerHTML = `
       <div class="font-bold text-slate-900">${closing.businessDate}</div>
-      <div class="mt-1 text-sm text-slate-600">総売上 ${yen.format(total)}円 / 会計 ${transactionCount}件</div>
+      <div class="mt-1 text-sm text-slate-600">総売上 ${yen.format(total)}円 / 会計 ${transactionCount}件 / 受信 ${closingSubmissionLabel(closing)}${duplicateLabel}</div>
     `;
     const button = document.createElement("button");
     button.type = "button";
@@ -1567,6 +1579,7 @@ function buildPayload() {
     },
     source: {
       ...(selectedPending?.source || {}),
+      sourceDocumentId: selectedPending?.sourceCollection === shopClosingsCollectionName ? selectedPending.id : selectedPending?.source?.sourceDocumentId || "",
       reviewedBy: currentUser.uid,
       reviewedEmail: currentUser.email || "",
       reviewedAt: serverTimestamp(),
@@ -1681,13 +1694,14 @@ async function saveReport() {
   hideMessage("confirmSaveError");
 
   try {
-    await setDoc(doc(db, closingsCollectionName, pendingPayload.businessDate), pendingPayload, { merge: true });
+    const targetClosingId = selectedPending?.id || pendingPayload.businessDate;
+    await setDoc(doc(db, closingsCollectionName, targetClosingId), pendingPayload, { merge: true });
     await Promise.all(pendingPayload.trialWork.map((row) => setDoc(
-      doc(db, trialCastCollectionName, trialCastRecordId(pendingPayload.businessDate, row.castId)),
+      doc(db, trialCastCollectionName, trialCastRecordId(targetClosingId, row.castId)),
       {
         ...row,
         businessDate: pendingPayload.businessDate,
-        sourceClosingId: pendingPayload.businessDate,
+        sourceClosingId: targetClosingId,
         updatedBy: currentUser.uid,
         updatedAt: serverTimestamp()
       },
@@ -1695,8 +1709,8 @@ async function saveReport() {
     )));
     if (selectedPending?.sourceCollection === shopClosingsCollectionName) {
       try {
-        await setDoc(doc(db, shopClosingsCollectionName, selectedPending.businessDate), {
-          status: "submitted",
+        await setDoc(doc(db, shopClosingsCollectionName, selectedPending.id), {
+          status: "reviewed",
           reviewedBy: currentUser.uid,
           reviewedAt: serverTimestamp()
         }, { merge: true });
@@ -1738,12 +1752,19 @@ async function copyPreviousDay() {
     return;
   }
   try {
-    const snap = await getDoc(doc(db, closingsCollectionName, previousDateString(date)));
-    if (!snap.exists()) {
+    const previousDate = previousDateString(date);
+    const snapshot = await getDocs(query(
+      collection(db, closingsCollectionName),
+      where("businessDate", "==", previousDate)
+    ));
+    const previous = snapshot.docs
+      .map((item) => ({ id: item.id, ...item.data() }))
+      .sort((a, b) => closingSubmittedMillis(b) - closingSubmittedMillis(a))[0];
+    if (!previous) {
       showMessage("errorMessage", "前日のデータが見つかりません。");
       return;
     }
-    applyClosingToForm({ ...snap.data(), businessDate: date });
+    applyClosingToForm({ ...previous, businessDate: date });
     showMessage("successMessage", "前日のデータをコピーしました。送信するまで経理側には反映されません。", false);
   } catch (error) {
     showMessage("errorMessage", `前日データの取得に失敗しました。${error.message}`);
@@ -1894,6 +1915,22 @@ function formatTransactionTime(value) {
   const timestamp = Number(value || 0);
   if (!timestamp) return "--:--";
   return new Date(timestamp).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
+}
+
+function closingSubmittedMillis(closing) {
+  const value = closing?.source?.closedAt || closing?.source?.updatedAt || closing?.reviewedAt || closing?.updatedAt;
+  if (typeof value?.toMillis === "function") return value.toMillis();
+  if (typeof value?.seconds === "number") return value.seconds * 1000;
+  const parsed = new Date(value || 0).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function closingSubmissionLabel(closing) {
+  const millis = closingSubmittedMillis(closing);
+  const time = millis
+    ? new Date(millis).toLocaleString("ja-JP", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+    : "時刻不明";
+  return `${time} / ${String(closing.id || "").slice(-8)}`;
 }
 
 function transactionItemCategoryLabel(category) {

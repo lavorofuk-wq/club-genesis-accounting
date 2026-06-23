@@ -218,9 +218,11 @@ service cloud.firestore {
         'castWork',
         'source'
       ])
-      && request.resource.data.businessDate == document
       && request.resource.data.businessDate is string
       && request.resource.data.businessDate.matches('^\\d{4}-\\d{2}-\\d{2}$')
+      && (request.resource.data.businessDate == document
+        || (request.resource.data.source.keys().hasAny(['submissionId'])
+          && request.resource.data.source.submissionId == document))
       && (request.resource.data.status == 'submitted'
         || request.resource.data.status == 'approved'
         || request.resource.data.status == 'finalized')

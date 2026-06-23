@@ -137,7 +137,7 @@ async function loadData() {
     allClosings = closingSnap.docs.map((item) => normalizeClosing(item.id, item.data()));
     receivedClosings = allClosings
       .filter((item) => item.status !== "finalized")
-      .sort((a, b) => b.businessDate.localeCompare(a.businessDate));
+      .sort((a, b) => b.businessDate.localeCompare(a.businessDate) || b.id.localeCompare(a.id));
     finalizedClosings = allClosings
       .filter((item) => item.status === "finalized")
       .sort((a, b) => a.businessDate.localeCompare(b.businessDate));
@@ -446,7 +446,9 @@ function renderReceivedList() {
     title.textContent = closing.businessDate;
     const detail = document.createElement("p");
     detail.className = "mt-1 text-sm text-slate-500";
-    detail.textContent = `総売上 ${yenCell(closing.totalSales)} / 会計 ${closing.transactions.length}件 / ${statusLabel(closing.status)}`;
+    const duplicateCount = receivedClosings.filter((item) => item.businessDate === closing.businessDate).length;
+    const duplicateLabel = duplicateCount > 1 ? ` / 重複受信 ${duplicateCount}件` : "";
+    detail.textContent = `総売上 ${yenCell(closing.totalSales)} / 会計 ${closing.transactions.length}件 / 受信番号 ${closing.id.slice(-8)}${duplicateLabel} / ${statusLabel(closing.status)}`;
     main.append(title, detail);
     const actions = document.createElement("div");
     actions.className = "flex flex-wrap gap-2";
