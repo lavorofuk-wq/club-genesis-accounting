@@ -48,6 +48,10 @@
             <span class="shop-home-action-title">キャスト報酬</span>
             <span class="shop-home-action-detail">売上・会計・勤務時間から報酬明細を作成</span>
           </button>
+          <button type="button" class="shop-home-action" data-accounting-view="castRewardSystem">
+            <span class="shop-home-action-title">キャスト報酬システム</span>
+            <span class="shop-home-action-detail">報酬ルールとキャスト別の設定内容を確認</span>
+          </button>
           <button type="button" class="shop-home-action" data-accounting-view="trialCastRewards">
             <span class="shop-home-action-title">体入キャスト報酬</span>
             <span class="shop-home-action-detail">体入勤務時間と当日時給から報酬を算出</span>
@@ -135,6 +139,104 @@
         </div>
         <div id="castRewardList" class="payroll-list"></div>
       </section>
+
+      <div class="hidden space-y-6" data-accounting-workspace="castRewardSystem">
+        <section class="section-shell">
+          <div class="section-title">
+            <div>
+              <h2>キャスト報酬システム</h2>
+              <p class="mt-1 text-sm text-slate-500">現在の計算ルールとキャストごとの報酬設定を参照できます。</p>
+            </div>
+            <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
+          </div>
+          <div class="notice">「時給＋バック」と「売上報酬」を両方計算し、高い方を支給額として採用します。</div>
+        </section>
+
+        <section class="section-shell">
+          <div class="section-title"><h2>スライド時給</h2></div>
+          <div class="overflow-x-auto">
+            <table class="data-table">
+              <thead><tr><th>月間小計売上</th><th>適用時給</th></tr></thead>
+              <tbody>
+                <tr><td>41万円未満</td><td>3,000円</td></tr>
+                <tr><td>41万円以上 61万円未満</td><td>4,000円</td></tr>
+                <tr><td>61万円以上 71万円未満</td><td>4,500円</td></tr>
+                <tr><td>71万円以上 91万円未満</td><td>5,000円</td></tr>
+                <tr><td>91万円以上 101万円未満</td><td>5,500円</td></tr>
+                <tr><td>101万円以上</td><td>6,000円</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="mt-3 text-sm text-slate-500">月内で時給区分が上がった場合、その月の全勤務時間を最終的な適用時給で計算します。</p>
+        </section>
+
+        <section class="section-shell">
+          <div class="section-title"><h2>バックシステム</h2></div>
+          <div class="overflow-x-auto">
+            <table class="data-table">
+              <thead><tr><th>項目</th><th>計算方法</th></tr></thead>
+              <tbody>
+                <tr><td>本指名</td><td>1回 1,000円</td></tr>
+                <tr><td>場内指名</td><td>1回 500円</td></tr>
+                <tr><td>同伴</td><td>21:00までの入店 3,000円 / 21:30まで 2,000円</td></tr>
+                <tr><td>VIP室料</td><td>本指名テーブルの室料10%。本指名複数人は人数割りして切り捨て</td></tr>
+                <tr><td>キープボトル</td><td>本指名テーブルの対象小計10%</td></tr>
+                <tr><td>シャンパン・ワイン</td><td>本指名テーブルの対象小計20%</td></tr>
+                <tr><td>キャストドリンク</td><td>注文された当該キャストへ小計10%。キャスト売上には加算しない</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="section-shell">
+          <div class="section-title"><h2>売上報酬</h2></div>
+          <div class="overflow-x-auto">
+            <table class="data-table">
+              <thead><tr><th>月間小計売上</th><th>報酬率</th></tr></thead>
+              <tbody>
+                <tr><td>131万円以上 201万円未満</td><td>50%</td></tr>
+                <tr><td>201万円以上 301万円未満</td><td>55%</td></tr>
+                <tr><td>301万円以上 501万円未満</td><td>60%</td></tr>
+                <tr><td>501万円以上</td><td>70%</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="mt-3 text-sm text-slate-500">売上報酬を採用した場合、バックは加算しません。</p>
+        </section>
+
+        <section class="section-shell">
+          <div class="section-title">
+            <div>
+              <h2>キャスト別設定</h2>
+              <p id="castRewardSystemCount" class="mt-1 text-sm text-slate-500"></p>
+            </div>
+          </div>
+          <div class="grid gap-4 md:grid-cols-3">
+            <label>名前検索<input id="castRewardSystemSearch" type="search" maxlength="40" class="form-input mt-2" placeholder="キャスト名"></label>
+            <label>報酬方式
+              <select id="castRewardSystemFilter" class="form-select mt-2">
+                <option value="all">すべて</option>
+                <option value="slideHourly">スライド時給</option>
+                <option value="guaranteedHourly">保証時給</option>
+                <option value="unset">未設定</option>
+              </select>
+            </label>
+            <label>在籍状況
+              <select id="castRewardStatusFilter" class="form-select mt-2">
+                <option value="active">在籍中</option>
+                <option value="departed">退店済み</option>
+                <option value="all">すべて</option>
+              </select>
+            </label>
+          </div>
+          <div class="mt-5 overflow-x-auto">
+            <table class="data-table">
+              <thead><tr><th>キャスト</th><th>在籍状況</th><th>報酬方式</th><th>保証時給</th><th>保証期限</th><th>入店日</th><th>紹介者</th><th>備考</th></tr></thead>
+              <tbody id="castRewardSystemTableBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
 
       <section class="section-shell hidden" data-accounting-workspace="trialCastRewards">
         <div class="section-title">
@@ -275,6 +377,6 @@
   </dialog>
 
   <script src="js/vendor/exceljs.min.js"></script>
-  <script type="module" src="js/accounting.js?v=1.27"></script>
+  <script type="module" src="js/accounting.js?v=1.28"></script>
 </body>
 </html>

@@ -68,6 +68,9 @@ byId("exportIntroducerFeesXlsxButton").addEventListener("click", exportIntroduce
 byId("loadStaffSalaryButton").addEventListener("click", renderStaffPayroll);
 byId("staffSalaryMonth").addEventListener("change", renderStaffPayroll);
 byId("saveEmployeeSalariesButton").addEventListener("click", saveEmployeeSalaries);
+byId("castRewardSystemSearch").addEventListener("input", renderCastRewardSystem);
+byId("castRewardSystemFilter").addEventListener("change", renderCastRewardSystem);
+byId("castRewardStatusFilter").addEventListener("change", renderCastRewardSystem);
 document.querySelectorAll(".fixed-expense-input").forEach((input) => {
   input.addEventListener("input", updateFixedExpenseTotal);
 });
@@ -103,6 +106,7 @@ function showWorkspace(name) {
   });
   if (name === "finalized") renderFinalizedView();
   if (name === "castRewards") renderCastRewards();
+  if (name === "castRewardSystem") renderCastRewardSystem();
   if (name === "trialCastRewards") renderTrialCastRewards();
   if (name === "staffPayroll") renderStaffPayroll();
   if (name === "introducerFees") renderIntroducerFees();
@@ -1348,6 +1352,60 @@ function renderStaffPayroll() {
       card.appendChild(salaryField);
     }
     root.appendChild(card);
+  });
+}
+
+function renderCastRewardSystem() {
+  const body = byId("castRewardSystemTableBody");
+  body.replaceChildren();
+  const query = byId("castRewardSystemSearch").value.trim().toLocaleLowerCase("ja");
+  const rewardFilter = byId("castRewardSystemFilter").value;
+  const statusFilter = byId("castRewardStatusFilter").value;
+  const rows = castMembers
+    .filter((member) => member.deleted !== true && member.status !== "trial")
+    .filter((member) => !query || String(member.name || "").toLocaleLowerCase("ja").includes(query))
+    .filter((member) => statusFilter === "all" || member.status === statusFilter)
+    .filter((member) => {
+      if (rewardFilter === "all") return true;
+      if (rewardFilter === "unset") return !member.rewardSystem;
+      return member.rewardSystem === rewardFilter;
+    })
+    .sort((a, b) =>
+      Number(a.status === "departed") - Number(b.status === "departed")
+      || Number(a.internalNo || Number.MAX_SAFE_INTEGER) - Number(b.internalNo || Number.MAX_SAFE_INTEGER)
+      || String(a.name || "").localeCompare(String(b.name || ""), "ja")
+    );
+  const configuredCount = castMembers.filter((member) =>
+    member.deleted !== true
+    && member.status !== "trial"
+    && Boolean(member.rewardSystem)
+  ).length;
+  const targetCount = castMembers.filter((member) => member.deleted !== true && member.status !== "trial").length;
+  byId("castRewardSystemCount").textContent = `表示 ${rows.length}名 / 設定済み ${configuredCount}名 / 対象 ${targetCount}名`;
+  if (!rows.length) {
+    appendEmptyTableRow(body, 8, "条件に一致するキャストはいません。");
+    return;
+  }
+  rows.forEach((member) => {
+    const tr = document.createElement("tr");
+    const status = member.status === "departed" ? "退店済み" : "在籍中";
+    const guaranteedRate = member.rewardSystem === "guaranteedHourly"
+      ? member.guaranteedHourlyRate > 0 ? yenCell(member.guaranteedHourlyRate) : "未設定"
+      : "対象外";
+    const guaranteeNote = member.rewardSystem === "guaranteedHourly"
+      ? member.guaranteeNote || "未設定"
+      : "対象外";
+    [
+      member.name || "名称未設定",
+      status,
+      rewardSystemLabel(member.rewardSystem),
+      guaranteedRate,
+      guaranteeNote,
+      member.entryDate || "未設定",
+      member.introducerName || "なし",
+      member.note || "なし"
+    ].forEach((value) => appendCell(tr, value));
+    body.appendChild(tr);
   });
 }
 
