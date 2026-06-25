@@ -20,6 +20,7 @@ import {
   posCastPath
 } from "./firebase-config.js";
 import { requireRole, logout, showMessage, hideMessage } from "./auth.js";
+import { initInternalMail } from "./internal-mail.js";
 
 const yen = new Intl.NumberFormat("ja-JP");
 const employmentTypeLabels = {
@@ -66,6 +67,9 @@ document.getElementById("logoutButton").addEventListener("click", logout);
 document.getElementById("openRegistrationButton").addEventListener("click", () => showWorkspace("registration"));
 document.getElementById("openClosingButton").addEventListener("click", openPendingClosingModal);
 document.getElementById("openSentClosingsButton").addEventListener("click", openSentClosingModal);
+document.querySelectorAll("[data-mail-open]").forEach((button) => {
+  button.addEventListener("click", () => showWorkspace("mail"));
+});
 document.querySelectorAll("[data-home-button]").forEach((button) => {
   button.addEventListener("click", () => showWorkspace("home"));
 });
@@ -139,6 +143,12 @@ requireRole("shop", async (user) => {
   await loadMasters();
   await syncPosCasts(false);
   await loadClosingLists();
+  initInternalMail({
+    role: "shop",
+    currentUser: user,
+    onError: (message) => showMessage("errorMessage", message),
+    onSuccess: (message) => showMessage("successMessage", message, false)
+  });
   resetRows();
   wireRealtimeValidation();
   calculateUnitPrice();

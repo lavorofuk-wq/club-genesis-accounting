@@ -16,6 +16,7 @@ import {
   firebaseProjectId
 } from "./firebase-config.js";
 import { requireRole, logout, showMessage, hideMessage } from "./auth.js";
+import { initInternalMail } from "./internal-mail.js";
 import { deleteDoc } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore.js";
 
 const yen = new Intl.NumberFormat("ja-JP");
@@ -97,6 +98,12 @@ requireRole("accounting", async (user) => {
   byId("fixedExpenseMonth").value = start.slice(0, 7);
   byId("staffSalaryMonth").value = start.slice(0, 7);
   showHome();
+  initInternalMail({
+    role: "accounting",
+    currentUser: user,
+    onError: (message) => showMessage("errorMessage", message),
+    onSuccess: (message) => showMessage("successMessage", message, false)
+  });
   await loadData();
 });
 

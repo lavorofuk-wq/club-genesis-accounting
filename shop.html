@@ -44,6 +44,10 @@
             <span class="shop-home-action-title">送信済データ</span>
             <span class="shop-home-action-detail">送信済みデータの確認・編集・再送信</span>
           </button>
+          <button type="button" class="shop-home-action" data-mail-open="shop">
+            <span class="shop-home-action-title">内部メール</span>
+            <span class="shop-home-action-detail">経理との連絡・未読確認・日付検索</span>
+          </button>
         </div>
       </section>
 
@@ -99,6 +103,59 @@
             <button id="registerStaffButton" type="button" class="primary-button flex-1">入店登録</button>
             <button id="cancelStaffEditButton" type="button" class="secondary-button hidden">取消</button>
           </div>
+        </div>
+      </section>
+
+      <section class="section-shell hidden" data-workspace="mail">
+        <div class="section-title">
+          <div>
+            <h2>内部メール</h2>
+            <p class="mt-1 text-sm text-slate-500">経理へ日付・件名・本文を送信し、受信メールを確認します。</p>
+          </div>
+          <button type="button" class="secondary-button" data-home-button>ホームへ戻る</button>
+        </div>
+        <div data-internal-mail-root data-mail-role="shop" class="space-y-5">
+          <section class="detail-block">
+            <h3>メール送信</h3>
+            <div class="grid gap-4 md:grid-cols-3">
+              <label>
+                <span class="form-label">日付</span>
+                <input type="date" class="form-input" data-mail="date">
+              </label>
+              <label class="md:col-span-2">
+                <span class="form-label">件名</span>
+                <input type="text" maxlength="80" class="form-input" data-mail="subject" placeholder="件名">
+              </label>
+              <label class="md:col-span-3">
+                <span class="form-label">本文</span>
+                <textarea maxlength="2000" rows="5" class="form-textarea" data-mail="body" placeholder="本文"></textarea>
+              </label>
+              <div class="md:col-span-3 flex justify-end">
+                <button type="button" class="primary-button" data-mail="send">経理へ送信</button>
+              </div>
+            </div>
+          </section>
+          <section class="detail-block">
+            <div class="section-title">
+              <h3>受信・送信メール</h3>
+              <button type="button" class="secondary-button" data-mail="reload">再読み込み</button>
+            </div>
+            <div class="grid gap-4 md:grid-cols-3">
+              <label>
+                <span class="form-label">日付検索</span>
+                <input type="date" class="form-input" data-mail="dateSearch">
+              </label>
+              <div class="flex items-end gap-2 md:col-span-2">
+                <button type="button" class="secondary-button" data-mail="clearDateSearch">日付検索クリア</button>
+              </div>
+            </div>
+            <div class="mt-4 flex flex-wrap gap-2">
+              <button type="button" class="primary-button" data-mail-box="unread">未読ボックス</button>
+              <button type="button" class="secondary-button" data-mail-box="read">既読ボックス</button>
+            </div>
+            <div class="mt-4 notice" data-mail="status"></div>
+            <div class="pending-list mt-4" data-mail="list"></div>
+          </section>
         </div>
       </section>
 
@@ -425,6 +482,6 @@
     </form>
   </dialog>
 
-  <script type="module" src="js/shop.js?v=1.33"></script>
+  <script type="module" src="js/shop.js?v=1.34"></script>
 </body>
 </html>

@@ -223,6 +223,32 @@ service cloud.firestore {
       && request.resource.data.costAmount >= 0;
     }
 
+    function isInternalMail() {
+      return request.resource.data.sentDate is string
+      && request.resource.data.sentDate.matches('^\\d{4}-\\d{2}-\\d{2}$')
+      && request.resource.data.subject is string
+      && request.resource.data.subject.size() > 0
+      && request.resource.data.subject.size() <= 80
+      && request.resource.data.body is string
+      && request.resource.data.body.size() > 0
+      && request.resource.data.body.size() <= 2000
+      && (request.resource.data.fromRole == 'shop'
+        || request.resource.data.fromRole == 'accounting')
+      && (request.resource.data.toRole == 'shop'
+        || request.resource.data.toRole == 'accounting')
+      && request.resource.data.fromRole != request.resource.data.toRole
+      && request.resource.data.fromUid is string
+      && request.resource.data.fromUid.size() > 0
+      && request.resource.data.fromEmail is string
+      && request.resource.data.fromEmail.size() <= 120
+      && request.resource.data.readByShop is bool
+      && request.resource.data.readByAccounting is bool
+      && (!request.resource.data.keys().hasAny(['readAtShop'])
+        || request.resource.data.readAtShop is timestamp)
+      && (!request.resource.data.keys().hasAny(['readAtAccounting'])
+        || request.resource.data.readAtAccounting is timestamp);
+    }
+
     function isClosingPayload(document) {
       return request.resource.data.keys().hasAll([
         'businessDate',
@@ -393,6 +419,18 @@ service cloud.firestore {
     match /employeeSalaries-dev/{document} {
       allow read: if signedIn() && userRole() == 'accounting';
       allow create, update: if signedIn() && userRole() == 'accounting' && isEmployeeSalary();
+      allow delete: if false;
+    }
+
+    match /internalMails/{document} {
+      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow create, update: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting') && isInternalMail();
+      allow delete: if false;
+    }
+
+    match /internalMails-dev/{document} {
+      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow create, update: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting') && isInternalMail();
       allow delete: if false;
     }
 
