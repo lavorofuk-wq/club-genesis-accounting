@@ -37,6 +37,7 @@ export function initInternalMail({ role, currentUser, onError, onSuccess }) {
     currentUser,
     mails: [],
     currentBox: "unread",
+    activeMail: null,
     loading: false,
     dialogs: createMailDialogs(role)
   };
@@ -45,6 +46,10 @@ export function initInternalMail({ role, currentUser, onError, onSuccess }) {
   el("date").value = todayString();
   el("reload").addEventListener("click", () => loadMails(root, state, onError));
   el("send").addEventListener("click", () => sendMail(root, state, onError, onSuccess));
+  state.dialogs.replySend.addEventListener("click", () => sendReply(root, state, onError, onSuccess));
+  state.dialogs.replyBody.addEventListener("input", () => {
+    state.dialogs.replyBody.classList.toggle("invalid", !state.dialogs.replyBody.value.trim());
+  });
   el("dateSearch").addEventListener("input", () => renderMailSummary(root, state));
   el("clearDateSearch").addEventListener("click", () => {
     el("dateSearch").value = "";
@@ -179,15 +184,74 @@ function renderMailBoxModal(root, state) {
 }
 
 async function openMailDetail(root, state, mail) {
+  state.activeMail = mail;
   if (mail.toRole === state.role && mail[readFieldByRole[state.role]] !== true) {
     await markRead(root, state, mail);
   }
   state.dialogs.detailTitle.textContent = mail.subject || "件名なし";
   state.dialogs.detailMeta.textContent = `${mail.sentDate || "-"} / ${roleLabels[mail.fromRole] || mail.fromRole} → ${roleLabels[mail.toRole] || mail.toRole}`;
   state.dialogs.detailBody.textContent = mail.body || "";
+  state.dialogs.replyBody.value = "";
+  state.dialogs.replyStatus.textContent = "";
+  state.dialogs.replyBody.classList.remove("invalid");
+  const canReply = mail.toRole === state.role && mail.fromRole !== state.role;
+  state.dialogs.replySection.classList.toggle("hidden", !canReply);
   state.dialogs.detail.showModal();
   renderMailSummary(root, state);
   renderMailBoxModal(root, state);
+}
+
+async function sendReply(root, state, onError, onSuccess) {
+  const source = state.activeMail;
+  const body = state.dialogs.replyBody.value.trim();
+  if (!source || source.toRole !== state.role || source.fromRole === state.role) {
+    state.dialogs.replyStatus.textContent = "返信できる受信メールを開いてください。";
+    return;
+  }
+  if (!body) {
+    state.dialogs.replyBody.classList.add("invalid");
+    state.dialogs.replyStatus.textContent = "返信本文を入力してください。";
+    return;
+  }
+  if (body.length > 2000) {
+    state.dialogs.replyBody.classList.add("invalid");
+    state.dialogs.replyStatus.textContent = "返信本文は2000文字以内で入力してください。";
+    return;
+  }
+  state.dialogs.replyBody.classList.remove("invalid");
+  state.dialogs.replySend.disabled = true;
+  try {
+    const id = `mail_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const toRole = source.fromRole;
+    await setDoc(doc(db, internalMailCollectionName, id), {
+      sentDate: todayString(),
+      subject: replySubject(source.subject || ""),
+      body,
+      fromRole: state.role,
+      fromUid: state.currentUser.uid,
+      fromEmail: state.currentUser.email || "",
+      toRole,
+      readByShop: state.role === "shop",
+      readByAccounting: state.role === "accounting",
+      parentMailId: source.id,
+      replyToMailId: source.id,
+      threadId: source.threadId || source.id,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    state.dialogs.replyBody.value = "";
+    state.dialogs.replyStatus.textContent = "返信を送信しました。送信ボックスに保管しました。";
+    setStatus(root, `${roleLabels[toRole]}へ返信しました。`);
+    onSuccess?.("内部メールの返信を送信しました。");
+    await loadMails(root, state, onError);
+    state.currentBox = "sent";
+    renderMailBoxModal(root, state);
+  } catch (error) {
+    state.dialogs.replyStatus.textContent = `返信送信に失敗しました。${error.message}`;
+    onError?.(`内部メールの返信送信に失敗しました。${error.message}`);
+  } finally {
+    state.dialogs.replySend.disabled = false;
+  }
 }
 
 async function markRead(root, state, mail) {
@@ -243,6 +307,16 @@ function createMailDialogs(role) {
         <button type="button" class="secondary-button" data-dialog-mail="detailClose">閉じる</button>
       </div>
       <div class="mail-detail-body mt-5 whitespace-pre-wrap" data-dialog-mail="detailBody"></div>
+      <div class="mt-5 hidden" data-dialog-mail="replySection">
+        <div class="section-title">
+          <h3>返信</h3>
+        </div>
+        <textarea maxlength="2000" rows="5" class="form-textarea" data-dialog-mail="replyBody" placeholder="返信本文を入力"></textarea>
+        <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
+          <p class="text-sm text-slate-500" data-dialog-mail="replyStatus"></p>
+          <button type="button" class="primary-button" data-dialog-mail="replySend">返信を送信</button>
+        </div>
+      </div>
     </div>
   `;
   box.dataset.mailDialogRole = role;
@@ -258,7 +332,11 @@ function createMailDialogs(role) {
     boxList: box.querySelector('[data-dialog-mail="boxList"]'),
     detailTitle: detail.querySelector('[data-dialog-mail="detailTitle"]'),
     detailMeta: detail.querySelector('[data-dialog-mail="detailMeta"]'),
-    detailBody: detail.querySelector('[data-dialog-mail="detailBody"]')
+    detailBody: detail.querySelector('[data-dialog-mail="detailBody"]'),
+    replySection: detail.querySelector('[data-dialog-mail="replySection"]'),
+    replyBody: detail.querySelector('[data-dialog-mail="replyBody"]'),
+    replyStatus: detail.querySelector('[data-dialog-mail="replyStatus"]'),
+    replySend: detail.querySelector('[data-dialog-mail="replySend"]')
   };
 }
 
@@ -301,6 +379,12 @@ function sortMailDesc(a, b) {
   return String(b.sentDate || "").localeCompare(String(a.sentDate || ""))
     || timestampMillis(b.createdAt) - timestampMillis(a.createdAt)
     || String(b.id).localeCompare(String(a.id));
+}
+
+function replySubject(subject) {
+  const base = String(subject || "件名なし").trim();
+  const value = /^re:/i.test(base) ? base : `Re: ${base}`;
+  return value.slice(0, 80);
 }
 
 function timestampMillis(value) {
