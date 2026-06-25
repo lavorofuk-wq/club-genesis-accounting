@@ -1123,6 +1123,8 @@ function renderCastRewards() {
         ["月間小計売上", yenCell(row.monthlySales)],
         ["適用時給", row.hourlyRate ? yenCell(row.hourlyRate) : "未設定"],
         ["月間勤務時間", hoursCell(row.hours)],
+        ["体入勤務時間（同月入店分）", hoursCell(row.trialHours)],
+        ["体入時給報酬（同月入店分）", yenCell(row.trialPay)],
         ["時給分", row.hourlyBase === null ? "計算不可" : yenCell(row.hourlyBase)],
         ["本指名バック", `${row.backs.honCount}回 / ${yenCell(row.backs.hon)}`],
         ["場内指名バック", `${row.backs.banaiCount}回 / ${yenCell(row.backs.banai)}`],
@@ -1136,7 +1138,9 @@ function renderCastRewards() {
         ["ドリンクバック", yenCell(row.backs.drink)],
         ["バック合計", yenCell(row.backs.total)],
         ["時給＋バック", row.hourlyAndBack === null ? "計算不可" : yenCell(row.hourlyAndBack)],
+        ["時給＋バック＋体入時給", row.hourlyAndBackWithTrial === null ? "計算不可" : yenCell(row.hourlyAndBackWithTrial)],
         ["売上報酬", row.salesRewardRate ? `${Math.round(row.salesRewardRate * 100)}% / ${yenCell(row.salesReward)}` : "対象外"],
+        ["売上報酬＋体入時給", yenCell(row.salesRewardWithTrial)],
         ["支給額（高い方）", row.payable === null ? "計算不可" : yenCell(row.payable)]
       ]
     ));
@@ -1173,28 +1177,34 @@ function renderTrialCastRewards() {
 }
 
 function calculateTrialCastRewardRows(closings) {
-  return closings.flatMap((closing) => closing.trialWork.map((row) => ({
-    ...row,
-    businessDate: closing.businessDate,
-    payable: Math.round(toNumber(row.hours) * toNumber(row.hourlyRate))
-  }))).sort((a, b) => b.businessDate.localeCompare(a.businessDate) || a.name.localeCompare(b.name, "ja"));
+  return closings.flatMap((closing) => closing.trialWork
+    .filter((row) => !isTrialConvertedIntoActiveMonth(row, closing.businessDate))
+    .map((row) => ({
+      ...row,
+      businessDate: closing.businessDate,
+      payable: Math.round(toNumber(row.hours) * toNumber(row.hourlyRate))
+    }))).sort((a, b) => b.businessDate.localeCompare(a.businessDate) || a.name.localeCompare(b.name, "ja"));
 }
 
 function calculateCastRewardRows(rewardClosings = rewardMonthClosings()) {
   const salesRows = aggregateCastSales(rewardClosings);
   const workRows = aggregateWork(rewardClosings, "castWork");
   const backRows = aggregateCastBacks(rewardClosings);
-  const salesMap = new Map(salesRows.map((row) => [row.key, row]));
-  const workMap = new Map(workRows.map((row) => [row.id, row]));
-  const backMap = new Map(backRows.map((row) => [row.id, row]));
-  const trialIds = new Set(rewardClosings.flatMap((closing) => closing.trialWork.map((row) => String(row.id))));
-  const keys = new Set([...salesMap.keys(), ...workMap.keys(), ...backMap.keys()]);
+  const salesMap = mergeRowsByPersonKey(salesRows, "key");
+  const workMap = mergeRowsByPersonKey(workRows, "id");
+  const backMap = mergeRowsByPersonKey(
+    backRows.filter((row) => !isFormerTrialSource(findMember(castMembers, row.id, row.name), row.id)),
+    "id"
+  );
+  const trialCompMap = aggregateConvertedTrialCompensation(rewardClosings);
+  const keys = new Set([...salesMap.keys(), ...workMap.keys(), ...backMap.keys(), ...trialCompMap.keys()]);
   return [...keys].map((key) => {
     const sales = salesMap.get(key) || {};
     const work = workMap.get(key) || {};
     const backs = backMap.get(key) || emptyCastBack(key, sales.name || work.name);
+    const trialComp = trialCompMap.get(key) || { hours: 0, pay: 0, shifts: [], names: [], sales: 0 };
     const member = findMember(castMembers, key, sales.name || work.name);
-    if (member?.status === "trial" || trialIds.has(String(key))) return null;
+    if (member?.status === "trial") return null;
     const missingLiquorCosts = Array.isArray(backs.missingLiquorCosts)
       ? backs.missingLiquorCosts
       : [...(backs.missingLiquorCosts || [])];
@@ -1220,6 +1230,9 @@ function calculateCastRewardRows(rewardClosings = rewardMonthClosings()) {
     const hourlyAndBack = hourlyBase === null ? null : hourlyBase + backs.total;
     const salesRewardRate = castSalesRewardRate(monthlySales);
     const salesReward = Math.floor(monthlySales * salesRewardRate);
+    const trialPay = toNumber(trialComp.pay);
+    const hourlyAndBackWithTrial = hourlyAndBack === null ? null : hourlyAndBack + trialPay;
+    const salesRewardWithTrial = salesReward + trialPay;
     return {
       key,
       name: sales.name || work.name || backs.name || member?.name || "名称未設定",
@@ -1229,16 +1242,127 @@ function calculateCastRewardRows(rewardClosings = rewardMonthClosings()) {
       hours: toNumber(work.hours),
       days: work.days?.size || 0,
       shifts: work.shifts || [],
+      trialHours: toNumber(trialComp.hours),
+      trialPay,
+      trialShifts: trialComp.shifts || [],
+      trialNames: trialComp.names || [],
+      trialSales: toNumber(trialComp.sales),
       hourlyRate,
       hourlyBase,
       backs,
       hourlyAndBack,
+      hourlyAndBackWithTrial,
       salesRewardRate,
       salesReward,
-      payable: hourlyAndBack === null ? null : Math.max(hourlyAndBack, salesReward),
+      salesRewardWithTrial,
+      payable: hourlyAndBack === null ? null : Math.max(hourlyAndBack, salesReward) + trialPay,
       calculationError
     };
   }).filter(Boolean).sort((a, b) => b.monthlySales - a.monthlySales);
+}
+
+function mergeRowsByPersonKey(rows, idField) {
+  const map = new Map();
+  rows.forEach((row) => {
+    const rawId = String(row[idField] || row.id || row.key || row.name || "");
+    const member = findMember(castMembers, rawId, row.name);
+    const canMap = member && shouldMapMemberForReward(member, rawId);
+    const key = canMap ? member.personKey || member.id : rawId || row.name || "unknown";
+    const current = map.get(key) || {
+      ...row,
+      [idField]: key,
+      id: key,
+      key,
+      name: canMap ? member.name : row.name,
+      honShimeiSales: 0,
+      jonaiExtensionSales: 0,
+      totalAttributedSales: 0,
+      hours: 0,
+      days: new Set(),
+      shifts: [],
+      total: 0
+    };
+    current.name = current.name || (canMap ? member.name : row.name);
+    current.honShimeiSales += toNumber(row.honShimeiSales);
+    current.jonaiExtensionSales += toNumber(row.jonaiExtensionSales);
+    current.totalAttributedSales += toNumber(row.totalAttributedSales);
+    current.hours += toNumber(row.hours);
+    if (row.days instanceof Set) row.days.forEach((day) => current.days.add(day));
+    if (Array.isArray(row.shifts)) current.shifts.push(...row.shifts);
+    [
+      "hon", "honCount", "banai", "banaiCount", "dohan", "dohanCount", "vip",
+      "keepBottle", "champagneWine", "champagneWineGross", "champagneWineCost",
+      "champagneWineNet", "drink", "total"
+    ].forEach((field) => {
+      current[field] = toNumber(current[field]) + toNumber(row[field]);
+    });
+    const missing = new Set(current.missingLiquorCosts || []);
+    (Array.isArray(row.missingLiquorCosts) ? row.missingLiquorCosts : []).forEach((label) => missing.add(label));
+    current.missingLiquorCosts = [...missing];
+    map.set(key, current);
+  });
+  return map;
+}
+
+function shouldMapMemberForReward(member, sourceId) {
+  if (!member || member.status === "trial") return false;
+  const normalizedSource = String(sourceId || "");
+  const isFormerTrialId = isFormerTrialSource(member, normalizedSource);
+  if (!isFormerTrialId) return true;
+  const month = byId("startDate").value.slice(0, 7);
+  return Boolean(member.entryDate && member.entryDate.startsWith(`${month}-`));
+}
+
+function isFormerTrialSource(member, sourceId) {
+  if (!member) return false;
+  const normalizedSource = String(sourceId || "");
+  return normalizeAliasList(member.previousPosCastIds).includes(normalizedSource)
+    || String(member.sourceTrialCastId || "") === normalizedSource;
+}
+
+function aggregateConvertedTrialCompensation(closings) {
+  const map = new Map();
+  closings.forEach((closing) => {
+    closing.trialWork.forEach((row) => {
+      const member = convertedTrialMemberFor(row, closing.businessDate);
+      if (!member) return;
+      const key = member.personKey || member.id;
+      const current = map.get(key) || { hours: 0, pay: 0, shifts: [], names: new Set(), sales: 0 };
+      current.hours += toNumber(row.hours);
+      current.pay += Math.round(toNumber(row.hours) * toNumber(row.hourlyRate));
+      current.names.add(row.name);
+      current.shifts.push({
+        date: closing.businessDate,
+        startTime: row.startTime || "",
+        endTime: row.endTime || "",
+        hours: toNumber(row.hours),
+        trial: true,
+        name: row.name
+      });
+      map.set(key, current);
+    });
+  });
+  return new Map([...map.entries()].map(([key, row]) => [key, {
+    ...row,
+    names: [...row.names].filter(Boolean)
+  }]));
+}
+
+function convertedTrialMemberFor(row, businessDate) {
+  const member = findMember(castMembers, row.id || row.castId, row.name);
+  if (!member || member.status !== "active") return null;
+  if (!member.entryDate || !businessDate || member.entryDate.slice(0, 7) !== businessDate.slice(0, 7)) return null;
+  const id = String(row.id || row.castId || "");
+  const aliases = normalizeAliasList(member.previousPosCastIds);
+  const nameAliases = normalizeAliasList(member.previousNames);
+  const linked = aliases.includes(id)
+    || String(member.sourceTrialCastId || "") === String(row.id || "")
+    || nameAliases.includes(String(row.name || ""));
+  return linked ? member : null;
+}
+
+function isTrialConvertedIntoActiveMonth(row, businessDate) {
+  return Boolean(convertedTrialMemberFor(row, businessDate));
 }
 
 function renderIntroducerFees() {
@@ -1686,6 +1810,8 @@ async function exportCastRewardsXlsx() {
       ["適用時給", row.hourlyRate || "未設定"],
       ["勤務日数", `${row.days}日`],
       ["月間勤務時間", `${row.hours}時間`],
+      ["体入勤務時間（同月入店分）", `${row.trialHours}時間`],
+      ["体入時給報酬（同月入店分）", row.trialPay],
       ["時給分", statementAmount(row.hourlyBase)],
       ["本指名バック", row.backs.hon],
       ["場内指名バック", row.backs.banai],
@@ -1699,9 +1825,12 @@ async function exportCastRewardsXlsx() {
       ["ドリンクバック", row.backs.drink],
       ["バック合計", row.backs.total],
       ["時給＋バック", statementAmount(row.hourlyAndBack)],
+      ["時給＋バック＋体入時給", statementAmount(row.hourlyAndBackWithTrial)],
       ["売上報酬率", row.salesRewardRate ? `${Math.round(row.salesRewardRate * 100)}%` : "対象外"],
       ["売上報酬", row.salesReward],
+      ["売上報酬＋体入時給", row.salesRewardWithTrial],
       ["支給額（高い方）", statementAmount(row.payable)],
+      ...statementShiftRows(row.trialShifts),
       ...statementShiftRows(row.shifts)
     ],
     totalLabel: "支給額",
@@ -2124,11 +2253,19 @@ function normalizeWorkRows(work, staff) {
 }
 
 function findMember(members, id, name) {
+  const normalizedId = String(id || "");
   return members.find((member) =>
-    String(member.id) === String(id)
-    || String(member.posCastId || "") === String(id)
+    String(member.id) === normalizedId
+    || String(member.posCastId || "") === normalizedId
+    || normalizeAliasList(member.previousPosCastIds).includes(normalizedId)
+    || String(member.personKey || "") === normalizedId
     || (name && member.name === name)
+    || (name && normalizeAliasList(member.previousNames).includes(String(name)))
   );
+}
+
+function normalizeAliasList(value) {
+  return Array.isArray(value) ? value.map(String).filter(Boolean) : [];
 }
 
 function updateVisibleFinalized() {

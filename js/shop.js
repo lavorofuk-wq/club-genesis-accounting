@@ -103,6 +103,9 @@ document.getElementById("closeCastDetailButton").addEventListener("click", () =>
 document.getElementById("castSearchInput").addEventListener("input", renderCastDetailList);
 document.getElementById("castRewardSystem").addEventListener("change", updateGuaranteeNoteVisibility);
 document.getElementById("castIntroducerId").addEventListener("change", updateCastAdvisoryFeeVisibility);
+document.getElementById("castProfileName").addEventListener("input", (event) => {
+  markInvalid(event.target, !event.target.value.trim());
+});
 document.getElementById("castGuaranteedHourlyRate").addEventListener("input", (event) => {
   const value = Number(event.target.value);
   const invalid = event.target.value !== "" && (!Number.isInteger(value) || value <= 0);
@@ -301,6 +304,14 @@ function castDocumentId(posCastId) {
   return `pos_${String(posCastId).replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 }
 
+function personKeyFor(member) {
+  return member?.personKey || `person_${member?.id || member?.posCastId || Date.now()}`;
+}
+
+function normalizeAliasList(value) {
+  return Array.isArray(value) ? value.map(String).filter(Boolean) : [];
+}
+
 function setCastSyncStatus(message, isError = false) {
   const status = document.getElementById("castSyncStatus");
   status.textContent = message;
@@ -432,8 +443,14 @@ async function syncCastLifecycle(closings) {
   });
   if (!updates.size) return;
   const byPosId = new Map(allCastMembers.map((cast) => [String(cast.posCastId || ""), cast]));
+  const byActiveName = new Map(allCastMembers
+    .filter((cast) => cast.status === "active" && cast.deleted !== true)
+    .map((cast) => [String(cast.name || ""), cast]));
   await Promise.all([...updates.values()].map((update) => {
-    const existing = byPosId.get(update.posCastId);
+    const existing = byPosId.get(update.posCastId)
+      || (update.status === "active" ? byActiveName.get(update.name) : null);
+    const previousPosCastIds = new Set(normalizeAliasList(existing?.previousPosCastIds));
+    if (existing?.posCastId && existing.posCastId !== update.posCastId) previousPosCastIds.add(String(existing.posCastId));
     const changed = !existing
       || existing.name !== update.name
       || existing.status !== update.status
@@ -441,10 +458,13 @@ async function syncCastLifecycle(closings) {
       || (update.entryDate && existing.entryDate !== update.entryDate)
       || (update.exitedDate && existing.exitedDate !== update.exitedDate)
       || (update.posEnteredAt && existing.posEnteredAt !== update.posEnteredAt)
-      || (update.posExitedAt && existing.posExitedAt !== update.posExitedAt);
+      || (update.posExitedAt && existing.posExitedAt !== update.posExitedAt)
+      || previousPosCastIds.size !== normalizeAliasList(existing?.previousPosCastIds).length;
     if (!changed) return Promise.resolve();
     return setDoc(doc(db, castCollectionName, existing?.id || castDocumentId(update.posCastId)), {
       ...update,
+      personKey: existing?.personKey || `person_${existing?.id || castDocumentId(update.posCastId)}`,
+      previousPosCastIds: [...previousPosCastIds],
       source: "pos",
       lifecycleSyncedAt: serverTimestamp(),
       updatedAt: serverTimestamp()
@@ -873,11 +893,17 @@ function renderCastDetailList() {
     edit.className = "secondary-button";
     edit.textContent = "報酬・情報を編集";
     edit.addEventListener("click", () => openCastEdit(member));
+    const convert = document.createElement("button");
+    convert.type = "button";
+    convert.className = "primary-button";
+    convert.textContent = "在籍化";
+    convert.addEventListener("click", () => openCastEdit(member, true));
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "danger-button";
     remove.textContent = "削除";
     remove.addEventListener("click", () => deleteCastData(member));
+    if (member.status === "trial") actions.append(convert);
     actions.append(edit, remove);
     row.append(identity, detail, actions);
     root.appendChild(row);
@@ -913,9 +939,13 @@ function isCastProfileComplete(member) {
   return rewardComplete && advisoryComplete;
 }
 
-function openCastEdit(member) {
+function openCastEdit(member, convertTrial = false) {
   document.getElementById("editingCastId").value = member.id;
-  document.getElementById("castEditTitle").textContent = `${member.name}のキャスト情報`;
+  document.getElementById("convertingTrialCastId").value = convertTrial && member.status === "trial" ? member.id : "";
+  document.getElementById("castEditTitle").textContent = convertTrial
+    ? `${member.name}を在籍キャストに登録`
+    : `${member.name}のキャスト情報`;
+  document.getElementById("castProfileName").value = member.name || "";
   document.getElementById("castRewardSystem").value = member.rewardSystem || "";
   document.getElementById("castGuaranteeNote").value = member.guaranteeNote || "";
   document.getElementById("castGuaranteedHourlyRate").value = member.guaranteedHourlyRate || "";
@@ -949,6 +979,8 @@ function updateCastAdvisoryFeeVisibility() {
 async function saveCastProfile() {
   const id = document.getElementById("editingCastId").value;
   const member = castMembers.find((cast) => cast.id === id);
+  const convertingTrial = Boolean(document.getElementById("convertingTrialCastId").value) && member?.status === "trial";
+  const castProfileName = document.getElementById("castProfileName").value.trim();
   const rewardSystem = document.getElementById("castRewardSystem").value;
   const guaranteeNote = document.getElementById("castGuaranteeNote").value.trim();
   const guaranteedHourlyRate = Number(document.getElementById("castGuaranteedHourlyRate").value);
@@ -961,6 +993,12 @@ async function saveCastProfile() {
     showMessage("castEditError", "キャスト情報が見つかりません。");
     return;
   }
+  if (!castProfileName) {
+    markInvalid(document.getElementById("castProfileName"), true);
+    showMessage("castEditError", "キャスト名を入力してください。");
+    return;
+  }
+  markInvalid(document.getElementById("castProfileName"), false);
   if (!castRewardLabels[rewardSystem]) {
     markInvalid(document.getElementById("castRewardSystem"), true);
     showMessage("castEditError", "報酬システムを選択してください。");
@@ -1000,7 +1038,24 @@ async function saveCastProfile() {
   const button = document.getElementById("saveCastProfileButton");
   button.disabled = true;
   try {
+    const previousNames = new Set(normalizeAliasList(member.previousNames));
+    if (convertingTrial && member.name && member.name !== castProfileName) previousNames.add(member.name);
+    const previousPosCastIds = new Set(normalizeAliasList(member.previousPosCastIds));
+    if (convertingTrial && member.posCastId) previousPosCastIds.add(String(member.posCastId));
+    const conversionData = convertingTrial ? {
+      status: "active",
+      personKey: personKeyFor(member),
+      sourceTrialCastId: member.id,
+      convertedFromTrial: true,
+      convertedTrialName: member.name || "",
+      convertedAt: serverTimestamp(),
+      convertedBy: currentUser.uid,
+      previousNames: [...previousNames],
+      previousPosCastIds: [...previousPosCastIds]
+    } : {};
     await setDoc(doc(db, castCollectionName, id), {
+      name: castProfileName,
+      personKey: personKeyFor(member),
       rewardSystem,
       guaranteeNote: rewardSystem === "guaranteedHourly" ? guaranteeNote : "",
       guaranteedHourlyRate: rewardSystem === "guaranteedHourly" ? guaranteedHourlyRate : 0,
@@ -1011,6 +1066,7 @@ async function saveCastProfile() {
       advisoryFeeEnabled: Boolean(introducer?.advisoryFeeEnabled),
       advisoryFeeAmount: introducer?.advisoryFeeEnabled ? advisoryFeeAmount : 0,
       note,
+      ...conversionData,
       profileUpdatedAt: serverTimestamp(),
       profileUpdatedBy: currentUser.uid,
       updatedAt: serverTimestamp()

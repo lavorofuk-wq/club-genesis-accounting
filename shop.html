@@ -351,7 +351,12 @@
       <p class="brand-kicker">CAST PROFILE</p>
       <h2 id="castEditTitle" class="mt-2 text-xl font-bold">キャスト情報</h2>
       <input id="editingCastId" type="hidden">
+      <input id="convertingTrialCastId" type="hidden">
       <div class="mt-5 space-y-4">
+        <label>
+          <span class="form-label">キャスト名（正式名）</span>
+          <input id="castProfileName" type="text" maxlength="40" class="form-input">
+        </label>
         <label>
           <span class="form-label">報酬システム（必須）</span>
           <select id="castRewardSystem" class="form-select">
@@ -395,6 +400,6 @@
     </form>
   </dialog>
 
-  <script type="module" src="js/shop.js?v=1.31"></script>
+  <script type="module" src="js/shop.js?v=1.32"></script>
 </body>
 </html>

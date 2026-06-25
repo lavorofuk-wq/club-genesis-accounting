@@ -112,6 +112,22 @@ service cloud.firestore {
       && (!request.resource.data.keys().hasAny(['note'])
         || (request.resource.data.note is string
           && request.resource.data.note.size() <= 500))
+      && (!request.resource.data.keys().hasAny(['personKey'])
+        || (request.resource.data.personKey is string
+          && request.resource.data.personKey.size() > 0
+          && request.resource.data.personKey.size() <= 120))
+      && (!request.resource.data.keys().hasAny(['sourceTrialCastId'])
+        || (request.resource.data.sourceTrialCastId is string
+          && request.resource.data.sourceTrialCastId.size() <= 120))
+      && (!request.resource.data.keys().hasAny(['convertedFromTrial'])
+        || request.resource.data.convertedFromTrial is bool)
+      && (!request.resource.data.keys().hasAny(['convertedTrialName'])
+        || (request.resource.data.convertedTrialName is string
+          && request.resource.data.convertedTrialName.size() <= 40))
+      && (!request.resource.data.keys().hasAny(['previousNames'])
+        || request.resource.data.previousNames is list)
+      && (!request.resource.data.keys().hasAny(['previousPosCastIds'])
+        || request.resource.data.previousPosCastIds is list)
       && (!request.resource.data.keys().hasAny(['rewardSystem'])
         || request.resource.data.rewardSystem != 'guaranteedHourly'
         || (request.resource.data.keys().hasAny(['guaranteeNote'])
