@@ -400,6 +400,31 @@
     </form>
   </dialog>
 
-  <script type="module" src="js/shop.js?v=1.32"></script>
+  <dialog id="posCastLinkModal" class="modal-card">
+    <form method="dialog">
+      <p class="brand-kicker">POS LINK</p>
+      <h2 id="posCastLinkTitle" class="mt-2 text-xl font-bold">POS正式キャストと紐づけ</h2>
+      <input id="linkingCastId" type="hidden">
+      <div class="mt-5 space-y-4">
+        <div id="posCastLinkCurrent" class="notice"></div>
+        <label>
+          <span class="form-label">POSキャスト検索</span>
+          <input id="posCastLinkSearch" type="search" maxlength="40" class="form-input" placeholder="POSキャスト名または内部番号">
+        </label>
+        <label>
+          <span class="form-label">紐づけるPOS正式キャスト</span>
+          <select id="posCastLinkSelect" class="form-select"></select>
+        </label>
+        <div id="posCastLinkPreview" class="notice"></div>
+        <div id="posCastLinkError" class="hidden alert alert-error"></div>
+      </div>
+      <div class="mt-6 flex justify-end gap-3">
+        <button id="cancelPosCastLinkButton" value="cancel" class="secondary-button">戻る</button>
+        <button id="savePosCastLinkButton" type="button" class="primary-button">紐づける</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="js/shop.js?v=1.33"></script>
 </body>
 </html>

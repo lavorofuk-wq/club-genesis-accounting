@@ -60,6 +60,7 @@ let selectedPending = null;
 let editingStaffId = null;
 let editingIntroducerId = null;
 let currentCastDetailType = "active";
+let posCastLinkCandidates = [];
 
 document.getElementById("logoutButton").addEventListener("click", logout);
 document.getElementById("openRegistrationButton").addEventListener("click", () => showWorkspace("registration"));
@@ -117,6 +118,9 @@ document.getElementById("castAdvisoryFeeAmount").addEventListener("input", (even
   markInvalid(event.target, invalid);
 });
 document.getElementById("saveCastProfileButton").addEventListener("click", saveCastProfile);
+document.getElementById("posCastLinkSearch").addEventListener("input", renderPosCastLinkOptions);
+document.getElementById("posCastLinkSelect").addEventListener("change", renderPosCastLinkPreview);
+document.getElementById("savePosCastLinkButton").addEventListener("click", savePosCastLink);
 document.getElementById("addCastWorkButton").addEventListener("click", () => addCastWorkRow());
 document.getElementById("addExpenseButton").addEventListener("click", () => addExpenseRow());
 document.getElementById("addAllowanceButton").addEventListener("click", () => addAllowanceRow());
@@ -231,18 +235,16 @@ async function syncPosCasts(showSuccess) {
   button.disabled = true;
   setCastSyncStatus("POSのキャスト名簿を同期しています。");
   try {
-    const snapshot = await get(ref(posDb, posCastPath));
-    const rawCasts = snapshot.val();
-    const posCasts = (Array.isArray(rawCasts) ? rawCasts : Object.values(rawCasts || {}))
-      .filter((cast) => cast && cast.castType !== "trial" && cast.id != null && String(cast.name || "").trim())
-      .map(normalizePosCast);
+    const posCasts = await loadPosCastCandidates();
     if (!posCasts.length) {
       throw new Error("POSに通常キャストの名簿データがありません。");
     }
-    const localByPosId = new Map(allCastMembers.filter((cast) => cast.posCastId).map((cast) => [String(cast.posCastId), cast]));
+    const localByPosId = new Map(allCastMembers
+      .filter((cast) => cast.deleted !== true && cast.posCastId)
+      .map((cast) => [String(cast.posCastId), cast]));
     const localByName = new Map(
       allCastMembers
-        .filter((cast) => !cast.posCastId)
+        .filter((cast) => cast.deleted !== true && (!cast.posCastId || cast.convertedFromTrial === true))
         .map((cast) => [String(cast.name || ""), cast])
     );
     await Promise.all(posCasts.map((posCast) => {
@@ -291,6 +293,18 @@ function normalizePosCast(cast) {
     posExitedAt: Number(cast.exitedAt || 0),
     exitedDate: cast.exitedBizDay || timestampToDate(cast.exitedAt)
   };
+}
+
+async function loadPosCastCandidates() {
+  const snapshot = await get(ref(posDb, posCastPath));
+  const rawCasts = snapshot.val();
+  return (Array.isArray(rawCasts) ? rawCasts : Object.values(rawCasts || {}))
+    .filter((cast) => cast && cast.castType !== "trial" && cast.id != null && String(cast.name || "").trim())
+    .map(normalizePosCast)
+    .sort((a, b) =>
+      Number(a.internalNo || Number.MAX_SAFE_INTEGER) - Number(b.internalNo || Number.MAX_SAFE_INTEGER)
+      || String(a.name || "").localeCompare(String(b.name || ""), "ja")
+    );
 }
 
 function timestampToDate(value) {
@@ -442,7 +456,9 @@ async function syncCastLifecycle(closings) {
     });
   });
   if (!updates.size) return;
-  const byPosId = new Map(allCastMembers.map((cast) => [String(cast.posCastId || ""), cast]));
+  const byPosId = new Map(allCastMembers
+    .filter((cast) => cast.deleted !== true)
+    .map((cast) => [String(cast.posCastId || ""), cast]));
   const byActiveName = new Map(allCastMembers
     .filter((cast) => cast.status === "active" && cast.deleted !== true)
     .map((cast) => [String(cast.name || ""), cast]));
@@ -893,6 +909,11 @@ function renderCastDetailList() {
     edit.className = "secondary-button";
     edit.textContent = "報酬・情報を編集";
     edit.addEventListener("click", () => openCastEdit(member));
+    const linkPos = document.createElement("button");
+    linkPos.type = "button";
+    linkPos.className = "secondary-button";
+    linkPos.textContent = "POS紐づけ";
+    linkPos.addEventListener("click", () => openPosCastLink(member));
     const convert = document.createElement("button");
     convert.type = "button";
     convert.className = "primary-button";
@@ -904,6 +925,7 @@ function renderCastDetailList() {
     remove.textContent = "削除";
     remove.addEventListener("click", () => deleteCastData(member));
     if (member.status === "trial") actions.append(convert);
+    if (member.status === "active") actions.append(linkPos);
     actions.append(edit, remove);
     row.append(identity, detail, actions);
     root.appendChild(row);
@@ -957,6 +979,135 @@ function openCastEdit(member, convertTrial = false) {
   updateGuaranteeNoteVisibility();
   updateCastAdvisoryFeeVisibility();
   document.getElementById("castEditModal").showModal();
+}
+
+async function openPosCastLink(member) {
+  document.getElementById("linkingCastId").value = member.id;
+  document.getElementById("posCastLinkTitle").textContent = `${member.name}のPOS正式キャスト紐づけ`;
+  document.getElementById("posCastLinkCurrent").textContent =
+    `現在のGMS情報：No.${member.internalNo || "-"} / POS ID ${member.posCastId || "未設定"} / 名前 ${member.name || "-"}`;
+  document.getElementById("posCastLinkSearch").value = "";
+  document.getElementById("posCastLinkSelect").replaceChildren(makeOption("", "POS名簿を読み込み中..."));
+  document.getElementById("posCastLinkPreview").textContent = "";
+  hideMessage("posCastLinkError");
+  document.getElementById("posCastLinkModal").showModal();
+  try {
+    posCastLinkCandidates = (await loadPosCastCandidates()).filter((cast) => cast.status === "active");
+    renderPosCastLinkOptions();
+    if (member.posCastId && posCastLinkCandidates.some((cast) => cast.posCastId === String(member.posCastId))) {
+      document.getElementById("posCastLinkSelect").value = String(member.posCastId);
+    }
+    renderPosCastLinkPreview();
+  } catch (error) {
+    posCastLinkCandidates = [];
+    document.getElementById("posCastLinkSelect").replaceChildren(makeOption("", "POS名簿を読み込めませんでした"));
+    showMessage("posCastLinkError", `POSキャスト名簿の取得に失敗しました。${error.message}`);
+  }
+}
+
+function renderPosCastLinkOptions() {
+  const select = document.getElementById("posCastLinkSelect");
+  const currentValue = select.value;
+  const queryText = document.getElementById("posCastLinkSearch").value.trim().toLocaleLowerCase("ja");
+  const linkingId = document.getElementById("linkingCastId").value;
+  const options = posCastLinkCandidates.filter((cast) => {
+    if (!queryText) return true;
+    return String(cast.name || "").toLocaleLowerCase("ja").includes(queryText)
+      || String(cast.internalNo || "").includes(queryText)
+      || String(cast.posCastId || "").toLocaleLowerCase("ja").includes(queryText);
+  });
+  select.replaceChildren(makeOption("", options.length ? "選択してください" : "該当するPOSキャストがありません"));
+  options.forEach((cast) => {
+    const linked = allCastMembers.find((member) =>
+      member.id !== linkingId
+      && member.deleted !== true
+      && String(member.posCastId || "") === String(cast.posCastId)
+    );
+    const label = `No.${cast.internalNo || "-"} ${cast.name} / POS ID ${cast.posCastId}${linked ? ` / GMS登録済み:${linked.name}` : ""}`;
+    select.appendChild(makeOption(cast.posCastId, label));
+  });
+  if (currentValue && options.some((cast) => String(cast.posCastId) === currentValue)) select.value = currentValue;
+  renderPosCastLinkPreview();
+}
+
+function renderPosCastLinkPreview() {
+  const cast = posCastLinkCandidates.find((item) => String(item.posCastId) === document.getElementById("posCastLinkSelect").value);
+  const preview = document.getElementById("posCastLinkPreview");
+  if (!cast) {
+    preview.textContent = "POS正式キャストを選択してください。";
+    return;
+  }
+  const linked = allCastMembers.find((member) =>
+    member.id !== document.getElementById("linkingCastId").value
+    && member.deleted !== true
+    && String(member.posCastId || "") === String(cast.posCastId)
+  );
+  preview.textContent = `選択中：No.${cast.internalNo || "-"} / ${cast.name} / POS ID ${cast.posCastId}`
+    + (linked ? `。既存のGMSデータ「${linked.name}」は統合済みとして非表示にします。` : "");
+}
+
+async function savePosCastLink() {
+  const member = castMembers.find((cast) => cast.id === document.getElementById("linkingCastId").value);
+  const selected = posCastLinkCandidates.find((cast) => String(cast.posCastId) === document.getElementById("posCastLinkSelect").value);
+  if (!member) {
+    showMessage("posCastLinkError", "GMSキャスト情報が見つかりません。");
+    return;
+  }
+  if (!selected) {
+    markInvalid(document.getElementById("posCastLinkSelect"), true);
+    showMessage("posCastLinkError", "紐づけるPOS正式キャストを選択してください。");
+    return;
+  }
+  markInvalid(document.getElementById("posCastLinkSelect"), false);
+  const duplicate = allCastMembers.find((cast) =>
+    cast.id !== member.id
+    && cast.deleted !== true
+    && String(cast.posCastId || "") === String(selected.posCastId)
+  );
+  const previousPosCastIds = new Set(normalizeAliasList(member.previousPosCastIds));
+  if (member.posCastId && String(member.posCastId) !== String(selected.posCastId)) previousPosCastIds.add(String(member.posCastId));
+  const previousNames = new Set(normalizeAliasList(member.previousNames));
+  if (member.name && member.name !== selected.name) previousNames.add(member.name);
+  const button = document.getElementById("savePosCastLinkButton");
+  button.disabled = true;
+  hideMessage("posCastLinkError");
+  try {
+    await setDoc(doc(db, castCollectionName, member.id), {
+      posCastId: selected.posCastId,
+      name: selected.name,
+      internalNo: selected.internalNo,
+      status: selected.status,
+      entryDate: selected.entryDate || member.entryDate || "",
+      exitedDate: selected.exitedDate || "",
+      posEnteredAt: selected.posEnteredAt,
+      posExitedAt: selected.posExitedAt,
+      personKey: personKeyFor(member),
+      previousNames: [...previousNames],
+      previousPosCastIds: [...previousPosCastIds],
+      linkedPosCastAt: serverTimestamp(),
+      linkedPosCastBy: currentUser.uid,
+      source: "pos",
+      updatedAt: serverTimestamp()
+    }, { merge: true });
+    if (duplicate) {
+      await setDoc(doc(db, castCollectionName, duplicate.id), {
+        deleted: true,
+        mergedIntoCastId: member.id,
+        mergedIntoPersonKey: personKeyFor(member),
+        mergedAt: serverTimestamp(),
+        mergedBy: currentUser.uid,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+    }
+    document.getElementById("posCastLinkModal").close();
+    await loadCastMembers();
+    renderCastDetailList();
+    showMessage("successMessage", `${member.name}をPOS正式キャスト「${selected.name}」へ紐づけました。`, false);
+  } catch (error) {
+    showMessage("posCastLinkError", `POS正式キャストとの紐づけに失敗しました。${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function updateGuaranteeNoteVisibility() {
