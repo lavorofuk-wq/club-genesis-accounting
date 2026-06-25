@@ -866,3 +866,15 @@ body {
 .calendar-day.future {
   opacity: 0.5;
 }
+
+.mail-detail-body {
+  max-height: 52vh;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  padding: 14px;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.8;
+}
