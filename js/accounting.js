@@ -2353,11 +2353,21 @@ function buildIncomeStatementSheet(worksheet, closings) {
 
   worksheet.getCell("A34").value = "平均";
   worksheet.getCell("A35").value = "合計";
+  const totalFor = (col) => dailyRows.reduce((sum, row) => sum + (Number.isFinite(row[col]) ? row[col] : 0), 0);
   ["C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"].forEach((col) => {
     const values = dailyRows.map((row) => row[col]).filter((value) => value !== "");
     worksheet.getCell(`${col}34`).value = averageNumbers(values);
-    worksheet.getCell(`${col}35`).value = values.reduce((sum, value) => sum + (Number.isFinite(value) ? value : 0), 0);
+    worksheet.getCell(`${col}35`).value = totalFor(col);
   });
+  const totalSales = totalFor("C");
+  const totalCustomers = totalFor("G");
+  const totalCastRewards = totalFor("N") + totalFor("O");
+  const totalStaffPay = totalFor("S");
+  const totalExpenses = totalFor("T");
+  worksheet.getCell("H35").value = totalCustomers ? Math.floor(totalSales / totalCustomers) : "";
+  worksheet.getCell("R35").value = totalSales ? totalCastRewards / totalSales : "";
+  worksheet.getCell("U35").value = totalSales ? totalExpenses / totalSales : "";
+  worksheet.getCell("V35").value = totalSales - totalCastRewards - totalStaffPay - totalExpenses;
   styleIncomeStatementSheet(worksheet);
 }
 
