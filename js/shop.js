@@ -840,6 +840,27 @@ function refreshCastIntroducerSelect(selectedId = "") {
   if (value && introducers.some((introducer) => introducer.id === value)) select.value = value;
 }
 
+function fillIntroducerSelect(select, selectedId = "", selectedName = "") {
+  const matched = selectedId
+    ? introducers.find((introducer) => introducer.id === selectedId)
+    : introducers.find((introducer) => introducer.name === selectedName);
+  select.replaceChildren(makeOption("", "紹介者を選択してください"));
+  introducers.forEach((introducer) => {
+    select.appendChild(makeOption(introducer.id, introducer.name));
+  });
+  if (matched) select.value = matched.id;
+}
+
+function selectedIntroducerData(select) {
+  const introducer = introducers.find((item) => item.id === select?.value);
+  return {
+    introducerId: introducer?.id || "",
+    introducerName: introducer?.name || "",
+    introducerFeeSystem: introducer?.feeSystem || "",
+    advisoryFeeEnabled: Boolean(introducer?.advisoryFeeEnabled)
+  };
+}
+
 function renderCastMasterList() {
   document.getElementById("activeCastCount").textContent = `${castMembers.filter((cast) => cast.status === "active").length}名`;
   document.getElementById("departedCastCount").textContent = `${castMembers.filter((cast) => cast.status === "departed").length}名`;
@@ -1726,7 +1747,7 @@ function collectRows() {
     startTime: row.dataset.startTime || "",
     endTime: row.dataset.endTime || "",
     hours: Number(row.dataset.hours || 0),
-    introducerName: row.querySelector(".trial-introducer-name").value.trim(),
+    ...selectedIntroducerData(row.querySelector(".trial-introducer-id")),
     hourlyRate: Number(row.querySelector(".trial-hourly-rate").value || 0)
   }));
 
@@ -1919,6 +1940,18 @@ async function saveReport() {
         ...row,
         businessDate: pendingPayload.businessDate,
         sourceClosingId: targetClosingId,
+        updatedBy: currentUser.uid,
+        updatedAt: serverTimestamp()
+      },
+      { merge: true }
+    )));
+    await Promise.all(pendingPayload.trialWork.map((row) => setDoc(
+      doc(db, castCollectionName, castDocumentId(row.castId)),
+      {
+        introducerId: row.introducerId,
+        introducerName: row.introducerName,
+        introducerFeeSystem: row.introducerFeeSystem,
+        advisoryFeeEnabled: row.advisoryFeeEnabled,
         updatedBy: currentUser.uid,
         updatedAt: serverTimestamp()
       },
@@ -2215,12 +2248,17 @@ function renderTrialCastWork(work, trialCasts) {
     item.dataset.hours = String(row.hours || calculateWorkHours(row.startTime, row.endTime) || 0);
     const identity = document.createElement("div");
     identity.innerHTML = `<strong>${escapeHtml(item.dataset.castName)}</strong><span class="block text-xs text-slate-500">${escapeHtml(item.dataset.startTime)}-${escapeHtml(item.dataset.endTime)} / ${escapeHtml(formatHours(Number(item.dataset.hours)))}</span>`;
-    const introducer = document.createElement("input");
-    introducer.type = "text";
-    introducer.maxLength = 40;
-    introducer.placeholder = "紹介者（必須）";
-    introducer.className = "form-input trial-introducer-name";
-    introducer.value = row.introducerName || "";
+    const introducer = document.createElement("select");
+    introducer.className = "form-select trial-introducer-id";
+    const castMember = castMembers.find((member) =>
+      String(member.posCastId || member.id || "") === String(item.dataset.castId)
+      || String(member.name || "") === String(item.dataset.castName)
+    );
+    fillIntroducerSelect(
+      introducer,
+      row.introducerId || trial.introducerId || castMember?.introducerId || "",
+      row.introducerName || trial.introducerName || castMember?.introducerName || ""
+    );
     const hourlyRate = document.createElement("input");
     hourlyRate.type = "number";
     hourlyRate.min = "1";

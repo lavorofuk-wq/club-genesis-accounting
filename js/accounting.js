@@ -217,7 +217,10 @@ function normalizeTrialWork(trialWork, castWork, trialCasts) {
       startTime: String(row.startTime || ""),
       endTime: String(row.endTime || ""),
       hours: toNumber(row.hours),
+      introducerId: String(row.introducerId || ""),
       introducerName: String(row.introducerName || ""),
+      introducerFeeSystem: String(row.introducerFeeSystem || ""),
+      advisoryFeeEnabled: row.advisoryFeeEnabled === true,
       hourlyRate: toNumber(row.hourlyRate),
       isTrial: true
     }));
@@ -723,7 +726,10 @@ async function saveReceived(finalize) {
           startTime: row.startTime,
           endTime: row.endTime,
           hours: row.hours,
+          introducerId: row.introducerId,
           introducerName: row.introducerName,
+          introducerFeeSystem: row.introducerFeeSystem,
+          advisoryFeeEnabled: row.advisoryFeeEnabled === true,
           hourlyRate: row.hourlyRate,
           sourceClosingId: editingClosing.id,
           updatedBy: currentUser.uid,
@@ -2523,7 +2529,10 @@ function normalizeWorkRows(work, staff) {
     payType: String(row.payType || ""),
     payAmount: toNumber(row.payAmount),
     isTrial: row.isTrial === true || row.castType === "trial",
+    introducerId: String(row.introducerId || ""),
     introducerName: String(row.introducerName || ""),
+    introducerFeeSystem: String(row.introducerFeeSystem || ""),
+    advisoryFeeEnabled: row.advisoryFeeEnabled === true,
     hourlyRate: toNumber(row.hourlyRate)
   })).filter((row) => row.name);
 }
