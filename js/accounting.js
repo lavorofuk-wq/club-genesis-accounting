@@ -2189,35 +2189,80 @@ async function exportCsv() {
   }
 }
 
+function activeCastCountOnDate(date) {
+  if (!date) return 0;
+  return castMembers.filter((member) => {
+    if (member.deleted === true || member.status === "trial") return false;
+    if (member.entryDate && member.entryDate > date) return false;
+    const exitedDate = member.exitedDate || member.departedDate || "";
+    if (exitedDate && exitedDate < date) return false;
+    if (member.status === "departed" && !exitedDate) return false;
+    return true;
+  }).length;
+}
+
+function castRewardDecisionMap(monthClosings) {
+  const decisions = new Map();
+  calculateCastRewardRows(monthClosings).forEach((row) => {
+    const hourlyAndBack = toNumber(row.hourlyAndBack);
+    const salesReward = toNumber(row.salesReward);
+    decisions.set(row.key, {
+      hourlyRate: toNumber(row.hourlyRate),
+      salesRewardRate: toNumber(row.salesRewardRate),
+      mode: salesReward > hourlyAndBack ? "sales" : "hourly",
+      calculationError: row.calculationError
+    });
+  });
+  return decisions;
+}
+
+function dailyCastRewardAmounts(closing, decisions) {
+  const salesMap = mergeRowsByPersonKey(aggregateCastSales([closing]), "key");
+  const workMap = mergeRowsByPersonKey(aggregateWork([closing], "castWork"), "id");
+  const backMap = mergeRowsByPersonKey(
+    aggregateCastBacks([closing]).filter((row) => !isFormerTrialSource(findMember(castMembers, row.id, row.name), row.id)),
+    "id"
+  );
+  const trialCompMap = aggregateConvertedTrialCompensation([closing]);
+  const keys = new Set([...salesMap.keys(), ...workMap.keys(), ...backMap.keys(), ...trialCompMap.keys()]);
+  let hourlyAndBack = 0;
+  let salesReward = 0;
+
+  keys.forEach((key) => {
+    const decision = decisions.get(key);
+    if (!decision || decision.calculationError) return;
+    const sales = salesMap.get(key) || {};
+    const work = workMap.get(key) || {};
+    const backs = backMap.get(key) || {};
+    const trialComp = trialCompMap.get(key) || {};
+    const trialPay = toNumber(trialComp.pay);
+    if (decision.mode === "sales") {
+      salesReward += Math.floor(toNumber(sales.totalAttributedSales) * decision.salesRewardRate);
+      hourlyAndBack += trialPay;
+      return;
+    }
+    hourlyAndBack += Math.round(decision.hourlyRate * toNumber(work.hours)) + toNumber(backs.total) + trialPay;
+  });
+
+  hourlyAndBack += calculateTrialCastRewardRows([closing]).reduce((sum, row) => sum + toNumber(row.payable), 0);
+  return { hourlyAndBack, salesReward };
+}
+
+function averageNumbers(values) {
+  const numbers = values.filter((value) => Number.isFinite(value));
+  if (!numbers.length) return "";
+  return numbers.reduce((sum, value) => sum + value, 0) / numbers.length;
+}
+
 function buildIncomeStatementSheet(worksheet, closings) {
   const start = byId("startDate").value;
   const targetMonth = start.slice(0, 7);
   const [year, month] = targetMonth.split("-").map(Number);
   const monthClosings = closings.filter((closing) => closing.businessDate.startsWith(`${targetMonth}-`));
-  const summary = summarize(monthClosings);
   const dayMap = new Map(monthClosings.map((closing) => [Number(closing.businessDate.slice(8, 10)), closing]));
-  const castSalesRows = aggregateCastSales(monthClosings);
-  const rewardRows = calculateCastRewardRows(monthClosings);
-  const introducerRows = rewardRows.filter((row) => row.member?.introducerId).map((row) => calculateIntroducerFee(row));
-  const totalCastSales = castSalesRows.reduce((sum, row) => sum + row.totalAttributedSales, 0);
-  const honSales = castSalesRows.reduce((sum, row) => sum + row.honShimeiSales, 0);
-  const jonaiSales = castSalesRows.reduce((sum, row) => sum + row.jonaiExtensionSales, 0);
-  const backTotal = rewardRows.reduce((sum, row) => sum + toNumber(row.backs?.total), 0);
-  const allowanceTotal = monthClosings.reduce((sum, closing) => sum + sumAmounts(closing.allowances), 0);
-  const totalCash = monthClosings.reduce((sum, closing) => sum + closing.cashSales, 0);
-  const totalCard = monthClosings.reduce((sum, closing) => sum + closing.cardSales, 0);
-  const firstHalfCard = monthClosings
-    .filter((closing) => Number(closing.businessDate.slice(8, 10)) <= 15)
-    .reduce((sum, closing) => sum + closing.cardSales, 0);
-  const secondHalfCard = totalCard - firstHalfCard;
-  const femalePay = summary.castRewards + summary.trialCastRewards;
-  const employeePay = summary.staffPayroll;
-  const introducerPay = introducerRows.reduce((sum, row) => sum + toNumber(row.introductionFee), 0);
-  const withholdingEstimate = Math.floor((femalePay + employeePay) * 0.1021);
-  const salesTaxDeposit = Math.floor(summary.totalSales / 11);
-  const grossProfit = summary.unresolvedPayments ? null : summary.grossProfit;
-  const businessDays = monthClosings.length;
   const maxDay = new Date(year, month, 0).getDate();
+  const rewardDecisions = castRewardDecisionMap(monthClosings);
+  const dailyRows = [];
 
   worksheet.columns = [
     { width: 5 }, { width: 2 }, { width: 12 }, { width: 12 }, { width: 12 }, { width: 8 },
@@ -2251,110 +2296,60 @@ function buildIncomeStatementSheet(worksheet, closings) {
     worksheet.getCell(`A${rowNumber}`).value = day;
     if (day <= maxDay && closing) {
       const dailyExpense = sumAmounts(closing.expenses) + sumAmounts(closing.allowances);
-      worksheet.getCell(`C${rowNumber}`).value = closing.totalSales;
-      worksheet.getCell(`D${rowNumber}`).value = closing.cashSales;
-      worksheet.getCell(`E${rowNumber}`).value = closing.cardSales;
-      worksheet.getCell(`F${rowNumber}`).value = closing.groupCount;
-      worksheet.getCell(`G${rowNumber}`).value = closing.totalCustomers;
-      worksheet.getCell(`H${rowNumber}`).value = closing.totalCustomers ? { formula: `C${rowNumber}/G${rowNumber}`, result: closing.customerUnitPrice } : "";
-      worksheet.getCell(`I${rowNumber}`).value = closing.honShimei;
-      worksheet.getCell(`J${rowNumber}`).value = closing.jonai;
-      worksheet.getCell(`K${rowNumber}`).value = dohanCountForClosing(closing);
-      worksheet.getCell(`L${rowNumber}`).value = closing.castWork.length + closing.trialWork.length;
-      worksheet.getCell(`M${rowNumber}`).value = closing.castWork.length;
-      worksheet.getCell(`T${rowNumber}`).value = dailyExpense;
-      worksheet.getCell(`U${rowNumber}`).value = closing.totalSales ? { formula: `T${rowNumber}/C${rowNumber}`, result: dailyExpense / closing.totalSales } : "";
-      worksheet.getCell(`V${rowNumber}`).value = { formula: `C${rowNumber}-N${rowNumber}-O${rowNumber}-Q${rowNumber}-S${rowNumber}-T${rowNumber}`, result: closing.totalSales - dailyExpense };
+      const castRewards = dailyCastRewardAmounts(closing, rewardDecisions);
+      const rowValues = {
+        C: closing.totalSales,
+        D: closing.cashSales,
+        E: closing.cardSales,
+        F: closing.groupCount,
+        G: closing.totalCustomers,
+        H: closing.totalCustomers ? Math.floor(closing.totalSales / closing.totalCustomers) : "",
+        I: closing.honShimei,
+        J: closing.jonai,
+        K: dohanCountForClosing(closing),
+        L: closing.castWork.length + closing.trialWork.length,
+        M: activeCastCountOnDate(closing.businessDate),
+        N: castRewards.hourlyAndBack,
+        O: castRewards.salesReward,
+        P: 0,
+        Q: 0,
+        R: "",
+        S: 0,
+        T: dailyExpense,
+        U: closing.totalSales ? dailyExpense / closing.totalSales : "",
+        V: closing.totalSales - castRewards.hourlyAndBack - castRewards.salesReward - dailyExpense
+      };
+      Object.entries(rowValues).forEach(([col, value]) => {
+        worksheet.getCell(`${col}${rowNumber}`).value = value;
+      });
+      dailyRows.push(rowValues);
     } else {
-      worksheet.getCell(`C${rowNumber}`).value = { formula: `SUM(D${rowNumber}:E${rowNumber})`, result: 0 };
+      const rowValues = {
+        C: 0, D: 0, E: 0, F: 0, G: 0, H: "", I: 0, J: 0, K: 0, L: 0, M: 0,
+        N: 0, O: 0, P: 0, Q: 0, R: "", S: 0, T: 0, U: "", V: 0
+      };
+      Object.entries(rowValues).forEach(([col, value]) => {
+        worksheet.getCell(`${col}${rowNumber}`).value = value;
+      });
       worksheet.getCell(`H${rowNumber}`).value = "";
       worksheet.getCell(`U${rowNumber}`).value = "";
-      worksheet.getCell(`V${rowNumber}`).value = { formula: `C${rowNumber}-N${rowNumber}-O${rowNumber}-Q${rowNumber}-S${rowNumber}-T${rowNumber}`, result: 0 };
     }
   }
 
   worksheet.getCell("A34").value = "平均";
   worksheet.getCell("A35").value = "合計";
   ["C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"].forEach((col) => {
-    worksheet.getCell(`${col}34`).value = { formula: `AVERAGE(${col}3:${col}33)` };
-    worksheet.getCell(`${col}35`).value = { formula: `SUM(${col}3:${col}33)` };
+    const values = dailyRows.map((row) => row[col]).filter((value) => value !== "");
+    worksheet.getCell(`${col}34`).value = averageNumbers(values);
+    worksheet.getCell(`${col}35`).value = values.reduce((sum, value) => sum + (Number.isFinite(value) ? value : 0), 0);
   });
-  worksheet.getCell("D36").value = businessDays;
-  worksheet.getCell("H36").value = backTotal + allowanceTotal;
-  worksheet.getCell("N36").value = allowanceTotal;
-  worksheet.getCell("Q36").value = employeePay;
-  worksheet.getCell("V36").value = employeePay;
-  worksheet.getCell("F37").value = femalePay;
-  worksheet.getCell("M37").value = femalePay - withholdingEstimate;
-  worksheet.getCell("T37").value = summary.totalOutflow;
-  worksheet.getCell("M38").value = totalCash + totalCard - summary.totalOutflow;
-  worksheet.getCell("U38").value = totalCash - summary.totalOutflow;
-  worksheet.getCell("D39").value = allowanceTotal;
-  worksheet.getCell("J39").value = employeePay;
-  worksheet.getCell("U39").value = grossProfit === null ? "未計算項目あり" : grossProfit;
-  worksheet.getCell("C40").value = summary.totalSales ? femalePay / summary.totalSales : "";
-  worksheet.getCell("F40").value = summary.totalSales ? summary.totalExpenses / summary.totalSales : "";
-  worksheet.getCell("K40").value = summary.totalSales ? (femalePay + employeePay) / summary.totalSales : "";
-
-  const bottomLabels = {
-    C36: "営業日数", E36: "女子給バック（バック+手当）", I36: "女子（送迎・減給）", O36: "従業員（日払い等）", R36: "総従業員給",
-    B37: "時給給+売上給+バック+派遣＝女子総支給額", H37: "女子総支給額-控除計-派遣給-源泉所得税＝差引支給額", O37: "女子総支給額+総従業員給+経費＝総支出",
-    A38: "現金売上+カ・前期+カ・後期-送迎給-女子給・源泉税-紹売給-従給-女子日払-従員日払-派遣-変動費-固定費＝現状現金残", O38: "現金残",
-    A39: "女子（日払・立替）計", G39: "従業員日払い計", O39: "現金残+カード＝利益",
-    A40: "女子給比", D40: "経費比（固定・変動）", H40: "人件費率（女子・従業員）",
-    G41: "【入出金】", N41: "預かり消費税", R41: "女子給",
-    C42: "本指売上", G42: "前期・カード入金／1日～15日分", L42: "後期・カード入金／16日～31日分", R42: "源泉税",
-    C43: "場内売上", G43: "送迎者給／毎月5日", L43: "紹介売上10％（経費表S欄）", R43: "紹介バック",
-    C44: "キャスト総売上", G44: "女子差引支給額・源泉税／15日", L44: "従業員給／20日（従員給欄計）", R44: "15日", S44: "準備金",
-    R46: "【源泉所得税】", T46: "※翌月10日までに支払い！",
-    C47: "総支給額", I47: "欠勤数", R47: "所得税【売上給】", U47: "合計",
-    E48: "変動　時給時", G48: "変動　売給時", I48: "減給数", R48: "【時給】",
-    C49: "総差引支給額", R49: "【従業員】",
-    F55: "【　時給　】", J55: "【　売上給　】",
-    C56: "店舗総売上に対する時給比", J57: "店舗総売上に対する売上給比",
-    C57: "女子総売上に対する時給比（手当含む）", J58: "女子総売上に対する売上給比（手当含む）",
-    C58: "女子総売上に対するバック比", G58: "総売上に対するバック比",
-    E59: "女子総売上", J59: "女子総売上",
-    E60: "女子給（時給+バック）", E61: "女子給（時給+バック+手当）", E62: "女子・バックのみ"
-  };
-  Object.entries(bottomLabels).forEach(([cell, value]) => { worksheet.getCell(cell).value = value; });
-  mergeIncomeStatementLabelCells(worksheet);
-  worksheet.getCell("O41").value = salesTaxDeposit;
-  worksheet.getCell("T41").value = femalePay;
-  worksheet.getCell("D42").value = honSales;
-  worksheet.getCell("K42").value = firstHalfCard;
-  worksheet.getCell("Q42").value = secondHalfCard;
-  worksheet.getCell("T42").value = withholdingEstimate;
-  worksheet.getCell("D43").value = jonaiSales;
-  worksheet.getCell("Q43").value = introducerPay;
-  worksheet.getCell("T43").value = summary.introducerExpenses;
-  worksheet.getCell("D44").value = totalCastSales;
-  worksheet.getCell("K44").value = femalePay - withholdingEstimate;
-  worksheet.getCell("Q44").value = employeePay;
-  worksheet.getCell("E47").value = femalePay;
-  worksheet.getCell("G47").value = femalePay;
-  worksheet.getCell("T47").value = Math.floor(summary.castRewards * 0.1021);
-  worksheet.getCell("E49").value = femalePay - withholdingEstimate;
-  worksheet.getCell("G49").value = femalePay - withholdingEstimate;
-  worksheet.getCell("G56").value = summary.totalSales ? summary.castRewards / summary.totalSales : "";
-  worksheet.getCell("H57").value = totalCastSales ? (summary.castRewards + allowanceTotal) / totalCastSales : "";
-  worksheet.getCell("O57").value = summary.totalSales ? summary.castRewards / summary.totalSales : "";
-  worksheet.getCell("F58").value = totalCastSales ? backTotal / totalCastSales : "";
-  worksheet.getCell("I58").value = summary.totalSales ? backTotal / summary.totalSales : "";
-  worksheet.getCell("O58").value = totalCastSales ? (summary.castRewards + allowanceTotal) / totalCastSales : "";
-  worksheet.getCell("G59").value = totalCastSales;
-  worksheet.getCell("L59").value = totalCastSales;
-  worksheet.getCell("G60").value = summary.castRewards;
-  worksheet.getCell("G61").value = summary.castRewards + allowanceTotal;
-  worksheet.getCell("G62").value = backTotal;
-
   styleIncomeStatementSheet(worksheet);
 }
 
 function styleIncomeStatementSheet(worksheet) {
-  for (let rowNumber = 1; rowNumber <= 76; rowNumber += 1) {
+  for (let rowNumber = 1; rowNumber <= 35; rowNumber += 1) {
     const row = worksheet.getRow(rowNumber);
-    row.height = incomeStatementRowHeight(rowNumber);
+    row.height = rowNumber === 1 ? 24 : 22;
     row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
       cell.font = { name: "Yu Gothic", size: rowNumber === 1 ? 11 : 9, bold: rowNumber <= 2 };
       cell.alignment = {
@@ -2366,12 +2361,9 @@ function styleIncomeStatementSheet(worksheet) {
       if (rowNumber >= 2 && rowNumber <= 35 && colNumber >= 1 && colNumber <= 22) {
         cell.border = thinBorder();
       }
-      if (rowNumber >= 36 && rowNumber <= 62 && colNumber >= 1 && colNumber <= 22) {
-        cell.border = thinBorder("FFE2E8F0");
-      }
     });
   }
-  ["A2:V2", "A35:V35", "A41:V41", "A46:V49", "A55:O62"].forEach((range) => {
+  ["A2:V2", "A35:V35"].forEach((range) => {
     const [start, end] = range.split(":");
     eachCellInRange(worksheet, start, end, (cell) => {
       cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF1F5F9" } };
@@ -2389,42 +2381,9 @@ function styleIncomeStatementSheet(worksheet) {
       worksheet.getCell(`${col}${row}`).numFmt = "0.0%";
     }
   });
-  ["C40", "F40", "K40", "G56", "H57", "O57", "F58", "I58", "O58"].forEach((cell) => {
-    worksheet.getCell(cell).numFmt = "0.0%";
-  });
   worksheet.getCell("J1").alignment = { horizontal: "left", vertical: "middle" };
-  [
-    "B37", "H37", "O37", "A38", "O38", "A39", "G39", "O39",
-    "A40", "D40", "H40", "G42", "L42", "G43", "L43", "G44", "L44",
-    "C56", "C57", "J57", "J58"
-  ].forEach((cellAddress) => {
-    const cell = worksheet.getCell(cellAddress);
-    cell.alignment = { horizontal: "left", vertical: "middle", wrapText: true, shrinkToFit: false };
-  });
-  worksheet.pageSetup.printArea = "A1:V62";
+  worksheet.pageSetup.printArea = "A1:V35";
   worksheet.headerFooter.oddFooter = "&CGENESIS Management System";
-}
-
-function mergeIncomeStatementLabelCells(worksheet) {
-  [
-    "B37:E37", "H37:L37", "O37:S37",
-    "A38:L38", "O38:T38",
-    "A39:C39", "G39:I39", "O39:T39",
-    "A40:B40", "D40:E40", "H40:J40",
-    "G42:J42", "L42:P42",
-    "G43:J43", "L43:P43",
-    "G44:J44", "L44:P44",
-    "C56:F56", "C57:G57", "J57:N57", "J58:N58"
-  ].forEach((range) => {
-    if (!worksheet.getCell(range.split(":")[0]).isMerged) worksheet.mergeCells(range);
-  });
-}
-
-function incomeStatementRowHeight(rowNumber) {
-  if (rowNumber === 1) return 24;
-  if ([37, 38].includes(rowNumber)) return 42;
-  if ([36, 39, 40, 42, 43, 44, 47, 48, 49, 56, 57, 58].includes(rowNumber)) return 32;
-  return 22;
 }
 
 function styleHeader(cell) {
