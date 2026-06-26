@@ -2148,42 +2148,291 @@ function createTableBlock(title, headers, rows, mapper) {
   return block;
 }
 
-function exportCsv() {
-  if (!visibleFinalized.length) {
-    showMessage("errorMessage", "CSV出力対象の確定データがありません。");
+async function exportCsv() {
+  const ExcelJS = globalThis.ExcelJS;
+  if (!ExcelJS) {
+    showMessage("errorMessage", "XLSX出力機能を読み込めませんでした。ページを再読み込みしてください。");
     return;
   }
-  const rows = [["日付", "総売上", "現金", "カード", "総客数", "組数", "客単価", "本指名", "場内指名", "経費", "手当", "推定収支"]];
-  visibleFinalized.forEach((closing) => {
-    const expense = sumAmounts(closing.expenses);
-    const allowance = sumAmounts(closing.allowances);
-    rows.push([
-      closing.businessDate, closing.totalSales, closing.cashSales, closing.cardSales,
-      closing.totalCustomers, closing.groupCount, closing.customerUnitPrice,
-      closing.honShimei, closing.jonai, expense, allowance, closing.totalSales - expense
-    ]);
+  updateVisibleFinalized();
+  if (!visibleFinalized.length) {
+    showMessage("errorMessage", "XLSX出力対象の確定データがありません。");
+    return;
+  }
+  const button = byId("exportCsvButton");
+  button.disabled = true;
+  hideMessage("errorMessage");
+  try {
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = "GENESIS Management System";
+    workbook.created = new Date();
+    const worksheet = workbook.addWorksheet("【ジェネシス収支表】", {
+      pageSetup: {
+        paperSize: 9,
+        orientation: "landscape",
+        fitToPage: true,
+        fitToWidth: 1,
+        fitToHeight: 0,
+        horizontalCentered: true,
+        margins: { left: 0.25, right: 0.25, top: 0.4, bottom: 0.4, header: 0.2, footer: 0.2 }
+      }
+    });
+    buildIncomeStatementSheet(worksheet, visibleFinalized);
+    const buffer = await workbook.xlsx.writeBuffer();
+    const month = byId("startDate").value.slice(0, 7).replace("-", "");
+    downloadXlsx(buffer, `gms_income_statement_${month || todayString().replaceAll("-", "")}.xlsx`);
+    showMessage("successMessage", "確定データを収支表XLSXで出力しました。", false);
+  } catch (error) {
+    showMessage("errorMessage", `XLSX出力に失敗しました。${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function buildIncomeStatementSheet(worksheet, closings) {
+  const start = byId("startDate").value;
+  const targetMonth = start.slice(0, 7);
+  const [year, month] = targetMonth.split("-").map(Number);
+  const monthClosings = closings.filter((closing) => closing.businessDate.startsWith(`${targetMonth}-`));
+  const summary = summarize(monthClosings);
+  const dayMap = new Map(monthClosings.map((closing) => [Number(closing.businessDate.slice(8, 10)), closing]));
+  const castSalesRows = aggregateCastSales(monthClosings);
+  const rewardRows = calculateCastRewardRows(monthClosings);
+  const introducerRows = rewardRows.filter((row) => row.member?.introducerId).map((row) => calculateIntroducerFee(row));
+  const totalCastSales = castSalesRows.reduce((sum, row) => sum + row.totalAttributedSales, 0);
+  const honSales = castSalesRows.reduce((sum, row) => sum + row.honShimeiSales, 0);
+  const jonaiSales = castSalesRows.reduce((sum, row) => sum + row.jonaiExtensionSales, 0);
+  const backTotal = rewardRows.reduce((sum, row) => sum + toNumber(row.backs?.total), 0);
+  const allowanceTotal = monthClosings.reduce((sum, closing) => sum + sumAmounts(closing.allowances), 0);
+  const totalCash = monthClosings.reduce((sum, closing) => sum + closing.cashSales, 0);
+  const totalCard = monthClosings.reduce((sum, closing) => sum + closing.cardSales, 0);
+  const firstHalfCard = monthClosings
+    .filter((closing) => Number(closing.businessDate.slice(8, 10)) <= 15)
+    .reduce((sum, closing) => sum + closing.cardSales, 0);
+  const secondHalfCard = totalCard - firstHalfCard;
+  const femalePay = summary.castRewards + summary.trialCastRewards;
+  const employeePay = summary.staffPayroll;
+  const introducerPay = introducerRows.reduce((sum, row) => sum + toNumber(row.introductionFee), 0);
+  const withholdingEstimate = Math.floor((femalePay + employeePay) * 0.1021);
+  const salesTaxDeposit = Math.floor(summary.totalSales / 11);
+  const grossProfit = summary.unresolvedPayments ? null : summary.grossProfit;
+  const businessDays = monthClosings.length;
+  const maxDay = new Date(year, month, 0).getDate();
+
+  worksheet.columns = [
+    { width: 5 }, { width: 2 }, { width: 12 }, { width: 12 }, { width: 12 }, { width: 8 },
+    { width: 8 }, { width: 10 }, { width: 8 }, { width: 8 }, { width: 8 }, { width: 9 },
+    { width: 8 }, { width: 10 }, { width: 10 }, { width: 9 }, { width: 10 }, { width: 10 },
+    { width: 10 }, { width: 12 }, { width: 10 }, { width: 12 }, { width: 2 }
+  ];
+  worksheet.views = [{ showGridLines: false }];
+
+  worksheet.getCell("F1").value = year;
+  worksheet.getCell("G1").value = "年";
+  worksheet.getCell("H1").value = month;
+  worksheet.getCell("I1").value = "月度";
+  worksheet.getCell("J1").value = "ジェネシス収支表";
+  worksheet.getCell("J1").font = titleFont();
+
+  const headers = {
+    A2: "日", C2: "売上", D2: "現金", E2: "カード", F2: "組数", G2: "客数", H2: "客単",
+    I2: "本指名", J2: "場内", K2: "同伴", L2: "総出勤", M2: "在籍", N2: "時給",
+    O2: "売上給", P2: "派遣数", Q2: "派遣給", R2: "女子給比", S2: "従業員給",
+    T2: "経費", U2: "経費比", V2: "収支"
+  };
+  Object.entries(headers).forEach(([cell, value]) => {
+    worksheet.getCell(cell).value = value;
+    styleHeader(worksheet.getCell(cell));
   });
-  const summary = summarize(visibleFinalized);
-  rows.push(
-    [],
-    ["期間集計"],
-    ["総売上", summary.totalSales],
-    ["経費合計", summary.totalExpenses],
-    ["キャスト報酬", summary.castRewards],
-    ["体入キャスト報酬", summary.trialCastRewards],
-    ["スタッフ給与", summary.staffPayroll],
-    ["紹介料・顧問料", summary.introducerExpenses],
-    ["総支出", summary.totalOutflow],
-    ["最終収支", summary.unresolvedPayments ? "未計算項目あり" : summary.grossProfit]
-  );
-  const csv = rows.map((row) => row.map(escapeCsv).join(",")).join("\r\n");
-  const blob = new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `gms_export_${todayString().replaceAll("-", "")}.csv`;
-  link.click();
-  URL.revokeObjectURL(url);
+
+  for (let day = 1; day <= 31; day += 1) {
+    const rowNumber = day + 2;
+    const closing = dayMap.get(day);
+    worksheet.getCell(`A${rowNumber}`).value = day;
+    if (day <= maxDay && closing) {
+      const dailyExpense = sumAmounts(closing.expenses) + sumAmounts(closing.allowances);
+      worksheet.getCell(`C${rowNumber}`).value = closing.totalSales;
+      worksheet.getCell(`D${rowNumber}`).value = closing.cashSales;
+      worksheet.getCell(`E${rowNumber}`).value = closing.cardSales;
+      worksheet.getCell(`F${rowNumber}`).value = closing.groupCount;
+      worksheet.getCell(`G${rowNumber}`).value = closing.totalCustomers;
+      worksheet.getCell(`H${rowNumber}`).value = closing.totalCustomers ? { formula: `C${rowNumber}/G${rowNumber}`, result: closing.customerUnitPrice } : "";
+      worksheet.getCell(`I${rowNumber}`).value = closing.honShimei;
+      worksheet.getCell(`J${rowNumber}`).value = closing.jonai;
+      worksheet.getCell(`K${rowNumber}`).value = dohanCountForClosing(closing);
+      worksheet.getCell(`L${rowNumber}`).value = closing.castWork.length + closing.trialWork.length;
+      worksheet.getCell(`M${rowNumber}`).value = closing.castWork.length;
+      worksheet.getCell(`T${rowNumber}`).value = dailyExpense;
+      worksheet.getCell(`U${rowNumber}`).value = closing.totalSales ? { formula: `T${rowNumber}/C${rowNumber}`, result: dailyExpense / closing.totalSales } : "";
+      worksheet.getCell(`V${rowNumber}`).value = { formula: `C${rowNumber}-N${rowNumber}-O${rowNumber}-Q${rowNumber}-S${rowNumber}-T${rowNumber}`, result: closing.totalSales - dailyExpense };
+    } else {
+      worksheet.getCell(`C${rowNumber}`).value = { formula: `SUM(D${rowNumber}:E${rowNumber})`, result: 0 };
+      worksheet.getCell(`H${rowNumber}`).value = "";
+      worksheet.getCell(`U${rowNumber}`).value = "";
+      worksheet.getCell(`V${rowNumber}`).value = { formula: `C${rowNumber}-N${rowNumber}-O${rowNumber}-Q${rowNumber}-S${rowNumber}-T${rowNumber}`, result: 0 };
+    }
+  }
+
+  worksheet.getCell("A34").value = "平均";
+  worksheet.getCell("A35").value = "合計";
+  ["C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V"].forEach((col) => {
+    worksheet.getCell(`${col}34`).value = { formula: `AVERAGE(${col}3:${col}33)` };
+    worksheet.getCell(`${col}35`).value = { formula: `SUM(${col}3:${col}33)` };
+  });
+  worksheet.getCell("D36").value = businessDays;
+  worksheet.getCell("H36").value = backTotal + allowanceTotal;
+  worksheet.getCell("N36").value = allowanceTotal;
+  worksheet.getCell("Q36").value = employeePay;
+  worksheet.getCell("V36").value = employeePay;
+  worksheet.getCell("F37").value = femalePay;
+  worksheet.getCell("M37").value = femalePay - withholdingEstimate;
+  worksheet.getCell("T37").value = summary.totalOutflow;
+  worksheet.getCell("M38").value = totalCash + totalCard - summary.totalOutflow;
+  worksheet.getCell("U38").value = totalCash - summary.totalOutflow;
+  worksheet.getCell("D39").value = allowanceTotal;
+  worksheet.getCell("J39").value = employeePay;
+  worksheet.getCell("U39").value = grossProfit === null ? "未計算項目あり" : grossProfit;
+  worksheet.getCell("C40").value = summary.totalSales ? femalePay / summary.totalSales : "";
+  worksheet.getCell("F40").value = summary.totalSales ? summary.totalExpenses / summary.totalSales : "";
+  worksheet.getCell("K40").value = summary.totalSales ? (femalePay + employeePay) / summary.totalSales : "";
+
+  const bottomLabels = {
+    C36: "営業日数", E36: "女子給バック（バック+手当）", I36: "女子（送迎・減給）", O36: "従業員（日払い等）", R36: "総従業員給",
+    B37: "時給給+売上給+バック+派遣＝女子総支給額", H37: "女子総支給額-控除計-派遣給-源泉所得税＝差引支給額", O37: "女子総支給額+総従業員給+経費＝総支出",
+    A38: "現金売上+カ・前期+カ・後期-送迎給-女子給・源泉税-紹売給-従給-女子日払-従員日払-派遣-変動費-固定費＝現状現金残", O38: "現金残",
+    A39: "女子（日払・立替）計", G39: "従業員日払い計", O39: "現金残+カード＝利益",
+    A40: "女子給比", D40: "経費比（固定・変動）", H40: "人件費率（女子・従業員）",
+    G41: "【入出金】", N41: "預かり消費税", R41: "女子給",
+    C42: "本指売上", G42: "前期・カード入金／1日～15日分", L42: "後期・カード入金／16日～31日分", R42: "源泉税",
+    C43: "場内売上", G43: "送迎者給／毎月5日", L43: "紹介売上10％（経費表S欄）", R43: "紹介バック",
+    C44: "キャスト総売上", G44: "女子差引支給額・源泉税／15日", L44: "従業員給／20日（従員給欄計）", R44: "15日", S44: "準備金",
+    R46: "【源泉所得税】", T46: "※翌月10日までに支払い！",
+    C47: "総支給額", I47: "欠勤数", R47: "所得税【売上給】", U47: "合計",
+    E48: "変動　時給時", G48: "変動　売給時", I48: "減給数", R48: "【時給】",
+    C49: "総差引支給額", R49: "【従業員】",
+    F55: "【　時給　】", J55: "【　売上給　】",
+    C56: "店舗総売上に対する時給比", J57: "店舗総売上に対する売上給比",
+    C57: "女子総売上に対する時給比（手当含む）", J58: "女子総売上に対する売上給比（手当含む）",
+    C58: "女子総売上に対するバック比", G58: "総売上に対するバック比",
+    E59: "女子総売上", J59: "女子総売上",
+    E60: "女子給（時給+バック）", E61: "女子給（時給+バック+手当）", E62: "女子・バックのみ"
+  };
+  Object.entries(bottomLabels).forEach(([cell, value]) => { worksheet.getCell(cell).value = value; });
+  worksheet.getCell("O41").value = salesTaxDeposit;
+  worksheet.getCell("T41").value = femalePay;
+  worksheet.getCell("D42").value = honSales;
+  worksheet.getCell("G42").value = firstHalfCard;
+  worksheet.getCell("L42").value = secondHalfCard;
+  worksheet.getCell("T42").value = withholdingEstimate;
+  worksheet.getCell("D43").value = jonaiSales;
+  worksheet.getCell("L43").value = introducerPay;
+  worksheet.getCell("T43").value = summary.introducerExpenses;
+  worksheet.getCell("D44").value = totalCastSales;
+  worksheet.getCell("G44").value = femalePay - withholdingEstimate;
+  worksheet.getCell("L44").value = employeePay;
+  worksheet.getCell("E47").value = femalePay;
+  worksheet.getCell("G47").value = femalePay;
+  worksheet.getCell("T47").value = Math.floor(summary.castRewards * 0.1021);
+  worksheet.getCell("E49").value = femalePay - withholdingEstimate;
+  worksheet.getCell("G49").value = femalePay - withholdingEstimate;
+  worksheet.getCell("G56").value = summary.totalSales ? summary.castRewards / summary.totalSales : "";
+  worksheet.getCell("H57").value = totalCastSales ? (summary.castRewards + allowanceTotal) / totalCastSales : "";
+  worksheet.getCell("O57").value = summary.totalSales ? summary.castRewards / summary.totalSales : "";
+  worksheet.getCell("F58").value = totalCastSales ? backTotal / totalCastSales : "";
+  worksheet.getCell("I58").value = summary.totalSales ? backTotal / summary.totalSales : "";
+  worksheet.getCell("O58").value = totalCastSales ? (summary.castRewards + allowanceTotal) / totalCastSales : "";
+  worksheet.getCell("G59").value = totalCastSales;
+  worksheet.getCell("L59").value = totalCastSales;
+  worksheet.getCell("G60").value = summary.castRewards;
+  worksheet.getCell("G61").value = summary.castRewards + allowanceTotal;
+  worksheet.getCell("G62").value = backTotal;
+
+  styleIncomeStatementSheet(worksheet);
+}
+
+function styleIncomeStatementSheet(worksheet) {
+  for (let rowNumber = 1; rowNumber <= 76; rowNumber += 1) {
+    const row = worksheet.getRow(rowNumber);
+    row.height = rowNumber === 1 ? 24 : 21;
+    row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+      cell.font = { name: "Yu Gothic", size: rowNumber === 1 ? 11 : 9, bold: rowNumber <= 2 };
+      cell.alignment = { horizontal: colNumber <= 2 ? "center" : "right", vertical: "middle", wrapText: true };
+      if (rowNumber >= 2 && rowNumber <= 35 && colNumber >= 1 && colNumber <= 22) {
+        cell.border = thinBorder();
+      }
+      if (rowNumber >= 36 && rowNumber <= 62 && colNumber >= 1 && colNumber <= 22) {
+        cell.border = thinBorder("FFE2E8F0");
+      }
+    });
+  }
+  ["A2:V2", "A35:V35", "A41:V41", "A46:V49", "A55:O62"].forEach((range) => {
+    const [start, end] = range.split(":");
+    eachCellInRange(worksheet, start, end, (cell) => {
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF1F5F9" } };
+      cell.font = { ...cell.font, bold: true };
+    });
+  });
+  ["C:V"].forEach((range) => {
+    const [from, to] = range.split(":").map(columnNumber);
+    for (let col = from; col <= to; col += 1) {
+      worksheet.getColumn(col).numFmt = '#,##0';
+    }
+  });
+  ["R", "U"].forEach((col) => {
+    for (let row = 3; row <= 35; row += 1) {
+      worksheet.getCell(`${col}${row}`).numFmt = "0.0%";
+    }
+  });
+  ["C40", "F40", "K40", "G56", "H57", "O57", "F58", "I58", "O58"].forEach((cell) => {
+    worksheet.getCell(cell).numFmt = "0.0%";
+  });
+  worksheet.getCell("J1").alignment = { horizontal: "left", vertical: "middle" };
+  worksheet.pageSetup.printArea = "A1:V62";
+  worksheet.headerFooter.oddFooter = "&CGENESIS Management System";
+}
+
+function styleHeader(cell) {
+  cell.font = { name: "Yu Gothic", size: 9, bold: true, color: { argb: "FFFFFFFF" } };
+  cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF334155" } };
+  cell.alignment = { horizontal: "center", vertical: "middle" };
+  cell.border = thinBorder();
+}
+
+function titleFont() {
+  return { name: "Yu Gothic", size: 16, bold: true, color: { argb: "FF0F172A" } };
+}
+
+function thinBorder(color = "FFCBD5E1") {
+  return {
+    top: { style: "thin", color: { argb: color } },
+    left: { style: "thin", color: { argb: color } },
+    bottom: { style: "thin", color: { argb: color } },
+    right: { style: "thin", color: { argb: color } }
+  };
+}
+
+function eachCellInRange(worksheet, start, end, callback) {
+  const startRef = splitCellRef(start);
+  const endRef = splitCellRef(end);
+  for (let row = startRef.row; row <= endRef.row; row += 1) {
+    for (let col = startRef.col; col <= endRef.col; col += 1) {
+      callback(worksheet.getRow(row).getCell(col));
+    }
+  }
+}
+
+function splitCellRef(ref) {
+  const match = String(ref).match(/^([A-Z]+)(\d+)$/);
+  return { col: columnNumber(match[1]), row: Number(match[2]) };
+}
+
+function columnNumber(label) {
+  return String(label).split("").reduce((sum, char) => sum * 26 + char.charCodeAt(0) - 64, 0);
+}
+
+function dohanCountForClosing(closing) {
+  return closing.transactions.reduce((count, transaction) =>
+    count + transaction.items.filter((item) => item.category === "dohan" || item.label === "同伴料").length, 0);
 }
 
 function normalizeTransactions(rows) {
