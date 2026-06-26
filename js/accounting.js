@@ -2318,18 +2318,19 @@ function buildIncomeStatementSheet(worksheet, closings) {
     E60: "女子給（時給+バック）", E61: "女子給（時給+バック+手当）", E62: "女子・バックのみ"
   };
   Object.entries(bottomLabels).forEach(([cell, value]) => { worksheet.getCell(cell).value = value; });
+  mergeIncomeStatementLabelCells(worksheet);
   worksheet.getCell("O41").value = salesTaxDeposit;
   worksheet.getCell("T41").value = femalePay;
   worksheet.getCell("D42").value = honSales;
-  worksheet.getCell("G42").value = firstHalfCard;
-  worksheet.getCell("L42").value = secondHalfCard;
+  worksheet.getCell("K42").value = firstHalfCard;
+  worksheet.getCell("Q42").value = secondHalfCard;
   worksheet.getCell("T42").value = withholdingEstimate;
   worksheet.getCell("D43").value = jonaiSales;
-  worksheet.getCell("L43").value = introducerPay;
+  worksheet.getCell("Q43").value = introducerPay;
   worksheet.getCell("T43").value = summary.introducerExpenses;
   worksheet.getCell("D44").value = totalCastSales;
-  worksheet.getCell("G44").value = femalePay - withholdingEstimate;
-  worksheet.getCell("L44").value = employeePay;
+  worksheet.getCell("K44").value = femalePay - withholdingEstimate;
+  worksheet.getCell("Q44").value = employeePay;
   worksheet.getCell("E47").value = femalePay;
   worksheet.getCell("G47").value = femalePay;
   worksheet.getCell("T47").value = Math.floor(summary.castRewards * 0.1021);
@@ -2353,10 +2354,15 @@ function buildIncomeStatementSheet(worksheet, closings) {
 function styleIncomeStatementSheet(worksheet) {
   for (let rowNumber = 1; rowNumber <= 76; rowNumber += 1) {
     const row = worksheet.getRow(rowNumber);
-    row.height = rowNumber === 1 ? 24 : 21;
+    row.height = incomeStatementRowHeight(rowNumber);
     row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
       cell.font = { name: "Yu Gothic", size: rowNumber === 1 ? 11 : 9, bold: rowNumber <= 2 };
-      cell.alignment = { horizontal: colNumber <= 2 ? "center" : "right", vertical: "middle", wrapText: true };
+      cell.alignment = {
+        horizontal: colNumber <= 2 ? "center" : "right",
+        vertical: "middle",
+        wrapText: true,
+        shrinkToFit: rowNumber <= 35
+      };
       if (rowNumber >= 2 && rowNumber <= 35 && colNumber >= 1 && colNumber <= 22) {
         cell.border = thinBorder();
       }
@@ -2387,8 +2393,38 @@ function styleIncomeStatementSheet(worksheet) {
     worksheet.getCell(cell).numFmt = "0.0%";
   });
   worksheet.getCell("J1").alignment = { horizontal: "left", vertical: "middle" };
+  [
+    "B37", "H37", "O37", "A38", "O38", "A39", "G39", "O39",
+    "A40", "D40", "H40", "G42", "L42", "G43", "L43", "G44", "L44",
+    "C56", "C57", "J57", "J58"
+  ].forEach((cellAddress) => {
+    const cell = worksheet.getCell(cellAddress);
+    cell.alignment = { horizontal: "left", vertical: "middle", wrapText: true, shrinkToFit: false };
+  });
   worksheet.pageSetup.printArea = "A1:V62";
   worksheet.headerFooter.oddFooter = "&CGENESIS Management System";
+}
+
+function mergeIncomeStatementLabelCells(worksheet) {
+  [
+    "B37:E37", "H37:L37", "O37:S37",
+    "A38:L38", "O38:T38",
+    "A39:C39", "G39:I39", "O39:T39",
+    "A40:B40", "D40:E40", "H40:J40",
+    "G42:J42", "L42:P42",
+    "G43:J43", "L43:P43",
+    "G44:J44", "L44:P44",
+    "C56:F56", "C57:G57", "J57:N57", "J58:N58"
+  ].forEach((range) => {
+    if (!worksheet.getCell(range.split(":")[0]).isMerged) worksheet.mergeCells(range);
+  });
+}
+
+function incomeStatementRowHeight(rowNumber) {
+  if (rowNumber === 1) return 24;
+  if ([37, 38].includes(rowNumber)) return 42;
+  if ([36, 39, 40, 42, 43, 44, 47, 48, 49, 56, 57, 58].includes(rowNumber)) return 32;
+  return 22;
 }
 
 function styleHeader(cell) {
