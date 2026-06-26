@@ -2248,6 +2248,19 @@ function dailyCastRewardAmounts(closing, decisions) {
   return { hourlyAndBack, salesReward };
 }
 
+function dailyNonEmployeeStaffPay(closing) {
+  return closing.staffWork.reduce((total, row) => {
+    const member = findMember(staffMembers, row.id, row.name);
+    if (member?.employmentType === "employee") return total;
+    const payType = row.payType || member?.payType || "";
+    const payAmount = toNumber(row.payAmount || member?.payAmount);
+    const basePay = payType === "hourly"
+      ? Math.round(payAmount * toNumber(row.hours))
+      : payType === "daily" ? payAmount : 0;
+    return total + basePay;
+  }, 0);
+}
+
 function averageNumbers(values) {
   const numbers = values.filter((value) => Number.isFinite(value));
   if (!numbers.length) return "";
@@ -2297,6 +2310,8 @@ function buildIncomeStatementSheet(worksheet, closings) {
     if (day <= maxDay && closing) {
       const dailyExpense = sumAmounts(closing.expenses) + sumAmounts(closing.allowances);
       const castRewards = dailyCastRewardAmounts(closing, rewardDecisions);
+      const castRewardTotal = castRewards.hourlyAndBack + castRewards.salesReward;
+      const staffPay = dailyNonEmployeeStaffPay(closing);
       const rowValues = {
         C: closing.totalSales,
         D: closing.cashSales,
@@ -2313,11 +2328,11 @@ function buildIncomeStatementSheet(worksheet, closings) {
         O: castRewards.salesReward,
         P: 0,
         Q: 0,
-        R: "",
-        S: 0,
+        R: closing.totalSales ? castRewardTotal / closing.totalSales : "",
+        S: staffPay,
         T: dailyExpense,
         U: closing.totalSales ? dailyExpense / closing.totalSales : "",
-        V: closing.totalSales - castRewards.hourlyAndBack - castRewards.salesReward - dailyExpense
+        V: closing.totalSales - castRewardTotal - staffPay - dailyExpense
       };
       Object.entries(rowValues).forEach(([col, value]) => {
         worksheet.getCell(`${col}${rowNumber}`).value = value;
