@@ -2014,8 +2014,15 @@ async function copyPreviousDay() {
       showMessage("errorMessage", "前日のデータが見つかりません。");
       return;
     }
-    applyClosingToForm({ ...previous, businessDate: date });
-    showMessage("successMessage", "前日のデータをコピーしました。送信するまで経理側には反映されません。", false);
+    const staffWork = normalizeStaffWork(previous.staffWork || previous.staffHours);
+    if (!staffWork.length) {
+      showMessage("errorMessage", "前日のスタッフ勤務データが見つかりません。");
+      return;
+    }
+    document.getElementById("staffWorkRows").replaceChildren();
+    staffWork.forEach(addStaffWorkRow);
+    renderStaffAttendancePicker();
+    showMessage("successMessage", "前日のスタッフ勤務のみコピーしました。売上・キャスト勤務・経費・手当は変更していません。", false);
   } catch (error) {
     showMessage("errorMessage", `前日データの取得に失敗しました。${error.message}`);
   }
