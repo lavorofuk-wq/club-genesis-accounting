@@ -314,6 +314,29 @@
         <div id="allowanceRows" class="space-y-3"></div>
       </section>
 
+      <section class="section-shell hidden" data-workspace="closing">
+        <div class="section-title">
+          <div>
+            <h2>控除</h2>
+            <p class="mt-1 text-sm text-slate-500">送迎代、日払い、立替金を当日の出勤者から選択して登録します。</p>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <button id="openTransportDeductionButton" type="button" class="secondary-button">送迎利用者を登録</button>
+            <button id="openPayrollDeductionButton" type="button" class="secondary-button">報酬・給与引きを登録</button>
+          </div>
+        </div>
+        <div class="grid gap-4 md:grid-cols-2">
+          <div>
+            <h3 class="text-sm font-bold text-slate-800">送迎代控除</h3>
+            <div id="transportDeductionRows" class="mt-3 space-y-3"></div>
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-slate-800">報酬・給与引き</h3>
+            <div id="payrollDeductionRows" class="mt-3 space-y-3"></div>
+          </div>
+        </div>
+      </section>
+
       <div class="sticky bottom-0 -mx-4 hidden border-t border-slate-200 bg-white/95 px-4 py-4 backdrop-blur" data-workspace="closing">
         <button id="saveButton" type="button" class="primary-button w-full md:w-auto">経理へ送信する</button>
       </div>
@@ -370,6 +393,32 @@
       </div>
       <div id="sentClosings" class="pending-list mt-4"></div>
     </div>
+  </dialog>
+
+  <dialog id="transportDeductionModal" class="modal-card modal-wide">
+    <form method="dialog">
+      <p class="brand-kicker">TRANSPORT DEDUCTION</p>
+      <h2 class="mt-2 text-xl font-bold">送迎利用者登録</h2>
+      <p class="mt-2 text-sm text-slate-500">当日出勤しているキャストから選択し、送迎代を入力してください。</p>
+      <div id="transportDeductionModalRows" class="mt-5 space-y-3"></div>
+      <div class="mt-6 flex justify-end gap-3">
+        <button value="cancel" class="secondary-button">戻る</button>
+        <button id="saveTransportDeductionButton" type="button" class="primary-button">反映する</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="payrollDeductionModal" class="modal-card modal-wide">
+    <form method="dialog">
+      <p class="brand-kicker">PAYROLL DEDUCTION</p>
+      <h2 class="mt-2 text-xl font-bold">報酬・給与引き登録</h2>
+      <p class="mt-2 text-sm text-slate-500">当日出勤しているキャスト・従業員から選択し、日払い・立替金を入力してください。</p>
+      <div id="payrollDeductionModalRows" class="mt-5 space-y-3"></div>
+      <div class="mt-6 flex justify-end gap-3">
+        <button value="cancel" class="secondary-button">戻る</button>
+        <button id="savePayrollDeductionButton" type="button" class="primary-button">反映する</button>
+      </div>
+    </form>
   </dialog>
 
   <dialog id="castDetailModal" class="modal-card modal-wide">
@@ -482,6 +531,6 @@
     </form>
   </dialog>
 
-  <script type="module" src="js/shop.js?v=1.43"></script>
+  <script type="module" src="js/shop.js?v=1.44"></script>
 </body>
 </html>

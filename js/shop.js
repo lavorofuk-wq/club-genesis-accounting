@@ -128,6 +128,10 @@ document.getElementById("savePosCastLinkButton").addEventListener("click", saveP
 document.getElementById("addCastWorkButton").addEventListener("click", () => addCastWorkRow());
 document.getElementById("addExpenseButton").addEventListener("click", () => addExpenseRow());
 document.getElementById("addAllowanceButton").addEventListener("click", () => addAllowanceRow());
+document.getElementById("openTransportDeductionButton").addEventListener("click", openTransportDeductionModal);
+document.getElementById("saveTransportDeductionButton").addEventListener("click", saveTransportDeductionsFromModal);
+document.getElementById("openPayrollDeductionButton").addEventListener("click", openPayrollDeductionModal);
+document.getElementById("savePayrollDeductionButton").addEventListener("click", savePayrollDeductionsFromModal);
 document.getElementById("copyPreviousButton").addEventListener("click", copyPreviousDay);
 document.getElementById("saveButton").addEventListener("click", openConfirm);
 document.getElementById("confirmSaveButton").addEventListener("click", saveReport);
@@ -1646,6 +1650,211 @@ function addAllowanceRow(data = {}) {
   updateNote();
 }
 
+function currentCastWorkers() {
+  return [...document.querySelectorAll(".cast-work-row")].map((row) => {
+    const select = row.querySelector(".cast-member-select");
+    const member = castMembers.find((item) => item.id === select.value);
+    return member ? {
+      personType: "cast",
+      personId: member.id,
+      posCastId: member.posCastId || "",
+      personName: member.name
+    } : null;
+  }).filter(Boolean);
+}
+
+function currentStaffWorkers() {
+  return [...document.querySelectorAll(".staff-work-row")].map((row) => {
+    const member = staffMembers.find((item) => item.id === row.dataset.staffId);
+    return member ? {
+      personType: "staff",
+      personId: member.id,
+      personName: member.name
+    } : null;
+  }).filter(Boolean);
+}
+
+function existingTransportDeductions() {
+  return [...document.querySelectorAll(".transport-deduction-row")].map((row) => ({
+    personType: "cast",
+    personId: row.dataset.personId || "",
+    posCastId: row.dataset.posCastId || "",
+    personName: row.dataset.personName || "",
+    amount: Number(row.dataset.amount || 0)
+  }));
+}
+
+function existingPayrollDeductions() {
+  return [...document.querySelectorAll(".payroll-deduction-row")].map((row) => ({
+    personType: row.dataset.personType || "",
+    personId: row.dataset.personId || "",
+    posCastId: row.dataset.posCastId || "",
+    personName: row.dataset.personName || "",
+    dailyPayment: Number(row.dataset.dailyPayment || 0),
+    advancePayment: Number(row.dataset.advancePayment || 0)
+  }));
+}
+
+function renderTransportDeductions(rows = []) {
+  const root = document.getElementById("transportDeductionRows");
+  root.replaceChildren();
+  rows.filter((row) => Number(row.amount) > 0).forEach((data) => {
+    const row = document.createElement("div");
+    row.className = "dynamic-row transport-deduction-row";
+    row.dataset.personId = data.personId || "";
+    row.dataset.posCastId = data.posCastId || "";
+    row.dataset.personName = data.personName || "";
+    row.dataset.amount = String(Number(data.amount || 0));
+    const label = document.createElement("strong");
+    label.textContent = data.personName || "未設定";
+    const amount = document.createElement("span");
+    amount.textContent = `送迎代 ${yen.format(Number(data.amount || 0))}円`;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "danger-button";
+    remove.textContent = "削除";
+    remove.addEventListener("click", () => row.remove());
+    row.append(label, amount, remove);
+    root.appendChild(row);
+  });
+}
+
+function renderPayrollDeductions(rows = []) {
+  const root = document.getElementById("payrollDeductionRows");
+  root.replaceChildren();
+  rows.filter((row) => Number(row.dailyPayment) > 0 || Number(row.advancePayment) > 0).forEach((data) => {
+    const row = document.createElement("div");
+    row.className = "dynamic-row payroll-deduction-row";
+    row.dataset.personType = data.personType || "";
+    row.dataset.personId = data.personId || "";
+    row.dataset.posCastId = data.posCastId || "";
+    row.dataset.personName = data.personName || "";
+    row.dataset.dailyPayment = String(Number(data.dailyPayment || 0));
+    row.dataset.advancePayment = String(Number(data.advancePayment || 0));
+    const label = document.createElement("strong");
+    label.textContent = `${data.personName || "未設定"} / ${data.personType === "staff" ? "従業員" : "キャスト"}`;
+    const amount = document.createElement("span");
+    amount.textContent = `日払い ${yen.format(Number(data.dailyPayment || 0))}円 / 立替金 ${yen.format(Number(data.advancePayment || 0))}円`;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "danger-button";
+    remove.textContent = "削除";
+    remove.addEventListener("click", () => row.remove());
+    row.append(label, amount, remove);
+    root.appendChild(row);
+  });
+}
+
+function addDeductionModalRow(root, person, values = {}, fields) {
+  const row = document.createElement("label");
+  row.className = "dynamic-row";
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.className = "deduction-select";
+  checkbox.dataset.personType = person.personType;
+  checkbox.dataset.personId = person.personId;
+  checkbox.dataset.posCastId = person.posCastId || "";
+  checkbox.dataset.personName = person.personName;
+  checkbox.checked = fields.some((field) => Number(values[field.key] || 0) > 0);
+  const name = document.createElement("strong");
+  name.textContent = `${person.personName} / ${person.personType === "staff" ? "従業員" : "キャスト"}`;
+  row.append(checkbox, name);
+  fields.forEach((field) => {
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = "0";
+    input.step = "1";
+    input.className = `form-input ${field.className}`;
+    input.placeholder = field.label;
+    input.value = values[field.key] || "";
+    input.addEventListener("input", () => {
+      checkbox.checked = fields.some((item) => Number(row.querySelector(`.${item.className}`).value || 0) > 0);
+    });
+    row.append(input);
+  });
+  root.appendChild(row);
+}
+
+function openTransportDeductionModal() {
+  const root = document.getElementById("transportDeductionModalRows");
+  root.replaceChildren();
+  const existing = new Map(existingTransportDeductions().map((row) => [row.personId || row.posCastId || row.personName, row]));
+  const workers = currentCastWorkers();
+  if (!workers.length) {
+    root.appendChild(emptyNotice("当日出勤しているキャストがいません。先にキャスト勤務を登録してください。"));
+  } else {
+    workers.forEach((person) => addDeductionModalRow(
+      root,
+      person,
+      existing.get(person.personId) || existing.get(person.posCastId) || {},
+      [{ key: "amount", className: "transport-deduction-amount", label: "送迎代" }]
+    ));
+  }
+  document.getElementById("transportDeductionModal").showModal();
+}
+
+function saveTransportDeductionsFromModal() {
+  const rows = [...document.querySelectorAll("#transportDeductionModalRows .dynamic-row")].map((row) => {
+    const checkbox = row.querySelector(".deduction-select");
+    const amount = Number(row.querySelector(".transport-deduction-amount")?.value || 0);
+    return checkbox?.checked && amount > 0 ? {
+      personType: "cast",
+      personId: checkbox.dataset.personId,
+      posCastId: checkbox.dataset.posCastId,
+      personName: checkbox.dataset.personName,
+      amount
+    } : null;
+  }).filter(Boolean);
+  renderTransportDeductions(rows);
+  document.getElementById("transportDeductionModal").close();
+}
+
+function openPayrollDeductionModal() {
+  const root = document.getElementById("payrollDeductionModalRows");
+  root.replaceChildren();
+  const existing = new Map(existingPayrollDeductions().map((row) => [`${row.personType}:${row.personId || row.posCastId || row.personName}`, row]));
+  const workers = [...currentCastWorkers(), ...currentStaffWorkers()];
+  if (!workers.length) {
+    root.appendChild(emptyNotice("当日出勤しているキャスト・従業員がいません。先に勤務を登録してください。"));
+  } else {
+    workers.forEach((person) => addDeductionModalRow(
+      root,
+      person,
+      existing.get(`${person.personType}:${person.personId}`) || existing.get(`${person.personType}:${person.posCastId}`) || {},
+      [
+        { key: "dailyPayment", className: "payroll-deduction-daily", label: "日払い" },
+        { key: "advancePayment", className: "payroll-deduction-advance", label: "立替金" }
+      ]
+    ));
+  }
+  document.getElementById("payrollDeductionModal").showModal();
+}
+
+function savePayrollDeductionsFromModal() {
+  const rows = [...document.querySelectorAll("#payrollDeductionModalRows .dynamic-row")].map((row) => {
+    const checkbox = row.querySelector(".deduction-select");
+    const dailyPayment = Number(row.querySelector(".payroll-deduction-daily")?.value || 0);
+    const advancePayment = Number(row.querySelector(".payroll-deduction-advance")?.value || 0);
+    return checkbox?.checked && (dailyPayment > 0 || advancePayment > 0) ? {
+      personType: checkbox.dataset.personType,
+      personId: checkbox.dataset.personId,
+      posCastId: checkbox.dataset.posCastId,
+      personName: checkbox.dataset.personName,
+      dailyPayment,
+      advancePayment
+    } : null;
+  }).filter(Boolean);
+  renderPayrollDeductions(rows);
+  document.getElementById("payrollDeductionModal").close();
+}
+
+function emptyNotice(text) {
+  const notice = document.createElement("div");
+  notice.className = "notice";
+  notice.textContent = text;
+  return notice;
+}
+
 function resetRows() {
   document.getElementById("staffWorkRows").replaceChildren();
   document.getElementById("castWorkRows").replaceChildren();
@@ -1653,6 +1862,8 @@ function resetRows() {
   document.getElementById("trialCastWorkSection").classList.add("hidden");
   document.getElementById("expenseRows").replaceChildren();
   document.getElementById("allowanceRows").replaceChildren();
+  document.getElementById("transportDeductionRows").replaceChildren();
+  document.getElementById("payrollDeductionRows").replaceChildren();
   renderStaffAttendancePicker();
   addCastWorkRow();
   addExpenseRow();
@@ -1774,7 +1985,15 @@ function collectRows() {
     })
     .filter((row) => row.amount > 0 || row.recipient || row.note || row.type === "その他");
 
-  return { staffWork, castWork, trialWork, expenses, allowances };
+  return {
+    staffWork,
+    castWork,
+    trialWork,
+    expenses,
+    allowances,
+    transportDeductions: existingTransportDeductions(),
+    payrollDeductions: existingPayrollDeductions()
+  };
 }
 
 function buildPayload() {
@@ -1809,6 +2028,8 @@ function buildPayload() {
     castHours: rows.castWork,
     expenses: rows.expenses,
     allowances: rows.allowances,
+    transportDeductions: rows.transportDeductions,
+    payrollDeductions: rows.payrollDeductions,
     cashReconciliation: selectedPending?.cashReconciliation || {
       expectedCash: numberValue("cashSales"),
       actualCash: numberValue("cashSales"),
@@ -1889,6 +2110,21 @@ function validatePayload(payload) {
       errors.push(`${row.type}の対象者は在籍スタッフから選択してください。`);
     }
   });
+  payload.transportDeductions.forEach((row) => {
+    if (!row.personId && !row.posCastId && !row.personName) errors.push("送迎代控除の対象キャストを確認してください。");
+    if (!isNonNegativeInteger(row.amount) || row.amount <= 0) errors.push("送迎代控除の金額は1円以上の整数で入力してください。");
+  });
+  payload.payrollDeductions.forEach((row) => {
+    if (!["cast", "staff"].includes(row.personType) || (!row.personId && !row.posCastId && !row.personName)) {
+      errors.push("報酬・給与引きの対象者を確認してください。");
+    }
+    if (!isNonNegativeInteger(row.dailyPayment) || !isNonNegativeInteger(row.advancePayment)) {
+      errors.push("日払い・立替金は0円以上の整数で入力してください。");
+    }
+    if (row.dailyPayment <= 0 && row.advancePayment <= 0) {
+      errors.push("報酬・給与引きは日払いまたは立替金を1円以上入力してください。");
+    }
+  });
   return [...new Set(errors)];
 }
 
@@ -1905,6 +2141,9 @@ function openConfirm() {
   }
   const expenseTotal = pendingPayload.expenses.reduce((sum, row) => sum + row.amount, 0);
   const allowanceTotal = pendingPayload.allowances.reduce((sum, row) => sum + row.amount, 0);
+  const transportDeductionTotal = pendingPayload.transportDeductions.reduce((sum, row) => sum + row.amount, 0);
+  const payrollDeductionTotal = pendingPayload.payrollDeductions.reduce((sum, row) =>
+    sum + row.dailyPayment + row.advancePayment, 0);
   const summary = document.getElementById("confirmSummary");
   summary.replaceChildren();
   [
@@ -1914,7 +2153,8 @@ function openConfirm() {
     `総客数：${pendingPayload.customers.totalCustomers}名 / 客単価：${yen.format(pendingPayload.customers.customerUnitPrice)}円`,
     `会計データ：${pendingPayload.transactions.length}件`,
     `体入キャスト：${pendingPayload.trialWork.length}名`,
-    `経費合計：${yen.format(expenseTotal)}円 / 手当合計：${yen.format(allowanceTotal)}円`
+    `経費合計：${yen.format(expenseTotal)}円 / 手当合計：${yen.format(allowanceTotal)}円`,
+    `控除合計：${yen.format(transportDeductionTotal + payrollDeductionTotal)}円`
   ].forEach((text) => {
     const p = document.createElement("p");
     p.textContent = text;
@@ -2073,6 +2313,8 @@ function applyClosingToForm(data) {
   (data.expenses?.length ? data.expenses : [{}]).forEach(addExpenseRow);
   document.getElementById("allowanceRows").replaceChildren();
   (data.allowances?.length ? data.allowances : [{}]).forEach(addAllowanceRow);
+  renderTransportDeductions(data.transportDeductions || []);
+  renderPayrollDeductions(data.payrollDeductions || []);
   calculateUnitPrice();
   checkSalesWarning();
 }

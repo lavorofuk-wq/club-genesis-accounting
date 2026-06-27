@@ -193,6 +193,8 @@ function normalizeClosing(id, raw) {
     jonai: toNumber(nominations.jonaiCount ?? nominations.jonai),
     expenses: normalizeMoneyRows(raw.expenses, "category"),
     allowances: normalizeMoneyRows(raw.allowances, "type"),
+    transportDeductions: normalizeTransportDeductions(raw.transportDeductions),
+    payrollDeductions: normalizePayrollDeductions(raw.payrollDeductions),
     transactions: normalizeTransactions(raw.transactions),
     castSales: Array.isArray(raw.castSales) ? raw.castSales : [],
     castWork: normalizeWorkRows(raw.castWork || raw.castHours, false).filter((row) => !row.isTrial),
@@ -213,6 +215,29 @@ function normalizeMoneyRows(rows, labelKey) {
     [labelKey]: String(row[labelKey] || ""),
     amount: toNumber(row.amount)
   }));
+}
+
+function normalizeTransportDeductions(rows) {
+  if (!Array.isArray(rows)) return [];
+  return rows.map((row) => ({
+    personType: "cast",
+    personId: String(row.personId || ""),
+    posCastId: String(row.posCastId || ""),
+    personName: String(row.personName || row.castName || row.name || ""),
+    amount: toNumber(row.amount)
+  })).filter((row) => row.amount > 0);
+}
+
+function normalizePayrollDeductions(rows) {
+  if (!Array.isArray(rows)) return [];
+  return rows.map((row) => ({
+    personType: row.personType === "staff" ? "staff" : "cast",
+    personId: String(row.personId || ""),
+    posCastId: String(row.posCastId || ""),
+    personName: String(row.personName || row.name || ""),
+    dailyPayment: toNumber(row.dailyPayment),
+    advancePayment: toNumber(row.advancePayment)
+  })).filter((row) => row.dailyPayment > 0 || row.advancePayment > 0);
 }
 
 function normalizeTrialWork(trialWork, castWork, trialCasts) {
@@ -1271,6 +1296,39 @@ function calculateTrialCastRewardRows(closings) {
     }))).sort((a, b) => b.businessDate.localeCompare(a.businessDate) || a.name.localeCompare(b.name, "ja"));
 }
 
+function deductionAmount(row) {
+  return toNumber(row.amount) + toNumber(row.dailyPayment) + toNumber(row.advancePayment);
+}
+
+function aggregatePersonDeductions(closings, members, personType) {
+  const map = new Map();
+  const add = (raw) => {
+    const id = raw.personId || raw.posCastId || "";
+    const member = findMember(members, id, raw.personName);
+    const key = member?.personKey || member?.id || id || raw.personName || "unknown";
+    const current = map.get(key) || {
+      key,
+      name: member?.name || raw.personName || "",
+      transport: 0,
+      dailyPayment: 0,
+      advancePayment: 0,
+      total: 0
+    };
+    current.transport += toNumber(raw.amount);
+    current.dailyPayment += toNumber(raw.dailyPayment);
+    current.advancePayment += toNumber(raw.advancePayment);
+    current.total += deductionAmount(raw);
+    map.set(key, current);
+  };
+  closings.forEach((closing) => {
+    if (personType === "cast") closing.transportDeductions.forEach(add);
+    closing.payrollDeductions
+      .filter((row) => row.personType === personType)
+      .forEach(add);
+  });
+  return map;
+}
+
 function calculateCastRewardRows(rewardClosings = rewardMonthClosings()) {
   const salesRows = aggregateCastSales(rewardClosings);
   const workRows = aggregateWork(rewardClosings, "castWork");
@@ -1282,12 +1340,14 @@ function calculateCastRewardRows(rewardClosings = rewardMonthClosings()) {
     "id"
   );
   const trialCompMap = aggregateConvertedTrialCompensation(rewardClosings);
-  const keys = new Set([...salesMap.keys(), ...workMap.keys(), ...backMap.keys(), ...trialCompMap.keys()]);
+  const deductionMap = aggregatePersonDeductions(rewardClosings, castMembers, "cast");
+  const keys = new Set([...salesMap.keys(), ...workMap.keys(), ...backMap.keys(), ...trialCompMap.keys(), ...deductionMap.keys()]);
   return [...keys].map((key) => {
     const sales = salesMap.get(key) || {};
     const work = workMap.get(key) || {};
     const backs = backMap.get(key) || emptyCastBack(key, sales.name || work.name);
     const trialComp = trialCompMap.get(key) || { hours: 0, pay: 0, shifts: [], names: [], sales: 0 };
+    const deductions = deductionMap.get(key) || { transport: 0, dailyPayment: 0, advancePayment: 0, total: 0 };
     const member = findMember(castMembers, key, sales.name || work.name);
     if (member?.status === "trial") return null;
     const missingLiquorCosts = Array.isArray(backs.missingLiquorCosts)
@@ -1320,6 +1380,8 @@ function calculateCastRewardRows(rewardClosings = rewardMonthClosings()) {
     const trialPay = toNumber(trialComp.pay);
     const hourlyAndBackWithTrial = hourlyAndBack === null ? null : hourlyAndBack + trialPay;
     const salesRewardWithTrial = salesReward + trialPay;
+    const grossPayable = hourlyAndBack === null ? null : Math.max(hourlyAndBack, salesReward) + trialPay;
+    const payable = grossPayable === null ? null : Math.max(0, grossPayable - deductions.total);
     return {
       key,
       name: sales.name || work.name || backs.name || member?.name || "名称未設定",
@@ -1344,7 +1406,9 @@ function calculateCastRewardRows(rewardClosings = rewardMonthClosings()) {
       salesRewardLiquorCostDeduction,
       salesReward,
       salesRewardWithTrial,
-      payable: hourlyAndBack === null ? null : Math.max(hourlyAndBack, salesReward) + trialPay,
+      deductions,
+      grossPayable,
+      payable,
       calculationError
     };
   }).filter(Boolean).sort((a, b) => b.monthlySales - a.monthlySales);
@@ -1809,8 +1873,9 @@ function renderCastRewardSystem() {
 function calculateStaffPayrollRows(closings, month = closings[0]?.businessDate?.slice(0, 7) || "") {
   const workRows = aggregateWork(closings, "staffWork");
   const workMap = new Map(workRows.map((row) => [String(row.id), row]));
+  const deductionMap = aggregatePersonDeductions(closings, staffMembers, "staff");
   const employees = staffMembers.filter((member) => member.employmentType === "employee" && member.status !== "departed");
-  const keys = new Set([...workMap.keys(), ...employees.map((member) => String(member.id))]);
+  const keys = new Set([...workMap.keys(), ...employees.map((member) => String(member.id)), ...deductionMap.keys()]);
   return [...keys].map((key) => {
     const row = workMap.get(key) || { id: key, name: "", hours: 0, days: new Set(), shifts: [], payType: "", payAmount: 0 };
     const member = findMember(staffMembers, row.id, row.name);
@@ -1825,6 +1890,8 @@ function calculateStaffPayrollRows(closings, month = closings[0]?.businessDate?.
     const allowance = closings.reduce((total, closing) => total + closing.allowances
       .filter((item) => (item.recipientName || item.recipient || "") === (row.name || member?.name))
       .reduce((sum, item) => sum + item.amount, 0), 0);
+    const deductions = deductionMap.get(key) || { dailyPayment: 0, advancePayment: 0, total: 0 };
+    const grossPayable = basePay + allowance;
     return {
       ...row,
       name: row.name || member?.name || "名称未設定",
@@ -1836,7 +1903,9 @@ function calculateStaffPayrollRows(closings, month = closings[0]?.businessDate?.
       payAmount,
       basePay,
       allowance,
-      payable: basePay + allowance
+      deductions,
+      grossPayable,
+      payable: Math.max(0, grossPayable - deductions.total)
     };
   }).sort((a, b) => Number(b.isEmployee) - Number(a.isEmployee) || a.name.localeCompare(b.name, "ja"));
 }
@@ -2191,6 +2260,12 @@ function openClosingDetail(id) {
   });
   body.appendChild(createTableBlock("経費", ["カテゴリ", "金額", "メモ"], closing.expenses, (row) => [row.category, yenCell(row.amount), row.note || ""]));
   body.appendChild(createTableBlock("手当", ["種類", "金額", "対象者"], closing.allowances, (row) => [row.type, yenCell(row.amount), row.recipientName || row.recipient || ""]));
+  body.appendChild(createTableBlock("送迎代控除", ["対象キャスト", "金額"], closing.transportDeductions, (row) => [
+    row.personName, yenCell(row.amount)
+  ]));
+  body.appendChild(createTableBlock("報酬・給与引き", ["対象者", "区分", "日払い", "立替金"], closing.payrollDeductions, (row) => [
+    row.personName, row.personType === "staff" ? "従業員" : "キャスト", yenCell(row.dailyPayment), yenCell(row.advancePayment)
+  ]));
   body.appendChild(createTableBlock("スタッフ勤務", ["スタッフ", "開始", "終了", "勤務時間"], closing.staffWork, (row) => [
     row.name, row.startTime || "", row.endTime || "", hoursCell(row.hours)
   ]));
@@ -2310,7 +2385,8 @@ function dailyCastRewardAmounts(closing, decisions) {
     "id"
   );
   const trialCompMap = aggregateConvertedTrialCompensation([closing]);
-  const keys = new Set([...salesMap.keys(), ...workMap.keys(), ...backMap.keys(), ...trialCompMap.keys()]);
+  const deductionMap = aggregatePersonDeductions([closing], castMembers, "cast");
+  const keys = new Set([...salesMap.keys(), ...workMap.keys(), ...backMap.keys(), ...trialCompMap.keys(), ...deductionMap.keys()]);
   let hourlyAndBack = 0;
   let salesReward = 0;
 
@@ -2321,14 +2397,15 @@ function dailyCastRewardAmounts(closing, decisions) {
     const work = workMap.get(key) || {};
     const backs = backMap.get(key) || {};
     const trialComp = trialCompMap.get(key) || {};
+    const deductions = deductionMap.get(key) || { total: 0 };
     const trialPay = toNumber(trialComp.pay);
     if (decision.mode === "sales") {
       const rewardBase = salesRewardBaseAfterLiquorCost(sales.totalAttributedSales, backs.champagneWineCost);
-      salesReward += Math.floor(rewardBase * decision.salesRewardRate);
+      salesReward += Math.max(0, Math.floor(rewardBase * decision.salesRewardRate) - deductions.total);
       hourlyAndBack += trialPay;
       return;
     }
-    hourlyAndBack += Math.round(decision.hourlyRate * toNumber(work.hours)) + toNumber(backs.total) + trialPay;
+    hourlyAndBack += Math.max(0, Math.round(decision.hourlyRate * toNumber(work.hours)) + toNumber(backs.total) + trialPay - deductions.total);
   });
 
   hourlyAndBack += calculateTrialCastRewardRows([closing]).reduce((sum, row) => sum + toNumber(row.payable), 0);
@@ -2336,6 +2413,7 @@ function dailyCastRewardAmounts(closing, decisions) {
 }
 
 function dailyNonEmployeeStaffPay(closing) {
+  const deductionMap = aggregatePersonDeductions([closing], staffMembers, "staff");
   return closing.staffWork.reduce((total, row) => {
     const member = findMember(staffMembers, row.id, row.name);
     if (member?.employmentType === "employee") return total;
@@ -2344,7 +2422,8 @@ function dailyNonEmployeeStaffPay(closing) {
     const basePay = payType === "hourly"
       ? Math.round(payAmount * toNumber(row.hours))
       : payType === "daily" ? payAmount : 0;
-    return total + basePay;
+    const deductions = deductionMap.get(member?.id || row.id) || { total: 0 };
+    return total + Math.max(0, basePay - deductions.total);
   }, 0);
 }
 
