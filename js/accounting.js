@@ -1242,7 +1242,9 @@ function calculateCastRewardRows(rewardClosings = rewardMonthClosings()) {
     const hourlyBase = calculationError ? null : Math.round(hourlyRate * toNumber(work.hours));
     const hourlyAndBack = hourlyBase === null ? null : hourlyBase + backs.total;
     const salesRewardRate = castSalesRewardRate(monthlySales);
-    const salesReward = Math.floor(monthlySales * salesRewardRate);
+    const salesRewardBase = salesRewardBaseAfterLiquorCost(monthlySales, backs.champagneWineCost);
+    const salesRewardLiquorCostDeduction = monthlySales - salesRewardBase;
+    const salesReward = Math.floor(salesRewardBase * salesRewardRate);
     const trialPay = toNumber(trialComp.pay);
     const hourlyAndBackWithTrial = hourlyAndBack === null ? null : hourlyAndBack + trialPay;
     const salesRewardWithTrial = salesReward + trialPay;
@@ -1266,6 +1268,8 @@ function calculateCastRewardRows(rewardClosings = rewardMonthClosings()) {
       hourlyAndBack,
       hourlyAndBackWithTrial,
       salesRewardRate,
+      salesRewardBase,
+      salesRewardLiquorCostDeduction,
       salesReward,
       salesRewardWithTrial,
       payable: hourlyAndBack === null ? null : Math.max(hourlyAndBack, salesReward) + trialPay,
@@ -1500,6 +1504,10 @@ function castSalesRewardRate(sales) {
   if (sales >= 2010000) return 0.55;
   if (sales >= 1310000) return 0.50;
   return 0;
+}
+
+function salesRewardBaseAfterLiquorCost(sales, champagneWineCost) {
+  return Math.max(0, toNumber(sales) - Math.floor(toNumber(champagneWineCost) * 0.5));
 }
 
 function aggregateCastBacks(items) {
@@ -2243,7 +2251,8 @@ function dailyCastRewardAmounts(closing, decisions) {
     const trialComp = trialCompMap.get(key) || {};
     const trialPay = toNumber(trialComp.pay);
     if (decision.mode === "sales") {
-      salesReward += Math.floor(toNumber(sales.totalAttributedSales) * decision.salesRewardRate);
+      const rewardBase = salesRewardBaseAfterLiquorCost(sales.totalAttributedSales, backs.champagneWineCost);
+      salesReward += Math.floor(rewardBase * decision.salesRewardRate);
       hourlyAndBack += trialPay;
       return;
     }
