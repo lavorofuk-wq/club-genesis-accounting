@@ -163,7 +163,7 @@
         <div id="summaryCards" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6"></div>
         <section class="section-shell">
           <div class="section-title"><h2>収支・日次確定データ</h2></div>
-          <div class="overflow-x-auto"><table class="data-table"><thead><tr><th>日付</th><th>総売上</th><th>現金</th><th>カード</th><th>経費</th><th>手当</th><th>推定収支</th><th>詳細</th></tr></thead><tbody id="finalizedTableBody"></tbody></table></div>
+          <div class="overflow-x-auto"><table class="data-table"><thead><tr><th>日付</th><th>総売上</th><th>現金</th><th>カード</th><th>経費</th><th>手当</th><th>推定収支</th><th>詳細</th><th>削除</th></tr></thead><tbody id="finalizedTableBody"></tbody></table></div>
         </section>
         <section class="section-shell">
           <div class="section-title"><h2>各キャスト売上データ</h2></div>
@@ -453,6 +453,48 @@
     </div>
   </dialog>
 
+  <dialog id="deleteFinalizedStepOneModal" class="modal-card">
+    <div>
+      <p class="brand-kicker">DELETE FINALIZED DATA</p>
+      <h2 class="mt-2 text-xl font-bold text-slate-900">確定データを削除</h2>
+      <div class="alert alert-error mt-4">
+        <strong id="deleteFinalizedTarget"></strong>
+        <p class="mt-1">1回目の確認です。この操作は確定済みの経理データを完全に削除します。</p>
+      </div>
+      <label class="form-label mt-5" for="deleteFinalizedInput">
+        確認のため「削除」と入力してください
+      </label>
+      <input
+        id="deleteFinalizedInput"
+        type="text"
+        class="form-input"
+        autocomplete="off"
+        maxlength="2"
+        placeholder="削除"
+      >
+      <div id="deleteFinalizedError" class="hidden alert alert-error mt-4"></div>
+      <div class="mt-6 flex justify-end gap-3">
+        <button id="cancelDeleteFinalizedButton" type="button" class="secondary-button">キャンセル</button>
+        <button id="openDeleteFinalizedStepTwoButton" type="button" class="danger-button" disabled>次の警告へ進む</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="deleteFinalizedStepTwoModal" class="modal-card">
+    <div>
+      <p class="brand-kicker">FINAL WARNING</p>
+      <h2 class="mt-2 text-xl font-bold text-slate-900">最終確認</h2>
+      <div class="alert alert-error mt-4">
+        <strong id="deleteFinalizedFinalTarget"></strong>
+        <p class="mt-1">2回目の警告です。削除後はこの画面から復元できません。</p>
+      </div>
+      <div class="mt-6 flex justify-end gap-3">
+        <button id="backDeleteFinalizedButton" type="button" class="secondary-button">戻る</button>
+        <button id="confirmDeleteFinalizedButton" type="button" class="danger-button">完全に削除する</button>
+      </div>
+    </div>
+  </dialog>
+
   <dialog id="closingDetailModal" class="modal-card modal-wide">
     <div>
       <div class="flex items-start justify-between gap-4">
@@ -464,6 +506,6 @@
   </dialog>
 
   <script src="js/vendor/exceljs.min.js"></script>
-  <script type="module" src="js/accounting.js?v=1.41"></script>
+  <script type="module" src="js/accounting.js?v=1.42"></script>
 </body>
 </html>

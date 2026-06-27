@@ -47,6 +47,7 @@ let fixedExpenseLoadError = null;
 let liquorCostLoadError = null;
 let editingClosing = null;
 let deletingClosing = null;
+let deletingFinalizedClosing = null;
 let editingLiquorCostId = "";
 
 const byId = (id) => document.getElementById(id);
@@ -64,6 +65,11 @@ byId("finalizeReceivedButton").addEventListener("click", () => saveReceived(true
 byId("cancelDeleteReceivedButton").addEventListener("click", closeDeleteReceivedModal);
 byId("deleteReceivedInput").addEventListener("input", updateDeleteConfirmation);
 byId("confirmDeleteReceivedButton").addEventListener("click", deleteReceived);
+byId("cancelDeleteFinalizedButton").addEventListener("click", closeDeleteFinalizedModals);
+byId("deleteFinalizedInput").addEventListener("input", updateDeleteFinalizedConfirmation);
+byId("openDeleteFinalizedStepTwoButton").addEventListener("click", openDeleteFinalizedStepTwoModal);
+byId("backDeleteFinalizedButton").addEventListener("click", backDeleteFinalizedStepOne);
+byId("confirmDeleteFinalizedButton").addEventListener("click", deleteFinalized);
 byId("loadFixedExpenseButton").addEventListener("click", renderFixedExpenseForm);
 byId("saveFixedExpenseButton").addEventListener("click", saveFixedExpenses);
 byId("fixedExpenseMonth").addEventListener("change", renderFixedExpenseForm);
@@ -517,6 +523,64 @@ async function deleteReceived() {
   }
 }
 
+function openDeleteFinalizedStepOneModal(id) {
+  deletingFinalizedClosing = finalizedClosings.find((item) => item.id === id);
+  if (!deletingFinalizedClosing) return;
+  byId("deleteFinalizedTarget").textContent = `${deletingFinalizedClosing.businessDate} の確定データを完全に削除します。`;
+  byId("deleteFinalizedFinalTarget").textContent = `${deletingFinalizedClosing.businessDate} の確定データ`;
+  byId("deleteFinalizedInput").value = "";
+  byId("openDeleteFinalizedStepTwoButton").disabled = true;
+  byId("confirmDeleteFinalizedButton").disabled = false;
+  hideMessage("deleteFinalizedError");
+  byId("deleteFinalizedStepTwoModal").close();
+  byId("deleteFinalizedStepOneModal").showModal();
+  byId("deleteFinalizedInput").focus();
+}
+
+function closeDeleteFinalizedModals() {
+  byId("deleteFinalizedStepOneModal").close();
+  byId("deleteFinalizedStepTwoModal").close();
+  byId("deleteFinalizedInput").value = "";
+  byId("openDeleteFinalizedStepTwoButton").disabled = true;
+  byId("confirmDeleteFinalizedButton").disabled = false;
+  hideMessage("deleteFinalizedError");
+  deletingFinalizedClosing = null;
+}
+
+function updateDeleteFinalizedConfirmation() {
+  byId("openDeleteFinalizedStepTwoButton").disabled = byId("deleteFinalizedInput").value !== "削除";
+}
+
+function openDeleteFinalizedStepTwoModal() {
+  if (!deletingFinalizedClosing || byId("deleteFinalizedInput").value !== "削除") return;
+  byId("deleteFinalizedStepOneModal").close();
+  byId("deleteFinalizedStepTwoModal").showModal();
+}
+
+function backDeleteFinalizedStepOne() {
+  byId("deleteFinalizedStepTwoModal").close();
+  byId("deleteFinalizedStepOneModal").showModal();
+  byId("deleteFinalizedInput").focus();
+}
+
+async function deleteFinalized() {
+  if (!deletingFinalizedClosing || byId("deleteFinalizedInput").value !== "削除") return;
+  const target = deletingFinalizedClosing;
+  const button = byId("confirmDeleteFinalizedButton");
+  button.disabled = true;
+  try {
+    await deleteDoc(doc(db, closingsCollectionName, target.id));
+    closeDeleteFinalizedModals();
+    await loadData();
+    showMessage("successMessage", `${target.businessDate} の確定データを削除しました。`);
+  } catch (error) {
+    byId("deleteFinalizedStepTwoModal").close();
+    byId("deleteFinalizedStepOneModal").showModal();
+    showMessage("deleteFinalizedError", `確定データを削除できませんでした。${error.message}`);
+    button.disabled = false;
+  }
+}
+
 function openReceivedEdit(id) {
   editingClosing = receivedClosings.find((item) => item.id === id);
   if (!editingClosing) return;
@@ -931,7 +995,7 @@ function renderFinalizedTable() {
   const body = byId("finalizedTableBody");
   body.replaceChildren();
   if (!visibleFinalized.length) {
-    appendEmptyTableRow(body, 8, "指定期間の確定データはありません。");
+    appendEmptyTableRow(body, 9, "指定期間の確定データはありません。");
     return;
   }
   visibleFinalized.forEach((closing) => {
@@ -954,8 +1018,16 @@ function renderFinalizedTable() {
     button.className = "secondary-button";
     button.textContent = "詳細";
     button.addEventListener("click", () => openClosingDetail(closing.id));
+    const deleteAction = document.createElement("td");
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "danger-button";
+    deleteButton.textContent = "削除";
+    deleteButton.addEventListener("click", () => openDeleteFinalizedStepOneModal(closing.id));
     action.appendChild(button);
+    deleteAction.appendChild(deleteButton);
     tr.appendChild(action);
+    tr.appendChild(deleteAction);
     body.appendChild(tr);
   });
 }
