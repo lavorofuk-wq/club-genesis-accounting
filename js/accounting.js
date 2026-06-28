@@ -675,12 +675,12 @@ function createMoneyRow(kind, options, value) {
   note.type = "text";
   note.maxLength = "120";
   note.className = "form-input edit-note";
-  note.placeholder = "その他の備考（必須）";
+  note.placeholder = "備考（任意）";
   note.value = kind === "expense" ? value.detail : value.note;
   if (kind === "expense") {
     detail.type = "text";
     detail.maxLength = "120";
-    detail.placeholder = "その他の備考（必須）";
+    detail.placeholder = "備考（任意）";
     detail.value = value.detail;
   }
   const refreshRecipient = () => {
@@ -708,19 +708,12 @@ function createMoneyRow(kind, options, value) {
       detail.value = legacy.value;
     }
   };
-  const updateNote = () => {
-    const required = select.value === "その他";
-    const target = kind === "expense" ? detail : note;
-    target.classList.toggle("hidden", !required);
-    if (!required) target.classList.remove("invalid");
-  };
   select.addEventListener("change", () => {
     if (kind === "allowance") {
       value.recipientId = "";
       value.detail = "";
       refreshRecipient();
     }
-    updateNote();
   });
   const remove = document.createElement("button");
   remove.type = "button";
@@ -731,7 +724,6 @@ function createMoneyRow(kind, options, value) {
   if (kind === "allowance") row.appendChild(note);
   row.appendChild(remove);
   refreshRecipient();
-  updateNote();
   return row;
 }
 
@@ -761,6 +753,18 @@ function renderReceivedTransactions(closing) {
     closing.trialWork,
     (row) => [row.name, row.startTime, row.endTime, hoursCell(row.hours), row.introducerName, yenCell(row.hourlyRate)]
   ));
+  root.appendChild(createTableBlock("送迎代控除", ["対象キャスト", "金額"], closing.transportDeductions, (row) => [
+    row.personName, yenCell(row.amount)
+  ]));
+  root.appendChild(createTableBlock("報酬・給与引き", ["対象者", "区分", "日払い", "立替金"], closing.payrollDeductions, (row) => [
+    row.personName, row.personType === "staff" ? "従業員" : "キャスト", yenCell(row.dailyPayment), yenCell(row.advancePayment)
+  ]));
+  root.appendChild(createTableBlock("従業員勤務時間", ["従業員", "開始", "終了", "勤務時間"], closing.staffWork, (row) => [
+    row.name, row.startTime || "入力対象外", row.endTime || "入力対象外", row.hours > 0 ? hoursCell(row.hours) : "入力対象外"
+  ]));
+  root.appendChild(createTableBlock("キャスト勤務時間", ["キャスト", "開始", "終了", "勤務時間"], closing.castWork, (row) => [
+    row.name, row.startTime || "", row.endTime || "", hoursCell(row.hours)
+  ]));
 }
 
 async function saveReceived(finalize) {
@@ -877,7 +881,6 @@ function collectMoneyRows(rootId, labelKey) {
     const recipientId = detailControl.tagName === "SELECT" ? detailControl.value : "";
     const note = row.querySelector(".edit-note")?.value.trim() || (labelKey === "category" ? detail : "");
     if (!Number.isInteger(amount) || amount < 0) throw new Error("経費・手当の金額は0以上の整数で入力してください。");
-    if (label === "その他" && !note) throw new Error("「その他」の備考を入力してください。");
     if (labelKey === "type" && !detail) throw new Error("手当の支給対象者を選択してください。");
     if (labelKey === "type" && !String(recipientId).startsWith("legacy:")) {
       const isCast = castMembers.some((member) => member.id === recipientId && member.status === "active");
