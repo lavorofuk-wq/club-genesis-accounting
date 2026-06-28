@@ -198,6 +198,7 @@
             <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
           </div>
         </div>
+        <label class="mb-5 block max-w-sm">名前検索<input id="castRewardSearch" type="search" maxlength="40" class="form-input mt-2" placeholder="キャスト名"></label>
         <div id="castRewardList" class="payroll-list"></div>
       </section>
 
@@ -304,6 +305,7 @@
           <div><h2>体入キャスト報酬</h2><p class="mt-1 text-sm text-slate-500">体入キャストは当日時給と勤務時間だけで計算し、紹介料の対象には含めません。</p></div>
           <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
         </div>
+        <label class="mb-5 block max-w-sm">名前検索<input id="trialCastRewardSearch" type="search" maxlength="40" class="form-input mt-2" placeholder="体入キャスト名"></label>
         <div id="trialCastRewardList" class="payroll-list"></div>
       </section>
 
@@ -317,6 +319,7 @@
         </div>
         <div class="mb-5 grid gap-4 md:grid-cols-3">
           <label>対象月<input id="staffSalaryMonth" type="month" class="form-input mt-2"></label>
+          <label>名前検索<input id="staffPayrollSearch" type="search" maxlength="40" class="form-input mt-2" placeholder="従業員名"></label>
           <div class="flex items-end"><button id="loadStaffSalaryButton" type="button" class="secondary-button w-full">対象月を表示</button></div>
           <div class="flex items-end"><button id="saveEmployeeSalariesButton" type="button" class="primary-button w-full">社員月給を保存</button></div>
         </div>
@@ -336,6 +339,7 @@
           </div>
         </div>
         <div id="introducerFeeSummary" class="grid gap-4 sm:grid-cols-3"></div>
+        <label class="mt-5 block max-w-sm">名前検索<input id="introducerFeeSearch" type="search" maxlength="40" class="form-input mt-2" placeholder="キャスト名・紹介者名"></label>
         <div id="introducerFeeList" class="payroll-list mt-5"></div>
       </section>
 
@@ -494,6 +498,6 @@
   </dialog>
 
   <script src="js/vendor/exceljs.min.js"></script>
-  <script type="module" src="js/accounting.js?v=1.48"></script>
+  <script type="module" src="js/accounting.js?v=1.49"></script>
 </body>
 </html>

@@ -82,6 +82,10 @@ byId("exportStaffPayrollXlsxButton").addEventListener("click", exportStaffPayrol
 byId("exportIntroducerFeesXlsxButton").addEventListener("click", exportIntroducerFeesXlsx);
 byId("loadStaffSalaryButton").addEventListener("click", renderStaffPayroll);
 byId("staffSalaryMonth").addEventListener("change", renderStaffPayroll);
+byId("castRewardSearch").addEventListener("input", renderCastRewards);
+byId("trialCastRewardSearch").addEventListener("input", renderTrialCastRewards);
+byId("staffPayrollSearch").addEventListener("input", renderStaffPayroll);
+byId("introducerFeeSearch").addEventListener("input", renderIntroducerFees);
 byId("saveEmployeeSalariesButton").addEventListener("click", saveEmployeeSalaries);
 byId("castRewardSystemSearch").addEventListener("input", renderCastRewardSystem);
 byId("castRewardSystemFilter").addEventListener("change", renderCastRewardSystem);
@@ -252,6 +256,15 @@ function personTypeLabel(type) {
   if (type === "staff") return "従業員";
   if (type === "trial") return "体入キャスト";
   return "キャスト";
+}
+
+function searchQuery(id) {
+  return String(byId(id)?.value || "").trim().toLocaleLowerCase("ja");
+}
+
+function nameMatches(query, ...values) {
+  if (!query) return true;
+  return values.some((value) => String(value || "").toLocaleLowerCase("ja").includes(query));
 }
 
 function normalizeTrialWork(trialWork, castWork, trialCasts) {
@@ -1063,7 +1076,8 @@ function renderBreakdown(id, data) {
 }
 
 function renderCastRewards() {
-  const rewardRows = calculateCastRewardRows();
+  const query = searchQuery("castRewardSearch");
+  const rewardRows = calculateCastRewardRows().filter((row) => nameMatches(query, row.name, row.member?.name, row.trialNames?.join(" ")));
   const root = byId("castRewardList");
   root.replaceChildren();
   const month = byId("startDate").value.slice(0, 7);
@@ -1111,7 +1125,10 @@ function renderTrialCastRewards() {
   updateVisibleFinalized();
   const root = byId("trialCastRewardList");
   root.replaceChildren();
-  const rows = calculateTrialCastRewardRows(visibleFinalized);
+  const query = searchQuery("trialCastRewardSearch");
+  const rows = calculateTrialCastRewardRows(visibleFinalized).filter((row) =>
+    nameMatches(query, row.name, trialCastDisplayName(row), row.introducerName)
+  );
   if (!rows.length) {
     root.appendChild(emptyMessage("指定期間の体入キャスト勤務データはありません。"));
     return;
@@ -1674,7 +1691,10 @@ function renderStaffPayroll() {
   const month = byId("staffSalaryMonth").value || byId("startDate").value.slice(0, 7);
   byId("staffSalaryMonth").value = month;
   const monthClosings = finalizedClosings.filter((closing) => closing.businessDate.startsWith(`${month}-`));
-  const rows = calculateStaffPayrollRows(monthClosings, month);
+  const query = searchQuery("staffPayrollSearch");
+  const rows = calculateStaffPayrollRows(monthClosings, month).filter((row) =>
+    nameMatches(query, row.name, row.member?.name)
+  );
   const root = byId("staffPayrollList");
   root.replaceChildren();
   byId("staffSalaryStatus").textContent = `${month.replace("-", "年")}月の給与を表示しています。社員は月給、アルバイトは勤務実績から計算します。`;
@@ -1931,7 +1951,10 @@ async function exportStaffPayrollXlsx() {
 
 async function exportIntroducerFeesXlsx() {
   const month = byId("startDate").value.slice(0, 7);
-  const rows = calculateIntroducerFeeRows(calculateCastRewardRows());
+  const query = searchQuery("introducerFeeSearch");
+  const rows = calculateIntroducerFeeRows(calculateCastRewardRows()).filter((row) =>
+    nameMatches(query, row.castName, row.introducerName)
+  );
   await exportStatementWorkbook({
     buttonId: "exportIntroducerFeesXlsxButton",
     fileName: `introducer_fees_${month.replace("-", "")}.xlsx`,
