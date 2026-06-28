@@ -404,23 +404,11 @@
         <div><p class="brand-kicker">ACCOUNTING REVIEW</p><h2 id="receivedEditTitle" class="mt-2 text-xl font-bold">受信データ確認</h2></div>
         <button id="closeReceivedEditButton" type="button" class="secondary-button">閉じる</button>
       </div>
-      <div class="mt-5 grid gap-4 md:grid-cols-3">
-        <label>総売上<input id="editTotalSales" type="number" min="0" step="1" class="form-input mt-2"></label>
-        <label>現金売上<input id="editCashSales" type="number" min="0" step="1" class="form-input mt-2"></label>
-        <label>カード売上<input id="editCardSales" type="number" min="0" step="1" class="form-input mt-2"></label>
-        <label>来店組数<input id="editGroupCount" type="number" min="0" step="1" class="form-input mt-2"></label>
-        <label>総客数<input id="editTotalCustomers" type="number" min="0" step="1" class="form-input mt-2"></label>
-        <label>本指名<input id="editHonShimei" type="number" min="0" step="1" class="form-input mt-2"></label>
-        <label>場内指名<input id="editJonai" type="number" min="0" step="1" class="form-input mt-2"></label>
-      </div>
-      <div class="received-money-grid mt-5">
-        <div><div class="mb-2 flex items-center justify-between"><h3 class="font-bold">経費</h3><button id="addEditExpenseButton" type="button" class="secondary-button">追加</button></div><div id="editExpenseRows" class="space-y-2"></div></div>
-        <div><div class="mb-2 flex items-center justify-between"><h3 class="font-bold">手当</h3><button id="addEditAllowanceButton" type="button" class="secondary-button">追加</button></div><div id="editAllowanceRows" class="space-y-2"></div></div>
-      </div>
+      <div class="notice mt-5">受信データは経理側では編集できません。変更が必要な場合は、店舗作業フォームから修正済みデータを再送信してください。</div>
+      <div id="receivedReadonlySummary" class="mt-5"></div>
       <div id="receivedTransactionSummary" class="mt-5"></div>
       <div id="receivedEditError" class="hidden alert alert-error mt-4"></div>
       <div class="mt-6 flex justify-end gap-3">
-        <button id="saveReceivedDraftButton" type="button" class="secondary-button">編集内容を保存</button>
         <button id="finalizeReceivedButton" type="button" class="primary-button">経理確定する</button>
       </div>
     </div>
@@ -506,6 +494,6 @@
   </dialog>
 
   <script src="js/vendor/exceljs.min.js"></script>
-  <script type="module" src="js/accounting.js?v=1.46"></script>
+  <script type="module" src="js/accounting.js?v=1.47"></script>
 </body>
 </html>

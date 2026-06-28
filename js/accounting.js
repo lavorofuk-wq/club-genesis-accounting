@@ -20,8 +20,6 @@ import { initInternalMail } from "./internal-mail.js";
 import { deleteDoc } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore.js";
 
 const yen = new Intl.NumberFormat("ja-JP");
-const expenseCategories = ["酒代", "広告宣伝①", "広告宣伝②", "消耗品/備品", "交際費", "交通費", "その他", "美容室"];
-const allowanceTypes = ["美容室", "遠方手当", "送迎手当", "その他"];
 const fixedExpenseFields = [
   ["rent", "賃料"],
   ["karaoke", "カラオケ"],
@@ -58,10 +56,7 @@ byId("loadButton").addEventListener("click", renderFinalizedView);
 byId("exportCsvButton").addEventListener("click", exportCsv);
 byId("closeReceivedEditButton").addEventListener("click", () => byId("receivedEditModal").close());
 byId("closeClosingDetailButton").addEventListener("click", () => byId("closingDetailModal").close());
-byId("addEditExpenseButton").addEventListener("click", () => addExpenseRow());
-byId("addEditAllowanceButton").addEventListener("click", () => addAllowanceRow());
-byId("saveReceivedDraftButton").addEventListener("click", () => saveReceived(false));
-byId("finalizeReceivedButton").addEventListener("click", () => saveReceived(true));
+byId("finalizeReceivedButton").addEventListener("click", finalizeReceived);
 byId("cancelDeleteReceivedButton").addEventListener("click", closeDeleteReceivedModal);
 byId("deleteReceivedInput").addEventListener("input", updateDeleteConfirmation);
 byId("confirmDeleteReceivedButton").addEventListener("click", deleteReceived);
@@ -610,128 +605,31 @@ function openReceivedEdit(id) {
   editingClosing = receivedClosings.find((item) => item.id === id);
   if (!editingClosing) return;
   byId("receivedEditTitle").textContent = `${editingClosing.businessDate} 受信データ確認`;
-  setInput("editTotalSales", editingClosing.totalSales);
-  setInput("editCashSales", editingClosing.cashSales);
-  setInput("editCardSales", editingClosing.cardSales);
-  setInput("editGroupCount", editingClosing.groupCount);
-  setInput("editTotalCustomers", editingClosing.totalCustomers);
-  setInput("editHonShimei", editingClosing.honShimei);
-  setInput("editJonai", editingClosing.jonai);
-  byId("editExpenseRows").replaceChildren();
-  byId("editAllowanceRows").replaceChildren();
-  editingClosing.expenses.forEach(addExpenseRow);
-  editingClosing.allowances.forEach(addAllowanceRow);
+  renderReceivedReadonlySummary(editingClosing);
   renderReceivedTransactions(editingClosing);
   hideMessage("receivedEditError");
   byId("receivedEditModal").showModal();
 }
 
-function addExpenseRow(value = {}) {
-  byId("editExpenseRows").appendChild(createMoneyRow("expense", expenseCategories, {
-    label: value.category || "酒代",
-    amount: value.amount || 0,
-    detail: value.note || ""
-  }));
-}
-
-function addAllowanceRow(value = {}) {
-  byId("editAllowanceRows").appendChild(createMoneyRow("allowance", allowanceTypes, {
-    label: value.type || "その他",
-    amount: value.amount || 0,
-    detail: value.recipientName || value.recipient || "",
-    recipientId: value.recipientId || "",
-    note: value.note || ""
-  }));
-}
-
-function createMoneyRow(kind, options, value) {
-  const row = document.createElement("div");
-  row.className = `dynamic-row ${kind}-row`;
-  const select = document.createElement("select");
-  select.className = "form-input edit-label";
-  options.forEach((option) => {
-    const el = document.createElement("option");
-    el.value = option;
-    el.textContent = option;
-    el.selected = option === value.label;
-    select.appendChild(el);
-  });
-  if (value.label && !options.includes(value.label)) {
-    const legacy = document.createElement("option");
-    legacy.value = value.label;
-    legacy.textContent = `${value.label}（旧データ）`;
-    legacy.selected = true;
-    select.appendChild(legacy);
-  }
-  const amount = document.createElement("input");
-  amount.type = "number";
-  amount.min = "0";
-  amount.step = "1";
-  amount.className = "form-input edit-amount";
-  amount.value = value.amount;
-  const detail = kind === "expense" ? document.createElement("input") : document.createElement("select");
-  detail.className = kind === "expense" ? "form-input edit-detail" : "form-select edit-detail";
-  const note = document.createElement("input");
-  note.type = "text";
-  note.maxLength = "120";
-  note.className = "form-input edit-note";
-  note.placeholder = "備考（任意）";
-  note.value = kind === "expense" ? value.detail : value.note;
-  if (kind === "expense") {
-    detail.type = "text";
-    detail.maxLength = "120";
-    detail.placeholder = "備考（任意）";
-    detail.value = value.detail;
-  }
-  const refreshRecipient = () => {
-    if (kind !== "allowance") return;
-    const members = select.value === "美容室"
-      ? castMembers.filter((member) => member.status === "active")
-      : staffMembers.filter((member) => member.status !== "departed");
-    detail.replaceChildren(makeSelectOption("", "支給対象者を選択"));
-    members.forEach((member) => {
-      const option = makeSelectOption(member.id, member.name);
-      option.dataset.name = member.name;
-      detail.appendChild(option);
-    });
-    const matched = members.find((member) =>
-      member.id === value.recipientId
-      || member.name === value.detail
-      || (select.value === "美容室" && String(member.posCastId || "") === String(value.recipientId || ""))
-    );
-    if (matched) {
-      detail.value = matched.id;
-    } else if (value.detail) {
-      const legacy = makeSelectOption(value.recipientId || `legacy:${value.detail}`, `${value.detail}（旧データ）`);
-      legacy.dataset.name = value.detail;
-      detail.appendChild(legacy);
-      detail.value = legacy.value;
-    }
-  };
-  select.addEventListener("change", () => {
-    if (kind === "allowance") {
-      value.recipientId = "";
-      value.detail = "";
-      refreshRecipient();
-    }
-  });
-  const remove = document.createElement("button");
-  remove.type = "button";
-  remove.className = "danger-button";
-  remove.textContent = "削除";
-  remove.addEventListener("click", () => row.remove());
-  row.append(select, amount, detail);
-  if (kind === "allowance") row.appendChild(note);
-  row.appendChild(remove);
-  refreshRecipient();
-  return row;
-}
-
-function makeSelectOption(value, label) {
-  const option = document.createElement("option");
-  option.value = value;
-  option.textContent = label;
-  return option;
+function renderReceivedReadonlySummary(closing) {
+  const root = byId("receivedReadonlySummary");
+  root.replaceChildren();
+  root.appendChild(createTableBlock("売上・客数・指名", ["項目", "内容"], [
+    ["総売上", yenCell(closing.totalSales)],
+    ["現金売上", yenCell(closing.cashSales)],
+    ["カード売上", yenCell(closing.cardSales)],
+    ["来店組数", `${closing.groupCount}組`],
+    ["総客数", `${closing.totalCustomers}名`],
+    ["客単価", yenCell(closing.customerUnitPrice)],
+    ["本指名", `${closing.honShimei}件`],
+    ["場内指名", `${closing.jonai}件`]
+  ], (row) => row));
+  root.appendChild(createTableBlock("経費", ["カテゴリ", "金額", "備考"], closing.expenses, (row) => [
+    row.category, yenCell(row.amount), row.note || ""
+  ]));
+  root.appendChild(createTableBlock("手当", ["種類", "金額", "対象者", "備考"], closing.allowances, (row) => [
+    row.type, yenCell(row.amount), row.recipientName || row.recipient || "", row.note || ""
+  ]));
 }
 
 function renderReceivedTransactions(closing) {
@@ -767,131 +665,49 @@ function renderReceivedTransactions(closing) {
   ]));
 }
 
-async function saveReceived(finalize) {
+async function finalizeReceived() {
   if (!editingClosing) return;
   hideMessage("receivedEditError");
-  const saveButton = byId("saveReceivedDraftButton");
   const finalizeButton = byId("finalizeReceivedButton");
-  saveButton.disabled = true;
   finalizeButton.disabled = true;
   try {
-    const values = collectReceivedValues();
-    const status = finalize ? "finalized" : "submitted";
     const update = {
-      status,
-      sales: {
-        ...(editingClosing.raw.sales || {}),
-        totalSales: values.totalSales,
-        cashSales: values.cashSales,
-        cardSales: values.cardSales
-      },
-      customers: {
-        ...(editingClosing.raw.customers || {}),
-        groupCount: values.groupCount,
-        totalCustomers: values.totalCustomers,
-        customerUnitPrice: values.totalCustomers ? Math.floor(values.totalSales / values.totalCustomers) : 0
-      },
-      nominations: {
-        ...(editingClosing.raw.nominations || {}),
-        honShimeiCount: values.honShimei,
-        jonaiCount: values.jonai
-      },
-      expenses: values.expenses,
-      allowances: values.allowances,
-      accountingEditedBy: currentUser.uid,
-      accountingEditedEmail: currentUser.email || "",
-      accountingEditedAt: serverTimestamp(),
+      status: "finalized",
+      finalizedBy: currentUser.uid,
+      finalizedEmail: currentUser.email || "",
+      finalizedAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     };
-    if (finalize) {
-      update.finalizedBy = currentUser.uid;
-      update.finalizedEmail = currentUser.email || "";
-      update.finalizedAt = serverTimestamp();
-    }
     await setDoc(doc(db, closingsCollectionName, editingClosing.id), update, { merge: true });
-    if (finalize) {
-      await Promise.all(editingClosing.trialWork.map((row) => setDoc(
-        doc(db, trialCastCollectionName, trialCastRecordId(editingClosing.businessDate, row.id)),
-        {
-          businessDate: editingClosing.businessDate,
-          castId: row.id,
-          castName: row.name,
-          startTime: row.startTime,
-          endTime: row.endTime,
-          hours: row.hours,
-          introducerId: row.introducerId,
-          introducerName: row.introducerName,
-          introducerFeeSystem: row.introducerFeeSystem,
-          advisoryFeeEnabled: row.advisoryFeeEnabled === true,
-          hourlyRate: row.hourlyRate,
-          sourceClosingId: editingClosing.id,
-          updatedBy: currentUser.uid,
-          updatedAt: serverTimestamp()
-        },
-        { merge: true }
-      )));
-    }
+    await Promise.all(editingClosing.trialWork.map((row) => setDoc(
+      doc(db, trialCastCollectionName, trialCastRecordId(editingClosing.businessDate, row.id)),
+      {
+        businessDate: editingClosing.businessDate,
+        castId: row.id,
+        castName: row.name,
+        startTime: row.startTime,
+        endTime: row.endTime,
+        hours: row.hours,
+        introducerId: row.introducerId,
+        introducerName: row.introducerName,
+        introducerFeeSystem: row.introducerFeeSystem,
+        advisoryFeeEnabled: row.advisoryFeeEnabled === true,
+        hourlyRate: row.hourlyRate,
+        sourceClosingId: editingClosing.id,
+        updatedBy: currentUser.uid,
+        updatedAt: serverTimestamp()
+      },
+      { merge: true }
+    )));
     byId("receivedEditModal").close();
     editingClosing = null;
     await loadData();
-    showMessage("successMessage", finalize ? "経理データを確定しました。" : "経理編集内容を保存しました。");
+    showMessage("successMessage", "受信データをそのまま経理確定しました。");
   } catch (error) {
     showMessage("receivedEditError", error.message);
   } finally {
-    saveButton.disabled = false;
     finalizeButton.disabled = false;
   }
-}
-
-function collectReceivedValues() {
-  const fields = [
-    ["totalSales", "editTotalSales", "総売上"],
-    ["cashSales", "editCashSales", "現金売上"],
-    ["cardSales", "editCardSales", "カード売上"],
-    ["groupCount", "editGroupCount", "来店組数"],
-    ["totalCustomers", "editTotalCustomers", "総客数"],
-    ["honShimei", "editHonShimei", "本指名"],
-    ["jonai", "editJonai", "場内指名"]
-  ];
-  const result = {};
-  fields.forEach(([key, id, label]) => {
-    const value = Number(byId(id).value);
-    if (!Number.isInteger(value) || value < 0) throw new Error(`${label}は0以上の整数で入力してください。`);
-    result[key] = value;
-  });
-  result.expenses = collectMoneyRows("editExpenseRows", "category");
-  result.allowances = collectMoneyRows("editAllowanceRows", "type");
-  editingClosing.trialWork.forEach((row) => {
-    if (!row.name || !row.introducerName) throw new Error("体入キャスト名と紹介者を確認してください。");
-    if (row.hours <= 0 || !Number.isInteger(row.hourlyRate) || row.hourlyRate <= 0) {
-      throw new Error(`${row.name}の勤務時間または当日時給を確認してください。`);
-    }
-  });
-  return result;
-}
-
-function collectMoneyRows(rootId, labelKey) {
-  return [...byId(rootId).querySelectorAll(".dynamic-row")].map((row) => {
-    const label = row.querySelector(".edit-label").value;
-    const amount = Number(row.querySelector(".edit-amount").value);
-    const detailControl = row.querySelector(".edit-detail");
-    const detail = detailControl.tagName === "SELECT"
-      ? detailControl.selectedOptions[0]?.dataset.name || ""
-      : detailControl.value.trim();
-    const recipientId = detailControl.tagName === "SELECT" ? detailControl.value : "";
-    const note = row.querySelector(".edit-note")?.value.trim() || (labelKey === "category" ? detail : "");
-    if (!Number.isInteger(amount) || amount < 0) throw new Error("経費・手当の金額は0以上の整数で入力してください。");
-    if (labelKey === "type" && !detail) throw new Error("手当の支給対象者を選択してください。");
-    if (labelKey === "type" && !String(recipientId).startsWith("legacy:")) {
-      const isCast = castMembers.some((member) => member.id === recipientId && member.status === "active");
-      const isStaff = staffMembers.some((member) => member.id === recipientId && member.status !== "departed");
-      if (label === "美容室" && !isCast) throw new Error("美容室手当の対象者は在籍キャストから選択してください。");
-      if (label !== "美容室" && !isStaff) throw new Error(`${label}の対象者は在籍スタッフから選択してください。`);
-    }
-    return labelKey === "category"
-      ? { category: label, amount, note: detail }
-      : { type: label, amount, recipientId, recipient: detail, recipientName: detail, note };
-  });
 }
 
 function renderFinalizedView() {
@@ -2793,10 +2609,6 @@ function todayString() {
 
 function formatDate(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-}
-
-function setInput(id, value) {
-  byId(id).value = value;
 }
 
 function toNumber(value) {

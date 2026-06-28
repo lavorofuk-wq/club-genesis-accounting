@@ -745,11 +745,6 @@ body {
   padding: 12px;
 }
 
-.received-money-grid {
-  display: grid;
-  gap: 20px;
-}
-
 .detail-block h3 {
   margin-bottom: 10px;
   color: var(--text);
