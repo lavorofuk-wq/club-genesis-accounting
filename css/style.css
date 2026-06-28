@@ -379,6 +379,16 @@ body {
     grid-template-columns: 150px 140px minmax(170px, 1fr) minmax(180px, 1fr) auto;
   }
 
+  .dynamic-row.expense-row .danger-button,
+  .dynamic-row.allowance-row .danger-button,
+  .transport-deduction-row .danger-button,
+  .payroll-deduction-row .danger-button,
+  .transport-deduction-row .secondary-button,
+  .payroll-deduction-row .secondary-button {
+    min-width: 72px;
+    align-self: stretch;
+  }
+
   .dynamic-row.trial-cast-work-row {
     grid-template-columns: minmax(220px, 1.4fr) minmax(160px, 1fr) minmax(160px, 1fr);
     align-items: end;
