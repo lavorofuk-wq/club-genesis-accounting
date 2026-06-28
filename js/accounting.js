@@ -224,7 +224,7 @@ function normalizeMoneyRows(rows, labelKey) {
 function normalizeTransportDeductions(rows) {
   if (!Array.isArray(rows)) return [];
   return rows.map((row) => ({
-    personType: "cast",
+    personType: normalizePersonType(row.personType, "cast"),
     personId: String(row.personId || ""),
     posCastId: String(row.posCastId || ""),
     personName: String(row.personName || row.castName || row.name || ""),
@@ -235,13 +235,23 @@ function normalizeTransportDeductions(rows) {
 function normalizePayrollDeductions(rows) {
   if (!Array.isArray(rows)) return [];
   return rows.map((row) => ({
-    personType: row.personType === "staff" ? "staff" : "cast",
+    personType: normalizePersonType(row.personType, "cast"),
     personId: String(row.personId || ""),
     posCastId: String(row.posCastId || ""),
     personName: String(row.personName || row.name || ""),
     dailyPayment: toNumber(row.dailyPayment),
     advancePayment: toNumber(row.advancePayment)
   })).filter((row) => row.dailyPayment > 0 || row.advancePayment > 0);
+}
+
+function normalizePersonType(value, fallback = "cast") {
+  return ["cast", "trial", "staff"].includes(value) ? value : fallback;
+}
+
+function personTypeLabel(type) {
+  if (type === "staff") return "従業員";
+  if (type === "trial") return "体入キャスト";
+  return "キャスト";
 }
 
 function normalizeTrialWork(trialWork, castWork, trialCasts) {
@@ -672,11 +682,11 @@ function renderReceivedTransactions(closing) {
     closing.trialWork,
     (row) => [trialCastDisplayName(row), row.startTime, row.endTime, hoursCell(row.hours), row.introducerName, yenCell(row.hourlyRate)]
   ));
-  root.appendChild(createTableBlock("送迎代控除", ["対象キャスト", "金額"], closing.transportDeductions, (row) => [
-    row.personName, yenCell(row.amount)
+  root.appendChild(createTableBlock("送迎代控除", ["対象者", "区分", "金額"], closing.transportDeductions, (row) => [
+    row.personName, personTypeLabel(row.personType), yenCell(row.amount)
   ]));
   root.appendChild(createTableBlock("報酬・給与引き", ["対象者", "区分", "日払い", "立替金"], closing.payrollDeductions, (row) => [
-    row.personName, row.personType === "staff" ? "従業員" : "キャスト", yenCell(row.dailyPayment), yenCell(row.advancePayment)
+    row.personName, personTypeLabel(row.personType), yenCell(row.dailyPayment), yenCell(row.advancePayment)
   ]));
   root.appendChild(createTableBlock("従業員勤務時間", ["従業員", "開始", "終了", "勤務時間"], closing.staffWork, (row) => [
     row.name, row.startTime || "入力対象外", row.endTime || "入力対象外", row.hours > 0 ? hoursCell(row.hours) : "入力対象外"
@@ -1113,6 +1123,10 @@ function renderTrialCastRewards() {
       [
         ["勤務時間", hoursCell(row.hours)],
         ["当日時給", yenCell(row.hourlyRate)],
+        ["控除前報酬", yenCell(row.grossPayable)],
+        ["送迎代控除", yenCell(row.deductions.transport)],
+        ["日払い", yenCell(row.deductions.dailyPayment)],
+        ["立替金", yenCell(row.deductions.advancePayment)],
         ["体入報酬", yenCell(row.payable)]
       ]
     ));
@@ -1129,11 +1143,36 @@ function renderTrialCastRewards() {
 function calculateTrialCastRewardRows(closings) {
   return closings.flatMap((closing) => closing.trialWork
     .filter((row) => !isTrialConvertedIntoActiveMonth(row, closing.businessDate))
-    .map((row) => ({
-      ...row,
-      businessDate: closing.businessDate,
-      payable: Math.round(toNumber(row.hours) * toNumber(row.hourlyRate))
-    }))).sort((a, b) => b.businessDate.localeCompare(a.businessDate) || a.name.localeCompare(b.name, "ja"));
+    .map((row) => {
+      const deductions = trialRowDeductions(closing, row);
+      const grossPayable = Math.round(toNumber(row.hours) * toNumber(row.hourlyRate));
+      return {
+        ...row,
+        businessDate: closing.businessDate,
+        deductions,
+        grossPayable,
+        payable: Math.max(0, grossPayable - deductions.total)
+      };
+    })).sort((a, b) => b.businessDate.localeCompare(a.businessDate) || a.name.localeCompare(b.name, "ja"));
+}
+
+function trialRowDeductions(closing, trialRow) {
+  const matches = (row) => {
+    const id = String(trialRow.id || trialRow.castId || "");
+    return row.personType === "trial"
+      && (String(row.personId || row.posCastId || "") === id || row.personName === trialRow.name);
+  };
+  const result = { transport: 0, dailyPayment: 0, advancePayment: 0, total: 0 };
+  closing.transportDeductions.filter(matches).forEach((row) => {
+    result.transport += toNumber(row.amount);
+    result.total += deductionAmount(row);
+  });
+  closing.payrollDeductions.filter(matches).forEach((row) => {
+    result.dailyPayment += toNumber(row.dailyPayment);
+    result.advancePayment += toNumber(row.advancePayment);
+    result.total += deductionAmount(row);
+  });
+  return result;
 }
 
 function deductionAmount(row) {
@@ -1161,7 +1200,11 @@ function aggregatePersonDeductions(closings, members, personType) {
     map.set(key, current);
   };
   closings.forEach((closing) => {
-    if (personType === "cast") closing.transportDeductions.forEach(add);
+    if (personType === "cast" || personType === "trial") {
+      closing.transportDeductions
+        .filter((row) => (row.personType || "cast") === personType)
+        .forEach(add);
+    }
     closing.payrollDeductions
       .filter((row) => row.personType === personType)
       .forEach(add);
@@ -1315,14 +1358,19 @@ function isFormerTrialSource(member, sourceId) {
 
 function aggregateConvertedTrialCompensation(closings) {
   const map = new Map();
+  const findTrialRow = (closing, raw) => closing.trialWork.find((row) => {
+    const id = String(row.id || row.castId || "");
+    return id === String(raw.personId || raw.posCastId || "")
+      || row.name === raw.personName;
+  });
   closings.forEach((closing) => {
     closing.trialWork.forEach((row) => {
       const member = convertedTrialMemberFor(row, closing.businessDate);
       if (!member) return;
       const key = member.personKey || member.id;
-      const current = map.get(key) || { hours: 0, pay: 0, shifts: [], names: new Set(), sales: 0 };
+      const current = map.get(key) || { hours: 0, grossPay: 0, deductions: 0, pay: 0, shifts: [], names: new Set(), sales: 0 };
       current.hours += toNumber(row.hours);
-      current.pay += Math.round(toNumber(row.hours) * toNumber(row.hourlyRate));
+      current.grossPay += Math.round(toNumber(row.hours) * toNumber(row.hourlyRate));
       current.names.add(row.name);
       current.shifts.push({
         date: closing.businessDate,
@@ -1334,9 +1382,23 @@ function aggregateConvertedTrialCompensation(closings) {
       });
       map.set(key, current);
     });
+    [...closing.transportDeductions, ...closing.payrollDeductions]
+      .filter((row) => row.personType === "trial")
+      .forEach((deduction) => {
+        const trialRow = findTrialRow(closing, deduction);
+        if (!trialRow) return;
+        const member = convertedTrialMemberFor(trialRow, closing.businessDate);
+        if (!member) return;
+        const key = member.personKey || member.id;
+        const current = map.get(key);
+        if (!current) return;
+        current.deductions += deductionAmount(deduction);
+        map.set(key, current);
+      });
   });
   return new Map([...map.entries()].map(([key, row]) => [key, {
     ...row,
+    pay: Math.max(0, row.grossPay - row.deductions),
     names: [...row.names].filter(Boolean)
   }]));
 }
@@ -2100,11 +2162,11 @@ function openClosingDetail(id) {
   });
   body.appendChild(createTableBlock("経費", ["カテゴリ", "金額", "メモ"], closing.expenses, (row) => [row.category, yenCell(row.amount), row.note || ""]));
   body.appendChild(createTableBlock("手当", ["種類", "金額", "対象者"], closing.allowances, (row) => [row.type, yenCell(row.amount), row.recipientName || row.recipient || ""]));
-  body.appendChild(createTableBlock("送迎代控除", ["対象キャスト", "金額"], closing.transportDeductions, (row) => [
-    row.personName, yenCell(row.amount)
+  body.appendChild(createTableBlock("送迎代控除", ["対象者", "区分", "金額"], closing.transportDeductions, (row) => [
+    row.personName, personTypeLabel(row.personType), yenCell(row.amount)
   ]));
   body.appendChild(createTableBlock("報酬・給与引き", ["対象者", "区分", "日払い", "立替金"], closing.payrollDeductions, (row) => [
-    row.personName, row.personType === "staff" ? "従業員" : "キャスト", yenCell(row.dailyPayment), yenCell(row.advancePayment)
+    row.personName, personTypeLabel(row.personType), yenCell(row.dailyPayment), yenCell(row.advancePayment)
   ]));
   body.appendChild(createTableBlock("スタッフ勤務", ["スタッフ", "開始", "終了", "勤務時間"], closing.staffWork, (row) => [
     row.name, row.startTime || "", row.endTime || "", hoursCell(row.hours)

@@ -1616,13 +1616,14 @@ function addAllowanceRow(data = {}) {
     const savedId = data.recipientId || recipient.value;
     const savedName = data.recipientName || data.recipient || recipient.dataset.savedName || "";
     const members = type.value === "美容室"
-      ? currentCastWorkers()
+      ? [...currentCastWorkers(), ...currentTrialWorkers()]
       : currentStaffWorkers();
     recipient.replaceChildren(makeOption("", "支給対象者を選択"));
     members.forEach((member) => {
-      const option = makeOption(member.personId, member.personName);
+      const option = makeOption(member.personId, `${member.personName} / ${personTypeLabel(member.personType)}`);
       option.dataset.name = member.personName;
       option.dataset.posCastId = member.posCastId || "";
+      option.dataset.personType = member.personType;
       recipient.appendChild(option);
     });
     const matched = members.find((member) =>
@@ -1685,9 +1686,18 @@ function currentStaffWorkers() {
   }).filter(Boolean);
 }
 
+function currentTrialWorkers() {
+  return [...document.querySelectorAll(".trial-cast-work-row")].map((row) => ({
+    personType: "trial",
+    personId: row.dataset.castId || "",
+    posCastId: row.dataset.castId || "",
+    personName: row.dataset.castName || ""
+  })).filter((row) => row.personId || row.personName);
+}
+
 function existingTransportDeductions() {
   return [...document.querySelectorAll(".transport-deduction-row")].map((row) => ({
-    personType: "cast",
+    personType: row.dataset.personType || "cast",
     personId: row.dataset.personId || "",
     posCastId: row.dataset.posCastId || "",
     personName: row.dataset.personName || "",
@@ -1712,12 +1722,13 @@ function renderTransportDeductions(rows = []) {
   rows.filter((row) => Number(row.amount) > 0).forEach((data) => {
     const row = document.createElement("div");
     row.className = "dynamic-row transport-deduction-row";
+    row.dataset.personType = data.personType || "cast";
     row.dataset.personId = data.personId || "";
     row.dataset.posCastId = data.posCastId || "";
     row.dataset.personName = data.personName || "";
     row.dataset.amount = String(Number(data.amount || 0));
     const label = document.createElement("strong");
-    label.textContent = data.personName || "未設定";
+    label.textContent = `${data.personName || "未設定"} / ${personTypeLabel(data.personType || "cast")}`;
     const amount = document.createElement("span");
     amount.textContent = `送迎代 ${yen.format(Number(data.amount || 0))}円`;
     const edit = document.createElement("button");
@@ -1748,7 +1759,7 @@ function renderPayrollDeductions(rows = []) {
     row.dataset.dailyPayment = String(Number(data.dailyPayment || 0));
     row.dataset.advancePayment = String(Number(data.advancePayment || 0));
     const label = document.createElement("strong");
-    label.textContent = `${data.personName || "未設定"} / ${data.personType === "staff" ? "従業員" : "キャスト"}`;
+    label.textContent = `${data.personName || "未設定"} / ${personTypeLabel(data.personType)}`;
     const amount = document.createElement("span");
     amount.textContent = `日払い ${yen.format(Number(data.dailyPayment || 0))}円 / 立替金 ${yen.format(Number(data.advancePayment || 0))}円`;
     const edit = document.createElement("button");
@@ -1772,7 +1783,7 @@ function makePersonSelect(people, selectedKey = "") {
   select.appendChild(makeOption("", "対象者を選択"));
   people.forEach((person) => {
     const key = person.personId || person.posCastId || person.personName;
-    const option = makeOption(key, person.personName);
+    const option = makeOption(key, `${person.personName} / ${personTypeLabel(person.personType)}`);
     option.dataset.personType = person.personType;
     option.dataset.personId = person.personId;
     option.dataset.posCastId = person.posCastId || "";
@@ -1794,10 +1805,16 @@ function selectedPersonFromSelect(select) {
   };
 }
 
+function personTypeLabel(type) {
+  if (type === "staff") return "従業員";
+  if (type === "trial") return "体入キャスト";
+  return "キャスト";
+}
+
 function replaceTransportDeduction(data, originalKey = "") {
-  const key = data.personId || data.posCastId || data.personName;
+  const key = `${data.personType || "cast"}:${data.personId || data.posCastId || data.personName}`;
   const rows = existingTransportDeductions().filter((row) => {
-    const rowKey = row.personId || row.posCastId || row.personName;
+    const rowKey = `${row.personType || "cast"}:${row.personId || row.posCastId || row.personName}`;
     return rowKey !== key && (!originalKey || rowKey !== originalKey);
   });
   renderTransportDeductions([...rows, data]);
@@ -1815,9 +1832,9 @@ function replacePayrollDeduction(data, originalKey = "") {
 function openTransportDeductionModal(editData = null) {
   const root = document.getElementById("transportDeductionModalRows");
   root.replaceChildren();
-  const workers = currentCastWorkers();
+  const workers = [...currentCastWorkers(), ...currentTrialWorkers()];
   if (!workers.length) {
-    root.appendChild(emptyNotice("当日出勤しているキャストがいません。先にキャスト勤務を登録してください。"));
+    root.appendChild(emptyNotice("当日出勤しているキャスト・体入キャストがいません。先に勤務を登録してください。"));
   } else {
     const selectedKey = editData ? editData.personId || editData.posCastId || editData.personName : "";
     const form = document.createElement("div");
@@ -1825,7 +1842,7 @@ function openTransportDeductionModal(editData = null) {
     const personLabel = document.createElement("label");
     personLabel.className = "work-field-label";
     const personSelect = makePersonSelect(workers, selectedKey);
-    personLabel.append("送迎利用キャスト", personSelect);
+    personLabel.append("送迎利用者", personSelect);
     const amountLabel = document.createElement("label");
     amountLabel.className = "work-field-label";
     const amount = document.createElement("input");
@@ -1836,7 +1853,7 @@ function openTransportDeductionModal(editData = null) {
     amount.placeholder = "送迎代";
     amount.value = editData?.amount || "";
     amountLabel.append("送迎代", amount);
-    form.dataset.originalKey = selectedKey;
+    form.dataset.originalKey = editData ? `${editData.personType || "cast"}:${selectedKey}` : "";
     form.append(personLabel, amountLabel);
     root.appendChild(form);
   }
@@ -1849,10 +1866,10 @@ function saveTransportDeductionsFromModal() {
   const person = select ? selectedPersonFromSelect(select) : null;
   const amount = Number(row?.querySelector(".transport-deduction-amount")?.value || 0);
   if (!person || !isNonNegativeInteger(amount) || amount <= 0) {
-    showMessage("errorMessage", "送迎利用キャストと送迎代を正しく入力してください。");
+    showMessage("errorMessage", "送迎利用者と送迎代を正しく入力してください。");
     return;
   }
-  replaceTransportDeduction({ ...person, personType: "cast", amount }, row.dataset.originalKey || "");
+  replaceTransportDeduction({ ...person, amount }, row.dataset.originalKey || "");
   document.getElementById("transportDeductionModal").close();
 }
 
@@ -1860,9 +1877,10 @@ function openPayrollDeductionModal(editData = null) {
   const root = document.getElementById("payrollDeductionModalRows");
   root.replaceChildren();
   const casts = currentCastWorkers();
+  const trials = currentTrialWorkers();
   const staff = currentStaffWorkers();
-  if (!casts.length && !staff.length) {
-    root.appendChild(emptyNotice("当日出勤しているキャスト・従業員がいません。先に勤務を登録してください。"));
+  if (!casts.length && !trials.length && !staff.length) {
+    root.appendChild(emptyNotice("当日出勤しているキャスト・体入キャスト・従業員がいません。先に勤務を登録してください。"));
   } else {
     const form = document.createElement("div");
     form.className = "dynamic-row";
@@ -1870,15 +1888,15 @@ function openPayrollDeductionModal(editData = null) {
     personTypeLabel.className = "work-field-label";
     const personType = document.createElement("select");
     personType.className = "form-select payroll-person-type";
-    personType.append(makeOption("cast", "キャスト"), makeOption("staff", "従業員"));
-    personType.value = editData?.personType === "staff" ? "staff" : "cast";
+    personType.append(makeOption("cast", "キャスト"), makeOption("trial", "体入キャスト"), makeOption("staff", "従業員"));
+    personType.value = ["cast", "trial", "staff"].includes(editData?.personType) ? editData.personType : "cast";
     personTypeLabel.append("対象区分", personType);
 
     const personLabel = document.createElement("label");
     personLabel.className = "work-field-label";
     const selectedKey = editData ? editData.personId || editData.posCastId || editData.personName : "";
     const mountPersonSelect = () => {
-      const people = personType.value === "staff" ? staff : casts;
+      const people = personType.value === "staff" ? staff : personType.value === "trial" ? trials : casts;
       const next = makePersonSelect(people, selectedKey);
       const old = personLabel.querySelector(".deduction-person-select");
       if (old) old.replaceWith(next);
@@ -2059,10 +2077,12 @@ function collectRows() {
     .map((row) => {
       const recipient = row.querySelector(".allowance-recipient");
       const recipientName = recipient.selectedOptions[0]?.dataset.name || recipient.dataset.savedName || "";
+      const recipientType = recipient.selectedOptions[0]?.dataset.personType || "";
       return {
         type: row.querySelector(".allowance-type").value,
         amount: Number(row.querySelector(".allowance-amount").value || 0),
         recipientId: recipient.value,
+        recipientType,
         recipient: recipientName,
         recipientName,
         note: row.querySelector(".allowance-note").value.trim()
@@ -2187,21 +2207,21 @@ function validatePayload(payload) {
   });
   payload.allowances.forEach((row) => {
     if (!row.type || !isNonNegativeInteger(row.amount) || !row.recipient) errors.push("手当の種類、金額、支給対象者を確認してください。");
-    const isCastRecipient = currentCastWorkers().some((member) => member.personId === row.recipientId);
+    const isCastRecipient = [...currentCastWorkers(), ...currentTrialWorkers()].some((member) => member.personId === row.recipientId);
     const isStaffRecipient = currentStaffWorkers().some((member) => member.personId === row.recipientId);
     if (row.type === "美容室" && !isCastRecipient && !String(row.recipientId).startsWith("legacy:")) {
-      errors.push("美容室手当の対象者は当日出勤しているキャストから選択してください。");
+      errors.push("美容室手当の対象者は当日出勤しているキャスト・体入キャストから選択してください。");
     }
     if (row.type !== "美容室" && !isStaffRecipient && !String(row.recipientId).startsWith("legacy:")) {
       errors.push(`${row.type}の対象者は当日出勤している従業員から選択してください。`);
     }
   });
   payload.transportDeductions.forEach((row) => {
-    if (!row.personId && !row.posCastId && !row.personName) errors.push("送迎代控除の対象キャストを確認してください。");
+    if (!["cast", "trial"].includes(row.personType) || (!row.personId && !row.posCastId && !row.personName)) errors.push("送迎代控除の対象者を確認してください。");
     if (!isNonNegativeInteger(row.amount) || row.amount <= 0) errors.push("送迎代控除の金額は1円以上の整数で入力してください。");
   });
   payload.payrollDeductions.forEach((row) => {
-    if (!["cast", "staff"].includes(row.personType) || (!row.personId && !row.posCastId && !row.personName)) {
+    if (!["cast", "trial", "staff"].includes(row.personType) || (!row.personId && !row.posCastId && !row.personName)) {
       errors.push("報酬・給与引きの対象者を確認してください。");
     }
     if (!isNonNegativeInteger(row.dailyPayment) || !isNonNegativeInteger(row.advancePayment)) {
