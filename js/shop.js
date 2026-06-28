@@ -260,13 +260,8 @@ async function syncPosCasts(showSuccess) {
     const localByPosId = new Map(allCastMembers
       .filter((cast) => cast.deleted !== true && cast.posCastId)
       .map((cast) => [String(cast.posCastId), cast]));
-    const localByName = new Map(
-      allCastMembers
-        .filter((cast) => cast.deleted !== true && (!cast.posCastId || cast.convertedFromTrial === true))
-        .map((cast) => [String(cast.name || ""), cast])
-    );
     await Promise.all(posCasts.map((posCast) => {
-      const existing = localByPosId.get(posCast.posCastId) || localByName.get(posCast.name);
+      const existing = localByPosId.get(posCast.posCastId);
       const changed = !existing
         || existing.name !== posCast.name
         || existing.status !== posCast.status
@@ -334,6 +329,15 @@ function timestampToDate(value) {
 
 function castDocumentId(posCastId) {
   return `pos_${String(posCastId).replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+}
+
+function castNumberLabel(value) {
+  const number = Number(value || 0);
+  return number ? `No.${String(number).padStart(3, "0")}` : "No.-";
+}
+
+function castDisplayName(member) {
+  return `${castNumberLabel(member?.internalNo)} ${member?.name || ""}`.trim();
 }
 
 function personKeyFor(member) {
@@ -434,13 +438,25 @@ async function loadClosingLists() {
 
 async function syncCastLifecycle(closings) {
   const updates = new Map();
+  const mergeLifecycleUpdate = (update) => {
+    const key = String(update.posCastId || "");
+    const current = updates.get(key) || {};
+    updates.set(key, {
+      ...current,
+      ...update,
+      entryDate: current.entryDate || update.entryDate || "",
+      posEnteredAt: current.posEnteredAt || update.posEnteredAt || 0,
+      exitedDate: update.exitedDate || current.exitedDate || "",
+      posExitedAt: update.posExitedAt || current.posExitedAt || 0
+    });
+  };
   [...closings]
     .sort((a, b) => String(a.businessDate || a.date || "").localeCompare(String(b.businessDate || b.date || "")))
     .forEach((closing) => {
     const eventDate = closing.businessDate || closing.date || "";
     (closing.enteredCasts || []).forEach((cast) => {
       if (cast.castId == null || !String(cast.castName || "").trim()) return;
-      updates.set(String(cast.castId), {
+      mergeLifecycleUpdate({
         posCastId: String(cast.castId),
         name: String(cast.castName).trim(),
         internalNo: Number(cast.internalNo || 0),
@@ -451,7 +467,7 @@ async function syncCastLifecycle(closings) {
     });
     (closing.exitedCasts || []).forEach((cast) => {
       if (cast.castId == null || !String(cast.castName || "").trim()) return;
-      updates.set(String(cast.castId), {
+      mergeLifecycleUpdate({
         posCastId: String(cast.castId),
         name: String(cast.castName).trim(),
         internalNo: Number(cast.internalNo || 0),
@@ -462,12 +478,13 @@ async function syncCastLifecycle(closings) {
     });
     (closing.trialCasts || []).forEach((cast) => {
       if (cast.castId == null || !String(cast.castName || "").trim()) return;
-      updates.set(String(cast.castId), {
+      mergeLifecycleUpdate({
         posCastId: String(cast.castId),
         name: String(cast.castName).trim(),
         internalNo: Number(cast.internalNo || 0),
         status: "trial",
         entryDate: cast.trialBizDay || eventDate,
+        trialBizDay: cast.trialBizDay || eventDate,
         posEnteredAt: Number(cast.trialRegisteredAt || 0),
         posExitedAt: Number(cast.trialEndedAt || 0)
       });
@@ -477,12 +494,8 @@ async function syncCastLifecycle(closings) {
   const byPosId = new Map(allCastMembers
     .filter((cast) => cast.deleted !== true)
     .map((cast) => [String(cast.posCastId || ""), cast]));
-  const byActiveName = new Map(allCastMembers
-    .filter((cast) => cast.status === "active" && cast.deleted !== true)
-    .map((cast) => [String(cast.name || ""), cast]));
   await Promise.all([...updates.values()].map((update) => {
-    const existing = byPosId.get(update.posCastId)
-      || (update.status === "active" ? byActiveName.get(update.name) : null);
+    const existing = byPosId.get(update.posCastId);
     const previousPosCastIds = new Set(normalizeAliasList(existing?.previousPosCastIds));
     if (existing?.posCastId && existing.posCastId !== update.posCastId) previousPosCastIds.add(String(existing.posCastId));
     const changed = !existing
@@ -491,6 +504,7 @@ async function syncCastLifecycle(closings) {
       || Number(existing.internalNo || 0) !== update.internalNo
       || (update.entryDate && existing.entryDate !== update.entryDate)
       || (update.exitedDate && existing.exitedDate !== update.exitedDate)
+      || (update.trialBizDay && existing.trialBizDay !== update.trialBizDay)
       || (update.posEnteredAt && existing.posEnteredAt !== update.posEnteredAt)
       || (update.posExitedAt && existing.posExitedAt !== update.posExitedAt)
       || previousPosCastIds.size !== normalizeAliasList(existing?.previousPosCastIds).length;
@@ -1319,7 +1333,7 @@ function refreshWorkSelects() {
 function fillCastMemberSelect(select, selectedId = "", savedName = "") {
   select.replaceChildren(makeOption("", "選択してください"));
   castMembers.filter((member) => member.status === "active").forEach((member) => {
-    select.appendChild(makeOption(member.id, member.name));
+    select.appendChild(makeOption(member.id, castDisplayName(member)));
   });
   if (selectedId && !castMembers.some((member) => member.id === selectedId && member.status === "active") && savedName) {
     select.appendChild(makeOption(selectedId, `${savedName}（現在は利用不可）`));
@@ -2024,6 +2038,8 @@ function collectRows() {
   const trialWork = [...document.querySelectorAll(".trial-cast-work-row")].map((row) => ({
     castId: row.dataset.castId || "",
     castName: row.dataset.castName || "",
+    internalNo: Number(row.dataset.internalNo || 0),
+    trialBizDay: row.dataset.trialBizDay || businessDate,
     startTime: row.dataset.startTime || "",
     endTime: row.dataset.endTime || "",
     hours: Number(row.dataset.hours || 0),
@@ -2545,6 +2561,8 @@ function normalizeCastWork(work) {
       ...row,
       castId: member?.id || row.castId || "",
       posCastId: member?.posCastId || row.castId || "",
+      internalNo: Number(row.internalNo || member?.internalNo || 0),
+      trialBizDay: row.trialBizDay || "",
       isTrial: row.isTrial === true || row.castType === "trial" || member?.status === "trial",
       hours: Number(row.hours || 0)
     };
@@ -2562,11 +2580,14 @@ function renderTrialCastWork(work, trialCasts) {
     item.className = "dynamic-row trial-cast-work-row";
     item.dataset.castId = String(row.posCastId || row.castId || trial.castId || "");
     item.dataset.castName = row.castName || row.name || trial.castName || "";
+    item.dataset.internalNo = String(row.internalNo || trial.internalNo || "");
+    item.dataset.trialBizDay = row.trialBizDay || trial.trialBizDay || "";
     item.dataset.startTime = row.startTime || "";
     item.dataset.endTime = row.endTime || "";
     item.dataset.hours = String(row.hours || calculateWorkHours(row.startTime, row.endTime) || 0);
     const identity = document.createElement("div");
-    identity.innerHTML = `<strong>${escapeHtml(item.dataset.castName)}</strong><span class="block text-xs text-slate-500">${escapeHtml(item.dataset.startTime)}-${escapeHtml(item.dataset.endTime)} / ${escapeHtml(formatHours(Number(item.dataset.hours)))}</span>`;
+    const meta = `${castNumberLabel(item.dataset.internalNo)}${item.dataset.trialBizDay ? ` / ${item.dataset.trialBizDay}` : ""}`;
+    identity.innerHTML = `<strong>体入 ${escapeHtml(meta)} ${escapeHtml(item.dataset.castName)}</strong><span class="block text-xs text-slate-500">${escapeHtml(item.dataset.startTime)}-${escapeHtml(item.dataset.endTime)} / ${escapeHtml(formatHours(Number(item.dataset.hours)))}</span>`;
     const introducer = document.createElement("select");
     introducer.className = "form-select trial-introducer-id";
     const castMember = castMembers.find((member) =>

@@ -49,6 +49,15 @@ let deletingFinalizedClosing = null;
 let editingLiquorCostId = "";
 
 const byId = (id) => document.getElementById(id);
+const castNumberLabel = (value) => {
+  const number = Number(value || 0);
+  return number ? `No.${String(number).padStart(3, "0")}` : "No.-";
+};
+const trialCastDisplayName = (row) => {
+  const dateValue = row.trialBizDay || row.businessDate || "";
+  const date = dateValue ? ` / ${dateValue}` : "";
+  return `体入 ${castNumberLabel(row.internalNo)} ${row.name || ""}${date}`.trim();
+};
 
 byId("logoutButton").addEventListener("click", logout);
 byId("reloadReceivedButton").addEventListener("click", loadData);
@@ -240,6 +249,8 @@ function normalizeTrialWork(trialWork, castWork, trialCasts) {
     return trialWork.map((row) => ({
       id: String(row.castId || row.id || row.castName || ""),
       name: String(row.castName || row.name || ""),
+      internalNo: toNumber(row.internalNo),
+      trialBizDay: String(row.trialBizDay || ""),
       startTime: String(row.startTime || ""),
       endTime: String(row.endTime || ""),
       hours: toNumber(row.hours),
@@ -252,7 +263,17 @@ function normalizeTrialWork(trialWork, castWork, trialCasts) {
     }));
   }
   const trialIds = new Set((trialCasts || []).map((cast) => String(cast.castId || "")));
-  return normalizeWorkRows(castWork, false).filter((row) => row.isTrial || trialIds.has(String(row.id)));
+  const trialMap = new Map((trialCasts || []).map((cast) => [String(cast.castId || ""), cast]));
+  return normalizeWorkRows(castWork, false)
+    .filter((row) => row.isTrial || trialIds.has(String(row.id)))
+    .map((row) => {
+      const trial = trialMap.get(String(row.id)) || {};
+      return {
+        ...row,
+        internalNo: row.internalNo || toNumber(trial.internalNo),
+        trialBizDay: row.trialBizDay || String(trial.trialBizDay || "")
+      };
+    });
 }
 
 function normalizeFixedExpense(id, raw = {}) {
@@ -649,7 +670,7 @@ function renderReceivedTransactions(closing) {
     "体入キャスト情報",
     ["体入キャスト", "開始", "終了", "勤務時間", "紹介者", "当日時給"],
     closing.trialWork,
-    (row) => [row.name, row.startTime, row.endTime, hoursCell(row.hours), row.introducerName, yenCell(row.hourlyRate)]
+    (row) => [trialCastDisplayName(row), row.startTime, row.endTime, hoursCell(row.hours), row.introducerName, yenCell(row.hourlyRate)]
   ));
   root.appendChild(createTableBlock("送迎代控除", ["対象キャスト", "金額"], closing.transportDeductions, (row) => [
     row.personName, yenCell(row.amount)
@@ -1087,7 +1108,7 @@ function renderTrialCastRewards() {
   }
   rows.forEach((row) => {
     root.appendChild(createPayrollCard(
-      row.name,
+      trialCastDisplayName(row),
       `${row.businessDate} / 紹介者：${row.introducerName || "未入力"}`,
       [
         ["勤務時間", hoursCell(row.hours)],
@@ -2092,7 +2113,7 @@ function openClosingDetail(id) {
     row.name, row.startTime || "", row.endTime || "", hoursCell(row.hours)
   ]));
   body.appendChild(createTableBlock("体入キャスト勤務", ["体入キャスト", "開始", "終了", "勤務時間", "紹介者", "当日時給", "報酬"], closing.trialWork, (row) => [
-    row.name, row.startTime || "", row.endTime || "", hoursCell(row.hours), row.introducerName || "", yenCell(row.hourlyRate), yenCell(row.hours * row.hourlyRate)
+    trialCastDisplayName(row), row.startTime || "", row.endTime || "", hoursCell(row.hours), row.introducerName || "", yenCell(row.hourlyRate), yenCell(row.hours * row.hourlyRate)
   ]));
   byId("closingDetailModal").showModal();
 }
@@ -2502,6 +2523,8 @@ function normalizeWorkRows(work, staff) {
   return work.map((row) => ({
     id: String(row.staffId || row.castId || row.posCastId || row.id || row.staffName || row.castName || row.name || ""),
     name: String(staff ? row.staffName || row.name || "" : row.castName || row.name || ""),
+    internalNo: toNumber(row.internalNo),
+    trialBizDay: String(row.trialBizDay || ""),
     startTime: String(row.startTime || ""),
     endTime: String(row.endTime || ""),
     hours: toNumber(row.hours),
