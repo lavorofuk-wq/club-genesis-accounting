@@ -379,6 +379,16 @@ body {
     grid-template-columns: 150px 140px minmax(170px, 1fr) minmax(180px, 1fr) auto;
   }
 
+  .dynamic-row.expense-row .danger-button,
+  .dynamic-row.allowance-row .danger-button,
+  .transport-deduction-row .danger-button,
+  .payroll-deduction-row .danger-button,
+  .transport-deduction-row .secondary-button,
+  .payroll-deduction-row .secondary-button {
+    min-width: 72px;
+    align-self: stretch;
+  }
+
   .dynamic-row.trial-cast-work-row {
     grid-template-columns: minmax(220px, 1.4fr) minmax(160px, 1fr) minmax(160px, 1fr);
     align-items: end;
@@ -764,6 +774,7 @@ body {
   width: 100%;
   border-collapse: collapse;
   font-size: 13px;
+  table-layout: auto;
 }
 
 .detail-mini-table th,
@@ -771,6 +782,9 @@ body {
   border-top: 1px solid var(--line);
   padding: 8px 6px;
   text-align: right;
+  vertical-align: top;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .detail-mini-table th:first-child,
@@ -865,4 +879,16 @@ body {
 
 .calendar-day.future {
   opacity: 0.5;
+}
+
+.mail-detail-body {
+  max-height: 52vh;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  padding: 14px;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.8;
 }

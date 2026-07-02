@@ -6,6 +6,8 @@ import {
   getDocs,
   getDoc,
   setDoc,
+  query,
+  where,
   ref,
   get,
   serverTimestamp,
@@ -18,6 +20,7 @@ import {
   posCastPath
 } from "./firebase-config.js";
 import { requireRole, logout, showMessage, hideMessage } from "./auth.js";
+import { initInternalMail } from "./internal-mail.js";
 
 const yen = new Intl.NumberFormat("ja-JP");
 const employmentTypeLabels = {
@@ -58,11 +61,15 @@ let selectedPending = null;
 let editingStaffId = null;
 let editingIntroducerId = null;
 let currentCastDetailType = "active";
+let posCastLinkCandidates = [];
 
 document.getElementById("logoutButton").addEventListener("click", logout);
 document.getElementById("openRegistrationButton").addEventListener("click", () => showWorkspace("registration"));
 document.getElementById("openClosingButton").addEventListener("click", openPendingClosingModal);
 document.getElementById("openSentClosingsButton").addEventListener("click", openSentClosingModal);
+document.querySelectorAll("[data-mail-open]").forEach((button) => {
+  button.addEventListener("click", () => showWorkspace("mail"));
+});
 document.querySelectorAll("[data-home-button]").forEach((button) => {
   button.addEventListener("click", () => showWorkspace("home"));
 });
@@ -80,6 +87,8 @@ document.getElementById("clearSentClosingDateButton").addEventListener("click", 
 });
 document.getElementById("registerStaffButton").addEventListener("click", registerStaff);
 document.getElementById("cancelStaffEditButton").addEventListener("click", resetStaffForm);
+document.getElementById("newStaffEmploymentType").addEventListener("change", updateStaffEmploymentFields);
+updateStaffEmploymentFields();
 document.getElementById("openStaffListButton").addEventListener("click", () => {
   renderStaffMasterList();
   document.getElementById("staffListModal").showModal();
@@ -99,6 +108,9 @@ document.getElementById("closeCastDetailButton").addEventListener("click", () =>
 document.getElementById("castSearchInput").addEventListener("input", renderCastDetailList);
 document.getElementById("castRewardSystem").addEventListener("change", updateGuaranteeNoteVisibility);
 document.getElementById("castIntroducerId").addEventListener("change", updateCastAdvisoryFeeVisibility);
+document.getElementById("castProfileName").addEventListener("input", (event) => {
+  markInvalid(event.target, !event.target.value.trim());
+});
 document.getElementById("castGuaranteedHourlyRate").addEventListener("input", (event) => {
   const value = Number(event.target.value);
   const invalid = event.target.value !== "" && (!Number.isInteger(value) || value <= 0);
@@ -110,9 +122,16 @@ document.getElementById("castAdvisoryFeeAmount").addEventListener("input", (even
   markInvalid(event.target, invalid);
 });
 document.getElementById("saveCastProfileButton").addEventListener("click", saveCastProfile);
+document.getElementById("posCastLinkSearch").addEventListener("input", renderPosCastLinkOptions);
+document.getElementById("posCastLinkSelect").addEventListener("change", renderPosCastLinkPreview);
+document.getElementById("savePosCastLinkButton").addEventListener("click", savePosCastLink);
 document.getElementById("addCastWorkButton").addEventListener("click", () => addCastWorkRow());
 document.getElementById("addExpenseButton").addEventListener("click", () => addExpenseRow());
 document.getElementById("addAllowanceButton").addEventListener("click", () => addAllowanceRow());
+document.getElementById("openTransportDeductionButton").addEventListener("click", openTransportDeductionModal);
+document.getElementById("saveTransportDeductionButton").addEventListener("click", saveTransportDeductionsFromModal);
+document.getElementById("openPayrollDeductionButton").addEventListener("click", openPayrollDeductionModal);
+document.getElementById("savePayrollDeductionButton").addEventListener("click", savePayrollDeductionsFromModal);
 document.getElementById("copyPreviousButton").addEventListener("click", copyPreviousDay);
 document.getElementById("saveButton").addEventListener("click", openConfirm);
 document.getElementById("confirmSaveButton").addEventListener("click", saveReport);
@@ -128,6 +147,12 @@ requireRole("shop", async (user) => {
   await loadMasters();
   await syncPosCasts(false);
   await loadClosingLists();
+  initInternalMail({
+    role: "shop",
+    currentUser: user,
+    onError: (message) => showMessage("errorMessage", message),
+    onSuccess: (message) => showMessage("successMessage", message, false)
+  });
   resetRows();
   wireRealtimeValidation();
   calculateUnitPrice();
@@ -186,6 +211,10 @@ function isNonNegativeInteger(value) {
   return Number.isInteger(value) && value >= 0;
 }
 
+function requiresStaffTimeInput(member) {
+  return member?.employmentType !== "employee" && member?.payType === "hourly" && member?.jobType !== "driver";
+}
+
 function markInvalid(el, invalid) {
   el.classList.toggle("invalid", invalid);
 }
@@ -224,22 +253,15 @@ async function syncPosCasts(showSuccess) {
   button.disabled = true;
   setCastSyncStatus("POSのキャスト名簿を同期しています。");
   try {
-    const snapshot = await get(ref(posDb, posCastPath));
-    const rawCasts = snapshot.val();
-    const posCasts = (Array.isArray(rawCasts) ? rawCasts : Object.values(rawCasts || {}))
-      .filter((cast) => cast && cast.castType !== "trial" && cast.id != null && String(cast.name || "").trim())
-      .map(normalizePosCast);
+    const posCasts = await loadPosCastCandidates();
     if (!posCasts.length) {
       throw new Error("POSに通常キャストの名簿データがありません。");
     }
-    const localByPosId = new Map(allCastMembers.filter((cast) => cast.posCastId).map((cast) => [String(cast.posCastId), cast]));
-    const localByName = new Map(
-      allCastMembers
-        .filter((cast) => !cast.posCastId)
-        .map((cast) => [String(cast.name || ""), cast])
-    );
+    const localByPosId = new Map(allCastMembers
+      .filter((cast) => cast.deleted !== true && cast.posCastId)
+      .map((cast) => [String(cast.posCastId), cast]));
     await Promise.all(posCasts.map((posCast) => {
-      const existing = localByPosId.get(posCast.posCastId) || localByName.get(posCast.name);
+      const existing = localByPosId.get(posCast.posCastId);
       const changed = !existing
         || existing.name !== posCast.name
         || existing.status !== posCast.status
@@ -286,6 +308,18 @@ function normalizePosCast(cast) {
   };
 }
 
+async function loadPosCastCandidates() {
+  const snapshot = await get(ref(posDb, posCastPath));
+  const rawCasts = snapshot.val();
+  return (Array.isArray(rawCasts) ? rawCasts : Object.values(rawCasts || {}))
+    .filter((cast) => cast && cast.castType !== "trial" && cast.id != null && String(cast.name || "").trim())
+    .map(normalizePosCast)
+    .sort((a, b) =>
+      Number(a.internalNo || Number.MAX_SAFE_INTEGER) - Number(b.internalNo || Number.MAX_SAFE_INTEGER)
+      || String(a.name || "").localeCompare(String(b.name || ""), "ja")
+    );
+}
+
 function timestampToDate(value) {
   const timestamp = Number(value || 0);
   if (!timestamp) return "";
@@ -295,6 +329,23 @@ function timestampToDate(value) {
 
 function castDocumentId(posCastId) {
   return `pos_${String(posCastId).replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+}
+
+function castNumberLabel(value) {
+  const number = Number(value || 0);
+  return number ? `No.${String(number).padStart(3, "0")}` : "No.-";
+}
+
+function castDisplayName(member) {
+  return `${castNumberLabel(member?.internalNo)} ${member?.name || ""}`.trim();
+}
+
+function personKeyFor(member) {
+  return member?.personKey || `person_${member?.id || member?.posCastId || Date.now()}`;
+}
+
+function normalizeAliasList(value) {
+  return Array.isArray(value) ? value.map(String).filter(Boolean) : [];
 }
 
 function setCastSyncStatus(message, isError = false) {
@@ -356,14 +407,22 @@ async function loadClosingLists() {
       .map((item) => ({ ...item, businessDate: item.businessDate || item.date || item.id }))
       .filter((item) => item.businessDate)
       .sort((a, b) => b.businessDate.localeCompare(a.businessDate));
-    const sentDates = new Set(sentClosings.map((item) => item.businessDate));
-    const map = new Map();
-    shopItems.forEach((item) => {
+    const processedSourceIds = new Set(sentClosings
+      .map((item) => String(item.source?.sourceDocumentId || item.source?.submissionId || ""))
+      .filter(Boolean));
+    const legacySentDates = new Set(sentClosings
+      .filter((item) => !item.source?.sourceDocumentId && !item.source?.submissionId)
+      .map((item) => item.businessDate));
+    pendingClosings = shopItems.flatMap((item) => {
       const date = item.businessDate || item.date || item.id;
-      if (!date || sentDates.has(date)) return;
-      map.set(date, { ...item, businessDate: date });
-    });
-    pendingClosings = [...map.values()].sort((a, b) => b.businessDate.localeCompare(a.businessDate));
+      if (!date || item.status === "reviewed" || processedSourceIds.has(item.id)) return [];
+      if (item.id === date && legacySentDates.has(date)) return [];
+      return [{ ...item, businessDate: date }];
+    }).sort((a, b) =>
+      b.businessDate.localeCompare(a.businessDate)
+      || closingSubmittedMillis(b) - closingSubmittedMillis(a)
+      || b.id.localeCompare(a.id)
+    );
     renderPendingClosings();
     renderSentClosings();
     if (lifecycleSyncError) {
@@ -379,13 +438,25 @@ async function loadClosingLists() {
 
 async function syncCastLifecycle(closings) {
   const updates = new Map();
+  const mergeLifecycleUpdate = (update) => {
+    const key = String(update.posCastId || "");
+    const current = updates.get(key) || {};
+    updates.set(key, {
+      ...current,
+      ...update,
+      entryDate: current.entryDate || update.entryDate || "",
+      posEnteredAt: current.posEnteredAt || update.posEnteredAt || 0,
+      exitedDate: update.exitedDate || current.exitedDate || "",
+      posExitedAt: update.posExitedAt || current.posExitedAt || 0
+    });
+  };
   [...closings]
     .sort((a, b) => String(a.businessDate || a.date || "").localeCompare(String(b.businessDate || b.date || "")))
     .forEach((closing) => {
     const eventDate = closing.businessDate || closing.date || "";
     (closing.enteredCasts || []).forEach((cast) => {
       if (cast.castId == null || !String(cast.castName || "").trim()) return;
-      updates.set(String(cast.castId), {
+      mergeLifecycleUpdate({
         posCastId: String(cast.castId),
         name: String(cast.castName).trim(),
         internalNo: Number(cast.internalNo || 0),
@@ -396,7 +467,7 @@ async function syncCastLifecycle(closings) {
     });
     (closing.exitedCasts || []).forEach((cast) => {
       if (cast.castId == null || !String(cast.castName || "").trim()) return;
-      updates.set(String(cast.castId), {
+      mergeLifecycleUpdate({
         posCastId: String(cast.castId),
         name: String(cast.castName).trim(),
         internalNo: Number(cast.internalNo || 0),
@@ -407,32 +478,41 @@ async function syncCastLifecycle(closings) {
     });
     (closing.trialCasts || []).forEach((cast) => {
       if (cast.castId == null || !String(cast.castName || "").trim()) return;
-      updates.set(String(cast.castId), {
+      mergeLifecycleUpdate({
         posCastId: String(cast.castId),
         name: String(cast.castName).trim(),
         internalNo: Number(cast.internalNo || 0),
         status: "trial",
         entryDate: cast.trialBizDay || eventDate,
+        trialBizDay: cast.trialBizDay || eventDate,
         posEnteredAt: Number(cast.trialRegisteredAt || 0),
         posExitedAt: Number(cast.trialEndedAt || 0)
       });
     });
   });
   if (!updates.size) return;
-  const byPosId = new Map(allCastMembers.map((cast) => [String(cast.posCastId || ""), cast]));
+  const byPosId = new Map(allCastMembers
+    .filter((cast) => cast.deleted !== true)
+    .map((cast) => [String(cast.posCastId || ""), cast]));
   await Promise.all([...updates.values()].map((update) => {
     const existing = byPosId.get(update.posCastId);
+    const previousPosCastIds = new Set(normalizeAliasList(existing?.previousPosCastIds));
+    if (existing?.posCastId && existing.posCastId !== update.posCastId) previousPosCastIds.add(String(existing.posCastId));
     const changed = !existing
       || existing.name !== update.name
       || existing.status !== update.status
       || Number(existing.internalNo || 0) !== update.internalNo
       || (update.entryDate && existing.entryDate !== update.entryDate)
       || (update.exitedDate && existing.exitedDate !== update.exitedDate)
+      || (update.trialBizDay && existing.trialBizDay !== update.trialBizDay)
       || (update.posEnteredAt && existing.posEnteredAt !== update.posEnteredAt)
-      || (update.posExitedAt && existing.posExitedAt !== update.posExitedAt);
+      || (update.posExitedAt && existing.posExitedAt !== update.posExitedAt)
+      || previousPosCastIds.size !== normalizeAliasList(existing?.previousPosCastIds).length;
     if (!changed) return Promise.resolve();
     return setDoc(doc(db, castCollectionName, existing?.id || castDocumentId(update.posCastId)), {
       ...update,
+      personKey: existing?.personKey || `person_${existing?.id || castDocumentId(update.posCastId)}`,
+      previousPosCastIds: [...previousPosCastIds],
       source: "pos",
       lifecycleSyncedAt: serverTimestamp(),
       updatedAt: serverTimestamp()
@@ -457,10 +537,12 @@ function renderPendingClosings() {
     row.className = "pending-item";
     const total = Number(closing.sales?.totalSales ?? closing.totalSales ?? 0);
     const transactionCount = Array.isArray(closing.transactions) ? closing.transactions.length : 0;
+    const duplicateCount = pendingClosings.filter((item) => item.businessDate === closing.businessDate).length;
+    const duplicateLabel = duplicateCount > 1 ? ` / 重複受信 ${duplicateCount}件` : "";
     const info = document.createElement("div");
     info.innerHTML = `
       <div class="font-bold text-slate-900">${closing.businessDate}</div>
-      <div class="mt-1 text-sm text-slate-600">総売上 ${yen.format(total)}円 / 会計 ${transactionCount}件</div>
+      <div class="mt-1 text-sm text-slate-600">総売上 ${yen.format(total)}円 / 会計 ${transactionCount}件 / 受信 ${closingSubmissionLabel(closing)}${duplicateLabel}</div>
     `;
     const button = document.createElement("button");
     button.type = "button";
@@ -507,10 +589,11 @@ async function registerStaff() {
   const nameInput = document.getElementById("newStaffName");
   const name = nameInput.value.trim();
   const employmentType = document.getElementById("newStaffEmploymentType").value;
-  const jobType = document.getElementById("newStaffJobType").value;
-  const payType = document.getElementById("newStaffPayType").value;
+  const isEmployee = employmentType === "employee";
+  const jobType = isEmployee ? "" : document.getElementById("newStaffJobType").value;
+  const payType = isEmployee ? "" : document.getElementById("newStaffPayType").value;
   const payAmountInput = document.getElementById("newStaffPayAmount");
-  const payAmount = Number(payAmountInput.value);
+  const payAmount = isEmployee ? 0 : Number(payAmountInput.value);
   if (!name) {
     showMessage("errorMessage", "スタッフ名を入力してください。");
     return;
@@ -519,11 +602,11 @@ async function registerStaff() {
     showMessage("errorMessage", "同じ名前のスタッフが登録済みです。退店済みの場合は一覧の「再入店」を使用してください。");
     return;
   }
-  if (!employmentTypeLabels[employmentType] || !jobTypeLabels[jobType] || !payTypeLabels[payType]) {
+  if (!employmentTypeLabels[employmentType] || (!isEmployee && (!jobTypeLabels[jobType] || !payTypeLabels[payType]))) {
     showMessage("errorMessage", "雇用形態、業務区分、給与形態を確認してください。");
     return;
   }
-  if (!Number.isInteger(payAmount) || payAmount <= 0) {
+  if (!isEmployee && (!Number.isInteger(payAmount) || payAmount <= 0)) {
     markInvalid(payAmountInput, true);
     showMessage("errorMessage", "給与金額は1円以上の整数で入力してください。");
     return;
@@ -589,11 +672,13 @@ function renderStaffMasterList() {
     status.textContent = isActive ? "在籍中" : "退店済み";
     const meta = document.createElement("span");
     meta.className = "staff-master-meta";
-    meta.textContent = [
-      employmentTypeLabels[member.employmentType] || "雇用形態未設定",
-      jobTypeLabels[member.jobType] || legacyJobTypeLabel(member.role),
-      `${payTypeLabels[member.payType] || "給与形態未設定"} ${member.payAmount ? `${yen.format(member.payAmount)}円` : "金額未設定"}`
-    ].join(" / ");
+    meta.textContent = member.employmentType === "employee"
+      ? "社員 / 月給は経理で設定"
+      : [
+        employmentTypeLabels[member.employmentType] || "雇用形態未設定",
+        jobTypeLabels[member.jobType] || legacyJobTypeLabel(member.role),
+        `${payTypeLabels[member.payType] || "給与形態未設定"} ${member.payAmount ? `${yen.format(member.payAmount)}円` : "金額未設定"}`
+      ].join(" / ");
     info.append(name, status, meta);
     const actions = document.createElement("div");
     actions.className = "staff-master-actions";
@@ -621,6 +706,7 @@ function startStaffEdit(member) {
   document.getElementById("newStaffJobType").value = member.jobType || legacyJobTypeValue(member.role);
   document.getElementById("newStaffPayType").value = member.payType || "daily";
   document.getElementById("newStaffPayAmount").value = member.payAmount || "";
+  updateStaffEmploymentFields();
   document.getElementById("registerStaffButton").textContent = "情報を更新";
   document.getElementById("cancelStaffEditButton").classList.remove("hidden");
   document.getElementById("newStaffName").focus();
@@ -637,6 +723,22 @@ function resetStaffForm() {
   document.getElementById("registerStaffButton").textContent = "入店登録";
   document.getElementById("cancelStaffEditButton").classList.add("hidden");
   markInvalid(document.getElementById("newStaffPayAmount"), false);
+  updateStaffEmploymentFields();
+}
+
+function updateStaffEmploymentFields() {
+  const isEmployee = document.getElementById("newStaffEmploymentType").value === "employee";
+  ["newStaffJobType", "newStaffPayType", "newStaffPayAmount"].forEach((id) => {
+    const input = document.getElementById(id);
+    input.disabled = isEmployee;
+    if (isEmployee) {
+      if (id === "newStaffPayAmount") input.value = "";
+      input.classList.remove("invalid");
+    }
+  });
+  ["staffJobTypeField", "staffPayTypeField", "staffPayAmountField"].forEach((id) => {
+    document.getElementById(id).classList.toggle("opacity-50", isEmployee);
+  });
 }
 
 async function saveIntroducer() {
@@ -760,6 +862,27 @@ function refreshCastIntroducerSelect(selectedId = "") {
   if (value && introducers.some((introducer) => introducer.id === value)) select.value = value;
 }
 
+function fillIntroducerSelect(select, selectedId = "", selectedName = "") {
+  const matched = selectedId
+    ? introducers.find((introducer) => introducer.id === selectedId)
+    : introducers.find((introducer) => introducer.name === selectedName);
+  select.replaceChildren(makeOption("", "紹介者を選択してください"));
+  introducers.forEach((introducer) => {
+    select.appendChild(makeOption(introducer.id, introducer.name));
+  });
+  if (matched) select.value = matched.id;
+}
+
+function selectedIntroducerData(select) {
+  const introducer = introducers.find((item) => item.id === select?.value);
+  return {
+    introducerId: introducer?.id || "",
+    introducerName: introducer?.name || "",
+    introducerFeeSystem: introducer?.feeSystem || "",
+    advisoryFeeEnabled: Boolean(introducer?.advisoryFeeEnabled)
+  };
+}
+
 function renderCastMasterList() {
   document.getElementById("activeCastCount").textContent = `${castMembers.filter((cast) => cast.status === "active").length}名`;
   document.getElementById("departedCastCount").textContent = `${castMembers.filter((cast) => cast.status === "departed").length}名`;
@@ -826,7 +949,7 @@ function renderCastDetailList() {
       : "保証期限：対象外";
     const introducer = document.createElement("span");
     introducer.textContent = member.introducerId
-      ? `紹介者：${member.introducerName || introducers.find((item) => item.id === member.introducerId)?.name || "未設定"}${Number(member.advisoryFeeAmount || 0) > 0 ? ` / 顧問料：${yen.format(member.advisoryFeeAmount)}円` : ""}`
+      ? `紹介者：${member.introducerName || introducers.find((item) => item.id === member.introducerId)?.name || "未設定"}${Number(member.advisoryFeeAmount || 0) > 0 ? ` / 顧問料：1出勤 ${yen.format(member.advisoryFeeAmount)}円` : ""}`
       : "紹介者：なし";
     const note = document.createElement("span");
     note.textContent = `備考：${member.note || "なし"}`;
@@ -839,11 +962,23 @@ function renderCastDetailList() {
     edit.className = "secondary-button";
     edit.textContent = "報酬・情報を編集";
     edit.addEventListener("click", () => openCastEdit(member));
+    const linkPos = document.createElement("button");
+    linkPos.type = "button";
+    linkPos.className = "secondary-button";
+    linkPos.textContent = "POS紐づけ";
+    linkPos.addEventListener("click", () => openPosCastLink(member));
+    const convert = document.createElement("button");
+    convert.type = "button";
+    convert.className = "primary-button";
+    convert.textContent = "在籍化";
+    convert.addEventListener("click", () => openCastEdit(member, true));
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "danger-button";
     remove.textContent = "削除";
     remove.addEventListener("click", () => deleteCastData(member));
+    if (member.status === "trial") actions.append(convert);
+    if (member.status === "active") actions.append(linkPos);
     actions.append(edit, remove);
     row.append(identity, detail, actions);
     root.appendChild(row);
@@ -879,9 +1014,13 @@ function isCastProfileComplete(member) {
   return rewardComplete && advisoryComplete;
 }
 
-function openCastEdit(member) {
+function openCastEdit(member, convertTrial = false) {
   document.getElementById("editingCastId").value = member.id;
-  document.getElementById("castEditTitle").textContent = `${member.name}のキャスト情報`;
+  document.getElementById("convertingTrialCastId").value = convertTrial && member.status === "trial" ? member.id : "";
+  document.getElementById("castEditTitle").textContent = convertTrial
+    ? `${member.name}を在籍キャストに登録`
+    : `${member.name}のキャスト情報`;
+  document.getElementById("castProfileName").value = member.name || "";
   document.getElementById("castRewardSystem").value = member.rewardSystem || "";
   document.getElementById("castGuaranteeNote").value = member.guaranteeNote || "";
   document.getElementById("castGuaranteedHourlyRate").value = member.guaranteedHourlyRate || "";
@@ -893,6 +1032,135 @@ function openCastEdit(member) {
   updateGuaranteeNoteVisibility();
   updateCastAdvisoryFeeVisibility();
   document.getElementById("castEditModal").showModal();
+}
+
+async function openPosCastLink(member) {
+  document.getElementById("linkingCastId").value = member.id;
+  document.getElementById("posCastLinkTitle").textContent = `${member.name}のPOS正式キャスト紐づけ`;
+  document.getElementById("posCastLinkCurrent").textContent =
+    `現在のGMS情報：No.${member.internalNo || "-"} / POS ID ${member.posCastId || "未設定"} / 名前 ${member.name || "-"}`;
+  document.getElementById("posCastLinkSearch").value = "";
+  document.getElementById("posCastLinkSelect").replaceChildren(makeOption("", "POS名簿を読み込み中..."));
+  document.getElementById("posCastLinkPreview").textContent = "";
+  hideMessage("posCastLinkError");
+  document.getElementById("posCastLinkModal").showModal();
+  try {
+    posCastLinkCandidates = (await loadPosCastCandidates()).filter((cast) => cast.status === "active");
+    renderPosCastLinkOptions();
+    if (member.posCastId && posCastLinkCandidates.some((cast) => cast.posCastId === String(member.posCastId))) {
+      document.getElementById("posCastLinkSelect").value = String(member.posCastId);
+    }
+    renderPosCastLinkPreview();
+  } catch (error) {
+    posCastLinkCandidates = [];
+    document.getElementById("posCastLinkSelect").replaceChildren(makeOption("", "POS名簿を読み込めませんでした"));
+    showMessage("posCastLinkError", `POSキャスト名簿の取得に失敗しました。${error.message}`);
+  }
+}
+
+function renderPosCastLinkOptions() {
+  const select = document.getElementById("posCastLinkSelect");
+  const currentValue = select.value;
+  const queryText = document.getElementById("posCastLinkSearch").value.trim().toLocaleLowerCase("ja");
+  const linkingId = document.getElementById("linkingCastId").value;
+  const options = posCastLinkCandidates.filter((cast) => {
+    if (!queryText) return true;
+    return String(cast.name || "").toLocaleLowerCase("ja").includes(queryText)
+      || String(cast.internalNo || "").includes(queryText)
+      || String(cast.posCastId || "").toLocaleLowerCase("ja").includes(queryText);
+  });
+  select.replaceChildren(makeOption("", options.length ? "選択してください" : "該当するPOSキャストがありません"));
+  options.forEach((cast) => {
+    const linked = allCastMembers.find((member) =>
+      member.id !== linkingId
+      && member.deleted !== true
+      && String(member.posCastId || "") === String(cast.posCastId)
+    );
+    const label = `No.${cast.internalNo || "-"} ${cast.name} / POS ID ${cast.posCastId}${linked ? ` / GMS登録済み:${linked.name}` : ""}`;
+    select.appendChild(makeOption(cast.posCastId, label));
+  });
+  if (currentValue && options.some((cast) => String(cast.posCastId) === currentValue)) select.value = currentValue;
+  renderPosCastLinkPreview();
+}
+
+function renderPosCastLinkPreview() {
+  const cast = posCastLinkCandidates.find((item) => String(item.posCastId) === document.getElementById("posCastLinkSelect").value);
+  const preview = document.getElementById("posCastLinkPreview");
+  if (!cast) {
+    preview.textContent = "POS正式キャストを選択してください。";
+    return;
+  }
+  const linked = allCastMembers.find((member) =>
+    member.id !== document.getElementById("linkingCastId").value
+    && member.deleted !== true
+    && String(member.posCastId || "") === String(cast.posCastId)
+  );
+  preview.textContent = `選択中：No.${cast.internalNo || "-"} / ${cast.name} / POS ID ${cast.posCastId}`
+    + (linked ? `。既存のGMSデータ「${linked.name}」は統合済みとして非表示にします。` : "");
+}
+
+async function savePosCastLink() {
+  const member = castMembers.find((cast) => cast.id === document.getElementById("linkingCastId").value);
+  const selected = posCastLinkCandidates.find((cast) => String(cast.posCastId) === document.getElementById("posCastLinkSelect").value);
+  if (!member) {
+    showMessage("posCastLinkError", "GMSキャスト情報が見つかりません。");
+    return;
+  }
+  if (!selected) {
+    markInvalid(document.getElementById("posCastLinkSelect"), true);
+    showMessage("posCastLinkError", "紐づけるPOS正式キャストを選択してください。");
+    return;
+  }
+  markInvalid(document.getElementById("posCastLinkSelect"), false);
+  const duplicate = allCastMembers.find((cast) =>
+    cast.id !== member.id
+    && cast.deleted !== true
+    && String(cast.posCastId || "") === String(selected.posCastId)
+  );
+  const previousPosCastIds = new Set(normalizeAliasList(member.previousPosCastIds));
+  if (member.posCastId && String(member.posCastId) !== String(selected.posCastId)) previousPosCastIds.add(String(member.posCastId));
+  const previousNames = new Set(normalizeAliasList(member.previousNames));
+  if (member.name && member.name !== selected.name) previousNames.add(member.name);
+  const button = document.getElementById("savePosCastLinkButton");
+  button.disabled = true;
+  hideMessage("posCastLinkError");
+  try {
+    await setDoc(doc(db, castCollectionName, member.id), {
+      posCastId: selected.posCastId,
+      name: selected.name,
+      internalNo: selected.internalNo,
+      status: selected.status,
+      entryDate: selected.entryDate || member.entryDate || "",
+      exitedDate: selected.exitedDate || "",
+      posEnteredAt: selected.posEnteredAt,
+      posExitedAt: selected.posExitedAt,
+      personKey: personKeyFor(member),
+      previousNames: [...previousNames],
+      previousPosCastIds: [...previousPosCastIds],
+      linkedPosCastAt: serverTimestamp(),
+      linkedPosCastBy: currentUser.uid,
+      source: "pos",
+      updatedAt: serverTimestamp()
+    }, { merge: true });
+    if (duplicate) {
+      await setDoc(doc(db, castCollectionName, duplicate.id), {
+        deleted: true,
+        mergedIntoCastId: member.id,
+        mergedIntoPersonKey: personKeyFor(member),
+        mergedAt: serverTimestamp(),
+        mergedBy: currentUser.uid,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+    }
+    document.getElementById("posCastLinkModal").close();
+    await loadCastMembers();
+    renderCastDetailList();
+    showMessage("successMessage", `${member.name}をPOS正式キャスト「${selected.name}」へ紐づけました。`, false);
+  } catch (error) {
+    showMessage("posCastLinkError", `POS正式キャストとの紐づけに失敗しました。${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function updateGuaranteeNoteVisibility() {
@@ -915,6 +1183,8 @@ function updateCastAdvisoryFeeVisibility() {
 async function saveCastProfile() {
   const id = document.getElementById("editingCastId").value;
   const member = castMembers.find((cast) => cast.id === id);
+  const convertingTrial = Boolean(document.getElementById("convertingTrialCastId").value) && member?.status === "trial";
+  const castProfileName = document.getElementById("castProfileName").value.trim();
   const rewardSystem = document.getElementById("castRewardSystem").value;
   const guaranteeNote = document.getElementById("castGuaranteeNote").value.trim();
   const guaranteedHourlyRate = Number(document.getElementById("castGuaranteedHourlyRate").value);
@@ -927,6 +1197,12 @@ async function saveCastProfile() {
     showMessage("castEditError", "キャスト情報が見つかりません。");
     return;
   }
+  if (!castProfileName) {
+    markInvalid(document.getElementById("castProfileName"), true);
+    showMessage("castEditError", "キャスト名を入力してください。");
+    return;
+  }
+  markInvalid(document.getElementById("castProfileName"), false);
   if (!castRewardLabels[rewardSystem]) {
     markInvalid(document.getElementById("castRewardSystem"), true);
     showMessage("castEditError", "報酬システムを選択してください。");
@@ -959,14 +1235,31 @@ async function saveCastProfile() {
     && (!Number.isInteger(advisoryFeeAmount) || advisoryFeeAmount <= 0)
   ) {
     markInvalid(document.getElementById("castAdvisoryFeeAmount"), true);
-    showMessage("castEditError", "顧問料が発生する紹介者の場合は、1円以上の顧問料金額を入力してください。");
+    showMessage("castEditError", "顧問料が発生する紹介者の場合は、1出勤あたり1円以上の顧問料金額を入力してください。");
     return;
   }
   markInvalid(document.getElementById("castAdvisoryFeeAmount"), false);
   const button = document.getElementById("saveCastProfileButton");
   button.disabled = true;
   try {
+    const previousNames = new Set(normalizeAliasList(member.previousNames));
+    if (convertingTrial && member.name && member.name !== castProfileName) previousNames.add(member.name);
+    const previousPosCastIds = new Set(normalizeAliasList(member.previousPosCastIds));
+    if (convertingTrial && member.posCastId) previousPosCastIds.add(String(member.posCastId));
+    const conversionData = convertingTrial ? {
+      status: "active",
+      personKey: personKeyFor(member),
+      sourceTrialCastId: member.id,
+      convertedFromTrial: true,
+      convertedTrialName: member.name || "",
+      convertedAt: serverTimestamp(),
+      convertedBy: currentUser.uid,
+      previousNames: [...previousNames],
+      previousPosCastIds: [...previousPosCastIds]
+    } : {};
     await setDoc(doc(db, castCollectionName, id), {
+      name: castProfileName,
+      personKey: personKeyFor(member),
       rewardSystem,
       guaranteeNote: rewardSystem === "guaranteedHourly" ? guaranteeNote : "",
       guaranteedHourlyRate: rewardSystem === "guaranteedHourly" ? guaranteedHourlyRate : 0,
@@ -977,6 +1270,7 @@ async function saveCastProfile() {
       advisoryFeeEnabled: Boolean(introducer?.advisoryFeeEnabled),
       advisoryFeeAmount: introducer?.advisoryFeeEnabled ? advisoryFeeAmount : 0,
       note,
+      ...conversionData,
       profileUpdatedAt: serverTimestamp(),
       profileUpdatedBy: currentUser.uid,
       updatedAt: serverTimestamp()
@@ -1039,7 +1333,7 @@ function refreshWorkSelects() {
 function fillCastMemberSelect(select, selectedId = "", savedName = "") {
   select.replaceChildren(makeOption("", "選択してください"));
   castMembers.filter((member) => member.status === "active").forEach((member) => {
-    select.appendChild(makeOption(member.id, member.name));
+    select.appendChild(makeOption(member.id, castDisplayName(member)));
   });
   if (selectedId && !castMembers.some((member) => member.id === selectedId && member.status === "active") && savedName) {
     select.appendChild(makeOption(selectedId, `${savedName}（現在は利用不可）`));
@@ -1082,7 +1376,7 @@ function renderStaffAttendancePicker() {
     });
     const text = document.createElement("span");
     const detail = isStaffProfileComplete(member)
-      ? jobTypeLabels[member.jobType]
+      ? member.employmentType === "employee" ? "社員" : jobTypeLabels[member.jobType]
       : "スタッフ情報を編集してから選択してください";
     text.innerHTML = `<strong>${escapeHtml(member.name)}</strong><span class="block text-xs text-slate-500">${escapeHtml(detail)}</span>`;
     label.append(checkbox, text);
@@ -1091,6 +1385,7 @@ function renderStaffAttendancePicker() {
 }
 
 function isStaffProfileComplete(member) {
+  if (member.employmentType === "employee") return true;
   return Boolean(
     employmentTypeLabels[member.employmentType]
     && jobTypeLabels[member.jobType]
@@ -1118,17 +1413,21 @@ function addStaffWorkRow(data = {}) {
   const row = document.createElement("div");
   row.className = "dynamic-row work-row staff-work-row";
   row.dataset.staffId = member.id;
+  const timeRequired = requiresStaffTimeInput(member);
   const name = document.createElement("div");
   name.className = "staff-work-name";
-  name.innerHTML = `<strong>${escapeHtml(member.name)}</strong><span class="block text-xs text-slate-500">${escapeHtml(payTypeLabels[member.payType] || "給与形態未設定")}</span>`;
-  const startLabel = createTimeField("開始時刻", "staff-work-start", data.startTime || "");
-  const endLabel = createTimeField("終了時刻", "staff-work-end", data.endTime || "");
+  const detail = member.employmentType === "employee"
+    ? "社員 / 時間入力なし"
+    : `${jobTypeLabels[member.jobType] || "業務区分未設定"} / ${payTypeLabels[member.payType] || "給与形態未設定"}${timeRequired ? "" : " / 時間入力なし"}`;
+  name.innerHTML = `<strong>${escapeHtml(member.name)}</strong><span class="block text-xs text-slate-500">${escapeHtml(detail)}</span>`;
+  const startLabel = createTimeField("開始時刻", "staff-work-start", timeRequired ? data.startTime || "" : "", !timeRequired);
+  const endLabel = createTimeField("終了時刻", "staff-work-end", timeRequired ? data.endTime || "" : "", !timeRequired);
   const hours = document.createElement("input");
   hours.type = "text";
   hours.readOnly = true;
   hours.className = "form-input staff-work-hours";
-  hours.value = data.startTime && data.endTime ? formatHours(calculateWorkHours(data.startTime, data.endTime)) : "";
-  hours.placeholder = "自動計算";
+  hours.value = timeRequired && data.startTime && data.endTime ? formatHours(calculateWorkHours(data.startTime, data.endTime)) : "";
+  hours.placeholder = timeRequired ? "自動計算" : "対象外";
   const hoursLabel = document.createElement("label");
   hoursLabel.className = "work-field-label";
   hoursLabel.append("稼働時間", hours);
@@ -1168,7 +1467,7 @@ function createTimeField(labelText, className, value, disabled = false) {
   input.className = `form-input ${className}`;
   input.value = value;
   input.disabled = disabled;
-  if (disabled) input.placeholder = "日給は入力不要";
+  if (disabled) input.placeholder = "入力不要";
   label.append(labelText, input);
   return label;
 }
@@ -1200,6 +1499,12 @@ function updateStaffWorkHours(row) {
   const start = row.querySelector(".staff-work-start");
   const end = row.querySelector(".staff-work-end");
   const hoursInput = row.querySelector(".staff-work-hours");
+  if (start.disabled || end.disabled) {
+    markInvalid(start, false);
+    markInvalid(end, false);
+    hoursInput.value = "";
+    return;
+  }
   const hours = calculateWorkHours(start.value, end.value);
   const valid = isQuarterTime(start.value) && isQuarterTime(end.value) && isQuarterHour(hours);
   markInvalid(start, start.value !== "" && !isQuarterTime(start.value));
@@ -1271,17 +1576,9 @@ function addExpenseRow(data = {}) {
   const note = document.createElement("input");
   note.type = "text";
   note.maxLength = 120;
-  note.placeholder = "その他の備考（必須）";
+  note.placeholder = "備考（任意）";
   note.className = "form-input expense-note";
   note.value = data.note || "";
-  const updateNote = () => {
-    const required = category.value === "その他";
-    note.classList.toggle("hidden", !required);
-    note.required = required;
-    if (!required) markInvalid(note, false);
-  };
-  category.addEventListener("change", updateNote);
-  note.addEventListener("input", () => markInvalid(note, category.value === "その他" && !note.value.trim()));
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "danger-button";
@@ -1289,7 +1586,6 @@ function addExpenseRow(data = {}) {
   remove.addEventListener("click", () => row.remove());
   row.append(category, amount, note, remove);
   document.getElementById("expenseRows").appendChild(row);
-  updateNote();
 }
 
 function addAllowanceRow(data = {}) {
@@ -1313,29 +1609,31 @@ function addAllowanceRow(data = {}) {
   const note = document.createElement("input");
   note.type = "text";
   note.maxLength = 120;
-  note.placeholder = "その他の備考（必須）";
+  note.placeholder = "備考（任意）";
   note.className = "form-input allowance-note";
   note.value = data.note || "";
   const refreshRecipient = () => {
     const savedId = data.recipientId || recipient.value;
     const savedName = data.recipientName || data.recipient || recipient.dataset.savedName || "";
     const members = type.value === "美容室"
-      ? castMembers.filter((member) => member.status === "active")
-      : staffMembers.filter((member) => member.status !== "departed");
+      ? [...currentCastWorkers(), ...currentTrialWorkers()]
+      : currentStaffWorkers();
     recipient.replaceChildren(makeOption("", "支給対象者を選択"));
     members.forEach((member) => {
-      const option = makeOption(member.id, member.name);
-      option.dataset.name = member.name;
+      const option = makeOption(member.personId, `${member.personName} / ${personTypeLabel(member.personType)}`);
+      option.dataset.name = member.personName;
+      option.dataset.posCastId = member.posCastId || "";
+      option.dataset.personType = member.personType;
       recipient.appendChild(option);
     });
     const matched = members.find((member) =>
-      member.id === savedId
-      || member.name === savedName
+      member.personId === savedId
+      || member.personName === savedName
       || (type.value === "美容室" && String(member.posCastId || "") === String(savedId || ""))
     );
     if (matched) {
-      recipient.value = matched.id;
-      recipient.dataset.savedName = matched.name;
+      recipient.value = matched.personId;
+      recipient.dataset.savedName = matched.personName;
     } else if (savedName) {
       const option = makeOption(savedId || `legacy:${savedName}`, `${savedName}（旧データ）`);
       option.dataset.name = savedName;
@@ -1344,24 +1642,16 @@ function addAllowanceRow(data = {}) {
       recipient.dataset.savedName = savedName;
     }
   };
-  const updateNote = () => {
-    const required = type.value === "その他";
-    note.classList.toggle("hidden", !required);
-    note.required = required;
-    if (!required) markInvalid(note, false);
-  };
   type.addEventListener("change", () => {
     recipient.dataset.savedName = "";
     data.recipientId = "";
     data.recipientName = "";
     data.recipient = "";
     refreshRecipient();
-    updateNote();
   });
   recipient.addEventListener("change", () => {
     recipient.dataset.savedName = recipient.selectedOptions[0]?.dataset.name || "";
   });
-  note.addEventListener("input", () => markInvalid(note, type.value === "その他" && !note.value.trim()));
   const remove = document.createElement("button");
   remove.type = "button";
   remove.className = "danger-button";
@@ -1370,7 +1660,299 @@ function addAllowanceRow(data = {}) {
   row.append(type, amount, recipient, note, remove);
   document.getElementById("allowanceRows").appendChild(row);
   refreshRecipient();
-  updateNote();
+}
+
+function currentCastWorkers() {
+  return [...document.querySelectorAll(".cast-work-row")].map((row) => {
+    const select = row.querySelector(".cast-member-select");
+    const member = castMembers.find((item) => item.id === select.value);
+    return member ? {
+      personType: "cast",
+      personId: member.id,
+      posCastId: member.posCastId || "",
+      personName: member.name
+    } : null;
+  }).filter(Boolean);
+}
+
+function currentStaffWorkers() {
+  return [...document.querySelectorAll(".staff-work-row")].map((row) => {
+    const member = staffMembers.find((item) => item.id === row.dataset.staffId);
+    return member ? {
+      personType: "staff",
+      personId: member.id,
+      personName: member.name
+    } : null;
+  }).filter(Boolean);
+}
+
+function currentTrialWorkers() {
+  return [...document.querySelectorAll(".trial-cast-work-row")].map((row) => ({
+    personType: "trial",
+    personId: row.dataset.castId || "",
+    posCastId: row.dataset.castId || "",
+    personName: row.dataset.castName || ""
+  })).filter((row) => row.personId || row.personName);
+}
+
+function existingTransportDeductions() {
+  return [...document.querySelectorAll(".transport-deduction-row")].map((row) => ({
+    personType: row.dataset.personType || "cast",
+    personId: row.dataset.personId || "",
+    posCastId: row.dataset.posCastId || "",
+    personName: row.dataset.personName || "",
+    amount: Number(row.dataset.amount || 0)
+  }));
+}
+
+function existingPayrollDeductions() {
+  return [...document.querySelectorAll(".payroll-deduction-row")].map((row) => ({
+    personType: row.dataset.personType || "",
+    personId: row.dataset.personId || "",
+    posCastId: row.dataset.posCastId || "",
+    personName: row.dataset.personName || "",
+    dailyPayment: Number(row.dataset.dailyPayment || 0),
+    advancePayment: Number(row.dataset.advancePayment || 0)
+  }));
+}
+
+function renderTransportDeductions(rows = []) {
+  const root = document.getElementById("transportDeductionRows");
+  root.replaceChildren();
+  rows.filter((row) => Number(row.amount) > 0).forEach((data) => {
+    const row = document.createElement("div");
+    row.className = "dynamic-row transport-deduction-row";
+    row.dataset.personType = data.personType || "cast";
+    row.dataset.personId = data.personId || "";
+    row.dataset.posCastId = data.posCastId || "";
+    row.dataset.personName = data.personName || "";
+    row.dataset.amount = String(Number(data.amount || 0));
+    const label = document.createElement("strong");
+    label.textContent = `${data.personName || "未設定"} / ${personTypeLabel(data.personType || "cast")}`;
+    const amount = document.createElement("span");
+    amount.textContent = `送迎代 ${yen.format(Number(data.amount || 0))}円`;
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "secondary-button";
+    edit.textContent = "編集";
+    edit.addEventListener("click", () => openTransportDeductionModal(data));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "danger-button";
+    remove.textContent = "削除";
+    remove.addEventListener("click", () => row.remove());
+    row.append(label, amount, edit, remove);
+    root.appendChild(row);
+  });
+}
+
+function renderPayrollDeductions(rows = []) {
+  const root = document.getElementById("payrollDeductionRows");
+  root.replaceChildren();
+  rows.filter((row) => Number(row.dailyPayment) > 0 || Number(row.advancePayment) > 0).forEach((data) => {
+    const row = document.createElement("div");
+    row.className = "dynamic-row payroll-deduction-row";
+    row.dataset.personType = data.personType || "";
+    row.dataset.personId = data.personId || "";
+    row.dataset.posCastId = data.posCastId || "";
+    row.dataset.personName = data.personName || "";
+    row.dataset.dailyPayment = String(Number(data.dailyPayment || 0));
+    row.dataset.advancePayment = String(Number(data.advancePayment || 0));
+    const label = document.createElement("strong");
+    label.textContent = `${data.personName || "未設定"} / ${personTypeLabel(data.personType)}`;
+    const amount = document.createElement("span");
+    amount.textContent = `日払い ${yen.format(Number(data.dailyPayment || 0))}円 / 立替金 ${yen.format(Number(data.advancePayment || 0))}円`;
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.className = "secondary-button";
+    edit.textContent = "編集";
+    edit.addEventListener("click", () => openPayrollDeductionModal(data));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "danger-button";
+    remove.textContent = "削除";
+    remove.addEventListener("click", () => row.remove());
+    row.append(label, amount, edit, remove);
+    root.appendChild(row);
+  });
+}
+
+function makePersonSelect(people, selectedKey = "") {
+  const select = document.createElement("select");
+  select.className = "form-select deduction-person-select";
+  select.appendChild(makeOption("", "対象者を選択"));
+  people.forEach((person) => {
+    const key = person.personId || person.posCastId || person.personName;
+    const option = makeOption(key, `${person.personName} / ${personTypeLabel(person.personType)}`);
+    option.dataset.personType = person.personType;
+    option.dataset.personId = person.personId;
+    option.dataset.posCastId = person.posCastId || "";
+    option.dataset.personName = person.personName;
+    select.appendChild(option);
+  });
+  select.value = selectedKey;
+  return select;
+}
+
+function selectedPersonFromSelect(select) {
+  const option = select.selectedOptions[0];
+  if (!option || !option.value) return null;
+  return {
+    personType: option.dataset.personType || "",
+    personId: option.dataset.personId || "",
+    posCastId: option.dataset.posCastId || "",
+    personName: option.dataset.personName || ""
+  };
+}
+
+function personTypeLabel(type) {
+  if (type === "staff") return "従業員";
+  if (type === "trial") return "体入キャスト";
+  return "キャスト";
+}
+
+function replaceTransportDeduction(data, originalKey = "") {
+  const key = `${data.personType || "cast"}:${data.personId || data.posCastId || data.personName}`;
+  const rows = existingTransportDeductions().filter((row) => {
+    const rowKey = `${row.personType || "cast"}:${row.personId || row.posCastId || row.personName}`;
+    return rowKey !== key && (!originalKey || rowKey !== originalKey);
+  });
+  renderTransportDeductions([...rows, data]);
+}
+
+function replacePayrollDeduction(data, originalKey = "") {
+  const key = `${data.personType}:${data.personId || data.posCastId || data.personName}`;
+  const rows = existingPayrollDeductions().filter((row) => {
+    const rowKey = `${row.personType}:${row.personId || row.posCastId || row.personName}`;
+    return rowKey !== key && (!originalKey || rowKey !== originalKey);
+  });
+  renderPayrollDeductions([...rows, data]);
+}
+
+function openTransportDeductionModal(editData = null) {
+  const root = document.getElementById("transportDeductionModalRows");
+  root.replaceChildren();
+  const workers = [...currentCastWorkers(), ...currentTrialWorkers()];
+  if (!workers.length) {
+    root.appendChild(emptyNotice("当日出勤しているキャスト・体入キャストがいません。先に勤務を登録してください。"));
+  } else {
+    const selectedKey = editData ? editData.personId || editData.posCastId || editData.personName : "";
+    const form = document.createElement("div");
+    form.className = "dynamic-row";
+    const personLabel = document.createElement("label");
+    personLabel.className = "work-field-label";
+    const personSelect = makePersonSelect(workers, selectedKey);
+    personLabel.append("送迎利用者", personSelect);
+    const amountLabel = document.createElement("label");
+    amountLabel.className = "work-field-label";
+    const amount = document.createElement("input");
+    amount.type = "number";
+    amount.min = "0";
+    amount.step = "1";
+    amount.className = "form-input transport-deduction-amount";
+    amount.placeholder = "送迎代";
+    amount.value = editData?.amount || "";
+    amountLabel.append("送迎代", amount);
+    form.dataset.originalKey = editData ? `${editData.personType || "cast"}:${selectedKey}` : "";
+    form.append(personLabel, amountLabel);
+    root.appendChild(form);
+  }
+  document.getElementById("transportDeductionModal").showModal();
+}
+
+function saveTransportDeductionsFromModal() {
+  const row = document.querySelector("#transportDeductionModalRows .dynamic-row");
+  const select = row?.querySelector(".deduction-person-select");
+  const person = select ? selectedPersonFromSelect(select) : null;
+  const amount = Number(row?.querySelector(".transport-deduction-amount")?.value || 0);
+  if (!person || !isNonNegativeInteger(amount) || amount <= 0) {
+    showMessage("errorMessage", "送迎利用者と送迎代を正しく入力してください。");
+    return;
+  }
+  replaceTransportDeduction({ ...person, amount }, row.dataset.originalKey || "");
+  document.getElementById("transportDeductionModal").close();
+}
+
+function openPayrollDeductionModal(editData = null) {
+  const root = document.getElementById("payrollDeductionModalRows");
+  root.replaceChildren();
+  const casts = currentCastWorkers();
+  const trials = currentTrialWorkers();
+  const staff = currentStaffWorkers();
+  if (!casts.length && !trials.length && !staff.length) {
+    root.appendChild(emptyNotice("当日出勤しているキャスト・体入キャスト・従業員がいません。先に勤務を登録してください。"));
+  } else {
+    const form = document.createElement("div");
+    form.className = "dynamic-row";
+    const personTypeLabel = document.createElement("label");
+    personTypeLabel.className = "work-field-label";
+    const personType = document.createElement("select");
+    personType.className = "form-select payroll-person-type";
+    personType.append(makeOption("cast", "キャスト"), makeOption("trial", "体入キャスト"), makeOption("staff", "従業員"));
+    personType.value = ["cast", "trial", "staff"].includes(editData?.personType) ? editData.personType : "cast";
+    personTypeLabel.append("対象区分", personType);
+
+    const personLabel = document.createElement("label");
+    personLabel.className = "work-field-label";
+    const selectedKey = editData ? editData.personId || editData.posCastId || editData.personName : "";
+    const mountPersonSelect = () => {
+      const people = personType.value === "staff" ? staff : personType.value === "trial" ? trials : casts;
+      const next = makePersonSelect(people, selectedKey);
+      const old = personLabel.querySelector(".deduction-person-select");
+      if (old) old.replaceWith(next);
+      else personLabel.append("対象者", next);
+    };
+    mountPersonSelect();
+    personType.addEventListener("change", mountPersonSelect);
+
+    const dailyLabel = document.createElement("label");
+    dailyLabel.className = "work-field-label";
+    const daily = document.createElement("input");
+    daily.type = "number";
+    daily.min = "0";
+    daily.step = "1";
+    daily.className = "form-input payroll-deduction-daily";
+    daily.placeholder = "日払い";
+    daily.value = editData?.dailyPayment || "";
+    dailyLabel.append("日払い", daily);
+
+    const advanceLabel = document.createElement("label");
+    advanceLabel.className = "work-field-label";
+    const advance = document.createElement("input");
+    advance.type = "number";
+    advance.min = "0";
+    advance.step = "1";
+    advance.className = "form-input payroll-deduction-advance";
+    advance.placeholder = "立替金";
+    advance.value = editData?.advancePayment || "";
+    advanceLabel.append("立替金", advance);
+    form.dataset.originalKey = editData ? `${editData.personType}:${selectedKey}` : "";
+    form.append(personTypeLabel, personLabel, dailyLabel, advanceLabel);
+    root.appendChild(form);
+  }
+  document.getElementById("payrollDeductionModal").showModal();
+}
+
+function savePayrollDeductionsFromModal() {
+  const row = document.querySelector("#payrollDeductionModalRows .dynamic-row");
+  const personType = row?.querySelector(".payroll-person-type")?.value || "";
+  const select = row?.querySelector(".deduction-person-select");
+  const person = select ? selectedPersonFromSelect(select) : null;
+  const dailyPayment = Number(row?.querySelector(".payroll-deduction-daily")?.value || 0);
+  const advancePayment = Number(row?.querySelector(".payroll-deduction-advance")?.value || 0);
+  if (!person || !isNonNegativeInteger(dailyPayment) || !isNonNegativeInteger(advancePayment) || (dailyPayment <= 0 && advancePayment <= 0)) {
+    showMessage("errorMessage", "対象者を選択し、日払いまたは立替金を1円以上で入力してください。");
+    return;
+  }
+  replacePayrollDeduction({ ...person, personType, dailyPayment, advancePayment }, row.dataset.originalKey || "");
+  document.getElementById("payrollDeductionModal").close();
+}
+
+function emptyNotice(text) {
+  const notice = document.createElement("div");
+  notice.className = "notice";
+  notice.textContent = text;
+  return notice;
 }
 
 function resetRows() {
@@ -1380,6 +1962,8 @@ function resetRows() {
   document.getElementById("trialCastWorkSection").classList.add("hidden");
   document.getElementById("expenseRows").replaceChildren();
   document.getElementById("allowanceRows").replaceChildren();
+  document.getElementById("transportDeductionRows").replaceChildren();
+  document.getElementById("payrollDeductionRows").replaceChildren();
   renderStaffAttendancePicker();
   addCastWorkRow();
   addExpenseRow();
@@ -1436,18 +2020,19 @@ function collectRows() {
   const staffWork = [...document.querySelectorAll(".staff-work-row")]
     .map((row) => {
       const member = staffMembers.find((item) => item.id === row.dataset.staffId);
-      const startTime = row.querySelector(".staff-work-start").value;
-      const endTime = row.querySelector(".staff-work-end").value;
+      const timeRequired = requiresStaffTimeInput(member);
+      const startTime = timeRequired ? row.querySelector(".staff-work-start").value : "";
+      const endTime = timeRequired ? row.querySelector(".staff-work-end").value : "";
       return {
         staffId: member?.id || row.dataset.staffId || "",
         staffName: member?.name || "",
         employmentType: member?.employmentType || "",
-        jobType: member?.jobType || "",
-        payType: member?.payType || "",
-        payAmount: Number(member?.payAmount || 0),
+        jobType: member?.employmentType === "employee" ? "" : member?.jobType || "",
+        payType: member?.employmentType === "employee" ? "" : member?.payType || "",
+        payAmount: member?.employmentType === "employee" ? 0 : Number(member?.payAmount || 0),
         startTime,
         endTime,
-        hours: calculateWorkHours(startTime, endTime)
+        hours: timeRequired ? calculateWorkHours(startTime, endTime) : 0
       };
     })
     .filter((row) => row.staffId || row.staffName);
@@ -1471,10 +2056,12 @@ function collectRows() {
   const trialWork = [...document.querySelectorAll(".trial-cast-work-row")].map((row) => ({
     castId: row.dataset.castId || "",
     castName: row.dataset.castName || "",
+    internalNo: Number(row.dataset.internalNo || 0),
+    trialBizDay: row.dataset.trialBizDay || businessDate,
     startTime: row.dataset.startTime || "",
     endTime: row.dataset.endTime || "",
     hours: Number(row.dataset.hours || 0),
-    introducerName: row.querySelector(".trial-introducer-name").value.trim(),
+    ...selectedIntroducerData(row.querySelector(".trial-introducer-id")),
     hourlyRate: Number(row.querySelector(".trial-hourly-rate").value || 0)
   }));
 
@@ -1490,10 +2077,12 @@ function collectRows() {
     .map((row) => {
       const recipient = row.querySelector(".allowance-recipient");
       const recipientName = recipient.selectedOptions[0]?.dataset.name || recipient.dataset.savedName || "";
+      const recipientType = recipient.selectedOptions[0]?.dataset.personType || "";
       return {
         type: row.querySelector(".allowance-type").value,
         amount: Number(row.querySelector(".allowance-amount").value || 0),
         recipientId: recipient.value,
+        recipientType,
         recipient: recipientName,
         recipientName,
         note: row.querySelector(".allowance-note").value.trim()
@@ -1501,7 +2090,15 @@ function collectRows() {
     })
     .filter((row) => row.amount > 0 || row.recipient || row.note || row.type === "その他");
 
-  return { staffWork, castWork, trialWork, expenses, allowances };
+  return {
+    staffWork,
+    castWork,
+    trialWork,
+    expenses,
+    allowances,
+    transportDeductions: existingTransportDeductions(),
+    payrollDeductions: existingPayrollDeductions()
+  };
 }
 
 function buildPayload() {
@@ -1536,6 +2133,8 @@ function buildPayload() {
     castHours: rows.castWork,
     expenses: rows.expenses,
     allowances: rows.allowances,
+    transportDeductions: rows.transportDeductions,
+    payrollDeductions: rows.payrollDeductions,
     cashReconciliation: selectedPending?.cashReconciliation || {
       expectedCash: numberValue("cashSales"),
       actualCash: numberValue("cashSales"),
@@ -1544,6 +2143,7 @@ function buildPayload() {
     },
     source: {
       ...(selectedPending?.source || {}),
+      sourceDocumentId: selectedPending?.sourceCollection === shopClosingsCollectionName ? selectedPending.id : selectedPending?.source?.sourceDocumentId || "",
       reviewedBy: currentUser.uid,
       reviewedEmail: currentUser.email || "",
       reviewedAt: serverTimestamp(),
@@ -1568,11 +2168,14 @@ function validatePayload(payload) {
   if (payload.businessDate > todayString()) errors.push("未来の日付は送信できません。");
   payload.staffWork.forEach((row) => {
     if (!row.staffId && !row.staffName) errors.push("勤務するスタッフを登録一覧から選択してください。");
-    if (!isQuarterTime(row.startTime) || !isQuarterTime(row.endTime)) {
-      errors.push("スタッフの開始・終了時刻は15分単位で入力してください。");
-    }
-    if (!isQuarterHour(row.hours)) {
-      errors.push("スタッフの稼働時間は0時間超〜24時間以内で入力してください。");
+    const member = staffMembers.find((item) => item.id === row.staffId);
+    if (requiresStaffTimeInput(member)) {
+      if (!isQuarterTime(row.startTime) || !isQuarterTime(row.endTime)) {
+        errors.push("時給スタッフの開始・終了時刻は15分単位で入力してください。");
+      }
+      if (!isQuarterHour(row.hours)) {
+        errors.push("時給スタッフの稼働時間は0時間超〜24時間以内で入力してください。");
+      }
     }
   });
   payload.castWork.forEach((row) => {
@@ -1601,18 +2204,31 @@ function validatePayload(payload) {
   });
   payload.expenses.forEach((row) => {
     if (!row.category || !isNonNegativeInteger(row.amount)) errors.push("経費のカテゴリと金額を確認してください。");
-    if (row.category === "その他" && !row.note) errors.push("経費「その他」の備考を入力してください。");
   });
   payload.allowances.forEach((row) => {
     if (!row.type || !isNonNegativeInteger(row.amount) || !row.recipient) errors.push("手当の種類、金額、支給対象者を確認してください。");
-    if (row.type === "その他" && !row.note) errors.push("手当「その他」の備考を入力してください。");
-    const isCastRecipient = castMembers.some((member) => member.id === row.recipientId && member.status === "active");
-    const isStaffRecipient = staffMembers.some((member) => member.id === row.recipientId && member.status !== "departed");
+    const isCastRecipient = [...currentCastWorkers(), ...currentTrialWorkers()].some((member) => member.personId === row.recipientId);
+    const isStaffRecipient = currentStaffWorkers().some((member) => member.personId === row.recipientId);
     if (row.type === "美容室" && !isCastRecipient && !String(row.recipientId).startsWith("legacy:")) {
-      errors.push("美容室手当の対象者は在籍キャストから選択してください。");
+      errors.push("美容室手当の対象者は当日出勤しているキャスト・体入キャストから選択してください。");
     }
     if (row.type !== "美容室" && !isStaffRecipient && !String(row.recipientId).startsWith("legacy:")) {
-      errors.push(`${row.type}の対象者は在籍スタッフから選択してください。`);
+      errors.push(`${row.type}の対象者は当日出勤している従業員から選択してください。`);
+    }
+  });
+  payload.transportDeductions.forEach((row) => {
+    if (!["cast", "trial"].includes(row.personType) || (!row.personId && !row.posCastId && !row.personName)) errors.push("送迎代控除の対象者を確認してください。");
+    if (!isNonNegativeInteger(row.amount) || row.amount <= 0) errors.push("送迎代控除の金額は1円以上の整数で入力してください。");
+  });
+  payload.payrollDeductions.forEach((row) => {
+    if (!["cast", "trial", "staff"].includes(row.personType) || (!row.personId && !row.posCastId && !row.personName)) {
+      errors.push("報酬・給与引きの対象者を確認してください。");
+    }
+    if (!isNonNegativeInteger(row.dailyPayment) || !isNonNegativeInteger(row.advancePayment)) {
+      errors.push("日払い・立替金は0円以上の整数で入力してください。");
+    }
+    if (row.dailyPayment <= 0 && row.advancePayment <= 0) {
+      errors.push("報酬・給与引きは日払いまたは立替金を1円以上入力してください。");
     }
   });
   return [...new Set(errors)];
@@ -1631,6 +2247,9 @@ function openConfirm() {
   }
   const expenseTotal = pendingPayload.expenses.reduce((sum, row) => sum + row.amount, 0);
   const allowanceTotal = pendingPayload.allowances.reduce((sum, row) => sum + row.amount, 0);
+  const transportDeductionTotal = pendingPayload.transportDeductions.reduce((sum, row) => sum + row.amount, 0);
+  const payrollDeductionTotal = pendingPayload.payrollDeductions.reduce((sum, row) =>
+    sum + row.dailyPayment + row.advancePayment, 0);
   const summary = document.getElementById("confirmSummary");
   summary.replaceChildren();
   [
@@ -1640,7 +2259,8 @@ function openConfirm() {
     `総客数：${pendingPayload.customers.totalCustomers}名 / 客単価：${yen.format(pendingPayload.customers.customerUnitPrice)}円`,
     `会計データ：${pendingPayload.transactions.length}件`,
     `体入キャスト：${pendingPayload.trialWork.length}名`,
-    `経費合計：${yen.format(expenseTotal)}円 / 手当合計：${yen.format(allowanceTotal)}円`
+    `経費合計：${yen.format(expenseTotal)}円 / 手当合計：${yen.format(allowanceTotal)}円`,
+    `控除合計：${yen.format(transportDeductionTotal + payrollDeductionTotal)}円`
   ].forEach((text) => {
     const p = document.createElement("p");
     p.textContent = text;
@@ -1658,13 +2278,26 @@ async function saveReport() {
   hideMessage("confirmSaveError");
 
   try {
-    await setDoc(doc(db, closingsCollectionName, pendingPayload.businessDate), pendingPayload, { merge: true });
+    const targetClosingId = selectedPending?.id || pendingPayload.businessDate;
+    await setDoc(doc(db, closingsCollectionName, targetClosingId), pendingPayload, { merge: true });
     await Promise.all(pendingPayload.trialWork.map((row) => setDoc(
-      doc(db, trialCastCollectionName, trialCastRecordId(pendingPayload.businessDate, row.castId)),
+      doc(db, trialCastCollectionName, trialCastRecordId(targetClosingId, row.castId)),
       {
         ...row,
         businessDate: pendingPayload.businessDate,
-        sourceClosingId: pendingPayload.businessDate,
+        sourceClosingId: targetClosingId,
+        updatedBy: currentUser.uid,
+        updatedAt: serverTimestamp()
+      },
+      { merge: true }
+    )));
+    await Promise.all(pendingPayload.trialWork.map((row) => setDoc(
+      doc(db, castCollectionName, castDocumentId(row.castId)),
+      {
+        introducerId: row.introducerId,
+        introducerName: row.introducerName,
+        introducerFeeSystem: row.introducerFeeSystem,
+        advisoryFeeEnabled: row.advisoryFeeEnabled,
         updatedBy: currentUser.uid,
         updatedAt: serverTimestamp()
       },
@@ -1672,8 +2305,8 @@ async function saveReport() {
     )));
     if (selectedPending?.sourceCollection === shopClosingsCollectionName) {
       try {
-        await setDoc(doc(db, shopClosingsCollectionName, selectedPending.businessDate), {
-          status: "submitted",
+        await setDoc(doc(db, shopClosingsCollectionName, selectedPending.id), {
+          status: "reviewed",
           reviewedBy: currentUser.uid,
           reviewedAt: serverTimestamp()
         }, { merge: true });
@@ -1715,13 +2348,27 @@ async function copyPreviousDay() {
     return;
   }
   try {
-    const snap = await getDoc(doc(db, closingsCollectionName, previousDateString(date)));
-    if (!snap.exists()) {
+    const previousDate = previousDateString(date);
+    const snapshot = await getDocs(query(
+      collection(db, closingsCollectionName),
+      where("businessDate", "==", previousDate)
+    ));
+    const previous = snapshot.docs
+      .map((item) => ({ id: item.id, ...item.data() }))
+      .sort((a, b) => closingSubmittedMillis(b) - closingSubmittedMillis(a))[0];
+    if (!previous) {
       showMessage("errorMessage", "前日のデータが見つかりません。");
       return;
     }
-    applyClosingToForm({ ...snap.data(), businessDate: date });
-    showMessage("successMessage", "前日のデータをコピーしました。送信するまで経理側には反映されません。", false);
+    const staffWork = normalizeStaffWork(previous.staffWork || previous.staffHours);
+    if (!staffWork.length) {
+      showMessage("errorMessage", "前日のスタッフ勤務データが見つかりません。");
+      return;
+    }
+    document.getElementById("staffWorkRows").replaceChildren();
+    staffWork.forEach(addStaffWorkRow);
+    renderStaffAttendancePicker();
+    showMessage("successMessage", "前日のスタッフ勤務のみコピーしました。売上・キャスト勤務・経費・手当は変更していません。", false);
   } catch (error) {
     showMessage("errorMessage", `前日データの取得に失敗しました。${error.message}`);
   }
@@ -1772,6 +2419,8 @@ function applyClosingToForm(data) {
   (data.expenses?.length ? data.expenses : [{}]).forEach(addExpenseRow);
   document.getElementById("allowanceRows").replaceChildren();
   (data.allowances?.length ? data.allowances : [{}]).forEach(addAllowanceRow);
+  renderTransportDeductions(data.transportDeductions || []);
+  renderPayrollDeductions(data.payrollDeductions || []);
   calculateUnitPrice();
   checkSalesWarning();
 }
@@ -1849,11 +2498,11 @@ function renderTransactions(transactions) {
     wrap.className = "transaction-table-wrap";
     const table = document.createElement("table");
     table.className = "detail-mini-table";
-    table.innerHTML = "<thead><tr><th>明細</th><th>単価</th><th>数量</th><th>金額</th></tr></thead>";
+    table.innerHTML = "<thead><tr><th>明細</th><th>分類</th><th>単価</th><th>数量</th><th>金額</th></tr></thead>";
     const tbody = document.createElement("tbody");
     transaction.items.forEach((item) => {
       const row = document.createElement("tr");
-      [item.label, `${yen.format(item.price)}円`, item.quantity, `${yen.format(item.price * item.quantity)}円`].forEach((value) => {
+      [item.label, transactionItemCategoryLabel(item.category), `${yen.format(item.price)}円`, item.quantity, `${yen.format(item.price * item.quantity)}円`].forEach((value) => {
         const cell = document.createElement("td");
         cell.textContent = value;
         row.appendChild(cell);
@@ -1871,6 +2520,32 @@ function formatTransactionTime(value) {
   const timestamp = Number(value || 0);
   if (!timestamp) return "--:--";
   return new Date(timestamp).toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
+}
+
+function closingSubmittedMillis(closing) {
+  const value = closing?.source?.closedAt || closing?.source?.updatedAt || closing?.reviewedAt || closing?.updatedAt;
+  if (typeof value?.toMillis === "function") return value.toMillis();
+  if (typeof value?.seconds === "number") return value.seconds * 1000;
+  const parsed = new Date(value || 0).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function closingSubmissionLabel(closing) {
+  const millis = closingSubmittedMillis(closing);
+  const time = millis
+    ? new Date(millis).toLocaleString("ja-JP", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+    : "時刻不明";
+  return `${time} / ${String(closing.id || "").slice(-8)}`;
+}
+
+function transactionItemCategoryLabel(category) {
+  return {
+    champagneWine: "シャンパン・ワイン",
+    champagne: "シャンパン・ワイン",
+    wine: "シャンパン・ワイン",
+    keepBottle: "キープボトル",
+    castDrink: "キャストドリンク"
+  }[category] || "その他";
 }
 
 function paymentLabel(transaction) {
@@ -1906,6 +2581,8 @@ function normalizeCastWork(work) {
       ...row,
       castId: member?.id || row.castId || "",
       posCastId: member?.posCastId || row.castId || "",
+      internalNo: Number(row.internalNo || member?.internalNo || 0),
+      trialBizDay: row.trialBizDay || "",
       isTrial: row.isTrial === true || row.castType === "trial" || member?.status === "trial",
       hours: Number(row.hours || 0)
     };
@@ -1923,17 +2600,25 @@ function renderTrialCastWork(work, trialCasts) {
     item.className = "dynamic-row trial-cast-work-row";
     item.dataset.castId = String(row.posCastId || row.castId || trial.castId || "");
     item.dataset.castName = row.castName || row.name || trial.castName || "";
+    item.dataset.internalNo = String(row.internalNo || trial.internalNo || "");
+    item.dataset.trialBizDay = row.trialBizDay || trial.trialBizDay || "";
     item.dataset.startTime = row.startTime || "";
     item.dataset.endTime = row.endTime || "";
     item.dataset.hours = String(row.hours || calculateWorkHours(row.startTime, row.endTime) || 0);
     const identity = document.createElement("div");
-    identity.innerHTML = `<strong>${escapeHtml(item.dataset.castName)}</strong><span class="block text-xs text-slate-500">${escapeHtml(item.dataset.startTime)}-${escapeHtml(item.dataset.endTime)} / ${escapeHtml(formatHours(Number(item.dataset.hours)))}</span>`;
-    const introducer = document.createElement("input");
-    introducer.type = "text";
-    introducer.maxLength = 40;
-    introducer.placeholder = "紹介者（必須）";
-    introducer.className = "form-input trial-introducer-name";
-    introducer.value = row.introducerName || "";
+    const meta = `${castNumberLabel(item.dataset.internalNo)}${item.dataset.trialBizDay ? ` / ${item.dataset.trialBizDay}` : ""}`;
+    identity.innerHTML = `<strong>体入 ${escapeHtml(meta)} ${escapeHtml(item.dataset.castName)}</strong><span class="block text-xs text-slate-500">${escapeHtml(item.dataset.startTime)}-${escapeHtml(item.dataset.endTime)} / ${escapeHtml(formatHours(Number(item.dataset.hours)))}</span>`;
+    const introducer = document.createElement("select");
+    introducer.className = "form-select trial-introducer-id";
+    const castMember = castMembers.find((member) =>
+      String(member.posCastId || member.id || "") === String(item.dataset.castId)
+      || String(member.name || "") === String(item.dataset.castName)
+    );
+    fillIntroducerSelect(
+      introducer,
+      row.introducerId || trial.introducerId || castMember?.introducerId || "",
+      row.introducerName || trial.introducerName || castMember?.introducerName || ""
+    );
     const hourlyRate = document.createElement("input");
     hourlyRate.type = "number";
     hourlyRate.min = "1";

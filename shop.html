@@ -44,6 +44,10 @@
             <span class="shop-home-action-title">送信済データ</span>
             <span class="shop-home-action-detail">送信済みデータの確認・編集・再送信</span>
           </button>
+          <button type="button" class="shop-home-action" data-mail-open="shop">
+            <span class="shop-home-action-title">内部メール</span>
+            <span class="shop-home-action-detail">経理との連絡・未読確認・日付検索</span>
+          </button>
         </div>
       </section>
 
@@ -76,7 +80,7 @@
               <option value="partTime">アルバイト</option>
             </select>
           </label>
-          <label>
+          <label id="staffJobTypeField">
             <span class="form-label">業務区分</span>
             <select id="newStaffJobType" class="form-select">
               <option value="kitchen">キッチンスタッフ</option>
@@ -84,14 +88,14 @@
               <option value="driver">ドライバースタッフ</option>
             </select>
           </label>
-          <label>
+          <label id="staffPayTypeField">
             <span class="form-label">給与形態</span>
             <select id="newStaffPayType" class="form-select">
               <option value="daily">日給</option>
               <option value="hourly">時給</option>
             </select>
           </label>
-          <label>
+          <label id="staffPayAmountField">
             <span class="form-label">給与金額（円）</span>
             <input id="newStaffPayAmount" type="number" min="1" step="1" class="form-input" placeholder="例：1200">
           </label>
@@ -99,6 +103,59 @@
             <button id="registerStaffButton" type="button" class="primary-button flex-1">入店登録</button>
             <button id="cancelStaffEditButton" type="button" class="secondary-button hidden">取消</button>
           </div>
+        </div>
+      </section>
+
+      <section class="section-shell hidden" data-workspace="mail">
+        <div class="section-title">
+          <div>
+            <h2>内部メール</h2>
+            <p class="mt-1 text-sm text-slate-500">経理へ日付・件名・本文を送信し、受信メールを確認します。</p>
+          </div>
+          <button type="button" class="secondary-button" data-home-button>ホームへ戻る</button>
+        </div>
+        <div data-internal-mail-root data-mail-role="shop" class="space-y-5">
+          <section class="detail-block">
+            <h3>メール送信</h3>
+            <div class="grid gap-4 md:grid-cols-3">
+              <label>
+                <span class="form-label">日付</span>
+                <input type="date" class="form-input" data-mail="date">
+              </label>
+              <label class="md:col-span-2">
+                <span class="form-label">件名</span>
+                <input type="text" maxlength="80" class="form-input" data-mail="subject" placeholder="件名">
+              </label>
+              <label class="md:col-span-3">
+                <span class="form-label">本文</span>
+                <textarea maxlength="2000" rows="5" class="form-textarea" data-mail="body" placeholder="本文"></textarea>
+              </label>
+              <div class="md:col-span-3 flex justify-end">
+                <button type="button" class="primary-button" data-mail="send">経理へ送信</button>
+              </div>
+            </div>
+          </section>
+          <section class="detail-block">
+            <div class="section-title">
+              <h3>受信・送信メール</h3>
+              <button type="button" class="secondary-button" data-mail="reload">再読み込み</button>
+            </div>
+            <div class="grid gap-4 md:grid-cols-3">
+              <label>
+                <span class="form-label">日付検索</span>
+                <input type="date" class="form-input" data-mail="dateSearch">
+              </label>
+              <div class="flex items-end gap-2 md:col-span-2">
+                <button type="button" class="secondary-button" data-mail="clearDateSearch">日付検索クリア</button>
+              </div>
+            </div>
+            <div class="mt-4 flex flex-wrap gap-2">
+              <button type="button" class="primary-button" data-mail-box="unread">未読ボックス</button>
+              <button type="button" class="secondary-button" data-mail-box="read">既読ボックス</button>
+              <button type="button" class="secondary-button" data-mail-box="sent">送信ボックス</button>
+            </div>
+            <div class="mt-4 notice" data-mail="status"></div>
+          </section>
         </div>
       </section>
 
@@ -172,7 +229,7 @@
           <h2>営業日</h2>
           <div class="flex flex-wrap gap-2">
             <button type="button" class="secondary-button" data-home-button>ホームへ戻る</button>
-            <button id="copyPreviousButton" type="button" class="secondary-button">前日のデータをコピー</button>
+            <button id="copyPreviousButton" type="button" class="secondary-button">前日のスタッフ勤務をコピー</button>
           </div>
         </div>
         <div class="grid gap-4 md:grid-cols-3">
@@ -257,6 +314,29 @@
         <div id="allowanceRows" class="space-y-3"></div>
       </section>
 
+      <section class="section-shell hidden" data-workspace="closing">
+        <div class="section-title">
+          <div>
+            <h2>控除</h2>
+            <p class="mt-1 text-sm text-slate-500">送迎代、日払い、立替金を当日の出勤者から選択して登録します。</p>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <button id="openTransportDeductionButton" type="button" class="secondary-button">送迎利用者を登録</button>
+            <button id="openPayrollDeductionButton" type="button" class="secondary-button">報酬・給与引きを登録</button>
+          </div>
+        </div>
+        <div class="grid gap-4 md:grid-cols-2">
+          <div>
+            <h3 class="text-sm font-bold text-slate-800">送迎代控除</h3>
+            <div id="transportDeductionRows" class="mt-3 space-y-3"></div>
+          </div>
+          <div>
+            <h3 class="text-sm font-bold text-slate-800">報酬・給与引き</h3>
+            <div id="payrollDeductionRows" class="mt-3 space-y-3"></div>
+          </div>
+        </div>
+      </section>
+
       <div class="sticky bottom-0 -mx-4 hidden border-t border-slate-200 bg-white/95 px-4 py-4 backdrop-blur" data-workspace="closing">
         <button id="saveButton" type="button" class="primary-button w-full md:w-auto">経理へ送信する</button>
       </div>
@@ -315,6 +395,32 @@
     </div>
   </dialog>
 
+  <dialog id="transportDeductionModal" class="modal-card modal-wide">
+    <form method="dialog">
+      <p class="brand-kicker">TRANSPORT DEDUCTION</p>
+      <h2 class="mt-2 text-xl font-bold">送迎利用者登録</h2>
+      <p class="mt-2 text-sm text-slate-500">当日出勤しているキャストから選択し、送迎代を入力してください。</p>
+      <div id="transportDeductionModalRows" class="mt-5 space-y-3"></div>
+      <div class="mt-6 flex justify-end gap-3">
+        <button value="cancel" class="secondary-button">戻る</button>
+        <button id="saveTransportDeductionButton" type="button" class="primary-button">反映する</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="payrollDeductionModal" class="modal-card modal-wide">
+    <form method="dialog">
+      <p class="brand-kicker">PAYROLL DEDUCTION</p>
+      <h2 class="mt-2 text-xl font-bold">報酬・給与引き登録</h2>
+      <p class="mt-2 text-sm text-slate-500">当日出勤しているキャスト・従業員から選択し、日払い・立替金を入力してください。</p>
+      <div id="payrollDeductionModalRows" class="mt-5 space-y-3"></div>
+      <div class="mt-6 flex justify-end gap-3">
+        <button value="cancel" class="secondary-button">戻る</button>
+        <button id="savePayrollDeductionButton" type="button" class="primary-button">反映する</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="castDetailModal" class="modal-card modal-wide">
     <div>
       <div class="flex items-start justify-between gap-4">
@@ -351,7 +457,12 @@
       <p class="brand-kicker">CAST PROFILE</p>
       <h2 id="castEditTitle" class="mt-2 text-xl font-bold">キャスト情報</h2>
       <input id="editingCastId" type="hidden">
+      <input id="convertingTrialCastId" type="hidden">
       <div class="mt-5 space-y-4">
+        <label>
+          <span class="form-label">キャスト名（正式名）</span>
+          <input id="castProfileName" type="text" maxlength="40" class="form-input">
+        </label>
         <label>
           <span class="form-label">報酬システム（必須）</span>
           <select id="castRewardSystem" class="form-select">
@@ -379,8 +490,8 @@
           </select>
         </label>
         <label id="castAdvisoryFeeField" class="hidden">
-          <span class="form-label">顧問料金額（必須）</span>
-          <input id="castAdvisoryFeeAmount" type="number" min="1" step="1" inputmode="numeric" class="form-input" placeholder="例：30000">
+          <span class="form-label">顧問料金額（1出勤あたり・必須）</span>
+          <input id="castAdvisoryFeeAmount" type="number" min="1" step="1" inputmode="numeric" class="form-input" placeholder="例：2000">
         </label>
         <label>
           <span class="form-label">備考</span>
@@ -395,6 +506,31 @@
     </form>
   </dialog>
 
-  <script type="module" src="js/shop.js?v=1.25.1"></script>
+  <dialog id="posCastLinkModal" class="modal-card">
+    <form method="dialog">
+      <p class="brand-kicker">POS LINK</p>
+      <h2 id="posCastLinkTitle" class="mt-2 text-xl font-bold">POS正式キャストと紐づけ</h2>
+      <input id="linkingCastId" type="hidden">
+      <div class="mt-5 space-y-4">
+        <div id="posCastLinkCurrent" class="notice"></div>
+        <label>
+          <span class="form-label">POSキャスト検索</span>
+          <input id="posCastLinkSearch" type="search" maxlength="40" class="form-input" placeholder="POSキャスト名または内部番号">
+        </label>
+        <label>
+          <span class="form-label">紐づけるPOS正式キャスト</span>
+          <select id="posCastLinkSelect" class="form-select"></select>
+        </label>
+        <div id="posCastLinkPreview" class="notice"></div>
+        <div id="posCastLinkError" class="hidden alert alert-error"></div>
+      </div>
+      <div class="mt-6 flex justify-end gap-3">
+        <button id="cancelPosCastLinkButton" value="cancel" class="secondary-button">戻る</button>
+        <button id="savePosCastLinkButton" type="button" class="primary-button">紐づける</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="js/shop.js?v=1.48"></script>
 </body>
 </html>

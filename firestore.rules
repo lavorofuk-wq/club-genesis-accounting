@@ -35,13 +35,24 @@ service cloud.firestore {
       && request.resource.data.name.size() <= 40
       && (request.resource.data.employmentType == 'employee'
         || request.resource.data.employmentType == 'partTime')
-      && (request.resource.data.jobType == 'kitchen'
-        || request.resource.data.jobType == 'hall'
-        || request.resource.data.jobType == 'driver')
-      && (request.resource.data.payType == 'daily'
-        || request.resource.data.payType == 'hourly')
-      && request.resource.data.payAmount is int
-      && request.resource.data.payAmount > 0
+      && (request.resource.data.employmentType == 'employee'
+        ? (request.resource.data.jobType == ''
+          && request.resource.data.payType == ''
+          && request.resource.data.payAmount == 0)
+          || ((request.resource.data.jobType == 'kitchen'
+            || request.resource.data.jobType == 'hall'
+            || request.resource.data.jobType == 'driver')
+            && (request.resource.data.payType == 'daily'
+              || request.resource.data.payType == 'hourly')
+            && request.resource.data.payAmount is int
+            && request.resource.data.payAmount > 0)
+        : (request.resource.data.jobType == 'kitchen'
+          || request.resource.data.jobType == 'hall'
+          || request.resource.data.jobType == 'driver')
+          && (request.resource.data.payType == 'daily'
+            || request.resource.data.payType == 'hourly')
+          && request.resource.data.payAmount is int
+          && request.resource.data.payAmount > 0)
       && (request.resource.data.status == 'active'
         || request.resource.data.status == 'departed');
     }
@@ -101,6 +112,22 @@ service cloud.firestore {
       && (!request.resource.data.keys().hasAny(['note'])
         || (request.resource.data.note is string
           && request.resource.data.note.size() <= 500))
+      && (!request.resource.data.keys().hasAny(['personKey'])
+        || (request.resource.data.personKey is string
+          && request.resource.data.personKey.size() > 0
+          && request.resource.data.personKey.size() <= 120))
+      && (!request.resource.data.keys().hasAny(['sourceTrialCastId'])
+        || (request.resource.data.sourceTrialCastId is string
+          && request.resource.data.sourceTrialCastId.size() <= 120))
+      && (!request.resource.data.keys().hasAny(['convertedFromTrial'])
+        || request.resource.data.convertedFromTrial is bool)
+      && (!request.resource.data.keys().hasAny(['convertedTrialName'])
+        || (request.resource.data.convertedTrialName is string
+          && request.resource.data.convertedTrialName.size() <= 40))
+      && (!request.resource.data.keys().hasAny(['previousNames'])
+        || request.resource.data.previousNames is list)
+      && (!request.resource.data.keys().hasAny(['previousPosCastIds'])
+        || request.resource.data.previousPosCastIds is list)
       && (!request.resource.data.keys().hasAny(['rewardSystem'])
         || request.resource.data.rewardSystem != 'guaranteedHourly'
         || (request.resource.data.keys().hasAny(['guaranteeNote'])
@@ -176,6 +203,52 @@ service cloud.firestore {
       && isNonNegativeNumber(request.resource.data.hours);
     }
 
+    function isEmployeeSalary() {
+      return request.resource.data.month is string
+      && request.resource.data.month.matches('^\\d{4}-\\d{2}$')
+      && request.resource.data.staffId is string
+      && request.resource.data.staffId.size() > 0
+      && request.resource.data.staffName is string
+      && request.resource.data.staffName.size() > 0
+      && request.resource.data.staffName.size() <= 40
+      && request.resource.data.monthlySalary is int
+      && request.resource.data.monthlySalary > 0;
+    }
+
+    function isLiquorCost() {
+      return request.resource.data.brandName is string
+      && request.resource.data.brandName.size() > 0
+      && request.resource.data.brandName.size() <= 80
+      && request.resource.data.costAmount is int
+      && request.resource.data.costAmount >= 0;
+    }
+
+    function isInternalMail() {
+      return request.resource.data.sentDate is string
+      && request.resource.data.sentDate.matches('^\\d{4}-\\d{2}-\\d{2}$')
+      && request.resource.data.subject is string
+      && request.resource.data.subject.size() > 0
+      && request.resource.data.subject.size() <= 80
+      && request.resource.data.body is string
+      && request.resource.data.body.size() > 0
+      && request.resource.data.body.size() <= 2000
+      && (request.resource.data.fromRole == 'shop'
+        || request.resource.data.fromRole == 'accounting')
+      && (request.resource.data.toRole == 'shop'
+        || request.resource.data.toRole == 'accounting')
+      && request.resource.data.fromRole != request.resource.data.toRole
+      && request.resource.data.fromUid is string
+      && request.resource.data.fromUid.size() > 0
+      && request.resource.data.fromEmail is string
+      && request.resource.data.fromEmail.size() <= 120
+      && request.resource.data.readByShop is bool
+      && request.resource.data.readByAccounting is bool
+      && (!request.resource.data.keys().hasAny(['readAtShop'])
+        || request.resource.data.readAtShop is timestamp)
+      && (!request.resource.data.keys().hasAny(['readAtAccounting'])
+        || request.resource.data.readAtAccounting is timestamp);
+    }
+
     function isClosingPayload(document) {
       return request.resource.data.keys().hasAll([
         'businessDate',
@@ -187,9 +260,11 @@ service cloud.firestore {
         'castWork',
         'source'
       ])
-      && request.resource.data.businessDate == document
       && request.resource.data.businessDate is string
       && request.resource.data.businessDate.matches('^\\d{4}-\\d{2}-\\d{2}$')
+      && (request.resource.data.businessDate == document
+        || (request.resource.data.source.keys().hasAny(['submissionId'])
+          && request.resource.data.source.submissionId == document))
       && (request.resource.data.status == 'submitted'
         || request.resource.data.status == 'approved'
         || request.resource.data.status == 'finalized')
@@ -311,6 +386,18 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    match /liquorCosts/{document} {
+      allow read: if signedIn() && userRole() == 'accounting';
+      allow create, update: if signedIn() && userRole() == 'accounting' && isLiquorCost();
+      allow delete: if signedIn() && userRole() == 'accounting';
+    }
+
+    match /liquorCosts-dev/{document} {
+      allow read: if signedIn() && userRole() == 'accounting';
+      allow create, update: if signedIn() && userRole() == 'accounting' && isLiquorCost();
+      allow delete: if signedIn() && userRole() == 'accounting';
+    }
+
     match /trialCastRecords/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
       allow create, update: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting') && isTrialCastRecord();
@@ -320,6 +407,30 @@ service cloud.firestore {
     match /trialCastRecords-dev/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
       allow create, update: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting') && isTrialCastRecord();
+      allow delete: if false;
+    }
+
+    match /employeeSalaries/{document} {
+      allow read: if signedIn() && userRole() == 'accounting';
+      allow create, update: if signedIn() && userRole() == 'accounting' && isEmployeeSalary();
+      allow delete: if false;
+    }
+
+    match /employeeSalaries-dev/{document} {
+      allow read: if signedIn() && userRole() == 'accounting';
+      allow create, update: if signedIn() && userRole() == 'accounting' && isEmployeeSalary();
+      allow delete: if false;
+    }
+
+    match /internalMails/{document} {
+      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow create, update: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting') && isInternalMail();
+      allow delete: if false;
+    }
+
+    match /internalMails-dev/{document} {
+      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow create, update: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting') && isInternalMail();
       allow delete: if false;
     }
 
