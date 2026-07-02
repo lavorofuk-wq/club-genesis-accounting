@@ -331,6 +331,33 @@ function castDocumentId(posCastId) {
   return `pos_${String(posCastId).replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 }
 
+function findCastMemberByPosId(posCastId) {
+  return allCastMembers.find((member) =>
+    member.deleted !== true && String(member.posCastId || member.id || "") === String(posCastId || "")
+  );
+}
+
+function trialCastMemberPayload(row) {
+  const existing = findCastMemberByPosId(row.castId);
+  const posCastId = String(row.castId || existing?.posCastId || "");
+  const name = String(row.castName || existing?.name || "");
+  return {
+    posCastId,
+    name,
+    internalNo: Number(row.internalNo || existing?.internalNo || 0),
+    status: existing?.status || "trial",
+    source: existing?.source || "pos",
+    personKey: existing?.personKey || `person_${existing?.id || castDocumentId(posCastId)}`,
+    introducerId: row.introducerId || existing?.introducerId || "",
+    introducerName: row.introducerName || existing?.introducerName || "",
+    introducerFeeSystem: row.introducerFeeSystem || existing?.introducerFeeSystem || "",
+    advisoryFeeEnabled: row.advisoryFeeEnabled === true || existing?.advisoryFeeEnabled === true,
+    advisoryFeeAmount: Number(existing?.advisoryFeeAmount || 0),
+    updatedBy: currentUser.uid,
+    updatedAt: serverTimestamp()
+  };
+}
+
 function castNumberLabel(value) {
   const number = Number(value || 0);
   return number ? `No.${String(number).padStart(3, "0")}` : "No.-";
@@ -2293,14 +2320,7 @@ async function saveReport() {
     )));
     await Promise.all(pendingPayload.trialWork.map((row) => setDoc(
       doc(db, castCollectionName, castDocumentId(row.castId)),
-      {
-        introducerId: row.introducerId,
-        introducerName: row.introducerName,
-        introducerFeeSystem: row.introducerFeeSystem,
-        advisoryFeeEnabled: row.advisoryFeeEnabled,
-        updatedBy: currentUser.uid,
-        updatedAt: serverTimestamp()
-      },
+      trialCastMemberPayload(row),
       { merge: true }
     )));
     if (selectedPending?.sourceCollection === shopClosingsCollectionName) {
