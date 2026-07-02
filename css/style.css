@@ -730,6 +730,40 @@ body {
   background: rgb(15 23 42 / 0.42);
 }
 
+.force-update-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 999999;
+  display: grid;
+  place-items: center;
+  background: rgb(15 23 42 / 0.86);
+  padding: 20px;
+}
+
+.force-update-panel {
+  width: min(92vw, 460px);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 28px;
+  text-align: center;
+  box-shadow: 0 24px 60px rgb(15 23 42 / 0.28);
+}
+
+.force-update-panel h2 {
+  margin-top: 10px;
+  color: var(--text);
+  font-size: 24px;
+  font-weight: 900;
+}
+
+.force-update-panel p:not(.brand-kicker) {
+  margin: 14px 0 22px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.8;
+}
+
 .detail-grid {
   display: grid;
   gap: 10px;
