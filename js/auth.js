@@ -18,9 +18,12 @@ const ROLE_ROUTES = {
   accounting: "accounting.html"
 };
 const AUTH_TIMEOUT_MS = 15000;
+const APP_VERSION = "1.50";
+const VERSION_CHECK_INTERVAL_MS = 60000;
 
 cleanupLegacyPwa();
 showEnvironment();
+initForceUpdateMonitor();
 
 function showEnvironment() {
   const badge = document.getElementById("environmentBadge");
@@ -42,6 +45,65 @@ async function cleanupLegacyPwa() {
   } catch (error) {
     console.warn("Legacy cache cleanup skipped.", error);
   }
+}
+
+function initForceUpdateMonitor() {
+  if (location.protocol === "file:") return;
+  let showingOverlay = false;
+  const checkVersion = async () => {
+    try {
+      const response = await fetch(`version.json?t=${Date.now()}`, {
+        cache: "no-store",
+        headers: { "Cache-Control": "no-cache" }
+      });
+      if (!response.ok) return;
+      const data = await response.json();
+      const latestVersion = String(data.version || "");
+      if (latestVersion && compareVersions(latestVersion, APP_VERSION) > 0) {
+        showingOverlay = true;
+        showForceUpdateOverlay(latestVersion);
+      }
+    } catch (error) {
+      console.warn("Version check skipped.", error);
+    }
+  };
+  checkVersion();
+  window.setInterval(() => {
+    if (!showingOverlay) checkVersion();
+  }, VERSION_CHECK_INTERVAL_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && !showingOverlay) checkVersion();
+  });
+}
+
+function compareVersions(a, b) {
+  const left = String(a).split(".").map((part) => Number(part) || 0);
+  const right = String(b).split(".").map((part) => Number(part) || 0);
+  const length = Math.max(left.length, right.length);
+  for (let i = 0; i < length; i += 1) {
+    const diff = (left[i] || 0) - (right[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+function showForceUpdateOverlay(latestVersion) {
+  if (document.getElementById("forceUpdateOverlay")) return;
+  const overlay = document.createElement("div");
+  overlay.id = "forceUpdateOverlay";
+  overlay.className = "force-update-overlay";
+  overlay.innerHTML = `
+    <div class="force-update-panel">
+      <p class="brand-kicker">SYSTEM UPDATE</p>
+      <h2>アップデートがあります</h2>
+      <p>新しいバージョン Ver${latestVersion} が配信されました。<br>再読み込みしてから操作を続けてください。</p>
+      <button type="button" class="primary-button">再読み込み</button>
+    </div>
+  `;
+  overlay.querySelector("button").addEventListener("click", () => {
+    location.reload();
+  });
+  document.body.appendChild(overlay);
 }
 
 export function showMessage(elementId, message, isError = true) {
