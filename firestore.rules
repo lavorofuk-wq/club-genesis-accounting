@@ -259,6 +259,24 @@ service cloud.firestore {
         || request.resource.data.readAtAccounting is timestamp);
     }
 
+    function isInternalMailReadStatusUpdate() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+        'readByShop',
+        'readByAccounting',
+        'readAtShop',
+        'readAtAccounting',
+        'updatedAt'
+      ])
+      && (!request.resource.data.keys().hasAny(['readByShop'])
+        || request.resource.data.readByShop is bool)
+      && (!request.resource.data.keys().hasAny(['readByAccounting'])
+        || request.resource.data.readByAccounting is bool)
+      && (!request.resource.data.keys().hasAny(['readAtShop'])
+        || request.resource.data.readAtShop is timestamp)
+      && (!request.resource.data.keys().hasAny(['readAtAccounting'])
+        || request.resource.data.readAtAccounting is timestamp);
+    }
+
     function isClosingPayload(document) {
       return request.resource.data.keys().hasAll([
         'businessDate',
@@ -431,14 +449,16 @@ service cloud.firestore {
     }
 
     match /internalMails/{document} {
-      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting') && isInternalMail();
+      allow read: if signedIn();
+      allow create: if signedIn() && isInternalMail() && request.resource.data.fromUid == request.auth.uid;
+      allow update: if signedIn() && (isInternalMail() || isInternalMailReadStatusUpdate());
       allow delete: if false;
     }
 
     match /internalMails-dev/{document} {
-      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting') && isInternalMail();
+      allow read: if signedIn();
+      allow create: if signedIn() && isInternalMail() && request.resource.data.fromUid == request.auth.uid;
+      allow update: if signedIn() && (isInternalMail() || isInternalMailReadStatusUpdate());
       allow delete: if false;
     }
 
