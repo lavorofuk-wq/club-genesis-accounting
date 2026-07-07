@@ -1579,6 +1579,19 @@ function aggregateCastBacks(items) {
     row[key] += Math.floor(toNumber(amount));
     if (countKey) row[countKey] += 1;
   };
+  const backTargetIds = (item) => Array.isArray(item.backTargetCastIds)
+    ? [...new Set(item.backTargetCastIds.filter(Boolean).map(String))]
+    : [];
+  const backTargetName = (item, id, index = 0) =>
+    castNameForId(id) || (Array.isArray(item.backTargetCastNames) ? item.backTargetCastNames[index] : "") || item.castName || "";
+  const addTargetedBack = (item, key, amount, countKey = "") => {
+    const targets = backTargetIds(item);
+    if (!targets.length) return false;
+    const share = Math.floor(toNumber(amount) / targets.length);
+    targets.forEach((id, index) => add(id, backTargetName(item, id, index), key, share, countKey));
+    return true;
+  };
+  const hasTargetedBack = (item) => backTargetIds(item).length > 0;
 
   items.forEach((closing) => {
     closing.transactions.forEach((transaction) => {
@@ -1598,17 +1611,20 @@ function aggregateCastBacks(items) {
       const sharedBack = (categories, rate, key) => {
         if (!honCasts.length) return;
         const sourceTotal = transaction.items
-          .filter((item) => categories.includes(item.category))
+          .filter((item) => categories.includes(item.category) && !hasTargetedBack(item))
           .reduce((sum, item) => sum + item.price * item.quantity, 0);
         const share = Math.floor(Math.floor(sourceTotal * rate) / honCasts.length);
         honCasts.forEach((item) => add(item.castId, castNameForId(item.castId), key, share));
       };
       sharedBack(["vipRoom"], 0.10, "vip");
       sharedBack(["keepBottle"], 0.10, "keepBottle");
+      transaction.items
+        .filter((item) => item.category === "keepBottle" && hasTargetedBack(item))
+        .forEach((item) => addTargetedBack(item, "keepBottle", item.price * item.quantity * 0.10));
 
       if (honCasts.length) {
         const champagneItems = transaction.items.filter((item) =>
-          ["champagneWine", "champagne", "wine"].includes(item.category)
+          ["champagneWine", "champagne", "wine"].includes(item.category) && !hasTargetedBack(item)
         );
         let grossTotal = 0;
         let costTotal = 0;
@@ -1637,11 +1653,32 @@ function aggregateCastBacks(items) {
           missingCosts.forEach((label) => row.missingLiquorCosts.add(label));
         });
       }
+      transaction.items
+        .filter((item) => ["champagneWine", "champagne", "wine"].includes(item.category) && hasTargetedBack(item))
+        .forEach((item) => {
+          const quantity = toNumber(item.quantity);
+          const gross = toNumber(item.price) * quantity;
+          const costRecord = liquorCostForItem(item);
+          const cost = costRecord ? costRecord.costAmount * quantity : 0;
+          const net = costRecord ? Math.max(0, gross - cost) : 0;
+          const targets = backTargetIds(item);
+          const share = Math.floor(Math.floor(net * 0.20) / targets.length);
+          targets.forEach((id, index) => {
+            const row = ensure(id, backTargetName(item, id, index));
+            row.champagneWine += share;
+            row.champagneWineGross += Math.floor(gross / targets.length);
+            row.champagneWineCost += Math.floor(cost / targets.length);
+            row.champagneWineNet += Math.floor(net / targets.length);
+            if (!costRecord) row.missingLiquorCosts.add(item.label || "名称未設定");
+          });
+        });
 
       transaction.items
-        .filter((item) => item.category === "castDrink" && item.castId)
+        .filter((item) => item.category === "castDrink" && (item.castId || hasTargetedBack(item)))
         .forEach((item) => {
-          add(item.castId, castNameForId(item.castId), "drink", Math.floor(item.price * item.quantity * 0.10));
+          if (!addTargetedBack(item, "drink", Math.floor(item.price * item.quantity * 0.10))) {
+            add(item.castId, castNameForId(item.castId) || item.castName, "drink", Math.floor(item.price * item.quantity * 0.10));
+          }
         });
     });
   });
@@ -2567,6 +2604,11 @@ function normalizeTransactions(rows) {
       price: toNumber(item.price),
       quantity: toNumber(item.quantity ?? item.qty),
       castId: String(item.castId || ""),
+      castName: String(item.castName || ""),
+      backTargetCastIds: Array.isArray(item.backTargetCastIds) ? item.backTargetCastIds.map(String) : [],
+      backTargetCastNames: Array.isArray(item.backTargetCastNames) ? item.backTargetCastNames.map(String) : [],
+      backType: String(item.backType || ""),
+      backAllocation: String(item.backAllocation || ""),
       banaiExtCastIds: Array.isArray(item.banaiExtCastIds) ? item.banaiExtCastIds.map(String) : [],
       banaiExtCastId: String(item.banaiExtCastId || ""),
       isHonShimei: Boolean(item.isHonShimei),
