@@ -13,8 +13,18 @@ service cloud.firestore {
       return signedIn() && exists(userPath());
     }
 
+    function authRole() {
+      return signedIn()
+        && (request.auth.token.role == 'shop'
+          || request.auth.token.role == 'accounting')
+        ? request.auth.token.role
+        : null;
+    }
+
     function userRole() {
-      return userExists() ? get(userPath()).data.role : null;
+      return authRole() != null
+        ? authRole()
+        : (userExists() ? get(userPath()).data.role : null);
     }
 
     function isNonNegativeNumber(value) {
