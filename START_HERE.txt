@@ -1,146 +1,39 @@
-CLUB GENESIS 経理システム - 最初に読むファイル
+CLUB GENESIS GMS - 最初に読むファイル
 
-むずかしい言葉をできるだけ使わずに、最初にやることだけを書きます。
-
-このシステムで使うもの
-1. ログイン機能: Firebase Authentication
+このシステムで使うもの:
+1. ログイン: Firebase Authentication
 2. データ保存: Cloud Firestore
 3. 公開: Firebase Hosting または Vercel
 
-本番データと開発データ
+本番データと開発データ:
 1. 本番サイトは dailyClosings に保存します。
 2. dev環境とローカルは dailyClosings-dev に保存します。
-3. 本番と開発のPOS締めデータは相互に表示されません。
+3. 本番と開発の締めデータは相互に表示されません。
 4. ログインユーザーは共通です。
-5. 画面に「本番」または「開発」と表示されます。
+5. 画面に本番または開発の表示があります。
 
-スタッフ・キャスト登録
-1. 店舗入力画面の「スタッフ・キャスト登録」で名前を登録します。
-2. スタッフは名前と役職を登録します。
-3. キャストは名前を登録します。
-4. 勤務時間欄では、登録済みの名前を選択して時間を入力します。
-5. 開発と本番の登録名簿は別々です。
+POS締めデータ連携:
+1. POSからGMS Firebaseへ直接送信しません。
+2. POSの過去営業履歴で「GMS取込JSON」を出力します。
+3. GMSの「POSファイル取込」でJSONを選択して取り込みます。
+4. 取り込んだデータは dailyClosings または dailyClosings-dev に保存されます。
+5. shopClosings / shopClosings-dev は使用しません。
+6. 正式取込はUTF-8 JSONのみ対応します。CSVは確認用です。
 
-POS締め連携
-1. 今後の正しい流れは、POSで締め作業を行い、経理はPOS締めデータを確認します。
-2. POS側は dailyClosings または dailyClosings-dev に締めデータを保存します。
-3. 経理ダッシュボードは dailyClosings / dailyClosings-dev を読み取ります。
-4. POS側の保存形式は POS_CLOSING_SYNC_SPEC.md にあります。
-
-ローカルで開くときの重要事項
+ローカルで開くとき:
 1. index.htmlを直接ダブルクリックしないでください。
-2. file:/// から始まるURLではFirebaseログインが動きません。
-3. フォルダ内の「起動.bat」をダブルクリックしてください。
-4. 正しいURLは http://localhost:4173/index.html です。
+2. file:/// ではFirebaseログインが動かない場合があります。
+3. フォルダ内の起動.batまたはlocal-server.cjsを使ってください。
+4. URLは http://localhost:4173/index.html です。
 
-すでにこちらで済ませたこと
-1. ログイン画面を作成しました。
-   - index.html
-2. 店舗入力画面を作成しました。
-   - shop.html
-3. 経理確認画面を作成しました。
-   - accounting.html
-4. Firebaseに接続するプログラムを作成しました。
-   - js/firebase-config.js
-5. Firestoreの保存ルールを用意しました。
-   - firestore.rules
-6. Firebase Hosting用の設定を用意しました。
-   - firebase.json
-   - .firebaserc
+Firestoreルール:
+1. firestore.rules をFirebase ConsoleまたはFirebase CLIで反映してください。
+2. dailyClosings / dailyClosings-dev の作成・更新はログイン済みの accounting または shop ロールだけ許可します。
+3. POS端末からGMS Firestoreへ直接書き込ませるルールは不要です。
 
-あなたにやってほしいこと
-Firebaseの管理画面だけは、あなたのGoogleアカウントで操作する必要があります。
-パスワードやログイン情報をこちらで勝手に作れないためです。
-
-手順1: Firebaseを開く
-1. ブラウザで Firebase Console を開きます。
-   https://console.firebase.google.com/
-2. プロジェクト club-genesis-accountin を開きます。
-
-手順2: メール/パスワードログインをONにする
-1. 左メニューの「Authentication」を開きます。
-2. 「始める」または「Sign-in method」を押します。
-3. 「メール/パスワード」を選びます。
-4. 有効にして保存します。
-
-手順3: ログインユーザーを2人作る
-1. Authentication の「Users」を開きます。
-2. 「ユーザーを追加」を押します。
-3. 店舗用ユーザーを作ります。
-   例:
-   メール: shop@example.com
-   パスワード: 自分で決めた安全なパスワード
-4. 経理用ユーザーを作ります。
-   例:
-   メール: accounting@example.com
-   パスワード: 自分で決めた安全なパスワード
-5. 作成後、各ユーザーの UID をコピーします。
-   UIDは長い英数字です。
-
-手順4: Firestoreにusersを登録する
-1. 左メニューの「Firestore Database」を開きます。
-2. まだ作っていない場合はデータベースを作ります。
-3. 「コレクションを開始」を押します。
-4. コレクションIDに users と入力します。
-5. 店舗用ユーザーのドキュメントを作ります。
-   ドキュメントID: 店舗用ユーザーのUID
-   フィールド:
-   uid: 店舗用ユーザーのUID
-   email: shop@example.com
-   role: shop
-   createdAt: 今日の日付
-6. 経理用ユーザーのドキュメントを作ります。
-   ドキュメントID: 経理用ユーザーのUID
-   フィールド:
-   uid: 経理用ユーザーのUID
-   email: accounting@example.com
-   role: accounting
-   createdAt: 今日の日付
-
-重要
-role が shop の人は、店舗入力画面だけ使えます。
-role が accounting の人は、経理ダッシュボードだけ使えます。
-
-手順5: Firestoreルールを反映する
-Firebase CLIを使える場合は、このフォルダで次を実行します。
-
-firebase deploy --only firestore:rules
-
-CLIがわからない場合:
-1. Firebase Console の Firestore Database を開きます。
-2. 「ルール」タブを開きます。
-3. firestore.rules の内容をコピーして貼り付けます。
-4. 「公開」を押します。
-
-手順6: 動作確認
-1. サイトを開きます。
-2. 店舗用メールとパスワードでログインします。
-3. 店舗入力画面が開けばOKです。
-4. 日付、売上、客数などを入れて保存します。
-5. ログアウトします。
-6. 経理用メールとパスワードでログインします。
-7. 経理ダッシュボードで保存したデータが見えればOKです。
-
-よくあるエラー
-
-ログインできない
-- Authenticationでメール/パスワードがONになっていない可能性があります。
-- メールかパスワードが間違っている可能性があります。
-
-ログイン後に進まない
-- Firestoreの users にUIDのドキュメントがない可能性があります。
-- role が shop または accounting になっていない可能性があります。
-
-保存できない
-- Firestoreルールが反映されていない可能性があります。
-- 店舗用ユーザーではなく経理用ユーザーで入力しようとしている可能性があります。
-
-CSVが文字化けしにくい理由
-- プログラム側でUTF-8 BOMを付けて出力しています。
-- Excelで開いても日本語が壊れにくい形式です。
-
-次にこちらで手伝えること
-1. Firebase画面を見ながら一緒に設定確認
-2. ログインエラーの原因確認
-3. 本番URLでの動作確認
-4. 店舗用・経理用の実メールアドレスに合わせた手順の書き換え
+動作確認:
+1. POSで営業終了済みの日付からGMS取込JSONを出力します。
+2. GMSにaccountingユーザーでログインします。
+3. POSファイル取込でJSONを選択して取り込みます。
+4. 受信データに営業日・総売上・伝票件数が表示されることを確認します。
+5. 内容確認後に確定します。

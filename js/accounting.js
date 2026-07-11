@@ -61,6 +61,7 @@ const trialCastDisplayName = (row) => {
 
 byId("logoutButton").addEventListener("click", logout);
 byId("reloadReceivedButton").addEventListener("click", loadData);
+byId("importPosClosingButton").addEventListener("click", importPosClosingFile);
 byId("loadButton").addEventListener("click", renderFinalizedView);
 byId("exportCsvButton").addEventListener("click", exportCsv);
 byId("closeReceivedEditButton").addEventListener("click", () => byId("receivedEditModal").close());
@@ -177,6 +178,107 @@ async function loadData() {
     renderLiquorCostSettings();
   } catch (error) {
     showMessage("errorMessage", `データの取得に失敗しました。${error.message}`);
+  }
+}
+
+function setImportStatus(message, isError = false) {
+  const el = byId("posClosingImportStatus");
+  if (!el) return;
+  el.textContent = message || "";
+  el.classList.toggle("alert", !!message && isError);
+  el.classList.toggle("alert-error", !!message && isError);
+}
+
+function closingChecksum(payload) {
+  const copy = { ...payload };
+  delete copy.checksum;
+  const text = JSON.stringify(copy);
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (`00000000${(hash >>> 0).toString(16)}`).slice(-8);
+}
+
+async function readImportFile(file) {
+  if (typeof file.text === "function") return file.text();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("ファイルを読み込めませんでした"));
+    reader.readAsText(file, "utf-8");
+  });
+}
+
+function validateImportedClosing(raw) {
+  const errors = [];
+  if (!raw || typeof raw !== "object") errors.push("JSONの形式が正しくありません。");
+  if (raw?.schema !== "club-genesis-pos-closing") errors.push("POS締めJSONではありません。");
+  if (Number(raw?.schemaVersion) !== 1) errors.push("対応していないschemaVersionです。");
+  if (!String(raw?.businessDate || "").match(/^\d{4}-\d{2}-\d{2}$/)) errors.push("businessDateが正しくありません。");
+  if (!raw?.sales || typeof raw.sales !== "object") errors.push("salesがありません。");
+  if (!Array.isArray(raw?.transactions)) errors.push("transactionsがありません。");
+  if (!Array.isArray(raw?.castWork)) errors.push("castWorkがありません。");
+  if (raw?.checksum && closingChecksum(raw) !== raw.checksum) errors.push("チェックサムが一致しません。ファイル破損または編集の可能性があります。");
+  ["totalSales", "cashSales", "cardSales"].forEach((key) => {
+    if (toNumber(raw?.sales?.[key]) < 0) errors.push(`${key}が不正です。`);
+  });
+  return errors;
+}
+
+function importedClosingDocument(raw, fileName) {
+  const importedAt = new Date().toISOString();
+  const source = {
+    ...(raw.source || {}),
+    importMethod: "file",
+    importedFileName: fileName,
+    importedBy: currentUser?.uid || "",
+    importedEmail: currentUser?.email || "",
+    importedAtText: importedAt
+  };
+  return {
+    ...raw,
+    status: "submitted",
+    source,
+    importedAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  };
+}
+
+async function importPosClosingFile() {
+  hideMessage("errorMessage");
+  hideMessage("successMessage");
+  setImportStatus("");
+  const input = byId("posClosingImportFile");
+  const button = byId("importPosClosingButton");
+  const file = input?.files?.[0];
+  if (!file) {
+    setImportStatus("取り込むJSONファイルを選択してください。", true);
+    return;
+  }
+  button.disabled = true;
+  try {
+    const text = await readImportFile(file);
+    const raw = JSON.parse(text);
+    const errors = validateImportedClosing(raw);
+    if (errors.length) {
+      setImportStatus(errors.join(" / "), true);
+      return;
+    }
+    const docId = `posfile_${raw.businessDate}_${raw.checksum || Date.now()}`;
+    await setDoc(doc(db, closingsCollectionName, docId), importedClosingDocument(raw, file.name), { merge: true });
+    input.value = "";
+    await loadData();
+    showMessage("successMessage", `${raw.businessDate} のPOS締めJSONを取り込みました。受信データで内容を確認してください。`, false);
+    setImportStatus(`取込完了: ${raw.businessDate} / ${raw.transactions.length}件 / ${file.name}`);
+  } catch (error) {
+    const message = error instanceof SyntaxError
+      ? "JSONを解析できません。POSで出力したGMS取込JSONを選択してください。"
+      : `取込に失敗しました: ${error.message}`;
+    setImportStatus(message, true);
+  } finally {
+    button.disabled = false;
   }
 }
 

@@ -53,7 +53,6 @@ export const isProduction = productionHosts.has(window.location.hostname);
 export const environmentName = isProduction ? "本番" : "開発";
 export const reportsCollectionName = isProduction ? "dailyReports" : "dailyReports-dev";
 export const closingsCollectionName = isProduction ? "dailyClosings" : "dailyClosings-dev";
-export const shopClosingsCollectionName = isProduction ? "shopClosings" : "shopClosings-dev";
 export const staffCollectionName = isProduction ? "staffMembers" : "staffMembers-dev";
 export const castCollectionName = isProduction ? "castMembers" : "castMembers-dev";
 export const introducerCollectionName = isProduction ? "introducers" : "introducers-dev";

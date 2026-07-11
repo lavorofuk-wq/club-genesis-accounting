@@ -12,7 +12,6 @@ import {
   get,
   serverTimestamp,
   closingsCollectionName,
-  shopClosingsCollectionName,
   staffCollectionName,
   castCollectionName,
   introducerCollectionName,
@@ -407,21 +406,13 @@ function sortCasts(a, b) {
 async function loadClosingLists() {
   hideMessage("errorMessage");
   try {
-    const [shopSnap, closingSnap] = await Promise.all([
-      getDocs(collection(db, shopClosingsCollectionName)),
-      getDocs(collection(db, closingsCollectionName))
-    ]);
-    const shopItems = shopSnap.docs.map((docSnap) => ({
-      sourceCollection: shopClosingsCollectionName,
-      id: docSnap.id,
-      ...docSnap.data()
-    }));
+    const closingSnap = await getDocs(collection(db, closingsCollectionName));
     const closingItems = closingSnap.docs.map((docSnap) => ({
       sourceCollection: closingsCollectionName,
       id: docSnap.id,
       ...docSnap.data()
     }));
-    const items = [...shopItems, ...closingItems];
+    const items = [...closingItems];
     let lifecycleSyncError = null;
     try {
       await syncCastLifecycle(items);
@@ -440,9 +431,9 @@ async function loadClosingLists() {
     const legacySentDates = new Set(sentClosings
       .filter((item) => !item.source?.sourceDocumentId && !item.source?.submissionId)
       .map((item) => item.businessDate));
-    pendingClosings = shopItems.flatMap((item) => {
+    pendingClosings = closingItems.flatMap((item) => {
       const date = item.businessDate || item.date || item.id;
-      if (!date || item.status === "reviewed" || processedSourceIds.has(item.id)) return [];
+      if (!date || item.status !== "submitted" || processedSourceIds.has(item.id)) return [];
       if (item.id === date && legacySentDates.has(date)) return [];
       return [{ ...item, businessDate: date }];
     }).sort((a, b) =>
@@ -2170,7 +2161,7 @@ function buildPayload() {
     },
     source: {
       ...(selectedPending?.source || {}),
-      sourceDocumentId: selectedPending?.sourceCollection === shopClosingsCollectionName ? selectedPending.id : selectedPending?.source?.sourceDocumentId || "",
+      sourceDocumentId: selectedPending?.source?.sourceDocumentId || selectedPending?.id || "",
       reviewedBy: currentUser.uid,
       reviewedEmail: currentUser.email || "",
       reviewedAt: serverTimestamp(),
@@ -2323,17 +2314,6 @@ async function saveReport() {
       trialCastMemberPayload(row),
       { merge: true }
     )));
-    if (selectedPending?.sourceCollection === shopClosingsCollectionName) {
-      try {
-        await setDoc(doc(db, shopClosingsCollectionName, selectedPending.id), {
-          status: "reviewed",
-          reviewedBy: currentUser.uid,
-          reviewedAt: serverTimestamp()
-        }, { merge: true });
-      } catch (sourceError) {
-        console.warn("POS締め状態の更新に失敗しました。", sourceError);
-      }
-    }
     document.getElementById("confirmModal").close();
     selectedPending = null;
     await loadClosingLists();

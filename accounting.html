@@ -37,8 +37,8 @@
         <h2 class="mt-2 text-xl font-bold text-slate-900">経理ホーム</h2>
         <div class="accounting-home-grid mt-5">
           <button type="button" class="shop-home-action" data-accounting-view="received">
-            <span class="shop-home-action-title">受信データ</span>
-            <span class="shop-home-action-detail">店舗送信データの確認・編集・確定</span>
+            <span class="shop-home-action-title">POSファイル取込</span>
+            <span class="shop-home-action-detail">POSで出力した締めJSONを取り込み、確認して確定</span>
           </button>
           <button type="button" class="shop-home-action" data-accounting-view="finalized">
             <span class="shop-home-action-title">確定データ</span>
@@ -135,13 +135,22 @@
       <section class="section-shell hidden" data-accounting-workspace="received">
         <div class="section-title">
           <div>
-            <h2>受信データ</h2>
-            <p class="mt-1 text-sm text-slate-500">店舗から送信された未確定データです。</p>
+            <h2>POSファイル取込</h2>
+            <p class="mt-1 text-sm text-slate-500">POSから直接送信せず、POSで出力したUTF-8 JSONファイルをGMS側で取り込みます。</p>
           </div>
           <div class="flex gap-2">
             <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
             <button id="reloadReceivedButton" type="button" class="secondary-button">再読込</button>
           </div>
+        </div>
+        <div class="detail-block mb-5">
+          <h3>POS締めJSONを取り込む</h3>
+          <p class="mt-1 text-sm text-slate-500">POSの過去営業履歴から「GMS取込JSON」を出力し、ここで選択してください。正式取込はJSONのみ対応です。</p>
+          <div class="mt-4 grid gap-3 md:grid-cols-[1fr_auto]">
+            <input id="posClosingImportFile" type="file" accept="application/json,.json" class="form-input">
+            <button id="importPosClosingButton" type="button" class="primary-button">取り込む</button>
+          </div>
+          <div id="posClosingImportStatus" class="notice mt-4"></div>
         </div>
         <div id="receivedDataList" class="pending-list"></div>
       </section>
@@ -498,6 +507,6 @@
   </dialog>
 
   <script src="js/vendor/exceljs.min.js"></script>
-  <script type="module" src="js/accounting.js?v=1.50.3"></script>
+  <script type="module" src="js/accounting.js?v=1.50.4"></script>
 </body>
 </html>
