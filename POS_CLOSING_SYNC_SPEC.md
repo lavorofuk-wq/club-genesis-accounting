@@ -1,73 +1,49 @@
-# CLUB GENESIS POS締め連携仕様
+# CLUB GENESIS POS締めファイル取込仕様
 
-GENESIS Management System（GMS）は、POS締めデータをいったん店舗作業フォームで確認し、店舗側が訂正・承認したデータだけを経理ダッシュボードへ表示します。
+POSからGMSへFirebaseで直接データ共有・送信する方式は廃止します。
+POSは営業終了済みデータをUTF-8 JSONファイルとして出力し、GMS側でファイルを選択して取り込みます。
 
 ## 保存先
 
-POSからの未確認データ:
+GMSで取り込んだ後の保存先:
 
-- 本番: `shopClosings/{businessDate}`
-- 開発: `shopClosings-dev/{businessDate}`
+- 本番: `dailyClosings/{importId}`
+- 開発: `dailyClosings-dev/{importId}`
 
-店舗作業フォームで確認後、経理側へ送信する確定データ:
+`shopClosings` / `shopClosings-dev` はPOS直接受信用だったため使用しません。
 
-- 本番: `dailyClosings/{businessDate}`
-- 開発: `dailyClosings-dev/{businessDate}`
+## 取込フロー
 
-`businessDate` は `YYYY-MM-DD` 形式です。
+1. POSの過去営業履歴から対象営業日の「GMS取込JSON」を出力します。
+2. GMSの「POSファイル取込」でJSONファイルを選択します。
+3. GMSがschemaVersion、営業日、明細配列、チェックサムを検証します。
+4. 問題なければ `dailyClosings(-dev)` に `status: "submitted"` として保存します。
+5. GMS上で内容を確認し、確定処理で `status: "finalized"` に更新します。
 
-## ステータス
+## ファイル形式
 
-- `submitted`: POS送信済み、店舗確認待ち
-- `approved`: 店舗確認済み、経理側表示対象
-- `rejected`: 差戻し
+- 文字コード: UTF-8
+- 拡張子: `.json`
+- schema: `club-genesis-pos-closing`
+- schemaVersion: `1`
 
-## POS送信データ形式
+必須主要項目:
 
-```js
-{
-  businessDate: "2026-06-16",
-  status: "submitted",
-  sales: {
-    totalSales: 0,
-    cashSales: 0,
-    cardSales: 0,
-    discountTotal: 0,
-    taxServiceTotal: 0
-  },
-  customers: {
-    groupCount: 0,
-    totalCustomers: 0,
-    customerUnitPrice: 0
-  },
-  nominations: {
-    honShimeiCount: 0,
-    jonaiCount: 0
-  },
-  castSales: [],
-  staffWork: [],
-  castWork: [],
-  cashReconciliation: {
-    expectedCash: 0,
-    actualCash: 0,
-    difference: 0,
-    note: ""
-  },
-  source: {
-    posVersion: "POS側バージョン",
-    closedBy: "締め担当者",
-    closedAt: serverTimestamp(),
-    updatedAt: serverTimestamp()
-  }
-}
-```
+- `businessDate`
+- `sales`
+- `customers`
+- `nominations`
+- `transactions`
+- `castSales`
+- `castWork`
+- `enteredCasts`
+- `exitedCasts`
+- `trialCasts`
+- `checksum`
 
-## GMS側の流れ
+CSVは閲覧・確認用としてのみ扱い、正式取込には使用しません。
 
-1. POSが `shopClosings(-dev)` に締めデータを保存します。
-2. 店舗ユーザーがGMSの店舗作業フォームでデータを確認します。
-3. 店舗ユーザーが必要に応じて売上、勤務時間、経費、手当を訂正します。
-4. 店舗ユーザーが「経理へ送信」を押すと、`dailyClosings(-dev)` に `status: "approved"` として保存されます。
-5. 経理ユーザーのダッシュボードは `status: "approved"` のデータだけを表示します。
+## Firebaseルール方針
 
-互換性のため、旧POSが `dailyClosings(-dev)` に `status: "submitted"` で保存したデータも店舗作業フォームでは確認待ちとして拾います。
+POS端末からGMS Firestoreへ直接書き込ませません。
+`dailyClosings(-dev)` への作成・更新はGMSにログインした `accounting` または `shop` ロールのユーザー操作に限定します。

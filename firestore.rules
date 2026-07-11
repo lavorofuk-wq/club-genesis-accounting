@@ -277,47 +277,6 @@ service cloud.firestore {
         || request.resource.data.readAtAccounting is timestamp);
     }
 
-    function isClosingPayload(document) {
-      return request.resource.data.keys().hasAll([
-        'businessDate',
-        'status',
-        'sales',
-        'customers',
-        'nominations',
-        'castSales',
-        'castWork',
-        'source'
-      ])
-      && request.resource.data.businessDate is string
-      && request.resource.data.businessDate.matches('^\\d{4}-\\d{2}-\\d{2}$')
-      && (request.resource.data.businessDate == document
-        || (request.resource.data.source.keys().hasAny(['submissionId'])
-          && request.resource.data.source.submissionId == document))
-      && (request.resource.data.status == 'submitted'
-        || request.resource.data.status == 'approved'
-        || request.resource.data.status == 'finalized')
-      && request.resource.data.sales is map
-      && isNonNegativeNumber(request.resource.data.sales.totalSales)
-      && isNonNegativeNumber(request.resource.data.sales.cashSales)
-      && isNonNegativeNumber(request.resource.data.sales.cardSales)
-      && request.resource.data.customers is map
-      && isNonNegativeNumber(request.resource.data.customers.groupCount)
-      && isNonNegativeNumber(request.resource.data.customers.totalCustomers)
-      && isNonNegativeNumber(request.resource.data.customers.customerUnitPrice)
-      && request.resource.data.nominations is map
-      && isNonNegativeNumber(request.resource.data.nominations.honShimeiCount)
-      && isNonNegativeNumber(request.resource.data.nominations.jonaiCount)
-      && request.resource.data.castSales is list
-      && request.resource.data.castWork is list
-      && (!request.resource.data.keys().hasAny(['transactions'])
-        || request.resource.data.transactions is list)
-      && (!request.resource.data.keys().hasAny(['staffWork'])
-        || request.resource.data.staffWork is list)
-      && (!request.resource.data.keys().hasAny(['cashReconciliation'])
-        || request.resource.data.cashReconciliation is map)
-      && request.resource.data.source is map;
-    }
-
     match /dailyReports/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
       allow create, update: if signedIn() && userRole() == 'shop';
@@ -332,36 +291,16 @@ service cloud.firestore {
 
     match /dailyClosings/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create: if signedIn() && userRole() == 'shop' && request.resource.data.status == 'submitted';
-      allow update: if signedIn() && (
-        userRole() == 'accounting'
-        || (userRole() == 'shop' && request.resource.data.status == 'submitted')
-      );
+      allow create, update: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
       allow delete: if signedIn()
         && userRole() == 'accounting';
     }
 
     match /dailyClosings-dev/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create: if signedIn() && userRole() == 'shop' && request.resource.data.status == 'submitted';
-      allow update: if signedIn() && (
-        userRole() == 'accounting'
-        || (userRole() == 'shop' && request.resource.data.status == 'submitted')
-      );
+      allow create, update: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
       allow delete: if signedIn()
         && userRole() == 'accounting';
-    }
-
-    match /shopClosings/{document} {
-      allow read: if signedIn() && userRole() == 'shop';
-      allow create, update: if (isClosingPayload(document) && request.resource.data.status == 'submitted') || (signedIn() && userRole() == 'shop');
-      allow delete: if false;
-    }
-
-    match /shopClosings-dev/{document} {
-      allow read: if signedIn() && userRole() == 'shop';
-      allow create, update: if (isClosingPayload(document) && request.resource.data.status == 'submitted') || (signedIn() && userRole() == 'shop');
-      allow delete: if false;
     }
 
     match /staffMembers/{document} {

@@ -39,10 +39,12 @@ GENESIS Management System（GMS）セットアップ手順
    npx firebase-tools login
    npx firebase-tools deploy --only firestore:rules --project club-genesis-accountin
 
-6. POS連携先
-   - POSは締めデータを shopClosings / shopClosings-dev に送ります。
-   - 店舗作業フォームが内容を確認・訂正し、dailyClosings / dailyClosings-dev に経理確定データとして送信します。
-   - 経理ダッシュボードは dailyClosings / dailyClosings-dev の status: approved のみ表示します。
+6. POS締めデータ取込
+   - POSからGMS Firebaseへ直接送信しません。
+   - POSの過去営業履歴で「GMS取込JSON」を出力します。
+   - GMSの「POSファイル取込」からJSONを選択して取り込みます。
+   - 取り込んだデータは dailyClosings / dailyClosings-dev に保存します。
+   - shopClosings / shopClosings-dev は使用しません。
 
 7. Hosting
    - VercelまたはFirebase Hostingで公開します。
@@ -51,7 +53,7 @@ GENESIS Management System（GMS）セットアップ手順
 8. 動作確認
    - 店舗ユーザーでログインすると shop.html（店舗作業フォーム）に移動します。
    - 経理ユーザーでログインすると accounting.html（経理ダッシュボード）に移動します。
-   - POSから締めデータを送信します。
+   - POSからGMS取込JSONを出力し、GMSで取り込みます。
    - 店舗作業フォームで確認待ちデータを開き、経理へ送信します。
    - 経理ダッシュボードに経理確定データが表示されることを確認します。
    - 経理ホームの「経費入力」で対象月を選び、固定費を保存できることを確認します。
