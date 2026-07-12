@@ -79,6 +79,10 @@ document.getElementById("closeSentClosingButton").addEventListener("click", () =
   document.getElementById("sentClosingModal").close();
 });
 document.getElementById("reloadPendingButton").addEventListener("click", loadClosingLists);
+document.getElementById("importClosingJsonButton").addEventListener("click", () => {
+  document.getElementById("closingJsonFileInput").click();
+});
+document.getElementById("closingJsonFileInput").addEventListener("change", handleClosingJsonFile);
 document.getElementById("sentClosingDateSearch").addEventListener("input", renderSentClosings);
 document.getElementById("clearSentClosingDateButton").addEventListener("click", () => {
   document.getElementById("sentClosingDateSearch").value = "";
@@ -177,6 +181,120 @@ function openSentClosingModal() {
   document.getElementById("sentClosingDateSearch").value = "";
   renderSentClosings();
   document.getElementById("sentClosingModal").showModal();
+}
+
+async function handleClosingJsonFile(event) {
+  hideMessage("errorMessage");
+  hideMessage("successMessage");
+  const input = event.target;
+  const status = document.getElementById("closingJsonImportStatus");
+  const file = input.files?.[0];
+  if (!file) return;
+  status.textContent = "JSONを読み込んでいます。";
+  try {
+    const text = await file.text();
+    const parsed = JSON.parse(stripBom(text));
+    const closing = normalizeImportedClosingJson(parsed, file.name);
+    pendingClosings = [
+      closing,
+      ...pendingClosings.filter((item) => item.id !== closing.id)
+    ];
+    renderPendingClosings();
+    loadClosingIntoForm(closing);
+    status.textContent = `${closing.businessDate} のPOS JSONを読み込みました。内容を確認して経理へ送信してください。`;
+    showMessage("successMessage", `${closing.businessDate} のPOS JSONを店舗作業フォームに読み込みました。`, false);
+  } catch (error) {
+    status.textContent = "JSONを読み込めませんでした。ファイル形式を確認してください。";
+    showMessage("errorMessage", `POS JSONの読み込みに失敗しました。${error.message}`);
+  } finally {
+    input.value = "";
+  }
+}
+
+function stripBom(text) {
+  return String(text || "").replace(/^\uFEFF/, "");
+}
+
+function normalizeImportedClosingJson(data, fileName) {
+  const errors = validateImportedClosingJson(data);
+  if (errors.length) throw new Error(errors.join(" / "));
+  const businessDate = String(data.businessDate || data.date || "");
+  const checksum = String(data.checksum || "");
+  if (checksum && checksum !== closingChecksum(data)) {
+    throw new Error("チェックサムが一致しません。POSからJSONを再出力してください。");
+  }
+  const importId = String(data.source?.submissionId || `pos_json_${businessDate}_${checksum || Date.now()}`);
+  return {
+    ...data,
+    id: importId,
+    businessDate,
+    date: businessDate,
+    status: "submitted",
+    sourceCollection: "pos-json-file",
+    source: {
+      ...(data.source || {}),
+      submissionId: importId,
+      sourceDocumentId: importId,
+      importMethod: "jsonFile",
+      importedFileName: String(fileName || ""),
+      importedAt: new Date().toISOString()
+    },
+    transactions: normalizeTransactions(data.transactions),
+    castSales: Array.isArray(data.castSales) ? data.castSales : [],
+    castWork: normalizeCastWork(data.castWork || data.castHours),
+    staffWork: normalizeStaffWork(data.staffWork || data.staffHours),
+    enteredCasts: Array.isArray(data.enteredCasts) ? data.enteredCasts : [],
+    exitedCasts: Array.isArray(data.exitedCasts) ? data.exitedCasts : [],
+    trialCasts: Array.isArray(data.trialCasts) ? data.trialCasts : []
+  };
+}
+
+function validateImportedClosingJson(data) {
+  const errors = [];
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return ["JSONの中身が締めデータ形式ではありません。"];
+  }
+  if (data.schema !== "club-genesis-pos-closing") {
+    errors.push("schemaがclub-genesis-pos-closingではありません。");
+  }
+  if (Number(data.schemaVersion || 0) !== 1) {
+    errors.push("schemaVersion 1のJSONを選択してください。");
+  }
+  const businessDate = String(data.businessDate || data.date || "");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(businessDate)) {
+    errors.push("businessDateがYYYY-MM-DD形式ではありません。");
+  }
+  if (!data.sales || typeof data.sales !== "object") {
+    errors.push("salesがありません。");
+  }
+  if (!data.customers || typeof data.customers !== "object") {
+    errors.push("customersがありません。");
+  }
+  if (!data.nominations || typeof data.nominations !== "object") {
+    errors.push("nominationsがありません。");
+  }
+  if (!Array.isArray(data.transactions)) {
+    errors.push("各テーブルの会計データ transactions がありません。");
+  }
+  if (!Array.isArray(data.castWork)) {
+    errors.push("キャスト勤務情報 castWork がありません。");
+  }
+  if (!Array.isArray(data.castSales)) {
+    errors.push("本指名売上・場内延長売上データ castSales がありません。");
+  }
+  return errors;
+}
+
+function closingChecksum(payload) {
+  const copy = { ...payload };
+  delete copy.checksum;
+  const text = JSON.stringify(copy);
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (`00000000${(hash >>> 0).toString(16)}`).slice(-8);
 }
 
 function todayString() {
@@ -2454,8 +2572,13 @@ function normalizeTransactions(transactions) {
         price: Number(item.price || 0),
         quantity: Number(item.quantity ?? item.qty ?? 0),
         castId: String(item.castId || ""),
+        castName: String(item.castName || ""),
         banaiExtCastIds: Array.isArray(item.banaiExtCastIds) ? item.banaiExtCastIds.map(String) : [],
         banaiExtCastId: String(item.banaiExtCastId || ""),
+        backTargetCastIds: Array.isArray(item.backTargetCastIds) ? item.backTargetCastIds.map(String) : [],
+        backTargetCastNames: Array.isArray(item.backTargetCastNames) ? item.backTargetCastNames.map(String) : [],
+        backType: String(item.backType || ""),
+        backAllocation: String(item.backAllocation || ""),
         isSet: Boolean(item.isSet),
         isHonShimei: Boolean(item.isHonShimei),
         isBanaiShimei: Boolean(item.isBanaiShimei),

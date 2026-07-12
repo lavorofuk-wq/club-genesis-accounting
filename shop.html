@@ -365,7 +365,13 @@
         </div>
         <button id="closePendingClosingButton" type="button" class="secondary-button">閉じる</button>
       </div>
-      <div class="mt-5 flex justify-end">
+      <div class="mt-5 grid gap-3 md:grid-cols-[1fr_auto_auto] md:items-end">
+        <div>
+          <p class="text-sm font-semibold text-slate-800">POS JSONファイル取込</p>
+          <p id="closingJsonImportStatus" class="mt-1 text-sm text-slate-500">POSで出力したGMS取込JSONを選択してください。</p>
+          <input id="closingJsonFileInput" type="file" accept="application/json,.json" class="hidden">
+        </div>
+        <button id="importClosingJsonButton" type="button" class="secondary-button">JSONを読み込む</button>
         <button id="reloadPendingButton" type="button" class="secondary-button">再読込</button>
       </div>
       <div id="pendingClosings" class="pending-list mt-4"></div>
@@ -531,6 +537,6 @@
     </form>
   </dialog>
 
-  <script type="module" src="js/shop.js?v=1.50.4"></script>
+  <script type="module" src="js/shop.js?v=1.51.0"></script>
 </body>
 </html>
