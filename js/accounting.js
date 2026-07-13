@@ -61,7 +61,6 @@ const trialCastDisplayName = (row) => {
 
 byId("logoutButton").addEventListener("click", logout);
 byId("reloadReceivedButton").addEventListener("click", loadData);
-byId("importPosClosingButton").addEventListener("click", importPosClosingFile);
 byId("loadButton").addEventListener("click", renderFinalizedView);
 byId("exportCsvButton").addEventListener("click", exportCsv);
 byId("closeReceivedEditButton").addEventListener("click", () => byId("receivedEditModal").close());
@@ -78,6 +77,7 @@ byId("confirmDeleteFinalizedButton").addEventListener("click", deleteFinalized);
 byId("loadFixedExpenseButton").addEventListener("click", renderFixedExpenseForm);
 byId("saveFixedExpenseButton").addEventListener("click", saveFixedExpenses);
 byId("fixedExpenseMonth").addEventListener("change", renderFixedExpenseForm);
+byId("exportExpenseSheetXlsxButton").addEventListener("click", exportExpenseSheetXlsx);
 byId("exportCastRewardsXlsxButton").addEventListener("click", exportCastRewardsXlsx);
 byId("exportStaffPayrollXlsxButton").addEventListener("click", exportStaffPayrollXlsx);
 byId("exportIntroducerFeesXlsxButton").addEventListener("click", exportIntroducerFeesXlsx);
@@ -178,107 +178,6 @@ async function loadData() {
     renderLiquorCostSettings();
   } catch (error) {
     showMessage("errorMessage", `データの取得に失敗しました。${error.message}`);
-  }
-}
-
-function setImportStatus(message, isError = false) {
-  const el = byId("posClosingImportStatus");
-  if (!el) return;
-  el.textContent = message || "";
-  el.classList.toggle("alert", !!message && isError);
-  el.classList.toggle("alert-error", !!message && isError);
-}
-
-function closingChecksum(payload) {
-  const copy = { ...payload };
-  delete copy.checksum;
-  const text = JSON.stringify(copy);
-  let hash = 2166136261;
-  for (let i = 0; i < text.length; i += 1) {
-    hash ^= text.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (`00000000${(hash >>> 0).toString(16)}`).slice(-8);
-}
-
-async function readImportFile(file) {
-  if (typeof file.text === "function") return file.text();
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result || ""));
-    reader.onerror = () => reject(reader.error || new Error("ファイルを読み込めませんでした"));
-    reader.readAsText(file, "utf-8");
-  });
-}
-
-function validateImportedClosing(raw) {
-  const errors = [];
-  if (!raw || typeof raw !== "object") errors.push("JSONの形式が正しくありません。");
-  if (raw?.schema !== "club-genesis-pos-closing") errors.push("POS締めJSONではありません。");
-  if (Number(raw?.schemaVersion) !== 1) errors.push("対応していないschemaVersionです。");
-  if (!String(raw?.businessDate || "").match(/^\d{4}-\d{2}-\d{2}$/)) errors.push("businessDateが正しくありません。");
-  if (!raw?.sales || typeof raw.sales !== "object") errors.push("salesがありません。");
-  if (!Array.isArray(raw?.transactions)) errors.push("transactionsがありません。");
-  if (!Array.isArray(raw?.castWork)) errors.push("castWorkがありません。");
-  if (raw?.checksum && closingChecksum(raw) !== raw.checksum) errors.push("チェックサムが一致しません。ファイル破損または編集の可能性があります。");
-  ["totalSales", "cashSales", "cardSales"].forEach((key) => {
-    if (toNumber(raw?.sales?.[key]) < 0) errors.push(`${key}が不正です。`);
-  });
-  return errors;
-}
-
-function importedClosingDocument(raw, fileName) {
-  const importedAt = new Date().toISOString();
-  const source = {
-    ...(raw.source || {}),
-    importMethod: "file",
-    importedFileName: fileName,
-    importedBy: currentUser?.uid || "",
-    importedEmail: currentUser?.email || "",
-    importedAtText: importedAt
-  };
-  return {
-    ...raw,
-    status: "submitted",
-    source,
-    importedAt: serverTimestamp(),
-    updatedAt: serverTimestamp()
-  };
-}
-
-async function importPosClosingFile() {
-  hideMessage("errorMessage");
-  hideMessage("successMessage");
-  setImportStatus("");
-  const input = byId("posClosingImportFile");
-  const button = byId("importPosClosingButton");
-  const file = input?.files?.[0];
-  if (!file) {
-    setImportStatus("取り込むJSONファイルを選択してください。", true);
-    return;
-  }
-  button.disabled = true;
-  try {
-    const text = await readImportFile(file);
-    const raw = JSON.parse(text);
-    const errors = validateImportedClosing(raw);
-    if (errors.length) {
-      setImportStatus(errors.join(" / "), true);
-      return;
-    }
-    const docId = `posfile_${raw.businessDate}_${raw.checksum || Date.now()}`;
-    await setDoc(doc(db, closingsCollectionName, docId), importedClosingDocument(raw, file.name), { merge: true });
-    input.value = "";
-    await loadData();
-    showMessage("successMessage", `${raw.businessDate} のPOS締めJSONを取り込みました。受信データで内容を確認してください。`, false);
-    setImportStatus(`取込完了: ${raw.businessDate} / ${raw.transactions.length}件 / ${file.name}`);
-  } catch (error) {
-    const message = error instanceof SyntaxError
-      ? "JSONを解析できません。POSで出力したGMS取込JSONを選択してください。"
-      : `取込に失敗しました: ${error.message}`;
-    setImportStatus(message, true);
-  } finally {
-    button.disabled = false;
   }
 }
 
@@ -2334,6 +2233,217 @@ function createTableBlock(title, headers, rows, mapper) {
   table.append(thead, tbody);
   block.appendChild(table);
   return block;
+}
+
+async function exportExpenseSheetXlsx() {
+  const ExcelJS = globalThis.ExcelJS;
+  if (!ExcelJS) {
+    showMessage("errorMessage", "XLSX出力機能を読み込めませんでした。ページを再読み込みしてください。");
+    return;
+  }
+  const month = byId("fixedExpenseMonth").value;
+  if (!/^\d{4}-\d{2}$/.test(month)) {
+    showMessage("errorMessage", "経費表の対象月を選択してください。");
+    return;
+  }
+  const button = byId("exportExpenseSheetXlsxButton");
+  button.disabled = true;
+  hideMessage("errorMessage");
+  hideMessage("successMessage");
+  try {
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = "GENESIS Management System";
+    workbook.created = new Date();
+    const worksheet = workbook.addWorksheet("ジェネシス経費表", {
+      pageSetup: {
+        paperSize: 9,
+        orientation: "landscape",
+        fitToPage: true,
+        fitToWidth: 1,
+        fitToHeight: 0,
+        horizontalCentered: true,
+        margins: { left: 0.25, right: 0.25, top: 0.4, bottom: 0.4, header: 0.2, footer: 0.2 }
+      }
+    });
+    buildExpenseSheet(worksheet, month);
+    const buffer = await workbook.xlsx.writeBuffer();
+    downloadXlsx(buffer, `genesis_expenses_${month.replace("-", "")}.xlsx`);
+    showMessage("successMessage", "経費表XLSXを出力しました。", false);
+  } catch (error) {
+    showMessage("errorMessage", `経費表XLSXを出力できませんでした。${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function buildExpenseSheet(worksheet, month) {
+  const [year, monthNumber] = month.split("-").map(Number);
+  const monthClosings = finalizedClosings.filter((closing) => closing.businessDate.startsWith(`${month}-`));
+  const fixed = fixedExpenseForMonth(month);
+  const rewardRows = calculateCastRewardRows(monthClosings);
+  const staffRows = calculateStaffPayrollRows(monthClosings, month);
+  const introducerRows = calculateIntroducerFeeRows(rewardRows);
+  const categories = [
+    ["B", "C", "酒代"],
+    ["D", "E", "広告宣伝①"],
+    ["F", "G", "広告宣伝②"],
+    ["H", "I", "消耗品/備品"],
+    ["J", "K", "交際費"],
+    ["L", "M", "交通費"],
+    ["N", "O", "その他"],
+    ["P", "Q", "美容室"]
+  ];
+  const maxDay = new Date(year, monthNumber, 0).getDate();
+  const dailyExpenseMap = new Map();
+  monthClosings.forEach((closing) => {
+    const day = Number(closing.businessDate.slice(8, 10));
+    if (!dailyExpenseMap.has(day)) dailyExpenseMap.set(day, {});
+    const bucket = dailyExpenseMap.get(day);
+    closing.expenses.forEach((expense) => {
+      const category = expense.category || "その他";
+      bucket[category] = (bucket[category] || 0) + toNumber(expense.amount);
+    });
+  });
+
+  worksheet.columns = [
+    { width: 6 }, { width: 16 }, { width: 12 }, { width: 16 }, { width: 12 }, { width: 16 }, { width: 12 },
+    { width: 16 }, { width: 12 }, { width: 16 }, { width: 12 }, { width: 16 }, { width: 12 }, { width: 16 },
+    { width: 12 }, { width: 16 }, { width: 12 }, { width: 14 }
+  ];
+  worksheet.views = [{ showGridLines: false }];
+  worksheet.getCell("A1").value = "ジェネシス経費表";
+  worksheet.getCell("A1").font = { name: "Yu Gothic", size: 16, bold: true };
+  worksheet.getCell("G1").value = year;
+  worksheet.getCell("J1").value = "年";
+  worksheet.getCell("A2").value = "日";
+  categories.forEach(([labelCol, amountCol, label]) => {
+    worksheet.getCell(`${labelCol}2`).value = label;
+    worksheet.getCell(`${amountCol}2`).value = "金額";
+  });
+  worksheet.getCell("R2").value = "合計";
+
+  for (let day = 1; day <= 31; day += 1) {
+    const rowNumber = day + 2;
+    const bucket = dailyExpenseMap.get(day) || {};
+    worksheet.getCell(`A${rowNumber}`).value = day;
+    categories.forEach(([labelCol, amountCol, label]) => {
+      const amount = day <= maxDay ? toNumber(bucket[label]) : 0;
+      worksheet.getCell(`${labelCol}${rowNumber}`).value = amount > 0 ? label : "";
+      worksheet.getCell(`${amountCol}${rowNumber}`).value = amount;
+    });
+    worksheet.getCell(`R${rowNumber}`).value = { formula: `SUM(C${rowNumber},E${rowNumber},G${rowNumber},I${rowNumber},K${rowNumber},M${rowNumber},O${rowNumber},Q${rowNumber})` };
+  }
+
+  categories.forEach(([labelCol, amountCol]) => {
+    worksheet.getCell(`${labelCol}34`).value = "合計";
+    worksheet.getCell(`${amountCol}34`).value = { formula: `SUM(${amountCol}3:${amountCol}33)` };
+  });
+  worksheet.getCell("P34").value = "変動費合計";
+  worksheet.getCell("R34").value = { formula: "C34+E34+G34+I34+K34+M34+O34+Q34" };
+  worksheet.getCell("A35").value = "日";
+  worksheet.getCell("B35").value = "固定費";
+  worksheet.getCell("C35").value = "金額";
+  const fixedRows = [
+    [36, "賃料", toNumber(fixed.rent)],
+    [37, "カラオケ", toNumber(fixed.karaoke)],
+    [38, "おしぼり", toNumber(fixed.towel)],
+    [39, "リースキン", toNumber(fixed.leasekin)],
+    [40, "固定電話", toNumber(fixed.landline)],
+    [41, "西部ガス", toNumber(fixed.saibuGas)],
+    [42, "USEN", toNumber(fixed.usen)],
+    [43, "酒代", alcoholExpenseForMonth(month, monthClosings)],
+    [44, "カード決済手数料", cardSettlementFeeForMonth(monthClosings)]
+  ];
+  fixedRows.forEach(([row, label, amount]) => {
+    worksheet.getCell(`B${row}`).value = label;
+    worksheet.getCell(`C${row}`).value = amount;
+  });
+  worksheet.getCell("B45").value = "固定費合計";
+  worksheet.getCell("C45").value = { formula: "SUM(C36:C44)" };
+
+  const castHourlyTotal = rewardRows.reduce((sum, row) => sum + (row.salesReward > row.hourlyAndBack ? 0 : toNumber(row.hourlyAndBackWithTrial ?? row.hourlyAndBack)), 0);
+  const castSalesRewardTotal = rewardRows.reduce((sum, row) => sum + (row.salesReward > row.hourlyAndBack ? toNumber(row.salesRewardWithTrial) : 0), 0);
+  const dispatchPayTotal = 0;
+  worksheet.getCell("F35").value = "人件費";
+  worksheet.getCell("G35").value = "金額";
+  worksheet.mergeCells("F36:G36");
+  worksheet.getCell("F36").value = "女子総支給額";
+  worksheet.getCell("F37").value = "時給";
+  worksheet.getCell("G37").value = castHourlyTotal;
+  worksheet.getCell("F38").value = "売上報酬";
+  worksheet.getCell("G38").value = castSalesRewardTotal;
+  worksheet.getCell("F40").value = "派遣給与";
+  worksheet.getCell("G40").value = dispatchPayTotal;
+  worksheet.getCell("F45").value = "女子給合計";
+  worksheet.getCell("G45").value = { formula: "SUM(G37:G44)" };
+
+  const staffPayrollTotal = staffRows.reduce((sum, row) => sum + (row.isEmployee ? 0 : toNumber(row.payable)), 0);
+  worksheet.getCell("H35").value = "人件費";
+  worksheet.getCell("I35").value = "金額";
+  worksheet.mergeCells("H36:K36");
+  worksheet.getCell("H36").value = "従業員給与";
+  worksheet.mergeCells("H45:I45");
+  worksheet.getCell("H45").value = "従業員給合計";
+  worksheet.getCell("J45").value = staffPayrollTotal;
+
+  const introductionFeeTotal = introducerRows.reduce((sum, row) => sum + toNumber(row.introductionFee), 0);
+  const advisoryFeeTotal = introducerRows.reduce((sum, row) => sum + toNumber(row.advisoryFee), 0);
+  const transportAllowanceTotal = monthClosings.reduce((total, closing) => total + closing.allowances
+    .filter((row) => row.type === "送迎手当")
+    .reduce((sum, row) => sum + toNumber(row.amount), 0), 0);
+  worksheet.mergeCells("L35:O35");
+  worksheet.getCell("L35").value = "スカウト報酬";
+  worksheet.getCell("L36").value = "紹介料";
+  worksheet.getCell("M36").value = introductionFeeTotal;
+  worksheet.getCell("N36").value = "顧問料";
+  worksheet.getCell("O36").value = advisoryFeeTotal;
+  worksheet.mergeCells("L41:O41");
+  worksheet.getCell("L41").value = "送迎";
+  worksheet.getCell("L42").value = "送迎手当";
+  worksheet.getCell("M42").value = transportAllowanceTotal;
+  worksheet.getCell("R35").value = { formula: "R34+M36+O36+M42" };
+
+  worksheet.mergeCells("P43:R44");
+  worksheet.getCell("P43").value = "総支出合計";
+  worksheet.mergeCells("P45:R45");
+  worksheet.getCell("P45").value = { formula: "SUM(R35+C45+G45+J45)" };
+
+  styleExpenseSheet(worksheet);
+}
+
+function cardSettlementFeeForMonth(closings) {
+  return closings.reduce((total, closing) => total + closing.expenses
+    .filter((expense) => ["カード決済手数料", "カード手数料", "決済手数料"].includes(expense.category))
+    .reduce((sum, expense) => sum + toNumber(expense.amount), 0), 0);
+}
+
+function styleExpenseSheet(worksheet) {
+  const headerFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE2E8F0" } };
+  const sectionFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF8FAFC" } };
+  const border = {
+    top: { style: "thin", color: { argb: "FFCBD5E1" } },
+    left: { style: "thin", color: { argb: "FFCBD5E1" } },
+    bottom: { style: "thin", color: { argb: "FFCBD5E1" } },
+    right: { style: "thin", color: { argb: "FFCBD5E1" } }
+  };
+  for (let row = 1; row <= 45; row += 1) {
+    worksheet.getRow(row).height = row === 1 ? 24 : 21;
+    for (let col = 1; col <= 18; col += 1) {
+      const cell = worksheet.getRow(row).getCell(col);
+      cell.font = { name: "Yu Gothic", size: row === 1 ? 12 : 10, bold: row <= 2 || row === 34 || row === 35 || row === 45 };
+      cell.alignment = { horizontal: col === 1 || col % 2 === 0 ? "center" : "right", vertical: "middle", wrapText: true };
+      cell.border = border;
+      if ([2, 35].includes(row)) cell.fill = headerFill;
+      if ([34, 36, 41, 43, 44, 45].includes(row)) cell.fill = sectionFill;
+      if ([3, 5, 7, 9, 11, 13, 15, 17, 18].includes(col)) cell.numFmt = '#,##0';
+    }
+  }
+  ["F36", "H36", "L35", "L41", "P34", "P43", "P45"].forEach((cellRef) => {
+    worksheet.getCell(cellRef).alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+    worksheet.getCell(cellRef).font = { name: "Yu Gothic", size: 10, bold: true };
+  });
+  worksheet.getCell("A1").alignment = { horizontal: "left", vertical: "middle" };
+  worksheet.pageSetup.printArea = "A1:R45";
 }
 
 async function exportCsv() {
