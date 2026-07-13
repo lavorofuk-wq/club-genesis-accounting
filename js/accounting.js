@@ -2313,8 +2313,9 @@ function buildExpenseSheet(worksheet, month) {
   worksheet.views = [{ showGridLines: false }];
   worksheet.getCell("A1").value = "ジェネシス経費表";
   worksheet.getCell("A1").font = { name: "Yu Gothic", size: 16, bold: true };
-  worksheet.getCell("G1").value = year;
-  worksheet.getCell("J1").value = "年";
+  worksheet.getCell("G1").value = `${year}年`;
+  worksheet.getCell("H1").value = `${monthNumber}月度`;
+  worksheet.getCell("J1").value = "";
   worksheet.getCell("A2").value = "日";
   categories.forEach(([labelCol, amountCol, label]) => {
     worksheet.getCell(`${labelCol}2`).value = label;
