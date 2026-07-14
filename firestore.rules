@@ -305,13 +305,13 @@ service cloud.firestore {
 
     match /staffMembers/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && userRole() == 'shop' && isStaffMember();
+      allow create, update: if signedIn() && isStaffMember();
       allow delete: if false;
     }
 
     match /staffMembers-dev/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && userRole() == 'shop' && isStaffMember();
+      allow create, update: if signedIn() && isStaffMember();
       allow delete: if false;
     }
 
@@ -329,13 +329,13 @@ service cloud.firestore {
 
     match /introducers/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && userRole() == 'shop' && isIntroducer();
+      allow create, update: if signedIn() && isIntroducer();
       allow delete: if false;
     }
 
     match /introducers-dev/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && userRole() == 'shop' && isIntroducer();
+      allow create, update: if signedIn() && isIntroducer();
       allow delete: if false;
     }
 

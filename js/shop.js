@@ -78,7 +78,7 @@ document.getElementById("closePendingClosingButton").addEventListener("click", (
 document.getElementById("closeSentClosingButton").addEventListener("click", () => {
   document.getElementById("sentClosingModal").close();
 });
-document.getElementById("reloadPendingButton").addEventListener("click", loadClosingLists);
+document.getElementById("reloadPendingButton").addEventListener("click", clearImportedClosingJson);
 document.getElementById("importClosingJsonButton").addEventListener("click", () => {
   document.getElementById("closingJsonFileInput").click();
 });
@@ -149,7 +149,7 @@ requireRole("shop", async (user) => {
   document.getElementById("date").value = todayString();
   await loadMasters();
   await syncPosCasts(false);
-  await loadClosingLists();
+  await loadSentClosings();
   initInternalMail({
     role: "shop",
     currentUser: user,
@@ -195,6 +195,7 @@ async function handleClosingJsonFile(event) {
     const text = await file.text();
     const parsed = JSON.parse(stripBom(text));
     const closing = normalizeImportedClosingJson(parsed, file.name);
+    await syncCastLifecycle([closing]);
     pendingClosings = [
       closing,
       ...pendingClosings.filter((item) => item.id !== closing.id)
@@ -209,6 +210,16 @@ async function handleClosingJsonFile(event) {
   } finally {
     input.value = "";
   }
+}
+
+function clearImportedClosingJson() {
+  pendingClosings = [];
+  selectedPending = null;
+  renderPendingClosings();
+  const status = document.getElementById("closingJsonImportStatus");
+  if (status) status.textContent = "POSで出力したGMS取込JSONを選択してください。";
+  hideMessage("errorMessage");
+  hideMessage("successMessage");
 }
 
 function stripBom(text) {
@@ -521,7 +532,7 @@ function sortCasts(a, b) {
     || sortByName(a, b);
 }
 
-async function loadClosingLists() {
+async function loadSentClosings() {
   hideMessage("errorMessage");
   try {
     const closingSnap = await getDocs(collection(db, closingsCollectionName));
@@ -530,45 +541,15 @@ async function loadClosingLists() {
       id: docSnap.id,
       ...docSnap.data()
     }));
-    const items = [...closingItems];
-    let lifecycleSyncError = null;
-    try {
-      await syncCastLifecycle(items);
-    } catch (error) {
-      lifecycleSyncError = error;
-      console.warn("POSキャスト入退店同期に失敗しました。", error);
-    }
     sentClosings = closingItems
       .filter((item) => ["submitted", "approved", "finalized"].includes(item.status))
       .map((item) => ({ ...item, businessDate: item.businessDate || item.date || item.id }))
       .filter((item) => item.businessDate)
       .sort((a, b) => b.businessDate.localeCompare(a.businessDate));
-    const processedSourceIds = new Set(sentClosings
-      .map((item) => String(item.source?.sourceDocumentId || item.source?.submissionId || ""))
-      .filter(Boolean));
-    const legacySentDates = new Set(sentClosings
-      .filter((item) => !item.source?.sourceDocumentId && !item.source?.submissionId)
-      .map((item) => item.businessDate));
-    pendingClosings = closingItems.flatMap((item) => {
-      const date = item.businessDate || item.date || item.id;
-      if (!date || item.status !== "submitted" || processedSourceIds.has(item.id)) return [];
-      if (item.id === date && legacySentDates.has(date)) return [];
-      return [{ ...item, businessDate: date }];
-    }).sort((a, b) =>
-      b.businessDate.localeCompare(a.businessDate)
-      || closingSubmittedMillis(b) - closingSubmittedMillis(a)
-      || b.id.localeCompare(a.id)
-    );
     renderPendingClosings();
     renderSentClosings();
-    if (lifecycleSyncError) {
-      showMessage(
-        "errorMessage",
-        `POS締めデータは読み込みましたが、キャスト入退店同期に失敗しました。${lifecycleSyncError.message}`
-      );
-    }
   } catch (error) {
-    showMessage("errorMessage", `POS締めデータを読み込めませんでした。${error.message}`);
+    showMessage("errorMessage", `送信済データを読み込めませんでした。${error.message}`);
   }
 }
 
@@ -663,7 +644,7 @@ function renderPendingClosings() {
   if (!pendingClosings.length) {
     const empty = document.createElement("div");
     empty.className = "notice";
-    empty.textContent = "経理へ未送信のPOS締めデータはありません。";
+    empty.textContent = "JSONファイルを読み込むと、ここに未送信データが表示されます。";
     root.appendChild(empty);
     return;
   }
@@ -673,12 +654,10 @@ function renderPendingClosings() {
     row.className = "pending-item";
     const total = Number(closing.sales?.totalSales ?? closing.totalSales ?? 0);
     const transactionCount = Array.isArray(closing.transactions) ? closing.transactions.length : 0;
-    const duplicateCount = pendingClosings.filter((item) => item.businessDate === closing.businessDate).length;
-    const duplicateLabel = duplicateCount > 1 ? ` / 重複受信 ${duplicateCount}件` : "";
     const info = document.createElement("div");
     info.innerHTML = `
       <div class="font-bold text-slate-900">${closing.businessDate}</div>
-      <div class="mt-1 text-sm text-slate-600">総売上 ${yen.format(total)}円 / 会計 ${transactionCount}件 / 受信 ${closingSubmissionLabel(closing)}${duplicateLabel}</div>
+      <div class="mt-1 text-sm text-slate-600">総売上 ${yen.format(total)}円 / 会計 ${transactionCount}件 / JSON取込 ${closing.source?.importedFileName || ""}</div>
     `;
     const button = document.createElement("button");
     button.type = "button";
@@ -2434,7 +2413,8 @@ async function saveReport() {
     )));
     document.getElementById("confirmModal").close();
     selectedPending = null;
-    await loadClosingLists();
+    pendingClosings = pendingClosings.filter((closing) => closing.id !== targetClosingId);
+    await loadSentClosings();
     showMessage("successMessage", "経理側へ送信しました。", false);
   } catch (error) {
     const message = `経理送信に失敗しました。${firestoreErrorMessage(error)}`;
@@ -2502,7 +2482,7 @@ function loadClosingIntoForm(closing, isSent = false) {
     "successMessage",
     isSent
       ? `${closing.businessDate} の送信済データを読み込みました。編集後、経理へ再送信できます。`
-      : `${closing.businessDate} のPOS締めデータを読み込みました。確認後、経理へ送信してください。`,
+      : `${closing.businessDate} のPOS JSONを読み込みました。確認後、経理へ送信してください。`,
     false
   );
 }

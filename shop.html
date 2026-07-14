@@ -38,7 +38,7 @@
           </button>
           <button id="openClosingButton" type="button" class="shop-home-action">
             <span class="shop-home-action-title">締め作業データ作成</span>
-            <span class="shop-home-action-detail">未送信のPOS締めデータを選択</span>
+            <span class="shop-home-action-detail">POSで出力したJSONファイルを読み込み</span>
           </button>
           <button id="openSentClosingsButton" type="button" class="shop-home-action">
             <span class="shop-home-action-title">送信済データ</span>
@@ -361,7 +361,7 @@
         <div>
           <p class="brand-kicker">CLOSING DATA</p>
           <h2 class="mt-2 text-xl font-bold">締めデータ選択</h2>
-          <p class="mt-1 text-sm text-slate-500">経理へ未送信のPOS締めデータだけを表示します。</p>
+          <p class="mt-1 text-sm text-slate-500">POSで出力したJSONファイルを読み込み、店舗作業フォームで確認します。</p>
         </div>
         <button id="closePendingClosingButton" type="button" class="secondary-button">閉じる</button>
       </div>
@@ -372,7 +372,7 @@
           <input id="closingJsonFileInput" type="file" accept="application/json,.json" class="hidden">
         </div>
         <button id="importClosingJsonButton" type="button" class="secondary-button">JSONを読み込む</button>
-        <button id="reloadPendingButton" type="button" class="secondary-button">再読込</button>
+        <button id="reloadPendingButton" type="button" class="secondary-button">選択解除</button>
       </div>
       <div id="pendingClosings" class="pending-list mt-4"></div>
     </div>
@@ -537,6 +537,6 @@
     </form>
   </dialog>
 
-  <script type="module" src="js/shop.js?v=1.52.1"></script>
+  <script type="module" src="js/shop.js?v=1.52.2"></script>
 </body>
 </html>
