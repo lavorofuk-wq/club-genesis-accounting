@@ -2037,7 +2037,7 @@ function applyCastRewardSheetLayout(worksheet) {
   const widths = {
     B: 3.375, C: 5.6875, D: 5.1875, E: 5.6875, F: 3.8125, G: excelWidthFromPixels(58),
     H: 6.375, I: 3.1875, J: 8.5, K: excelWidthFromPixels(58), L: 6.375, M: excelWidthFromPixels(58),
-    N: 7.125, O: 3.1875, P: 6.3125, Q: 6.6875, R: excelWidthFromPixels(100), S: 6.8125,
+    N: 7.125, O: excelWidthFromPixels(52), P: 6.3125, Q: 6.6875, R: excelWidthFromPixels(100), S: 6.8125,
     T: 8.3125, U: 13.6875, V: 8.1875, W: 8.8125, X: 6.6875,
     Y: 3.6875, Z: 4, AA: 9.3125, AB: 6.1875, AC: 8.8125,
     AD: 8.875, AE: 7.1875, AF: 5.1875, AG: 5, AH: 6, AI: 13,
@@ -2291,6 +2291,7 @@ function writeCastRewardSummary(worksheet, rewardRow, dailyRows) {
 
 function mergeCastRewardMonthlyCells(worksheet) {
   [
+    "B1:D1", "G1:I1", "T1:T2",
     "O1:P1",
     "AB37:AB38",
     "T36:V36", "T37:V37", "T38:V38", "T39:V39", "T40:V40", "T41:V41",
@@ -2323,6 +2324,7 @@ function styleCastRewardMonthlySheet(worksheet) {
     worksheet.getCell(address).font = { name: "Yu Gothic", size: 10, bold: true };
   });
   worksheet.getCell("AG1").font = { name: "Yu Gothic", size: 8, color: { argb: "FF2563EB" }, underline: true };
+  worksheet.getCell("T1").font = { name: "Yu Gothic", size: 7 };
   worksheet.pageSetup.printArea = "B1:AO42";
 }
 
