@@ -2555,6 +2555,7 @@ function normalizeTransactions(transactions) {
         category: String(item.category || ""),
         price: Number(item.price || 0),
         quantity: Number(item.quantity ?? item.qty ?? 0),
+        lineTotal: Number(item.lineTotal ?? item.amount ?? item.subtotal ?? item.total ?? item.priceTotal ?? 0),
         castId: String(item.castId || ""),
         castName: String(item.castName || ""),
         banaiExtCastIds: Array.isArray(item.banaiExtCastIds) ? item.banaiExtCastIds.map(String) : [],
@@ -2609,7 +2610,8 @@ function renderTransactions(transactions) {
     const tbody = document.createElement("tbody");
     transaction.items.forEach((item) => {
       const row = document.createElement("tr");
-      [item.label, transactionItemCategoryLabel(item.category), `${yen.format(item.price)}円`, item.quantity, `${yen.format(item.price * item.quantity)}円`].forEach((value) => {
+      const lineTotal = item.lineTotal || item.price * item.quantity;
+      [item.label, transactionItemCategoryLabel(item.category), `${yen.format(item.price)}円`, item.quantity, `${yen.format(lineTotal)}円`].forEach((value) => {
         const cell = document.createElement("td");
         cell.textContent = value;
         row.appendChild(cell);

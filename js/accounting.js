@@ -948,7 +948,7 @@ function banaiExtensionSalesPhases(items) {
     const sortedIds = [...currentCastIds].sort();
     const key = sortedIds.join("|");
     if (!phases.has(key)) phases.set(key, { castIds: sortedIds, subtotal: 0 });
-    phases.get(key).subtotal += item.price * normalizedItemQuantity(item);
+    phases.get(key).subtotal += transactionItemAmount(item);
   });
   return [...phases.values()];
 }
@@ -973,8 +973,21 @@ function uniqueBackTargetIds(values) {
 }
 
 function normalizedItemQuantity(item) {
+  const lineTotal = explicitItemLineTotal(item);
+  const price = toNumber(item.price);
+  if (lineTotal > 0 && price > 0) return lineTotal / price;
   const quantity = toNumber(item.quantity ?? item.qty);
   return quantity > 0 ? quantity : 0;
+}
+
+function explicitItemLineTotal(item) {
+  return toNumber(item.lineTotal ?? item.amount ?? item.subtotal ?? item.total ?? item.priceTotal);
+}
+
+function transactionItemAmount(item) {
+  const lineTotal = explicitItemLineTotal(item);
+  if (lineTotal !== 0) return lineTotal;
+  return toNumber(item.price) * normalizedItemQuantity(item);
 }
 
 function aggregateCastSales(items) {
@@ -1630,8 +1643,7 @@ function aggregateCastBacks(items) {
     let netTotal = 0;
     const missingCosts = new Set();
     champagneItems.forEach((item) => {
-      const quantity = normalizedItemQuantity(item);
-      const gross = toNumber(item.price) * quantity;
+      const gross = transactionItemAmount(item);
       const costRecord = liquorCostForItem(item);
       grossTotal += gross;
       if (!costRecord) {
@@ -1673,7 +1685,7 @@ function aggregateCastBacks(items) {
         if (!honCasts.length) return;
         const sourceTotal = transaction.items
           .filter((item) => categories.includes(item.category))
-          .reduce((sum, item) => sum + item.price * normalizedItemQuantity(item), 0);
+          .reduce((sum, item) => sum + transactionItemAmount(item), 0);
         const share = Math.floor(Math.floor(sourceTotal * rate) / honCasts.length);
         honCasts.forEach((item) => add(item.castId, castNameForId(item.castId), key, share));
       };
@@ -1689,7 +1701,7 @@ function aggregateCastBacks(items) {
         banaiBackPhases(transaction.items).forEach((phase) => {
           const keepBottleTotal = phase.items
             .filter((item) => item.category === "keepBottle")
-            .reduce((sum, item) => sum + toNumber(item.price) * normalizedItemQuantity(item), 0);
+            .reduce((sum, item) => sum + transactionItemAmount(item), 0);
           addSharedBack(phase.castIds, "keepBottle", Math.floor(keepBottleTotal * 0.10));
           addChampagneWineBack(phase.castIds, phase.items.filter((item) =>
             ["champagneWine", "champagne", "wine"].includes(item.category)
@@ -1700,7 +1712,7 @@ function aggregateCastBacks(items) {
       transaction.items
         .filter((item) => item.category === "castDrink" && item.castId)
         .forEach((item) => {
-          add(item.castId, castNameForId(item.castId), "drink", Math.floor(item.price * normalizedItemQuantity(item) * 0.10));
+          add(item.castId, castNameForId(item.castId), "drink", Math.floor(transactionItemAmount(item) * 0.10));
         });
     });
   });
@@ -2791,7 +2803,7 @@ function openClosingDetail(id) {
   ]));
   closing.transactions.forEach((transaction) => {
     body.appendChild(createTableBlock(`会計明細 ${transaction.tableLabel || ""}`, ["明細", "分類", "単価", "数量", "金額"], transaction.items, (item) => [
-      item.label, transactionItemCategoryLabel(item.category), yenCell(item.price), item.quantity, yenCell(item.price * item.quantity)
+      item.label, transactionItemCategoryLabel(item.category), yenCell(item.price), item.quantity, yenCell(transactionItemAmount(item))
     ]));
   });
   body.appendChild(createTableBlock("経費", ["カテゴリ", "金額", "メモ"], closing.expenses, (row) => [row.category, yenCell(row.amount), row.note || ""]));
@@ -3390,6 +3402,7 @@ function normalizeTransactions(rows) {
       category: transactionItemCategory(item),
       price: toNumber(item.price),
       quantity: toNumber(item.quantity ?? item.qty),
+      lineTotal: toNumber(item.lineTotal ?? item.amount ?? item.subtotal ?? item.total ?? item.priceTotal),
       castId: String(item.castId || ""),
       castName: String(item.castName || ""),
       banaiExtCastIds: Array.isArray(item.banaiExtCastIds) ? item.banaiExtCastIds.map(String) : [],
