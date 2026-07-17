@@ -148,14 +148,14 @@ async function loadData() {
   hideMessage("successMessage");
   try {
     const [closingSnap, castSnap, staffSnap, introducerSnap, fixedExpenseSnap, trialCastSnap, employeeSalarySnap, liquorCostSnap] = await Promise.all([
-      getDocs(collection(db, closingsCollectionName)),
-      getDocs(collection(db, castCollectionName)),
-      getDocs(collection(db, staffCollectionName)),
-      getDocs(collection(db, introducerCollectionName)),
-      getDocs(collection(db, fixedExpenseCollectionName)).catch((error) => ({ docs: [], error })),
-      getDocs(collection(db, trialCastCollectionName)).catch(() => ({ docs: [] })),
-      getDocs(collection(db, employeeSalaryCollectionName)).catch(() => ({ docs: [] })),
-      getDocs(collection(db, liquorCostCollectionName)).catch((error) => ({ docs: [], error }))
+      loadCollectionSnapshot("締めデータ", closingsCollectionName),
+      loadCollectionSnapshot("キャスト一覧", castCollectionName),
+      loadCollectionSnapshot("スタッフ一覧", staffCollectionName),
+      loadCollectionSnapshot("紹介者一覧", introducerCollectionName),
+      loadCollectionSnapshot("固定費", fixedExpenseCollectionName, true),
+      loadCollectionSnapshot("体入キャスト記録", trialCastCollectionName, true),
+      loadCollectionSnapshot("従業員月給", employeeSalaryCollectionName, true),
+      loadCollectionSnapshot("酒代原価", liquorCostCollectionName, true)
     ]);
     allClosings = closingSnap.docs.map((item) => normalizeClosing(item.id, item.data()));
     receivedClosings = allClosings
@@ -179,6 +179,17 @@ async function loadData() {
     renderLiquorCostSettings();
   } catch (error) {
     showMessage("errorMessage", `データの取得に失敗しました。${error.message}`);
+  }
+}
+
+async function loadCollectionSnapshot(label, collectionName, optional = false) {
+  try {
+    return await getDocs(collection(db, collectionName));
+  } catch (error) {
+    const wrapped = new Error(`${label}（${collectionName}）の取得に失敗しました。${error.message}`);
+    wrapped.code = error.code;
+    if (optional) return { docs: [], error: wrapped };
+    throw wrapped;
   }
 }
 

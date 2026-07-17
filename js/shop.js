@@ -550,7 +550,7 @@ async function loadSentClosings() {
     renderPendingClosings();
     renderSentClosings();
   } catch (error) {
-    showMessage("errorMessage", `送信済データを読み込めませんでした。${error.message}`);
+    showMessage("errorMessage", `送信済データ（${closingsCollectionName}）を読み込めませんでした。${error.message}`);
   }
 }
 

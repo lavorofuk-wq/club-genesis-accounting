@@ -35,6 +35,14 @@ service cloud.firestore {
         && request.resource.data.status == 'submitted';
     }
 
+    function isSelfFinalizedClosing() {
+      return signedIn()
+        && request.resource.data.finalizedBy == request.auth.uid
+        && request.resource.data.businessDate is string
+        && request.resource.data.businessDate.matches('^\\d{4}-\\d{2}-\\d{2}$')
+        && request.resource.data.status == 'finalized';
+    }
+
     function isNonNegativeNumber(value) {
       return value is number && value >= 0;
     }
@@ -222,17 +230,6 @@ service cloud.firestore {
       && isNonNegativeNumber(request.resource.data.hours);
     }
 
-    function isSelfUpdatedTrialCastRecord() {
-      return isTrialCastRecord()
-        && request.resource.data.updatedBy == request.auth.uid;
-    }
-
-    function isSelfUpdatedTrialCastMember() {
-      return isCastMember()
-        && request.resource.data.status == 'trial'
-        && request.resource.data.updatedBy == request.auth.uid;
-    }
-
     function isEmployeeSalary() {
       return request.resource.data.month is string
       && request.resource.data.month.matches('^\\d{4}-\\d{2}$')
@@ -298,112 +295,112 @@ service cloud.firestore {
     }
 
     match /dailyReports/{document} {
-      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && userRole() == 'shop';
+      allow read: if signedIn();
+      allow create, update: if signedIn();
       allow delete: if false;
     }
 
     match /dailyReports-dev/{document} {
-      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && userRole() == 'shop';
+      allow read: if signedIn();
+      allow create, update: if signedIn();
       allow delete: if false;
     }
 
     match /dailyClosings/{document} {
-      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && ((userRole() == 'shop' || userRole() == 'accounting') || isSelfSubmittedClosing());
+      allow read: if signedIn();
+      allow create, update: if signedIn() && ((userRole() == 'shop' || userRole() == 'accounting') || isSelfSubmittedClosing() || isSelfFinalizedClosing());
       allow delete: if signedIn()
-        && userRole() == 'accounting';
+        && (userRole() == 'accounting' || resource.data.finalizedBy == request.auth.uid);
     }
 
     match /dailyClosings-dev/{document} {
-      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && ((userRole() == 'shop' || userRole() == 'accounting') || isSelfSubmittedClosing());
+      allow read: if signedIn();
+      allow create, update: if signedIn() && ((userRole() == 'shop' || userRole() == 'accounting') || isSelfSubmittedClosing() || isSelfFinalizedClosing());
       allow delete: if signedIn()
-        && userRole() == 'accounting';
+        && (userRole() == 'accounting' || resource.data.finalizedBy == request.auth.uid);
     }
 
     match /staffMembers/{document} {
-      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow read: if signedIn();
       allow create, update: if signedIn() && isStaffMember();
       allow delete: if false;
     }
 
     match /staffMembers-dev/{document} {
-      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow read: if signedIn();
       allow create, update: if signedIn() && isStaffMember();
       allow delete: if false;
     }
 
     match /castMembers/{document} {
-      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && ((userRole() == 'shop' && isCastMember()) || isSelfUpdatedTrialCastMember());
+      allow read: if signedIn();
+      allow create, update: if signedIn() && isCastMember();
       allow delete: if false;
     }
 
     match /castMembers-dev/{document} {
-      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && ((userRole() == 'shop' && isCastMember()) || isSelfUpdatedTrialCastMember());
+      allow read: if signedIn();
+      allow create, update: if signedIn() && isCastMember();
       allow delete: if false;
     }
 
     match /introducers/{document} {
-      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow read: if signedIn();
       allow create, update: if signedIn() && isIntroducer();
       allow delete: if false;
     }
 
     match /introducers-dev/{document} {
-      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow read: if signedIn();
       allow create, update: if signedIn() && isIntroducer();
       allow delete: if false;
     }
 
     match /fixedExpenses/{document} {
-      allow read: if signedIn() && userRole() == 'accounting';
-      allow create, update: if signedIn() && userRole() == 'accounting' && isFixedExpense(document);
+      allow read: if signedIn();
+      allow create, update: if signedIn() && isFixedExpense(document);
       allow delete: if false;
     }
 
     match /fixedExpenses-dev/{document} {
-      allow read: if signedIn() && userRole() == 'accounting';
-      allow create, update: if signedIn() && userRole() == 'accounting' && isFixedExpense(document);
+      allow read: if signedIn();
+      allow create, update: if signedIn() && isFixedExpense(document);
       allow delete: if false;
     }
 
     match /liquorCosts/{document} {
-      allow read: if signedIn() && userRole() == 'accounting';
-      allow create, update: if signedIn() && userRole() == 'accounting' && isLiquorCost();
-      allow delete: if signedIn() && userRole() == 'accounting';
+      allow read: if signedIn();
+      allow create, update: if signedIn() && isLiquorCost();
+      allow delete: if signedIn();
     }
 
     match /liquorCosts-dev/{document} {
-      allow read: if signedIn() && userRole() == 'accounting';
-      allow create, update: if signedIn() && userRole() == 'accounting' && isLiquorCost();
-      allow delete: if signedIn() && userRole() == 'accounting';
+      allow read: if signedIn();
+      allow create, update: if signedIn() && isLiquorCost();
+      allow delete: if signedIn();
     }
 
     match /trialCastRecords/{document} {
-      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && (((userRole() == 'shop' || userRole() == 'accounting') && isTrialCastRecord()) || isSelfUpdatedTrialCastRecord());
+      allow read: if signedIn();
+      allow create, update: if signedIn() && isTrialCastRecord();
       allow delete: if false;
     }
 
     match /trialCastRecords-dev/{document} {
-      allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && (((userRole() == 'shop' || userRole() == 'accounting') && isTrialCastRecord()) || isSelfUpdatedTrialCastRecord());
+      allow read: if signedIn();
+      allow create, update: if signedIn() && isTrialCastRecord();
       allow delete: if false;
     }
 
     match /employeeSalaries/{document} {
-      allow read: if signedIn() && userRole() == 'accounting';
-      allow create, update: if signedIn() && userRole() == 'accounting' && isEmployeeSalary();
+      allow read: if signedIn();
+      allow create, update: if signedIn() && isEmployeeSalary();
       allow delete: if false;
     }
 
     match /employeeSalaries-dev/{document} {
-      allow read: if signedIn() && userRole() == 'accounting';
-      allow create, update: if signedIn() && userRole() == 'accounting' && isEmployeeSalary();
+      allow read: if signedIn();
+      allow create, update: if signedIn() && isEmployeeSalary();
       allow delete: if false;
     }
 
