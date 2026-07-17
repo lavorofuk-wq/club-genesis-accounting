@@ -2029,14 +2029,15 @@ function buildCastRewardMonthlySheet(worksheet, rewardRow, month, monthClosings)
 
   writeCastRewardTotals(worksheet, dailyRows);
   writeCastRewardSummary(worksheet, rewardRow, dailyRows);
+  mergeCastRewardMonthlyCells(worksheet);
   styleCastRewardMonthlySheet(worksheet);
 }
 
 function applyCastRewardSheetLayout(worksheet) {
   const widths = {
-    B: 3.375, C: 5.6875, D: 5.1875, E: 5.6875, F: 3.8125, G: 3.1875,
-    H: 6.375, I: 3.1875, J: 8.5, K: 3.1875, L: 6.375, M: 3.1875,
-    N: 7.125, O: 3.1875, P: 6.3125, Q: 6.6875, R: 13, S: 6.8125,
+    B: 3.375, C: 5.6875, D: 5.1875, E: 5.6875, F: 3.8125, G: excelWidthFromPixels(58),
+    H: 6.375, I: 3.1875, J: 8.5, K: excelWidthFromPixels(58), L: 6.375, M: excelWidthFromPixels(58),
+    N: 7.125, O: 3.1875, P: 6.3125, Q: 6.6875, R: excelWidthFromPixels(100), S: 6.8125,
     T: 8.3125, U: 13.6875, V: 8.1875, W: 8.8125, X: 6.6875,
     Y: 3.6875, Z: 4, AA: 9.3125, AB: 6.1875, AC: 8.8125,
     AD: 8.875, AE: 7.1875, AF: 5.1875, AG: 5, AH: 6, AI: 13,
@@ -2100,7 +2101,8 @@ function castRewardDailySheetValues(rewardRow, closing) {
   const hours = toNumber(work?.hours);
   const hourlyPay = rewardRow.calculationError ? 0 : Math.round(toNumber(rewardRow.hourlyRate) * hours);
   const beautyAllowance = castAllowanceAmount(closing, rewardRow, "美容室");
-  const salesReward = dailySalesRewardForCast(rewardRow, sales, backs);
+  const liquorCost = castLiquorCostBreakdown(closing, rewardRow);
+  const salesReward = dailySalesRewardForCast(rewardRow, sales, liquorCost.total);
   const girlPay = hourlyPay + toNumber(backs.total) + beautyAllowance;
   return {
     day: Number(closing.businessDate.slice(8, 10)),
@@ -2118,11 +2120,11 @@ function castRewardDailySheetValues(rewardRow, closing) {
     extensionSales: toNumber(sales?.jonaiExtensionSales) || "",
     dohanCount: toNumber(backs.dohanCount) || "",
     dohanBack: toNumber(backs.dohan) || "",
-    honLiquorCost: toNumber(backs.champagneWineCost) || "",
-    banaiLiquorCost: "",
+    honLiquorCost: liquorCost.hon || "",
+    banaiLiquorCost: liquorCost.banai || "",
     bottleBack: toNumber(backs.keepBottle) || "",
     bottleNames: castBottleNames(closing, rewardRow).join("、"),
-    liquorCostTotal: toNumber(backs.champagneWineCost),
+    liquorCostTotal: liquorCost.total,
     dailySales: toNumber(sales?.totalAttributedSales),
     drinkBack: toNumber(backs.drink),
     drinkCount: countCastDrinkQuantity(closing, rewardRow) || "",
@@ -2150,7 +2152,7 @@ function emptyCastRewardDailySheetValues(day) {
     day,
     startTime: "",
     endTime: "",
-    timeText: "00:00:00",
+    timeText: "00:00",
     groupCount: "",
     honCount: "",
     honBack: 0,
@@ -2259,34 +2261,42 @@ function writeCastRewardSummary(worksheet, rewardRow, dailyRows) {
   const deductionTotal = sum("dailyPayment") + sum("transport") + sum("advancePayment") + sum("payCut") + sum("pokepalaPenalty");
   const salesPayTotal = sum("salesReward");
 
-  worksheet.getCell("AF35").value = "☝";
   worksheet.getCell("D36").value = "①　時給　計";
-  worksheet.getCell("K36").value = hourlyTotal;
+  worksheet.getCell("J36").value = hourlyTotal;
   worksheet.getCell("T36").value = "①　 日売上　－　酒代（50％）　×　50％";
   worksheet.getCell("X36").value = salesPayTotal;
-  worksheet.getCell("AF36").value = "月末の送迎表にて、合計金額を入力!!";
   worksheet.getCell("D37").value = "②　総バック　計";
-  worksheet.getCell("K37").value = backTotal;
+  worksheet.getCell("J37").value = backTotal;
   worksheet.getCell("T37").value = "②　 美容室・手当て等";
   worksheet.getCell("X37").value = allowanceTotal;
   worksheet.getCell("AB37").value = "本指売上-本指酒代";
   worksheet.getCell("AD37").value = Math.max(0, toNumber(rewardRow.monthlyHonShimeiSales) - toNumber(rewardRow.backs?.champagneWineCost));
   worksheet.getCell("D38").value = "③　美容室・手当て等　";
-  worksheet.getCell("K38").value = allowanceTotal;
+  worksheet.getCell("J38").value = allowanceTotal;
   worksheet.getCell("T38").value = "③　　総支給額";
   worksheet.getCell("X38").value = salesPayTotal + allowanceTotal;
   worksheet.getCell("D39").value = "④　総支給額";
-  worksheet.getCell("K39").value = hourlyTotal + allowanceTotal;
+  worksheet.getCell("J39").value = hourlyTotal + allowanceTotal;
   worksheet.getCell("T39").value = "④　 日払い・その他";
   worksheet.getCell("X39").value = deductionTotal;
   worksheet.getCell("D40").value = "⑤　日払い・その他";
-  worksheet.getCell("K40").value = deductionTotal;
+  worksheet.getCell("J40").value = deductionTotal;
   worksheet.getCell("T40").value = "（5）　源泉所得税";
   worksheet.getCell("D41").value = "（６）　源泉所得税";
   worksheet.getCell("T41").value = "③－④－(5)　＝  差引支給額";
   worksheet.getCell("W41").value = Math.max(0, salesPayTotal + allowanceTotal - deductionTotal);
   worksheet.getCell("D42").value = "④－⑤－（６）＝差引支給額";
-  worksheet.getCell("K42").value = rewardRow.payable === null ? 0 : rewardRow.payable;
+  worksheet.getCell("J42").value = rewardRow.payable === null ? 0 : rewardRow.payable;
+}
+
+function mergeCastRewardMonthlyCells(worksheet) {
+  [
+    "O1:P1",
+    "AB37:AB38",
+    "T36:V36", "T37:V37", "T38:V38", "T39:V39", "T40:V40", "T41:V41",
+    "D36:I36", "D37:I37", "D38:I38", "D39:I39", "D40:I40", "D41:I41", "D42:I42",
+    "J36:L36", "J37:L37", "J38:L38", "J39:L39", "J40:L40", "J41:L41", "J42:L42"
+  ].forEach((range) => worksheet.mergeCells(range));
 }
 
 function styleCastRewardMonthlySheet(worksheet) {
@@ -2326,9 +2336,9 @@ function personRowFromMergedMap(map, key) {
   return map.get(String(key)) || null;
 }
 
-function dailySalesRewardForCast(rewardRow, sales, backs) {
+function dailySalesRewardForCast(rewardRow, sales, champagneWineCost) {
   if (!rewardRow.salesRewardRate || rewardRow.salesReward <= toNumber(rewardRow.hourlyAndBack)) return 0;
-  const base = salesRewardBaseAfterLiquorCost(toNumber(sales?.totalAttributedSales), toNumber(backs?.champagneWineCost));
+  const base = salesRewardBaseAfterLiquorCost(toNumber(sales?.totalAttributedSales), toNumber(champagneWineCost));
   return Math.floor(base * rewardRow.salesRewardRate);
 }
 
@@ -2362,12 +2372,60 @@ function castBottleNames(closing, rewardRow) {
   const names = new Set();
   closing.transactions.forEach((transaction) => {
     const honCastIds = honCastIdsForTransaction(transaction);
-    if (!honCastIds.some((id) => castRewardPersonMatches(rewardRow, id, castNameForId(id)))) return;
-    transaction.items
-      .filter((item) => ["keepBottle", "champagneWine", "champagne", "wine"].includes(item.category))
-      .forEach((item) => names.add(item.label || item.name || transactionItemCategoryLabel(item.category)));
+    if (honCastIds.length) {
+      if (!honCastIds.some((id) => castRewardPersonMatches(rewardRow, id, castNameForId(id)))) return;
+      transaction.items
+        .filter((item) => ["keepBottle", "champagneWine", "champagne", "wine"].includes(item.category))
+        .forEach((item) => names.add(item.label || item.name || transactionItemCategoryLabel(item.category)));
+      return;
+    }
+    let currentCastIds = [];
+    transaction.items.forEach((item) => {
+      if (item.isBanaiExtension) currentCastIds = banaiExtensionCastIdsForItem(item);
+      if (!currentCastIds.some((id) => castRewardPersonMatches(rewardRow, id, castNameForId(id)))) return;
+      if (!["keepBottle", "champagneWine", "champagne", "wine"].includes(item.category)) return;
+      names.add(item.label || item.name || transactionItemCategoryLabel(item.category));
+    });
   });
   return [...names];
+}
+
+function castLiquorCostBreakdown(closing, rewardRow) {
+  const result = { hon: 0, banai: 0, total: 0 };
+  closing.transactions.forEach((transaction) => {
+    const honCastIds = honCastIdsForTransaction(transaction);
+    if (honCastIds.length) {
+      if (!honCastIds.some((id) => castRewardPersonMatches(rewardRow, id, castNameForId(id)))) return;
+      const costTotal = transaction.items.reduce((sum, item) => sum + champagneWineItemCost(item), 0);
+      result.hon += Math.floor(costTotal / honCastIds.length);
+      return;
+    }
+    let currentCastIds = [];
+    transaction.items.forEach((item) => {
+      if (item.isBanaiExtension) currentCastIds = banaiExtensionCastIdsForItem(item);
+      if (!currentCastIds.length || item.isDiscount) return;
+      const cost = champagneWineItemCost(item);
+      if (!cost) return;
+      if (!currentCastIds.some((id) => castRewardPersonMatches(rewardRow, id, castNameForId(id)))) return;
+      result.banai += Math.floor(cost / currentCastIds.length);
+    });
+  });
+  result.total = result.hon + result.banai;
+  return result;
+}
+
+function champagneWineItemCost(item) {
+  if (!["champagneWine", "champagne", "wine"].includes(item.category)) return 0;
+  const costRecord = liquorCostForItem(item);
+  return costRecord ? toNumber(costRecord.costAmount) * toNumber(item.quantity) : 0;
+}
+
+function banaiExtensionCastIdsForItem(item) {
+  return [...new Set([
+    ...item.banaiExtCastIds,
+    item.banaiExtCastId,
+    item.castId
+  ].filter(Boolean).map(String))];
 }
 
 function countCastDrinkQuantity(closing, rewardRow) {
@@ -2406,7 +2464,7 @@ function hoursToClockText(hours) {
   const totalMinutes = Math.round(toNumber(hours) * 60);
   const hour = Math.floor(totalMinutes / 60);
   const minute = totalMinutes % 60;
-  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`;
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
 }
 
 function columnLetter(columnNumber) {
@@ -2418,6 +2476,10 @@ function columnLetter(columnNumber) {
     number = Math.floor((number - 1) / 26);
   }
   return letter;
+}
+
+function excelWidthFromPixels(pixels) {
+  return Math.round(((toNumber(pixels) - 5) / 7) * 100) / 100;
 }
 
 async function exportStaffPayrollXlsx() {
