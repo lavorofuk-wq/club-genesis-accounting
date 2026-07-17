@@ -948,9 +948,33 @@ function banaiExtensionSalesPhases(items) {
     const sortedIds = [...currentCastIds].sort();
     const key = sortedIds.join("|");
     if (!phases.has(key)) phases.set(key, { castIds: sortedIds, subtotal: 0 });
-    phases.get(key).subtotal += item.price * item.quantity;
+    phases.get(key).subtotal += item.price * normalizedItemQuantity(item);
   });
   return [...phases.values()];
+}
+
+function banaiBackPhases(items) {
+  const phases = [];
+  let currentPhase = null;
+  items.forEach((item) => {
+    if (item.isBanaiExtension) {
+      const castIds = uniqueBackTargetIds(banaiExtensionCastIdsForItem(item));
+      currentPhase = castIds.length ? { castIds, items: [] } : null;
+      if (currentPhase) phases.push(currentPhase);
+    }
+    if (!currentPhase || item.isDiscount) return;
+    currentPhase.items.push(item);
+  });
+  return phases;
+}
+
+function uniqueBackTargetIds(values) {
+  return [...new Set((values || []).filter(Boolean).map(String))];
+}
+
+function normalizedItemQuantity(item) {
+  const quantity = toNumber(item.quantity ?? item.qty);
+  return quantity > 0 ? quantity : 0;
 }
 
 function aggregateCastSales(items) {
@@ -1592,11 +1616,48 @@ function aggregateCastBacks(items) {
     row[key] += Math.floor(toNumber(amount));
     if (countKey) row[countKey] += 1;
   };
+  const addSharedBack = (targetIds, key, amount) => {
+    const castIds = uniqueBackTargetIds(targetIds);
+    if (!castIds.length) return;
+    const share = Math.floor(Math.floor(toNumber(amount)) / castIds.length);
+    castIds.forEach((castId) => add(castId, castNameForId(castId), key, share));
+  };
+  const addChampagneWineBack = (targetIds, champagneItems) => {
+    const castIds = uniqueBackTargetIds(targetIds);
+    if (!castIds.length || !champagneItems.length) return;
+    let grossTotal = 0;
+    let costTotal = 0;
+    let netTotal = 0;
+    const missingCosts = new Set();
+    champagneItems.forEach((item) => {
+      const quantity = normalizedItemQuantity(item);
+      const gross = toNumber(item.price) * quantity;
+      const costRecord = liquorCostForItem(item);
+      grossTotal += gross;
+      if (!costRecord) {
+        missingCosts.add(item.label || "名称未設定");
+        return;
+      }
+      const cost = toNumber(costRecord.costAmount) * quantity;
+      costTotal += cost;
+      netTotal += Math.max(0, gross - cost);
+    });
+    const share = Math.floor(Math.floor(netTotal * 0.20) / castIds.length);
+    castIds.forEach((castId) => {
+      const row = ensure(castId, castNameForId(castId));
+      row.champagneWine += share;
+      row.champagneWineGross += Math.floor(grossTotal / castIds.length);
+      row.champagneWineCost += Math.floor(costTotal / castIds.length);
+      row.champagneWineNet += Math.floor(netTotal / castIds.length);
+      missingCosts.forEach((label) => row.missingLiquorCosts.add(label));
+    });
+  };
 
   items.forEach((closing) => {
     closing.transactions.forEach((transaction) => {
       const honItems = transaction.items.filter((item) => item.isHonShimei && item.castId);
       const honCasts = [...new Map(honItems.map((item) => [item.castId, item])).values()];
+      const honCastIds = honCasts.map((item) => item.castId);
       honItems.forEach((item) => add(item.castId, castNameForId(item.castId), "hon", 1000, "honCount"));
       transaction.items
         .filter((item) => item.isBanaiShimei && item.castId)
@@ -1612,7 +1673,7 @@ function aggregateCastBacks(items) {
         if (!honCasts.length) return;
         const sourceTotal = transaction.items
           .filter((item) => categories.includes(item.category))
-          .reduce((sum, item) => sum + item.price * item.quantity, 0);
+          .reduce((sum, item) => sum + item.price * normalizedItemQuantity(item), 0);
         const share = Math.floor(Math.floor(sourceTotal * rate) / honCasts.length);
         honCasts.forEach((item) => add(item.castId, castNameForId(item.castId), key, share));
       };
@@ -1623,38 +1684,23 @@ function aggregateCastBacks(items) {
         const champagneItems = transaction.items.filter((item) =>
           ["champagneWine", "champagne", "wine"].includes(item.category)
         );
-        let grossTotal = 0;
-        let costTotal = 0;
-        let netTotal = 0;
-        const missingCosts = new Set();
-        champagneItems.forEach((item) => {
-          const quantity = toNumber(item.quantity);
-          const gross = toNumber(item.price) * quantity;
-          const costRecord = liquorCostForItem(item);
-          grossTotal += gross;
-          if (!costRecord) {
-            missingCosts.add(item.label || "名称未設定");
-            return;
-          }
-          const cost = costRecord.costAmount * quantity;
-          costTotal += cost;
-          netTotal += Math.max(0, gross - cost);
-        });
-        const share = Math.floor(Math.floor(netTotal * 0.20) / honCasts.length);
-        honCasts.forEach((item) => {
-          const row = ensure(item.castId, castNameForId(item.castId));
-          row.champagneWine += share;
-          row.champagneWineGross += Math.floor(grossTotal / honCasts.length);
-          row.champagneWineCost += Math.floor(costTotal / honCasts.length);
-          row.champagneWineNet += Math.floor(netTotal / honCasts.length);
-          missingCosts.forEach((label) => row.missingLiquorCosts.add(label));
+        addChampagneWineBack(honCastIds, champagneItems);
+      } else {
+        banaiBackPhases(transaction.items).forEach((phase) => {
+          const keepBottleTotal = phase.items
+            .filter((item) => item.category === "keepBottle")
+            .reduce((sum, item) => sum + toNumber(item.price) * normalizedItemQuantity(item), 0);
+          addSharedBack(phase.castIds, "keepBottle", Math.floor(keepBottleTotal * 0.10));
+          addChampagneWineBack(phase.castIds, phase.items.filter((item) =>
+            ["champagneWine", "champagne", "wine"].includes(item.category)
+          ));
         });
       }
 
       transaction.items
         .filter((item) => item.category === "castDrink" && item.castId)
         .forEach((item) => {
-          add(item.castId, castNameForId(item.castId), "drink", Math.floor(item.price * item.quantity * 0.10));
+          add(item.castId, castNameForId(item.castId), "drink", Math.floor(item.price * normalizedItemQuantity(item) * 0.10));
         });
     });
   });
@@ -2422,7 +2468,7 @@ function castLiquorCostBreakdown(closing, rewardRow) {
 function champagneWineItemCost(item) {
   if (!["champagneWine", "champagne", "wine"].includes(item.category)) return 0;
   const costRecord = liquorCostForItem(item);
-  return costRecord ? toNumber(costRecord.costAmount) * toNumber(item.quantity) : 0;
+  return costRecord ? toNumber(costRecord.costAmount) * normalizedItemQuantity(item) : 0;
 }
 
 function banaiExtensionCastIdsForItem(item) {
@@ -2437,7 +2483,7 @@ function countCastDrinkQuantity(closing, rewardRow) {
   return closing.transactions.reduce((total, transaction) => total + transaction.items
     .filter((item) => item.category === "castDrink")
     .filter((item) => castRewardPersonMatches(rewardRow, item.castId, item.castName || item.name))
-    .reduce((sum, item) => sum + toNumber(item.quantity), 0), 0);
+    .reduce((sum, item) => sum + normalizedItemQuantity(item), 0), 0);
 }
 
 function honCastIdsForTransaction(transaction) {
