@@ -1650,7 +1650,7 @@ function aggregateCastBacks(items) {
         missingCosts.add(item.label || "名称未設定");
         return;
       }
-      const cost = toNumber(costRecord.costAmount) * quantity;
+      const cost = toNumber(costRecord.costAmount) * normalizedItemQuantity(item);
       costTotal += cost;
       netTotal += Math.max(0, gross - cost);
     });
