@@ -973,21 +973,29 @@ function uniqueBackTargetIds(values) {
 }
 
 function normalizedItemQuantity(item) {
-  const lineTotal = explicitItemLineTotal(item);
-  const price = toNumber(item.price);
-  if (lineTotal > 0 && price > 0) return lineTotal / price;
   const quantity = toNumber(item.quantity ?? item.qty);
-  return quantity > 0 ? quantity : 0;
+  if (quantity > 0) return quantity;
+  const amount = transactionItemAmount(item);
+  const price = toNumber(item.price);
+  if (amount > 0 && price > 0) return amount / price;
+  return 0;
+}
+
+function itemCalculatedAmount(item) {
+  const price = toNumber(item.price);
+  const quantity = toNumber(item.quantity ?? item.qty);
+  return price && quantity ? price * quantity : 0;
 }
 
 function explicitItemLineTotal(item) {
-  return toNumber(item.lineTotal ?? item.amount ?? item.subtotal ?? item.total ?? item.priceTotal);
+  return toNumber(item.lineTotal ?? item.priceTotal ?? item.subtotal ?? item.total ?? item.amount);
 }
 
 function transactionItemAmount(item) {
+  const calculated = itemCalculatedAmount(item);
   const lineTotal = explicitItemLineTotal(item);
-  if (lineTotal !== 0) return lineTotal;
-  return toNumber(item.price) * normalizedItemQuantity(item);
+  if (calculated > 0 && lineTotal > 0) return Math.min(calculated, lineTotal);
+  return lineTotal || calculated;
 }
 
 function aggregateCastSales(items) {
@@ -3396,30 +3404,36 @@ function normalizeTransactions(rows) {
     discount: toNumber(row.discount),
     tax: toNumber(row.tax),
     total: toNumber(row.total),
-    items: Array.isArray(row.items) ? row.items.map((item) => ({
-      itemId: String(item.itemId || item.id || ""),
-      label: String(item.label || ""),
-      category: transactionItemCategory(item),
-      price: toNumber(item.price),
-      quantity: toNumber(item.quantity ?? item.qty),
-      lineTotal: toNumber(item.lineTotal ?? item.amount ?? item.subtotal ?? item.total ?? item.priceTotal),
-      castId: String(item.castId || ""),
-      castName: String(item.castName || ""),
-      banaiExtCastIds: Array.isArray(item.banaiExtCastIds) ? item.banaiExtCastIds.map(String) : [],
-      banaiExtCastId: String(item.banaiExtCastId || ""),
-      backTargetCastIds: Array.isArray(item.backTargetCastIds) ? item.backTargetCastIds.map(String) : [],
-      backTargetCastNames: Array.isArray(item.backTargetCastNames) ? item.backTargetCastNames.map(String) : [],
-      backType: String(item.backType || ""),
-      backAllocation: String(item.backAllocation || ""),
-      isSet: Boolean(item.isSet),
-      isHonShimei: Boolean(item.isHonShimei),
-      isBanaiShimei: Boolean(item.isBanaiShimei),
-      isExtension: Boolean(item.isExtension),
-      isBanaiExtension: Boolean(item.isBanaiExtension),
-      isVipCharge: Boolean(item.isVipCharge),
-      isDiscount: Boolean(item.isDiscount)
-    })) : []
+    items: Array.isArray(row.items) ? row.items.map(normalizeTransactionItem) : []
   }));
+}
+
+function normalizeTransactionItem(item) {
+  const normalized = {
+    itemId: String(item.itemId || item.id || ""),
+    label: String(item.label || ""),
+    category: transactionItemCategory(item),
+    price: toNumber(item.price),
+    quantity: toNumber(item.quantity ?? item.qty),
+    lineTotal: toNumber(item.lineTotal ?? item.priceTotal ?? item.subtotal ?? item.total ?? item.amount),
+    castId: String(item.castId || ""),
+    castName: String(item.castName || ""),
+    banaiExtCastIds: Array.isArray(item.banaiExtCastIds) ? item.banaiExtCastIds.map(String) : [],
+    banaiExtCastId: String(item.banaiExtCastId || ""),
+    backTargetCastIds: Array.isArray(item.backTargetCastIds) ? item.backTargetCastIds.map(String) : [],
+    backTargetCastNames: Array.isArray(item.backTargetCastNames) ? item.backTargetCastNames.map(String) : [],
+    backType: String(item.backType || ""),
+    backAllocation: String(item.backAllocation || ""),
+    isSet: Boolean(item.isSet),
+    isHonShimei: Boolean(item.isHonShimei),
+    isBanaiShimei: Boolean(item.isBanaiShimei),
+    isExtension: Boolean(item.isExtension),
+    isBanaiExtension: Boolean(item.isBanaiExtension),
+    isVipCharge: Boolean(item.isVipCharge),
+    isDiscount: Boolean(item.isDiscount)
+  };
+  normalized.lineTotal = transactionItemAmount(normalized);
+  return normalized;
 }
 
 function transactionItemCategory(item) {

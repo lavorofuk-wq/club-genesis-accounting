@@ -2548,32 +2548,58 @@ function normalizeTransactions(transactions) {
     discount: Number(transaction.discount || 0),
     tax: Number(transaction.tax || 0),
     total: Number(transaction.total || 0),
-    items: Array.isArray(transaction.items)
-      ? transaction.items.map((item) => ({
-        itemId: String(item.itemId || item.id || ""),
-        label: String(item.label || ""),
-        category: String(item.category || ""),
-        price: Number(item.price || 0),
-        quantity: Number(item.quantity ?? item.qty ?? 0),
-        lineTotal: Number(item.lineTotal ?? item.amount ?? item.subtotal ?? item.total ?? item.priceTotal ?? 0),
-        castId: String(item.castId || ""),
-        castName: String(item.castName || ""),
-        banaiExtCastIds: Array.isArray(item.banaiExtCastIds) ? item.banaiExtCastIds.map(String) : [],
-        banaiExtCastId: String(item.banaiExtCastId || ""),
-        backTargetCastIds: Array.isArray(item.backTargetCastIds) ? item.backTargetCastIds.map(String) : [],
-        backTargetCastNames: Array.isArray(item.backTargetCastNames) ? item.backTargetCastNames.map(String) : [],
-        backType: String(item.backType || ""),
-        backAllocation: String(item.backAllocation || ""),
-        isSet: Boolean(item.isSet),
-        isHonShimei: Boolean(item.isHonShimei),
-        isBanaiShimei: Boolean(item.isBanaiShimei),
-        isExtension: Boolean(item.isExtension),
-        isBanaiExtension: Boolean(item.isBanaiExtension),
-        isVipCharge: Boolean(item.isVipCharge),
-        isDiscount: Boolean(item.isDiscount)
-      }))
-      : []
+    items: Array.isArray(transaction.items) ? transaction.items.map(normalizeTransactionItem) : []
   }));
+}
+
+function numericItemValue(value) {
+  const number = Number(value ?? 0);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function itemCalculatedAmount(item) {
+  const price = numericItemValue(item.price);
+  const quantity = numericItemValue(item.quantity ?? item.qty);
+  return price && quantity ? price * quantity : 0;
+}
+
+function explicitItemLineTotal(item) {
+  return numericItemValue(item.lineTotal ?? item.priceTotal ?? item.subtotal ?? item.total ?? item.amount);
+}
+
+function transactionItemAmount(item) {
+  const calculated = itemCalculatedAmount(item);
+  const lineTotal = explicitItemLineTotal(item);
+  if (calculated > 0 && lineTotal > 0) return Math.min(calculated, lineTotal);
+  return lineTotal || calculated;
+}
+
+function normalizeTransactionItem(item) {
+  const normalized = {
+    itemId: String(item.itemId || item.id || ""),
+    label: String(item.label || ""),
+    category: String(item.category || ""),
+    price: numericItemValue(item.price),
+    quantity: numericItemValue(item.quantity ?? item.qty),
+    lineTotal: explicitItemLineTotal(item),
+    castId: String(item.castId || ""),
+    castName: String(item.castName || ""),
+    banaiExtCastIds: Array.isArray(item.banaiExtCastIds) ? item.banaiExtCastIds.map(String) : [],
+    banaiExtCastId: String(item.banaiExtCastId || ""),
+    backTargetCastIds: Array.isArray(item.backTargetCastIds) ? item.backTargetCastIds.map(String) : [],
+    backTargetCastNames: Array.isArray(item.backTargetCastNames) ? item.backTargetCastNames.map(String) : [],
+    backType: String(item.backType || ""),
+    backAllocation: String(item.backAllocation || ""),
+    isSet: Boolean(item.isSet),
+    isHonShimei: Boolean(item.isHonShimei),
+    isBanaiShimei: Boolean(item.isBanaiShimei),
+    isExtension: Boolean(item.isExtension),
+    isBanaiExtension: Boolean(item.isBanaiExtension),
+    isVipCharge: Boolean(item.isVipCharge),
+    isDiscount: Boolean(item.isDiscount)
+  };
+  normalized.lineTotal = transactionItemAmount(normalized);
+  return normalized;
 }
 
 function renderTransactions(transactions) {
@@ -2610,7 +2636,7 @@ function renderTransactions(transactions) {
     const tbody = document.createElement("tbody");
     transaction.items.forEach((item) => {
       const row = document.createElement("tr");
-      const lineTotal = item.lineTotal || item.price * item.quantity;
+      const lineTotal = transactionItemAmount(item);
       [item.label, transactionItemCategoryLabel(item.category), `${yen.format(item.price)}円`, item.quantity, `${yen.format(lineTotal)}円`].forEach((value) => {
         const cell = document.createElement("td");
         cell.textContent = value;
