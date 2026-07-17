@@ -1391,6 +1391,19 @@ function mergeRowsByPersonKey(rows, idField) {
       hours: 0,
       days: new Set(),
       shifts: [],
+      hon: 0,
+      honCount: 0,
+      banai: 0,
+      banaiCount: 0,
+      dohan: 0,
+      dohanCount: 0,
+      vip: 0,
+      keepBottle: 0,
+      champagneWine: 0,
+      champagneWineGross: 0,
+      champagneWineCost: 0,
+      champagneWineNet: 0,
+      drink: 0,
       total: 0
     };
     current.name = current.name || (canMap ? member.name : row.name);
