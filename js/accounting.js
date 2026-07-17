@@ -2123,6 +2123,7 @@ function castRewardDailySheetValues(rewardRow, closing) {
     honLiquorCost: liquorCost.hon || "",
     banaiLiquorCost: liquorCost.banai || "",
     bottleBack: toNumber(backs.keepBottle) || "",
+    champagneWineBack: toNumber(backs.champagneWine) || "",
     bottleNames: castBottleNames(closing, rewardRow).join("、"),
     liquorCostTotal: liquorCost.total,
     dailySales: toNumber(sales?.totalAttributedSales),
@@ -2167,6 +2168,7 @@ function emptyCastRewardDailySheetValues(day) {
     honLiquorCost: "",
     banaiLiquorCost: "",
     bottleBack: "",
+    champagneWineBack: "",
     bottleNames: "",
     liquorCostTotal: 0,
     dailySales: 0,
@@ -2197,7 +2199,7 @@ function writeCastRewardDailyRow(worksheet, rowNumber, values) {
     G: values.honCount, H: values.honBack, I: values.honPoint, J: values.honSales,
     K: values.banaiCount, L: values.banaiBack, M: values.extensionCount, N: values.extensionSales,
     O: values.dohanCount, P: values.dohanBack, Q: values.honLiquorCost, R: values.banaiLiquorCost,
-    S: values.bottleBack, U: values.bottleNames, V: values.liquorCostTotal, W: values.dailySales,
+    S: values.bottleBack, T: values.champagneWineBack, U: values.bottleNames, V: values.liquorCostTotal, W: values.dailySales,
     X: values.drinkBack, Y: values.drinkCount, Z: values.beautyAllowance, AA: values.salesReward,
     AB: values.hours, AC: values.hourlyRate, AD: values.girlPay, AE: values.dailyPayment,
     AF: values.transport, AG: values.advancePayment, AH: values.payCut, AI: values.absence,
@@ -2227,7 +2229,7 @@ function writeCastRewardTotals(worksheet, dailyRows) {
     Q: sum("honLiquorCost"),
     R: sum("banaiLiquorCost"),
     S: sum("bottleBack"),
-    T: 0,
+    T: sum("champagneWineBack"),
     V: sum("liquorCostTotal"),
     W: sum("dailySales"),
     X: sum("drinkBack"),
@@ -2256,7 +2258,8 @@ function writeCastRewardTotals(worksheet, dailyRows) {
 function writeCastRewardSummary(worksheet, rewardRow, dailyRows) {
   const sum = (key) => dailyRows.reduce((total, row) => total + toNumber(row[key]), 0);
   const hourlyTotal = sum("girlPay");
-  const backTotal = sum("honBack") + sum("banaiBack") + sum("dohanBack") + sum("bottleBack") + sum("drinkBack");
+  const backTotal = sum("honBack") + sum("banaiBack") + sum("dohanBack")
+    + sum("bottleBack") + sum("champagneWineBack") + sum("drinkBack");
   const allowanceTotal = sum("beautyAllowance") + sum("pokepalaAllowance");
   const deductionTotal = sum("dailyPayment") + sum("transport") + sum("advancePayment") + sum("payCut") + sum("pokepalaPenalty");
   const salesPayTotal = sum("salesReward");
