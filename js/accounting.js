@@ -79,6 +79,7 @@ byId("saveFixedExpenseButton").addEventListener("click", saveFixedExpenses);
 byId("fixedExpenseMonth").addEventListener("change", renderFixedExpenseForm);
 byId("exportExpenseSheetXlsxButton").addEventListener("click", exportExpenseSheetXlsx);
 byId("exportCastRewardsXlsxButton").addEventListener("click", exportCastRewardsXlsx);
+byId("exportCastRewardMonthlySheetXlsxButton").addEventListener("click", exportCastRewardMonthlySheetXlsx);
 byId("exportStaffPayrollXlsxButton").addEventListener("click", exportStaffPayrollXlsx);
 byId("exportIntroducerFeesXlsxButton").addEventListener("click", exportIntroducerFeesXlsx);
 byId("loadStaffSalaryButton").addEventListener("click", renderStaffPayroll);
@@ -1921,6 +1922,491 @@ async function exportCastRewardsXlsx() {
     totalLabel: "支給額",
     totalForRow: (row) => row.payable
   });
+}
+
+async function exportCastRewardMonthlySheetXlsx() {
+  const ExcelJS = globalThis.ExcelJS;
+  if (!ExcelJS) {
+    showMessage("errorMessage", "XLSX出力機能を読み込めませんでした。画面を再読み込みしてください。");
+    return;
+  }
+  const month = accountingTargetMonth();
+  const monthClosings = finalizedClosings.filter((closing) => closing.businessDate.startsWith(`${month}-`));
+  const rows = calculateCastRewardRows(monthClosings);
+  if (!rows.length) {
+    showMessage("errorMessage", "月次報酬表の出力対象データがありません。");
+    return;
+  }
+  const button = byId("exportCastRewardMonthlySheetXlsxButton");
+  button.disabled = true;
+  hideMessage("errorMessage");
+  try {
+    const workbook = new ExcelJS.Workbook();
+    workbook.creator = "GENESIS Management System";
+    workbook.created = new Date();
+    const usedNames = new Set();
+    const indexSheet = workbook.addWorksheet("目次", {
+      pageSetup: { paperSize: 9, orientation: "portrait", fitToPage: true, fitToWidth: 1, fitToHeight: 0 }
+    });
+    buildCastRewardIndexSheet(indexSheet, rows, usedNames, month);
+    rows.forEach((row, index) => {
+      const sheetName = uniqueSheetName(row.name || `キャスト${index + 1}`, usedNames);
+      const worksheet = workbook.addWorksheet(sheetName, {
+        pageSetup: {
+          paperSize: 9,
+          orientation: "landscape",
+          fitToPage: true,
+          fitToWidth: 1,
+          fitToHeight: 0,
+          horizontalCentered: true,
+          margins: { left: 0.25, right: 0.25, top: 0.35, bottom: 0.35, header: 0.15, footer: 0.15 }
+        }
+      });
+      buildCastRewardMonthlySheet(worksheet, row, month, monthClosings);
+      indexSheet.getCell(`A${index + 3}`).value = { text: row.name, hyperlink: `#'${sheetName}'!A1` };
+      indexSheet.getCell(`B${index + 3}`).value = row.payable === null ? "計算不可" : row.payable;
+      indexSheet.getCell(`B${index + 3}`).numFmt = '#,##0"円"';
+    });
+    const buffer = await workbook.xlsx.writeBuffer();
+    downloadXlsx(buffer, `cast_reward_monthly_${month.replace("-", "")}.xlsx`);
+    showMessage("successMessage", `${rows.length}名分の月次報酬表をXLSX出力しました。`);
+  } catch (error) {
+    showMessage("errorMessage", `月次報酬表をXLSX出力できませんでした。${error.message}`);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function accountingTargetMonth() {
+  const source = byId("startDate").value || currentMonthRange().start;
+  return source.slice(0, 7);
+}
+
+function buildCastRewardIndexSheet(worksheet, rows, usedNames, month) {
+  usedNames.add("目次");
+  worksheet.columns = [{ width: 28 }, { width: 16 }, { width: 18 }];
+  worksheet.views = [{ showGridLines: false }];
+  worksheet.mergeCells("A1:C1");
+  worksheet.getCell("A1").value = "キャスト月次報酬表 目次";
+  worksheet.getCell("A1").font = { name: "Yu Gothic", size: 16, bold: true };
+  worksheet.getCell("A1").alignment = { horizontal: "center", vertical: "middle" };
+  worksheet.getRow(1).height = 28;
+  worksheet.getCell("A2").value = `${month.replace("-", "年")}月分`;
+  worksheet.getCell("B2").value = "差引支給額";
+  worksheet.getCell("C2").value = "対象人数";
+  worksheet.getCell("C3").value = rows.length;
+  ["A2", "B2", "C2"].forEach((address) => styleCastRewardHeaderCell(worksheet.getCell(address)));
+}
+
+function buildCastRewardMonthlySheet(worksheet, rewardRow, month, monthClosings) {
+  const [year, monthNumber] = month.split("-").map(Number);
+  const maxDay = new Date(year, monthNumber, 0).getDate();
+  const dayMap = new Map(monthClosings.map((closing) => [Number(closing.businessDate.slice(8, 10)), closing]));
+  const dailyRows = [];
+
+  applyCastRewardSheetLayout(worksheet);
+  writeCastRewardHeader(worksheet, rewardRow, year, monthNumber);
+  writeCastRewardColumnHeaders(worksheet);
+
+  for (let day = 1; day <= 31; day += 1) {
+    const rowNumber = day + 2;
+    const closing = day <= maxDay ? dayMap.get(day) : null;
+    const values = closing ? castRewardDailySheetValues(rewardRow, closing) : emptyCastRewardDailySheetValues(day);
+    dailyRows.push(values);
+    writeCastRewardDailyRow(worksheet, rowNumber, values);
+  }
+
+  writeCastRewardTotals(worksheet, dailyRows);
+  writeCastRewardSummary(worksheet, rewardRow, dailyRows);
+  styleCastRewardMonthlySheet(worksheet);
+}
+
+function applyCastRewardSheetLayout(worksheet) {
+  const widths = {
+    B: 3.375, C: 5.6875, D: 5.1875, E: 5.6875, F: 3.8125, G: 3.1875,
+    H: 6.375, I: 3.1875, J: 8.5, K: 3.1875, L: 6.375, M: 3.1875,
+    N: 7.125, O: 3.1875, P: 6.3125, Q: 6.6875, R: 13, S: 6.8125,
+    T: 8.3125, U: 13.6875, V: 8.1875, W: 8.8125, X: 6.6875,
+    Y: 3.6875, Z: 4, AA: 9.3125, AB: 6.1875, AC: 8.8125,
+    AD: 8.875, AE: 7.1875, AF: 5.1875, AG: 5, AH: 6, AI: 13,
+    AJ: 13, AK: 6, AL: 2.6875, AM: 6, AN: 2.6875, AO: 6
+  };
+  worksheet.columns = Array.from({ length: 41 }, (_, index) => {
+    const letter = columnLetter(index + 1);
+    return { width: widths[letter] || 3 };
+  });
+  worksheet.getRow(1).height = 16.8;
+  for (let row = 2; row <= 35; row += 1) worksheet.getRow(row).height = 13.25;
+  for (let row = 36; row <= 42; row += 1) worksheet.getRow(row).height = 14.45;
+  worksheet.views = [{ showGridLines: false }];
+}
+
+function writeCastRewardHeader(worksheet, rewardRow, year, monthNumber) {
+  worksheet.getCell("B1").value = `${year}年　${monthNumber}月分`;
+  worksheet.getCell("G1").value = `【　${rewardRow.name}　】`;
+  worksheet.getCell("J1").value = rewardRow.member?.entryDate ? `${shortDateSlash(rewardRow.member.entryDate)}～` : "";
+  worksheet.getCell("O1").value = "出勤日数";
+  worksheet.getCell("S1").value = rewardRow.days;
+  worksheet.getCell("T1").value = "C/W\n料金-原価×(20%)";
+  worksheet.getCell("U1").value = "【A】勤務時間";
+  worksheet.getCell("X1").value = rewardRow.hours;
+  worksheet.getCell("Z1").value = "時間";
+  worksheet.getCell("AB1").value = "【B】時給";
+  worksheet.getCell("AC1").value = rewardRow.hourlyRate || 0;
+  worksheet.getCell("AD1").value = rewardRow.member?.introducerName || "";
+  worksheet.getCell("AE1").value = castRewardSystemShortLabel(rewardRow.member?.rewardSystem);
+  worksheet.getCell("AG1").value = { text: "目次へ戻る", hyperlink: "#'目次'!A1" };
+}
+
+function writeCastRewardColumnHeaders(worksheet) {
+  const headers = {
+    C2: "出勤", D2: "退勤", E2: "勤時間", F2: "組数", G2: "本指", H2: "バック",
+    I2: "本🅿", J2: "本指売上", K2: "場内", L2: "バック", M2: "延長", N2: "場延売上",
+    O2: "同伴", P2: "バック", Q2: "本指酒代", R2: "場内酒代", S2: "B(10%)",
+    U2: "ボトル名", V2: "酒代計", W2: "日売上", X2: "ドリンク", Y2: "杯",
+    Z2: "美容室", AA2: "売上給", AB2: "ｈ", AC2: "時給", AD2: "女子給",
+    AE2: "日払い", AF2: "送迎", AG2: "立替", AH2: "減給", AI2: "欠勤",
+    AJ2: "ポケパラ減給", AK2: "ポケパラ手当", AL2: "D", AM2: 500, AN2: "D", AO2: 300
+  };
+  Object.entries(headers).forEach(([address, value]) => {
+    worksheet.getCell(address).value = value;
+  });
+}
+
+function castRewardDailySheetValues(rewardRow, closing) {
+  const sales = personRowFromMergedMap(mergeRowsByPersonKey(aggregateCastSales([closing]), "key"), rewardRow.key);
+  const work = personRowFromMergedMap(mergeRowsByPersonKey(aggregateWork([closing], "castWork"), "id"), rewardRow.key);
+  const backs = personRowFromMergedMap(
+    mergeRowsByPersonKey(
+      aggregateCastBacks([closing]).filter((row) => !isFormerTrialSource(findMember(castMembers, row.id, row.name), row.id)),
+      "id"
+    ),
+    rewardRow.key
+  ) || emptyCastBack(rewardRow.key, rewardRow.name);
+  const deductions = personRowFromMergedMap(aggregatePersonDeductions([closing], castMembers, "cast"), rewardRow.key)
+    || { transport: 0, dailyPayment: 0, advancePayment: 0, total: 0 };
+  const shift = work?.shifts?.[0] || {};
+  const hours = toNumber(work?.hours);
+  const hourlyPay = rewardRow.calculationError ? 0 : Math.round(toNumber(rewardRow.hourlyRate) * hours);
+  const beautyAllowance = castAllowanceAmount(closing, rewardRow, "美容室");
+  const salesReward = dailySalesRewardForCast(rewardRow, sales, backs);
+  const girlPay = hourlyPay + toNumber(backs.total) + beautyAllowance;
+  return {
+    day: Number(closing.businessDate.slice(8, 10)),
+    startTime: shift.startTime || "",
+    endTime: shift.endTime || "",
+    timeText: hoursToClockText(hours),
+    groupCount: countCastGroups(closing, rewardRow),
+    honCount: toNumber(backs.honCount) || "",
+    honBack: toNumber(backs.hon),
+    honPoint: "",
+    honSales: toNumber(sales?.honShimeiSales) || "",
+    banaiCount: toNumber(backs.banaiCount) || "",
+    banaiBack: toNumber(backs.banai),
+    extensionCount: countBanaiExtensionGroups(closing, rewardRow) || "",
+    extensionSales: toNumber(sales?.jonaiExtensionSales) || "",
+    dohanCount: toNumber(backs.dohanCount) || "",
+    dohanBack: toNumber(backs.dohan) || "",
+    honLiquorCost: toNumber(backs.champagneWineCost) || "",
+    banaiLiquorCost: "",
+    bottleBack: toNumber(backs.keepBottle) || "",
+    bottleNames: castBottleNames(closing, rewardRow).join("、"),
+    liquorCostTotal: toNumber(backs.champagneWineCost),
+    dailySales: toNumber(sales?.totalAttributedSales),
+    drinkBack: toNumber(backs.drink),
+    drinkCount: countCastDrinkQuantity(closing, rewardRow) || "",
+    beautyAllowance: beautyAllowance || "",
+    salesReward,
+    hours,
+    hourlyRate: hours ? toNumber(rewardRow.hourlyRate) : 0,
+    girlPay,
+    dailyPayment: toNumber(deductions.dailyPayment) || "",
+    transport: toNumber(deductions.transport) || "",
+    advancePayment: toNumber(deductions.advancePayment) || "",
+    payCut: "",
+    absence: "",
+    pokepalaPenalty: "",
+    pokepalaAllowance: "",
+    drinkLabel500: "",
+    drinkAmount500: 0,
+    drinkLabel300: "",
+    drinkAmount300: 0
+  };
+}
+
+function emptyCastRewardDailySheetValues(day) {
+  return {
+    day,
+    startTime: "",
+    endTime: "",
+    timeText: "00:00:00",
+    groupCount: "",
+    honCount: "",
+    honBack: 0,
+    honPoint: "",
+    honSales: "",
+    banaiCount: "",
+    banaiBack: 0,
+    extensionCount: "",
+    extensionSales: "",
+    dohanCount: "",
+    dohanBack: "",
+    honLiquorCost: "",
+    banaiLiquorCost: "",
+    bottleBack: "",
+    bottleNames: "",
+    liquorCostTotal: 0,
+    dailySales: 0,
+    drinkBack: 0,
+    drinkCount: "",
+    beautyAllowance: "",
+    salesReward: 0,
+    hours: 0,
+    hourlyRate: 0,
+    girlPay: 0,
+    dailyPayment: "",
+    transport: "",
+    advancePayment: "",
+    payCut: "",
+    absence: "",
+    pokepalaPenalty: "",
+    pokepalaAllowance: "",
+    drinkLabel500: "",
+    drinkAmount500: 0,
+    drinkLabel300: "",
+    drinkAmount300: 0
+  };
+}
+
+function writeCastRewardDailyRow(worksheet, rowNumber, values) {
+  const cells = {
+    B: values.day, C: values.startTime, D: values.endTime, E: values.timeText, F: values.groupCount,
+    G: values.honCount, H: values.honBack, I: values.honPoint, J: values.honSales,
+    K: values.banaiCount, L: values.banaiBack, M: values.extensionCount, N: values.extensionSales,
+    O: values.dohanCount, P: values.dohanBack, Q: values.honLiquorCost, R: values.banaiLiquorCost,
+    S: values.bottleBack, U: values.bottleNames, V: values.liquorCostTotal, W: values.dailySales,
+    X: values.drinkBack, Y: values.drinkCount, Z: values.beautyAllowance, AA: values.salesReward,
+    AB: values.hours, AC: values.hourlyRate, AD: values.girlPay, AE: values.dailyPayment,
+    AF: values.transport, AG: values.advancePayment, AH: values.payCut, AI: values.absence,
+    AJ: values.pokepalaPenalty, AK: values.pokepalaAllowance, AL: values.drinkLabel500,
+    AM: values.drinkAmount500, AN: values.drinkLabel300, AO: values.drinkAmount300
+  };
+  Object.entries(cells).forEach(([column, value]) => {
+    worksheet.getCell(`${column}${rowNumber}`).value = value;
+  });
+}
+
+function writeCastRewardTotals(worksheet, dailyRows) {
+  worksheet.getCell("B34").value = "合計";
+  const sum = (key) => dailyRows.reduce((total, row) => total + toNumber(row[key]), 0);
+  const totals = {
+    C: dailyRows.filter((row) => row.startTime).length,
+    E: hoursToClockText(sum("hours")),
+    G: sum("honCount"),
+    H: sum("honBack"),
+    I: 0,
+    J: sum("honSales"),
+    K: sum("banaiCount"),
+    L: sum("banaiBack"),
+    N: sum("extensionSales"),
+    O: sum("dohanCount"),
+    P: sum("dohanBack"),
+    Q: sum("honLiquorCost"),
+    R: sum("banaiLiquorCost"),
+    S: sum("bottleBack"),
+    T: 0,
+    V: sum("liquorCostTotal"),
+    W: sum("dailySales"),
+    X: sum("drinkBack"),
+    Y: sum("drinkCount"),
+    Z: sum("beautyAllowance"),
+    AA: sum("salesReward"),
+    AB: sum("hours"),
+    AC: 0,
+    AD: sum("girlPay"),
+    AE: sum("dailyPayment"),
+    AG: sum("advancePayment"),
+    AH: sum("payCut"),
+    AI: sum("absence"),
+    AJ: sum("pokepalaPenalty"),
+    AK: sum("pokepalaAllowance"),
+    AL: 0,
+    AM: sum("drinkAmount500"),
+    AN: 0,
+    AO: sum("drinkAmount300")
+  };
+  Object.entries(totals).forEach(([column, value]) => {
+    worksheet.getCell(`${column}34`).value = value;
+  });
+}
+
+function writeCastRewardSummary(worksheet, rewardRow, dailyRows) {
+  const sum = (key) => dailyRows.reduce((total, row) => total + toNumber(row[key]), 0);
+  const hourlyTotal = sum("girlPay");
+  const backTotal = sum("honBack") + sum("banaiBack") + sum("dohanBack") + sum("bottleBack") + sum("drinkBack");
+  const allowanceTotal = sum("beautyAllowance") + sum("pokepalaAllowance");
+  const deductionTotal = sum("dailyPayment") + sum("transport") + sum("advancePayment") + sum("payCut") + sum("pokepalaPenalty");
+  const salesPayTotal = sum("salesReward");
+
+  worksheet.getCell("AF35").value = "☝";
+  worksheet.getCell("D36").value = "①　時給　計";
+  worksheet.getCell("K36").value = hourlyTotal;
+  worksheet.getCell("T36").value = "①　 日売上　－　酒代（50％）　×　50％";
+  worksheet.getCell("X36").value = salesPayTotal;
+  worksheet.getCell("AF36").value = "月末の送迎表にて、合計金額を入力!!";
+  worksheet.getCell("D37").value = "②　総バック　計";
+  worksheet.getCell("K37").value = backTotal;
+  worksheet.getCell("T37").value = "②　 美容室・手当て等";
+  worksheet.getCell("X37").value = allowanceTotal;
+  worksheet.getCell("AB37").value = "本指売上-本指酒代";
+  worksheet.getCell("AD37").value = Math.max(0, toNumber(rewardRow.monthlyHonShimeiSales) - toNumber(rewardRow.backs?.champagneWineCost));
+  worksheet.getCell("D38").value = "③　美容室・手当て等　";
+  worksheet.getCell("K38").value = allowanceTotal;
+  worksheet.getCell("T38").value = "③　　総支給額";
+  worksheet.getCell("X38").value = salesPayTotal + allowanceTotal;
+  worksheet.getCell("D39").value = "④　総支給額";
+  worksheet.getCell("K39").value = hourlyTotal + allowanceTotal;
+  worksheet.getCell("T39").value = "④　 日払い・その他";
+  worksheet.getCell("X39").value = deductionTotal;
+  worksheet.getCell("D40").value = "⑤　日払い・その他";
+  worksheet.getCell("K40").value = deductionTotal;
+  worksheet.getCell("T40").value = "（5）　源泉所得税";
+  worksheet.getCell("D41").value = "（６）　源泉所得税";
+  worksheet.getCell("T41").value = "③－④－(5)　＝  差引支給額";
+  worksheet.getCell("W41").value = Math.max(0, salesPayTotal + allowanceTotal - deductionTotal);
+  worksheet.getCell("D42").value = "④－⑤－（６）＝差引支給額";
+  worksheet.getCell("K42").value = rewardRow.payable === null ? 0 : rewardRow.payable;
+}
+
+function styleCastRewardMonthlySheet(worksheet) {
+  const headerFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE5E7EB" } };
+  const summaryFill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF8FAFC" } };
+  for (let rowNumber = 1; rowNumber <= 42; rowNumber += 1) {
+    const row = worksheet.getRow(rowNumber);
+    row.eachCell({ includeEmpty: true }, (cell, columnNumber) => {
+      if (columnNumber < 2 || columnNumber > 41) return;
+      cell.font = { name: "Yu Gothic", size: rowNumber === 1 ? 9 : 8 };
+      cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+      cell.border = {
+        top: { style: "thin", color: { argb: "FFD1D5DB" } },
+        left: { style: "thin", color: { argb: "FFD1D5DB" } },
+        bottom: { style: "thin", color: { argb: "FFD1D5DB" } },
+        right: { style: "thin", color: { argb: "FFD1D5DB" } }
+      };
+      if (rowNumber <= 2 || rowNumber === 34) cell.fill = headerFill;
+      if (rowNumber >= 35) cell.fill = summaryFill;
+      if (typeof cell.value === "number") cell.numFmt = '#,##0';
+    });
+  }
+  ["B1", "G1", "U1", "AB1"].forEach((address) => {
+    worksheet.getCell(address).font = { name: "Yu Gothic", size: 10, bold: true };
+  });
+  worksheet.getCell("AG1").font = { name: "Yu Gothic", size: 8, color: { argb: "FF2563EB" }, underline: true };
+  worksheet.pageSetup.printArea = "B1:AO42";
+}
+
+function styleCastRewardHeaderCell(cell) {
+  cell.font = { name: "Yu Gothic", size: 10, bold: true, color: { argb: "FFFFFFFF" } };
+  cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF334155" } };
+  cell.alignment = { horizontal: "center", vertical: "middle" };
+}
+
+function personRowFromMergedMap(map, key) {
+  return map.get(String(key)) || null;
+}
+
+function dailySalesRewardForCast(rewardRow, sales, backs) {
+  if (!rewardRow.salesRewardRate || rewardRow.salesReward <= toNumber(rewardRow.hourlyAndBack)) return 0;
+  const base = salesRewardBaseAfterLiquorCost(toNumber(sales?.totalAttributedSales), toNumber(backs?.champagneWineCost));
+  return Math.floor(base * rewardRow.salesRewardRate);
+}
+
+function castAllowanceAmount(closing, rewardRow, type) {
+  return closing.allowances
+    .filter((row) => row.type === type)
+    .filter((row) => castRewardPersonMatches(rewardRow, row.recipientId || row.personId || row.posCastId, row.recipientName || row.recipient || row.name))
+    .reduce((sum, row) => sum + toNumber(row.amount), 0);
+}
+
+function countCastGroups(closing, rewardRow) {
+  return closing.transactions.filter((transaction) =>
+    transaction.items.some((item) =>
+      castRewardPersonMatches(rewardRow, item.castId, item.castName || item.name)
+      || castRewardPersonMatches(rewardRow, item.banaiExtCastId, item.banaiExtCastName)
+      || item.banaiExtCastIds.some((id) => castRewardPersonMatches(rewardRow, id, castNameForId(id)))
+    )
+  ).length;
+}
+
+function countBanaiExtensionGroups(closing, rewardRow) {
+  return closing.transactions.filter((transaction) =>
+    transaction.items.some((item) =>
+      castRewardPersonMatches(rewardRow, item.banaiExtCastId, item.banaiExtCastName)
+      || item.banaiExtCastIds.some((id) => castRewardPersonMatches(rewardRow, id, castNameForId(id)))
+    )
+  ).length;
+}
+
+function castBottleNames(closing, rewardRow) {
+  const names = new Set();
+  closing.transactions.forEach((transaction) => {
+    const honCastIds = honCastIdsForTransaction(transaction);
+    if (!honCastIds.some((id) => castRewardPersonMatches(rewardRow, id, castNameForId(id)))) return;
+    transaction.items
+      .filter((item) => ["keepBottle", "champagneWine", "champagne", "wine"].includes(item.category))
+      .forEach((item) => names.add(item.label || item.name || transactionItemCategoryLabel(item.category)));
+  });
+  return [...names];
+}
+
+function countCastDrinkQuantity(closing, rewardRow) {
+  return closing.transactions.reduce((total, transaction) => total + transaction.items
+    .filter((item) => item.category === "castDrink")
+    .filter((item) => castRewardPersonMatches(rewardRow, item.castId, item.castName || item.name))
+    .reduce((sum, item) => sum + toNumber(item.quantity), 0), 0);
+}
+
+function honCastIdsForTransaction(transaction) {
+  return [...new Set(transaction.items.filter((item) => item.isHonShimei && item.castId).map((item) => String(item.castId)))];
+}
+
+function castRewardPersonMatches(rewardRow, rawId, rawName) {
+  const member = findMember(castMembers, rawId, rawName);
+  const key = member && shouldMapMemberForReward(member, rawId)
+    ? member.personKey || member.id
+    : String(rawId || rawName || "");
+  return String(rewardRow.key) === String(key)
+    || String(rewardRow.member?.id || "") === String(rawId || "")
+    || String(rewardRow.member?.posCastId || "") === String(rawId || "")
+    || (rawName && (rawName === rewardRow.name || rawName === rewardRow.member?.name));
+}
+
+function castRewardSystemShortLabel(value) {
+  return value === "guaranteedHourly" ? "保証" : value === "slideHourly" ? "スライド" : "";
+}
+
+function shortDateSlash(value) {
+  const text = String(value || "");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return text;
+  return `${text.slice(2, 4)}/${text.slice(5, 7)}/${text.slice(8, 10)}`;
+}
+
+function hoursToClockText(hours) {
+  const totalMinutes = Math.round(toNumber(hours) * 60);
+  const hour = Math.floor(totalMinutes / 60);
+  const minute = totalMinutes % 60;
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00`;
+}
+
+function columnLetter(columnNumber) {
+  let number = columnNumber;
+  let letter = "";
+  while (number > 0) {
+    const remainder = (number - 1) % 26;
+    letter = String.fromCharCode(65 + remainder) + letter;
+    number = Math.floor((number - 1) / 26);
+  }
+  return letter;
 }
 
 async function exportStaffPayrollXlsx() {
