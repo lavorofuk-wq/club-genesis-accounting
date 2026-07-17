@@ -469,6 +469,7 @@ function trialCastMemberPayload(row) {
   const existing = findCastMemberByPosId(row.castId);
   const posCastId = String(row.castId || existing?.posCastId || "");
   const name = String(row.castName || existing?.name || "");
+  const advisoryFeeAmount = Number(existing?.advisoryFeeAmount || 0);
   return {
     posCastId,
     name,
@@ -479,8 +480,8 @@ function trialCastMemberPayload(row) {
     introducerId: row.introducerId || existing?.introducerId || "",
     introducerName: row.introducerName || existing?.introducerName || "",
     introducerFeeSystem: row.introducerFeeSystem || existing?.introducerFeeSystem || "",
-    advisoryFeeEnabled: row.advisoryFeeEnabled === true || existing?.advisoryFeeEnabled === true,
-    advisoryFeeAmount: Number(existing?.advisoryFeeAmount || 0),
+    advisoryFeeEnabled: advisoryFeeAmount > 0 && (row.advisoryFeeEnabled === true || existing?.advisoryFeeEnabled === true),
+    advisoryFeeAmount,
     updatedBy: currentUser.uid,
     updatedAt: serverTimestamp()
   };
@@ -2392,9 +2393,11 @@ async function saveReport() {
   document.getElementById("confirmSaveButton").disabled = true;
   hideMessage("confirmSaveError");
 
+  let saveStep = "締めデータ";
   try {
     const targetClosingId = selectedPending?.id || pendingPayload.businessDate;
     await setDoc(doc(db, closingsCollectionName, targetClosingId), pendingPayload, { merge: true });
+    saveStep = "体入キャスト記録";
     await Promise.all(pendingPayload.trialWork.map((row) => setDoc(
       doc(db, trialCastCollectionName, trialCastRecordId(targetClosingId, row.castId)),
       {
@@ -2406,6 +2409,7 @@ async function saveReport() {
       },
       { merge: true }
     )));
+    saveStep = "体入キャスト名簿";
     await Promise.all(pendingPayload.trialWork.map((row) => setDoc(
       doc(db, castCollectionName, castDocumentId(row.castId)),
       trialCastMemberPayload(row),
@@ -2417,7 +2421,7 @@ async function saveReport() {
     await loadSentClosings();
     showMessage("successMessage", "経理側へ送信しました。", false);
   } catch (error) {
-    const message = `経理送信に失敗しました。${firestoreErrorMessage(error)}`;
+    const message = `経理送信に失敗しました。失敗箇所：${saveStep}。${firestoreErrorMessage(error)}`;
     showMessage("confirmSaveError", message);
     showMessage("errorMessage", message);
   } finally {

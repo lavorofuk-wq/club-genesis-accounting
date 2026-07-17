@@ -146,6 +146,7 @@ service cloud.firestore {
           && request.resource.data.guaranteedHourlyRate > 0))
       && (!request.resource.data.keys().hasAny(['advisoryFeeEnabled'])
         || request.resource.data.advisoryFeeEnabled == false
+        || request.resource.data.status == 'trial'
         || (request.resource.data.keys().hasAny(['advisoryFeeAmount'])
           && request.resource.data.advisoryFeeAmount > 0));
     }
