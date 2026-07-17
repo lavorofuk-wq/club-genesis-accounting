@@ -27,6 +27,14 @@ service cloud.firestore {
         : (userExists() ? get(userPath()).data.role : null);
     }
 
+    function isSelfSubmittedClosing() {
+      return signedIn()
+        && request.resource.data.reviewedBy == request.auth.uid
+        && request.resource.data.businessDate is string
+        && request.resource.data.businessDate.matches('^\\d{4}-\\d{2}-\\d{2}$')
+        && request.resource.data.status == 'submitted';
+    }
+
     function isNonNegativeNumber(value) {
       return value is number && value >= 0;
     }
@@ -214,6 +222,17 @@ service cloud.firestore {
       && isNonNegativeNumber(request.resource.data.hours);
     }
 
+    function isSelfUpdatedTrialCastRecord() {
+      return isTrialCastRecord()
+        && request.resource.data.updatedBy == request.auth.uid;
+    }
+
+    function isSelfUpdatedTrialCastMember() {
+      return isCastMember()
+        && request.resource.data.status == 'trial'
+        && request.resource.data.updatedBy == request.auth.uid;
+    }
+
     function isEmployeeSalary() {
       return request.resource.data.month is string
       && request.resource.data.month.matches('^\\d{4}-\\d{2}$')
@@ -292,14 +311,14 @@ service cloud.firestore {
 
     match /dailyClosings/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow create, update: if signedIn() && ((userRole() == 'shop' || userRole() == 'accounting') || isSelfSubmittedClosing());
       allow delete: if signedIn()
         && userRole() == 'accounting';
     }
 
     match /dailyClosings-dev/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
+      allow create, update: if signedIn() && ((userRole() == 'shop' || userRole() == 'accounting') || isSelfSubmittedClosing());
       allow delete: if signedIn()
         && userRole() == 'accounting';
     }
@@ -318,13 +337,13 @@ service cloud.firestore {
 
     match /castMembers/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && userRole() == 'shop' && isCastMember();
+      allow create, update: if signedIn() && ((userRole() == 'shop' && isCastMember()) || isSelfUpdatedTrialCastMember());
       allow delete: if false;
     }
 
     match /castMembers-dev/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && userRole() == 'shop' && isCastMember();
+      allow create, update: if signedIn() && ((userRole() == 'shop' && isCastMember()) || isSelfUpdatedTrialCastMember());
       allow delete: if false;
     }
 
@@ -366,13 +385,13 @@ service cloud.firestore {
 
     match /trialCastRecords/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting') && isTrialCastRecord();
+      allow create, update: if signedIn() && (((userRole() == 'shop' || userRole() == 'accounting') && isTrialCastRecord()) || isSelfUpdatedTrialCastRecord());
       allow delete: if false;
     }
 
     match /trialCastRecords-dev/{document} {
       allow read: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting');
-      allow create, update: if signedIn() && (userRole() == 'shop' || userRole() == 'accounting') && isTrialCastRecord();
+      allow create, update: if signedIn() && (((userRole() == 'shop' || userRole() == 'accounting') && isTrialCastRecord()) || isSelfUpdatedTrialCastRecord());
       allow delete: if false;
     }
 
