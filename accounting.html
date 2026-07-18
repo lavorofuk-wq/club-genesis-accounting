@@ -37,8 +37,8 @@
         <h2 class="mt-2 text-xl font-bold text-slate-900">経理ホーム</h2>
         <div class="accounting-home-grid mt-5">
           <button type="button" class="shop-home-action" data-accounting-view="received">
-            <span class="shop-home-action-title">POSファイル取込</span>
-            <span class="shop-home-action-detail">POSで出力した締めJSONを取り込み、確認して確定</span>
+            <span class="shop-home-action-title">&#21463;&#20449;&#12487;&#12540;&#12479;</span>
+            <span class="shop-home-action-detail">&#24215;&#33303;&#20316;&#26989;&#12501;&#12457;&#12540;&#12512;&#12363;&#12425;&#36865;&#20449;&#12373;&#12428;&#12383;&#32224;&#12417;&#12487;&#12540;&#12479;&#12434;&#30906;&#35469;&#12375;&#12390;&#30906;&#23450;</span>
           </button>
           <button type="button" class="shop-home-action" data-accounting-view="finalized">
             <span class="shop-home-action-title">確定データ</span>
@@ -65,8 +65,8 @@
             <span class="shop-home-action-detail">キャスト売上・総支給額から紹介料と顧問料を算出</span>
           </button>
           <button type="button" class="shop-home-action" data-accounting-view="fixedExpenses">
-            <span class="shop-home-action-title">経費入力</span>
-            <span class="shop-home-action-detail">月別固定費の入力と酒代の自動集計</span>
+            <span class="shop-home-action-title">&#32076;&#36027;</span>
+            <span class="shop-home-action-detail">&#26376;&#21029;&#22266;&#23450;&#36027;&#12398;&#20837;&#21147;&#12289;&#37202;&#20195;&#12398;&#33258;&#21205;&#38598;&#35336;&#12289;&#32076;&#36027;&#34920;XLSX&#20986;&#21147;</span>
           </button>
           <button type="button" class="shop-home-action" data-accounting-view="liquorCosts">
             <span class="shop-home-action-title">酒代原価設定</span>
@@ -135,22 +135,13 @@
       <section class="section-shell hidden" data-accounting-workspace="received">
         <div class="section-title">
           <div>
-            <h2>POSファイル取込</h2>
-            <p class="mt-1 text-sm text-slate-500">POSから直接送信せず、POSで出力したUTF-8 JSONファイルをGMS側で取り込みます。</p>
+            <h2>&#21463;&#20449;&#12487;&#12540;&#12479;</h2>
+            <p class="mt-1 text-sm text-slate-500">&#24215;&#33303;&#20316;&#26989;&#12501;&#12457;&#12540;&#12512;&#12363;&#12425;&#36865;&#20449;&#12373;&#12428;&#12383;&#32224;&#12417;&#12487;&#12540;&#12479;&#12434;&#30906;&#35469;&#12375;&#12289;&#30906;&#23450;&#12487;&#12540;&#12479;&#12434;&#20316;&#25104;&#12375;&#12414;&#12377;&#12290;</p>
           </div>
           <div class="flex gap-2">
-            <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
-            <button id="reloadReceivedButton" type="button" class="secondary-button">再読込</button>
+            <button type="button" class="secondary-button" data-accounting-home>&#12507;&#12540;&#12512;&#12408;&#25147;&#12427;</button>
+            <button id="reloadReceivedButton" type="button" class="secondary-button">&#20877;&#35501;&#36796;</button>
           </div>
-        </div>
-        <div class="detail-block mb-5">
-          <h3>POS締めJSONを取り込む</h3>
-          <p class="mt-1 text-sm text-slate-500">POSの過去営業履歴から「GMS取込JSON」を出力し、ここで選択してください。正式取込はJSONのみ対応です。</p>
-          <div class="mt-4 grid gap-3 md:grid-cols-[1fr_auto]">
-            <input id="posClosingImportFile" type="file" accept="application/json,.json" class="form-input">
-            <button id="importPosClosingButton" type="button" class="primary-button">取り込む</button>
-          </div>
-          <div id="posClosingImportStatus" class="notice mt-4"></div>
         </div>
         <div id="receivedDataList" class="pending-list"></div>
       </section>
@@ -204,6 +195,7 @@
           <div><h2>キャスト報酬</h2><p class="mt-1 text-sm text-slate-500">報酬計算設定は次の工程で追加します。現在は計算根拠を集計します。</p></div>
           <div class="flex flex-wrap gap-2">
             <button id="exportCastRewardsXlsxButton" type="button" class="primary-button">明細書をXLSX出力</button>
+            <button id="exportCastRewardMonthlySheetXlsxButton" type="button" class="secondary-button">月次報酬表をXLSX出力</button>
             <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
           </div>
         </div>
@@ -355,10 +347,13 @@
       <section class="section-shell hidden" data-accounting-workspace="fixedExpenses">
         <div class="section-title">
           <div>
-            <h2>経費入力</h2>
-            <p class="mt-1 text-sm text-slate-500">固定費を月別に保存します。酒代は確定データの経費から自動集計されます。</p>
+            <h2>&#32076;&#36027;</h2>
+            <p class="mt-1 text-sm text-slate-500">&#22266;&#23450;&#36027;&#12434;&#26376;&#21029;&#12395;&#20445;&#23384;&#12375;&#12414;&#12377;&#12290;&#37202;&#20195;&#12399;&#30906;&#23450;&#12487;&#12540;&#12479;&#12398;&#32076;&#36027;&#12363;&#12425;&#33258;&#21205;&#38598;&#35336;&#12373;&#12428;&#12414;&#12377;&#12290;</p>
           </div>
-          <button type="button" class="secondary-button" data-accounting-home>ホームへ戻る</button>
+          <div class="flex flex-wrap gap-2">
+            <button id="exportExpenseSheetXlsxButton" type="button" class="primary-button">&#32076;&#36027;&#34920;&#12434;XLSX&#20986;&#21147;</button>
+            <button type="button" class="secondary-button" data-accounting-home>&#12507;&#12540;&#12512;&#12408;&#25147;&#12427;</button>
+          </div>
         </div>
         <div class="mt-5 grid gap-4 md:grid-cols-3">
           <label>対象月<input id="fixedExpenseMonth" type="month" class="form-input mt-2"></label>
@@ -507,6 +502,6 @@
   </dialog>
 
   <script src="js/vendor/exceljs.min.js"></script>
-  <script type="module" src="js/accounting.js?v=1.50.4"></script>
+  <script type="module" src="js/accounting.js?v=1.53.11"></script>
 </body>
 </html>

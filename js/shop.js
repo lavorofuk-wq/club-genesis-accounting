@@ -78,7 +78,11 @@ document.getElementById("closePendingClosingButton").addEventListener("click", (
 document.getElementById("closeSentClosingButton").addEventListener("click", () => {
   document.getElementById("sentClosingModal").close();
 });
-document.getElementById("reloadPendingButton").addEventListener("click", loadClosingLists);
+document.getElementById("reloadPendingButton").addEventListener("click", clearImportedClosingJson);
+document.getElementById("importClosingJsonButton").addEventListener("click", () => {
+  document.getElementById("closingJsonFileInput").click();
+});
+document.getElementById("closingJsonFileInput").addEventListener("change", handleClosingJsonFile);
 document.getElementById("sentClosingDateSearch").addEventListener("input", renderSentClosings);
 document.getElementById("clearSentClosingDateButton").addEventListener("click", () => {
   document.getElementById("sentClosingDateSearch").value = "";
@@ -145,7 +149,7 @@ requireRole("shop", async (user) => {
   document.getElementById("date").value = todayString();
   await loadMasters();
   await syncPosCasts(false);
-  await loadClosingLists();
+  await loadSentClosings();
   initInternalMail({
     role: "shop",
     currentUser: user,
@@ -177,6 +181,131 @@ function openSentClosingModal() {
   document.getElementById("sentClosingDateSearch").value = "";
   renderSentClosings();
   document.getElementById("sentClosingModal").showModal();
+}
+
+async function handleClosingJsonFile(event) {
+  hideMessage("errorMessage");
+  hideMessage("successMessage");
+  const input = event.target;
+  const status = document.getElementById("closingJsonImportStatus");
+  const file = input.files?.[0];
+  if (!file) return;
+  status.textContent = "JSONを読み込んでいます。";
+  try {
+    const text = await file.text();
+    const parsed = JSON.parse(stripBom(text));
+    const closing = normalizeImportedClosingJson(parsed, file.name);
+    await syncCastLifecycle([closing]);
+    pendingClosings = [
+      closing,
+      ...pendingClosings.filter((item) => item.id !== closing.id)
+    ];
+    renderPendingClosings();
+    loadClosingIntoForm(closing);
+    status.textContent = `${closing.businessDate} のPOS JSONを読み込みました。内容を確認して経理へ送信してください。`;
+    showMessage("successMessage", `${closing.businessDate} のPOS JSONを店舗作業フォームに読み込みました。`, false);
+  } catch (error) {
+    status.textContent = "JSONを読み込めませんでした。ファイル形式を確認してください。";
+    showMessage("errorMessage", `POS JSONの読み込みに失敗しました。${error.message}`);
+  } finally {
+    input.value = "";
+  }
+}
+
+function clearImportedClosingJson() {
+  pendingClosings = [];
+  selectedPending = null;
+  renderPendingClosings();
+  const status = document.getElementById("closingJsonImportStatus");
+  if (status) status.textContent = "POSで出力したGMS取込JSONを選択してください。";
+  hideMessage("errorMessage");
+  hideMessage("successMessage");
+}
+
+function stripBom(text) {
+  return String(text || "").replace(/^\uFEFF/, "");
+}
+
+function normalizeImportedClosingJson(data, fileName) {
+  const errors = validateImportedClosingJson(data);
+  if (errors.length) throw new Error(errors.join(" / "));
+  const businessDate = String(data.businessDate || data.date || "");
+  const checksum = String(data.checksum || "");
+  if (checksum && checksum !== closingChecksum(data)) {
+    throw new Error("チェックサムが一致しません。POSからJSONを再出力してください。");
+  }
+  const importId = String(data.source?.submissionId || `pos_json_${businessDate}_${checksum || Date.now()}`);
+  return {
+    ...data,
+    id: importId,
+    businessDate,
+    date: businessDate,
+    status: "submitted",
+    sourceCollection: "pos-json-file",
+    source: {
+      ...(data.source || {}),
+      submissionId: importId,
+      sourceDocumentId: importId,
+      importMethod: "jsonFile",
+      importedFileName: String(fileName || ""),
+      importedAt: new Date().toISOString()
+    },
+    transactions: normalizeTransactions(data.transactions),
+    castSales: Array.isArray(data.castSales) ? data.castSales : [],
+    castWork: normalizeCastWork(data.castWork || data.castHours),
+    staffWork: normalizeStaffWork(data.staffWork || data.staffHours),
+    enteredCasts: Array.isArray(data.enteredCasts) ? data.enteredCasts : [],
+    exitedCasts: Array.isArray(data.exitedCasts) ? data.exitedCasts : [],
+    trialCasts: Array.isArray(data.trialCasts) ? data.trialCasts : []
+  };
+}
+
+function validateImportedClosingJson(data) {
+  const errors = [];
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return ["JSONの中身が締めデータ形式ではありません。"];
+  }
+  if (data.schema !== "club-genesis-pos-closing") {
+    errors.push("schemaがclub-genesis-pos-closingではありません。");
+  }
+  if (Number(data.schemaVersion || 0) !== 1) {
+    errors.push("schemaVersion 1のJSONを選択してください。");
+  }
+  const businessDate = String(data.businessDate || data.date || "");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(businessDate)) {
+    errors.push("businessDateがYYYY-MM-DD形式ではありません。");
+  }
+  if (!data.sales || typeof data.sales !== "object") {
+    errors.push("salesがありません。");
+  }
+  if (!data.customers || typeof data.customers !== "object") {
+    errors.push("customersがありません。");
+  }
+  if (!data.nominations || typeof data.nominations !== "object") {
+    errors.push("nominationsがありません。");
+  }
+  if (!Array.isArray(data.transactions)) {
+    errors.push("各テーブルの会計データ transactions がありません。");
+  }
+  if (!Array.isArray(data.castWork)) {
+    errors.push("キャスト勤務情報 castWork がありません。");
+  }
+  if (!Array.isArray(data.castSales)) {
+    errors.push("本指名売上・場内延長売上データ castSales がありません。");
+  }
+  return errors;
+}
+
+function closingChecksum(payload) {
+  const copy = { ...payload };
+  delete copy.checksum;
+  const text = JSON.stringify(copy);
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (`00000000${(hash >>> 0).toString(16)}`).slice(-8);
 }
 
 function todayString() {
@@ -340,6 +469,7 @@ function trialCastMemberPayload(row) {
   const existing = findCastMemberByPosId(row.castId);
   const posCastId = String(row.castId || existing?.posCastId || "");
   const name = String(row.castName || existing?.name || "");
+  const advisoryFeeAmount = Number(existing?.advisoryFeeAmount || 0);
   return {
     posCastId,
     name,
@@ -350,8 +480,8 @@ function trialCastMemberPayload(row) {
     introducerId: row.introducerId || existing?.introducerId || "",
     introducerName: row.introducerName || existing?.introducerName || "",
     introducerFeeSystem: row.introducerFeeSystem || existing?.introducerFeeSystem || "",
-    advisoryFeeEnabled: row.advisoryFeeEnabled === true || existing?.advisoryFeeEnabled === true,
-    advisoryFeeAmount: Number(existing?.advisoryFeeAmount || 0),
+    advisoryFeeEnabled: advisoryFeeAmount > 0 && (row.advisoryFeeEnabled === true || existing?.advisoryFeeEnabled === true),
+    advisoryFeeAmount,
     updatedBy: currentUser.uid,
     updatedAt: serverTimestamp()
   };
@@ -403,7 +533,7 @@ function sortCasts(a, b) {
     || sortByName(a, b);
 }
 
-async function loadClosingLists() {
+async function loadSentClosings() {
   hideMessage("errorMessage");
   try {
     const closingSnap = await getDocs(collection(db, closingsCollectionName));
@@ -412,45 +542,15 @@ async function loadClosingLists() {
       id: docSnap.id,
       ...docSnap.data()
     }));
-    const items = [...closingItems];
-    let lifecycleSyncError = null;
-    try {
-      await syncCastLifecycle(items);
-    } catch (error) {
-      lifecycleSyncError = error;
-      console.warn("POSキャスト入退店同期に失敗しました。", error);
-    }
     sentClosings = closingItems
       .filter((item) => ["submitted", "approved", "finalized"].includes(item.status))
       .map((item) => ({ ...item, businessDate: item.businessDate || item.date || item.id }))
       .filter((item) => item.businessDate)
       .sort((a, b) => b.businessDate.localeCompare(a.businessDate));
-    const processedSourceIds = new Set(sentClosings
-      .map((item) => String(item.source?.sourceDocumentId || item.source?.submissionId || ""))
-      .filter(Boolean));
-    const legacySentDates = new Set(sentClosings
-      .filter((item) => !item.source?.sourceDocumentId && !item.source?.submissionId)
-      .map((item) => item.businessDate));
-    pendingClosings = closingItems.flatMap((item) => {
-      const date = item.businessDate || item.date || item.id;
-      if (!date || item.status !== "submitted" || processedSourceIds.has(item.id)) return [];
-      if (item.id === date && legacySentDates.has(date)) return [];
-      return [{ ...item, businessDate: date }];
-    }).sort((a, b) =>
-      b.businessDate.localeCompare(a.businessDate)
-      || closingSubmittedMillis(b) - closingSubmittedMillis(a)
-      || b.id.localeCompare(a.id)
-    );
     renderPendingClosings();
     renderSentClosings();
-    if (lifecycleSyncError) {
-      showMessage(
-        "errorMessage",
-        `POS締めデータは読み込みましたが、キャスト入退店同期に失敗しました。${lifecycleSyncError.message}`
-      );
-    }
   } catch (error) {
-    showMessage("errorMessage", `POS締めデータを読み込めませんでした。${error.message}`);
+    showMessage("errorMessage", `送信済データ（${closingsCollectionName}）を読み込めませんでした。${error.message}`);
   }
 }
 
@@ -545,7 +645,7 @@ function renderPendingClosings() {
   if (!pendingClosings.length) {
     const empty = document.createElement("div");
     empty.className = "notice";
-    empty.textContent = "経理へ未送信のPOS締めデータはありません。";
+    empty.textContent = "JSONファイルを読み込むと、ここに未送信データが表示されます。";
     root.appendChild(empty);
     return;
   }
@@ -555,12 +655,10 @@ function renderPendingClosings() {
     row.className = "pending-item";
     const total = Number(closing.sales?.totalSales ?? closing.totalSales ?? 0);
     const transactionCount = Array.isArray(closing.transactions) ? closing.transactions.length : 0;
-    const duplicateCount = pendingClosings.filter((item) => item.businessDate === closing.businessDate).length;
-    const duplicateLabel = duplicateCount > 1 ? ` / 重複受信 ${duplicateCount}件` : "";
     const info = document.createElement("div");
     info.innerHTML = `
       <div class="font-bold text-slate-900">${closing.businessDate}</div>
-      <div class="mt-1 text-sm text-slate-600">総売上 ${yen.format(total)}円 / 会計 ${transactionCount}件 / 受信 ${closingSubmissionLabel(closing)}${duplicateLabel}</div>
+      <div class="mt-1 text-sm text-slate-600">総売上 ${yen.format(total)}円 / 会計 ${transactionCount}件 / JSON取込 ${closing.source?.importedFileName || ""}</div>
     `;
     const button = document.createElement("button");
     button.type = "button";
@@ -2295,9 +2393,11 @@ async function saveReport() {
   document.getElementById("confirmSaveButton").disabled = true;
   hideMessage("confirmSaveError");
 
+  let saveStep = "締めデータ";
   try {
     const targetClosingId = selectedPending?.id || pendingPayload.businessDate;
     await setDoc(doc(db, closingsCollectionName, targetClosingId), pendingPayload, { merge: true });
+    saveStep = "体入キャスト記録";
     await Promise.all(pendingPayload.trialWork.map((row) => setDoc(
       doc(db, trialCastCollectionName, trialCastRecordId(targetClosingId, row.castId)),
       {
@@ -2309,6 +2409,7 @@ async function saveReport() {
       },
       { merge: true }
     )));
+    saveStep = "体入キャスト名簿";
     await Promise.all(pendingPayload.trialWork.map((row) => setDoc(
       doc(db, castCollectionName, castDocumentId(row.castId)),
       trialCastMemberPayload(row),
@@ -2316,10 +2417,11 @@ async function saveReport() {
     )));
     document.getElementById("confirmModal").close();
     selectedPending = null;
-    await loadClosingLists();
+    pendingClosings = pendingClosings.filter((closing) => closing.id !== targetClosingId);
+    await loadSentClosings();
     showMessage("successMessage", "経理側へ送信しました。", false);
   } catch (error) {
-    const message = `経理送信に失敗しました。${firestoreErrorMessage(error)}`;
+    const message = `経理送信に失敗しました。失敗箇所：${saveStep}。${firestoreErrorMessage(error)}`;
     showMessage("confirmSaveError", message);
     showMessage("errorMessage", message);
   } finally {
@@ -2384,7 +2486,7 @@ function loadClosingIntoForm(closing, isSent = false) {
     "successMessage",
     isSent
       ? `${closing.businessDate} の送信済データを読み込みました。編集後、経理へ再送信できます。`
-      : `${closing.businessDate} のPOS締めデータを読み込みました。確認後、経理へ送信してください。`,
+      : `${closing.businessDate} のPOS JSONを読み込みました。確認後、経理へ送信してください。`,
     false
   );
 }
@@ -2446,31 +2548,58 @@ function normalizeTransactions(transactions) {
     discount: Number(transaction.discount || 0),
     tax: Number(transaction.tax || 0),
     total: Number(transaction.total || 0),
-    items: Array.isArray(transaction.items)
-      ? transaction.items.map((item) => ({
-        itemId: String(item.itemId || item.id || ""),
-        label: String(item.label || ""),
-        category: String(item.category || ""),
-        price: Number(item.price || 0),
-        quantity: Number(item.quantity ?? item.qty ?? 0),
-        castId: String(item.castId || ""),
-        castName: String(item.castName || ""),
-        backTargetCastIds: Array.isArray(item.backTargetCastIds) ? item.backTargetCastIds.map(String) : [],
-        backTargetCastNames: Array.isArray(item.backTargetCastNames) ? item.backTargetCastNames.map(String) : [],
-        backType: String(item.backType || ""),
-        backAllocation: String(item.backAllocation || ""),
-        banaiExtCastIds: Array.isArray(item.banaiExtCastIds) ? item.banaiExtCastIds.map(String) : [],
-        banaiExtCastId: String(item.banaiExtCastId || ""),
-        isSet: Boolean(item.isSet),
-        isHonShimei: Boolean(item.isHonShimei),
-        isBanaiShimei: Boolean(item.isBanaiShimei),
-        isExtension: Boolean(item.isExtension),
-        isBanaiExtension: Boolean(item.isBanaiExtension),
-        isVipCharge: Boolean(item.isVipCharge),
-        isDiscount: Boolean(item.isDiscount)
-      }))
-      : []
+    items: Array.isArray(transaction.items) ? transaction.items.map(normalizeTransactionItem) : []
   }));
+}
+
+function numericItemValue(value) {
+  const number = Number(value ?? 0);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function itemCalculatedAmount(item) {
+  const price = numericItemValue(item.price);
+  const quantity = numericItemValue(item.quantity ?? item.qty);
+  return price && quantity ? price * quantity : 0;
+}
+
+function explicitItemLineTotal(item) {
+  return numericItemValue(item.lineTotal ?? item.priceTotal ?? item.subtotal ?? item.total ?? item.amount);
+}
+
+function transactionItemAmount(item) {
+  const calculated = itemCalculatedAmount(item);
+  const lineTotal = explicitItemLineTotal(item);
+  if (calculated > 0 && lineTotal > 0) return Math.min(calculated, lineTotal);
+  return lineTotal || calculated;
+}
+
+function normalizeTransactionItem(item) {
+  const normalized = {
+    itemId: String(item.itemId || item.id || ""),
+    label: String(item.label || ""),
+    category: String(item.category || ""),
+    price: numericItemValue(item.price),
+    quantity: numericItemValue(item.quantity ?? item.qty),
+    lineTotal: explicitItemLineTotal(item),
+    castId: String(item.castId || ""),
+    castName: String(item.castName || ""),
+    banaiExtCastIds: Array.isArray(item.banaiExtCastIds) ? item.banaiExtCastIds.map(String) : [],
+    banaiExtCastId: String(item.banaiExtCastId || ""),
+    backTargetCastIds: Array.isArray(item.backTargetCastIds) ? item.backTargetCastIds.map(String) : [],
+    backTargetCastNames: Array.isArray(item.backTargetCastNames) ? item.backTargetCastNames.map(String) : [],
+    backType: String(item.backType || ""),
+    backAllocation: String(item.backAllocation || ""),
+    isSet: Boolean(item.isSet),
+    isHonShimei: Boolean(item.isHonShimei),
+    isBanaiShimei: Boolean(item.isBanaiShimei),
+    isExtension: Boolean(item.isExtension),
+    isBanaiExtension: Boolean(item.isBanaiExtension),
+    isVipCharge: Boolean(item.isVipCharge),
+    isDiscount: Boolean(item.isDiscount)
+  };
+  normalized.lineTotal = transactionItemAmount(normalized);
+  return normalized;
 }
 
 function renderTransactions(transactions) {
@@ -2507,7 +2636,8 @@ function renderTransactions(transactions) {
     const tbody = document.createElement("tbody");
     transaction.items.forEach((item) => {
       const row = document.createElement("tr");
-      [item.label, transactionItemCategoryLabel(item.category), `${yen.format(item.price)}円`, item.quantity, `${yen.format(item.price * item.quantity)}円`].forEach((value) => {
+      const lineTotal = transactionItemAmount(item);
+      [item.label, transactionItemCategoryLabel(item.category), `${yen.format(item.price)}円`, item.quantity, `${yen.format(lineTotal)}円`].forEach((value) => {
         const cell = document.createElement("td");
         cell.textContent = value;
         row.appendChild(cell);
