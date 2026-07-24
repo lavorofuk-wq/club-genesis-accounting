@@ -163,9 +163,9 @@
         <div class="section-title">
           <div>
             <h2>キャスト一覧</h2>
-            <p class="mt-1 text-sm text-slate-500">POSのキャスト名簿と連携しています。キャストの入店・退店操作はPOSで行ってください。</p>
+            <p class="mt-1 text-sm text-slate-500">POSとはFirebase接続せず、取込確認済みのJSONから在籍履歴を受け取ります。</p>
           </div>
-          <button id="syncCastsButton" type="button" class="secondary-button">POS名簿を再同期</button>
+          <button id="syncCastsButton" type="button" class="secondary-button">GMS名簿を再読み込み</button>
         </div>
         <div id="castSyncStatus" class="notice"></div>
         <div id="castSummaryButtons" class="cast-summary-grid mt-4">
@@ -222,6 +222,17 @@
           </div>
         </div>
         <div id="introducerList" class="master-list mt-5"></div>
+      </section>
+
+      <section id="castImportResolutionSection" class="section-shell hidden" data-workspace="closing">
+        <div class="section-title">
+          <div>
+            <h2>JSONキャスト紐づけ確認</h2>
+            <p class="mt-1 text-sm text-slate-500">名前だけでは自動統合しません。未登録のPOS IDを既存人物へ紐づけるか、新規人物として登録してください。</p>
+          </div>
+        </div>
+        <div id="castImportSafetySummary" class="notice"></div>
+        <div id="castImportResolutionRows" class="mt-4 space-y-3"></div>
       </section>
 
       <section class="section-shell hidden" data-workspace="closing">
@@ -514,20 +525,16 @@
 
   <dialog id="posCastLinkModal" class="modal-card">
     <form method="dialog">
-      <p class="brand-kicker">POS LINK</p>
-      <h2 id="posCastLinkTitle" class="mt-2 text-xl font-bold">POS正式キャストと紐づけ</h2>
+      <p class="brand-kicker">SOURCE ID LINK</p>
+      <h2 id="posCastLinkTitle" class="mt-2 text-xl font-bold">JSONのPOS IDを紐づけ</h2>
       <input id="linkingCastId" type="hidden">
       <div class="mt-5 space-y-4">
         <div id="posCastLinkCurrent" class="notice"></div>
         <label>
-          <span class="form-label">POSキャスト検索</span>
-          <input id="posCastLinkSearch" type="search" maxlength="40" class="form-input" placeholder="POSキャスト名または内部番号">
+          <span class="form-label">JSONに記録されているPOSキャストID</span>
+          <input id="posCastLinkSourceId" type="text" maxlength="120" class="form-input" placeholder="POSキャストID">
         </label>
-        <label>
-          <span class="form-label">紐づけるPOS正式キャスト</span>
-          <select id="posCastLinkSelect" class="form-select"></select>
-        </label>
-        <div id="posCastLinkPreview" class="notice"></div>
+        <p class="notice">名前だけでは統合しません。入力したIDはこのGMS人物へ固定で紐づきます。</p>
         <div id="posCastLinkError" class="hidden alert alert-error"></div>
       </div>
       <div class="mt-6 flex justify-end gap-3">
@@ -537,6 +544,6 @@
     </form>
   </dialog>
 
-  <script type="module" src="js/shop.js?v=1.53.14"></script>
+  <script type="module" src="js/shop.js?v=1.54"></script>
 </body>
 </html>

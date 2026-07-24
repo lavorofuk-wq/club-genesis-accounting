@@ -25,7 +25,7 @@ GMSで取り込んだ後の保存先:
 - 文字コード: UTF-8
 - 拡張子: `.json`
 - schema: `club-genesis-pos-closing`
-- schemaVersion: `1`
+- schemaVersion: `2`（過去データ取込に限り`1`も受け付けます）
 
 必須主要項目:
 
@@ -39,6 +39,10 @@ GMSで取り込んだ後の保存先:
 - `enteredCasts`
 - `exitedCasts`
 - `trialCasts`
+- `submissionId`
+- `generatedAt`
+- `rosterSnapshot`
+- `lifecycleEvents`
 - `checksum`
 
 CSVは閲覧・確認用としてのみ扱い、正式取込には使用しません。
