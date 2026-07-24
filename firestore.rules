@@ -309,15 +309,13 @@ service cloud.firestore {
     match /dailyClosings/{document} {
       allow read: if signedIn();
       allow create, update: if signedIn() && ((userRole() == 'shop' || userRole() == 'accounting') || isSelfSubmittedClosing() || isSelfFinalizedClosing());
-      allow delete: if signedIn()
-        && (userRole() == 'accounting' || resource.data.finalizedBy == request.auth.uid);
+      allow delete: if signedIn() && userRole() == 'accounting';
     }
 
     match /dailyClosings-dev/{document} {
       allow read: if signedIn();
       allow create, update: if signedIn() && ((userRole() == 'shop' || userRole() == 'accounting') || isSelfSubmittedClosing() || isSelfFinalizedClosing());
-      allow delete: if signedIn()
-        && (userRole() == 'accounting' || resource.data.finalizedBy == request.auth.uid);
+      allow delete: if signedIn() && userRole() == 'accounting';
     }
 
     match /staffMembers/{document} {
