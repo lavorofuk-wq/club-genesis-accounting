@@ -136,7 +136,7 @@ document.getElementById("saveTransportDeductionButton").addEventListener("click"
 document.getElementById("openPayrollDeductionButton").addEventListener("click", openPayrollDeductionModal);
 document.getElementById("savePayrollDeductionButton").addEventListener("click", savePayrollDeductionsFromModal);
 document.getElementById("copyPreviousButton").addEventListener("click", copyPreviousDay);
-document.getElementById("saveButton").addEventListener("click", openConfirm);
+document.getElementById("saveButton").addEventListener("click", handleOpenConfirm);
 document.getElementById("confirmSaveButton").addEventListener("click", saveReport);
 document.getElementById("cancelConfirmSaveButton").addEventListener("click", () => {
   document.getElementById("confirmModal").close();
@@ -2133,6 +2133,7 @@ function checkSalesWarning() {
 }
 
 function collectRows() {
+  const businessDate = textValue("date");
   const staffWork = [...document.querySelectorAll(".staff-work-row")]
     .map((row) => {
       const member = staffMembers.find((item) => item.id === row.dataset.staffId);
@@ -2384,6 +2385,18 @@ function openConfirm() {
   });
   hideMessage("confirmSaveError");
   document.getElementById("confirmModal").showModal();
+}
+
+function handleOpenConfirm() {
+  try {
+    openConfirm();
+  } catch (error) {
+    console.error("Failed to prepare closing confirmation.", error);
+    pendingPayload = null;
+    const message = `経理送信前の確認を表示できませんでした。${error?.message || "入力内容を確認してください。"}`;
+    showMessage("errorMessage", message);
+    document.getElementById("errorMessage")?.scrollIntoView({ block: "start" });
+  }
 }
 
 async function saveReport() {
