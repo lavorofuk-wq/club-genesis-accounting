@@ -15,6 +15,7 @@ service cloud.firestore {
 
     function authRole() {
       return signedIn()
+        && request.auth.token.keys().hasAny(['role'])
         && (request.auth.token.role == 'shop'
           || request.auth.token.role == 'accounting')
         ? request.auth.token.role
