@@ -18,7 +18,7 @@ const ROLE_ROUTES = {
   accounting: "accounting.html"
 };
 const AUTH_TIMEOUT_MS = 15000;
-const APP_VERSION = "1.53.13";
+const APP_VERSION = "1.53.14";
 const VERSION_CHECK_INTERVAL_MS = 60000;
 
 cleanupLegacyPwa();
