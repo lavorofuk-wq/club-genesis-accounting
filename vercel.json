@@ -17,6 +17,15 @@
           "value": "no-store, max-age=0"
         }
       ]
+    },
+    {
+      "source": "/js/(.*\\.mjs)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "no-store, max-age=0"
+        }
+      ]
     }
   ]
 }

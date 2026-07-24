@@ -251,6 +251,48 @@ service cloud.firestore {
       && request.resource.data.costAmount >= 0;
     }
 
+    function isCastSourceLink() {
+      return request.resource.data.sourceSystem == 'club-genesis-pos'
+        && request.resource.data.sourceCastId is string
+        && request.resource.data.sourceCastId.size() > 0
+        && request.resource.data.sourceCastId.size() <= 120
+        && request.resource.data.memberId is string
+        && request.resource.data.memberId.size() > 0
+        && request.resource.data.personKey is string
+        && request.resource.data.personKey.size() > 0
+        && request.resource.data.status == 'linked';
+    }
+
+    function isCastLifecycleEvent() {
+      return request.resource.data.eventId is string
+        && request.resource.data.eventId.size() > 0
+        && request.resource.data.eventId.size() <= 300
+        && request.resource.data.sourceCastId is string
+        && request.resource.data.sourceCastId.size() > 0
+        && request.resource.data.sourceCastId.size() <= 120
+        && (request.resource.data.eventType == 'entered'
+          || request.resource.data.eventType == 'departed'
+          || request.resource.data.eventType == 'trial')
+        && request.resource.data.eventAt is string
+        && request.resource.data.eventAt.size() <= 40
+        && request.resource.data.businessDate is string
+        && request.resource.data.businessDate.matches('^\\d{4}-\\d{2}-\\d{2}$');
+    }
+
+    function isJsonImport() {
+      return request.resource.data.submissionId is string
+        && request.resource.data.submissionId.size() > 0
+        && request.resource.data.submissionId.size() <= 200
+        && request.resource.data.checksum is string
+        && request.resource.data.checksum.size() > 0
+        && request.resource.data.checksum.size() <= 128
+        && request.resource.data.businessDate is string
+        && request.resource.data.businessDate.matches('^\\d{4}-\\d{2}-\\d{2}$')
+        && (request.resource.data.status == 'processing'
+          || request.resource.data.status == 'completed'
+          || request.resource.data.status == 'failed');
+    }
+
     function isInternalMail() {
       return request.resource.data.sentDate is string
       && request.resource.data.sentDate.matches('^\\d{4}-\\d{2}-\\d{2}$')
@@ -340,6 +382,56 @@ service cloud.firestore {
     match /castMembers-dev/{document} {
       allow read: if signedIn();
       allow create, update: if signedIn() && isCastMember();
+      allow delete: if false;
+    }
+
+    match /castSourceLinks/{document} {
+      allow read: if signedIn();
+      allow create, update: if signedIn()
+        && (userRole() == 'shop' || userRole() == 'accounting')
+        && isCastSourceLink();
+      allow delete: if false;
+    }
+
+    match /castSourceLinks-dev/{document} {
+      allow read: if signedIn();
+      allow create, update: if signedIn()
+        && (userRole() == 'shop' || userRole() == 'accounting')
+        && isCastSourceLink();
+      allow delete: if false;
+    }
+
+    match /castLifecycleEvents/{document} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && (userRole() == 'shop' || userRole() == 'accounting')
+        && isCastLifecycleEvent();
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    match /castLifecycleEvents-dev/{document} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && (userRole() == 'shop' || userRole() == 'accounting')
+        && isCastLifecycleEvent();
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    match /jsonImports/{document} {
+      allow read: if signedIn();
+      allow create, update: if signedIn()
+        && (userRole() == 'shop' || userRole() == 'accounting')
+        && isJsonImport();
+      allow delete: if false;
+    }
+
+    match /jsonImports-dev/{document} {
+      allow read: if signedIn();
+      allow create, update: if signedIn()
+        && (userRole() == 'shop' || userRole() == 'accounting')
+        && isJsonImport();
       allow delete: if false;
     }
 

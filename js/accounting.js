@@ -159,7 +159,7 @@ async function loadData() {
     ]);
     allClosings = closingSnap.docs.map((item) => normalizeClosing(item.id, item.data()));
     receivedClosings = allClosings
-      .filter((item) => item.status !== "finalized")
+      .filter((item) => item.status !== "finalized" && item.status !== "superseded")
       .sort((a, b) => b.businessDate.localeCompare(a.businessDate) || b.id.localeCompare(a.id));
     finalizedClosings = allClosings
       .filter((item) => item.status === "finalized")
@@ -3542,8 +3542,6 @@ function findMember(members, id, name) {
     || String(member.posCastId || "") === normalizedId
     || normalizeAliasList(member.previousPosCastIds).includes(normalizedId)
     || String(member.personKey || "") === normalizedId
-    || (name && member.name === name)
-    || (name && normalizeAliasList(member.previousNames).includes(String(name)))
   );
 }
 

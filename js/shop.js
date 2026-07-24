@@ -1,25 +1,34 @@
 import {
   db,
-  posDb,
   collection,
   doc,
   getDocs,
   getDoc,
   setDoc,
+  writeBatch,
+  runTransaction,
   query,
   where,
-  ref,
-  get,
   serverTimestamp,
   closingsCollectionName,
   staffCollectionName,
   castCollectionName,
   introducerCollectionName,
   trialCastCollectionName,
-  posCastPath
+  castSourceLinkCollectionName,
+  castLifecycleEventCollectionName,
+  jsonImportCollectionName
 } from "./firebase-config.js";
 import { requireRole, logout, showMessage, hideMessage } from "./auth.js";
 import { initInternalMail } from "./internal-mail.js";
+import {
+  analyzeCastImport,
+  findMemberBySourceId,
+  lifecycleDecision,
+  lifecycleStatus,
+  normalizeLifecycleEvents,
+  sourceLinkDocumentId
+} from "./cast-import.mjs";
 
 const yen = new Intl.NumberFormat("ja-JP");
 const employmentTypeLabels = {
@@ -60,7 +69,10 @@ let selectedPending = null;
 let editingStaffId = null;
 let editingIntroducerId = null;
 let currentCastDetailType = "active";
-let posCastLinkCandidates = [];
+let castSourceLinks = [];
+let jsonImportHistory = [];
+let pendingCastImportAnalysis = null;
+let pendingCastResolutions = new Map();
 
 document.getElementById("logoutButton").addEventListener("click", logout);
 document.getElementById("openRegistrationButton").addEventListener("click", () => showWorkspace("registration"));
@@ -101,7 +113,10 @@ document.getElementById("closeStaffListButton").addEventListener("click", () => 
 });
 document.getElementById("saveIntroducerButton").addEventListener("click", saveIntroducer);
 document.getElementById("cancelIntroducerEditButton").addEventListener("click", resetIntroducerForm);
-document.getElementById("syncCastsButton").addEventListener("click", () => syncPosCasts(true));
+document.getElementById("syncCastsButton").addEventListener("click", async () => {
+  await loadMasters();
+  renderCastDataStatus();
+});
 document.querySelectorAll("[data-cast-detail]").forEach((button) => {
   button.addEventListener("click", () => openCastDetail(button.dataset.castDetail));
 });
@@ -125,8 +140,6 @@ document.getElementById("castAdvisoryFeeAmount").addEventListener("input", (even
   markInvalid(event.target, invalid);
 });
 document.getElementById("saveCastProfileButton").addEventListener("click", saveCastProfile);
-document.getElementById("posCastLinkSearch").addEventListener("input", renderPosCastLinkOptions);
-document.getElementById("posCastLinkSelect").addEventListener("change", renderPosCastLinkPreview);
 document.getElementById("savePosCastLinkButton").addEventListener("click", savePosCastLink);
 document.getElementById("addCastWorkButton").addEventListener("click", () => addCastWorkRow());
 document.getElementById("addExpenseButton").addEventListener("click", () => addExpenseRow());
@@ -148,7 +161,7 @@ requireRole("shop", async (user) => {
   showWorkspace("home");
   document.getElementById("date").value = todayString();
   await loadMasters();
-  await syncPosCasts(false);
+  renderCastDataStatus();
   await loadSentClosings();
   initInternalMail({
     role: "shop",
@@ -195,7 +208,15 @@ async function handleClosingJsonFile(event) {
     const text = await file.text();
     const parsed = JSON.parse(stripBom(text));
     const closing = normalizeImportedClosingJson(parsed, file.name);
-    await syncCastLifecycle([closing]);
+    const analysis = analyzeCastImport(closing, allCastMembers, castSourceLinks);
+    const invalidIdentity = [...analysis.resolved, ...analysis.unresolved]
+      .find((identity) => identity.sourceCastId.length > 120);
+    if (invalidIdentity) {
+      throw new Error(`POS IDが120文字を超えています：${invalidIdentity.sourceCastId.slice(0, 40)}...`);
+    }
+    await assertImportIsNew(closing);
+    pendingCastImportAnalysis = analysis;
+    pendingCastResolutions = new Map();
     pendingClosings = [
       closing,
       ...pendingClosings.filter((item) => item.id !== closing.id)
@@ -215,6 +236,8 @@ async function handleClosingJsonFile(event) {
 function clearImportedClosingJson() {
   pendingClosings = [];
   selectedPending = null;
+  pendingCastImportAnalysis = null;
+  pendingCastResolutions = new Map();
   renderPendingClosings();
   const status = document.getElementById("closingJsonImportStatus");
   if (status) status.textContent = "POSで出力したGMS取込JSONを選択してください。";
@@ -234,13 +257,16 @@ function normalizeImportedClosingJson(data, fileName) {
   if (checksum && checksum !== closingChecksum(data)) {
     throw new Error("チェックサムが一致しません。POSからJSONを再出力してください。");
   }
-  const importId = String(data.source?.submissionId || `pos_json_${businessDate}_${checksum || Date.now()}`);
+  const effectiveChecksum = checksum || closingChecksum(data);
+  const importId = String(data.submissionId || data.source?.submissionId || `pos_json_${businessDate}_${effectiveChecksum}`);
   return {
     ...data,
     id: importId,
     businessDate,
     date: businessDate,
     status: "submitted",
+    submissionId: importId,
+    checksum: effectiveChecksum,
     sourceCollection: "pos-json-file",
     source: {
       ...(data.source || {}),
@@ -268,8 +294,55 @@ function validateImportedClosingJson(data) {
   if (data.schema !== "club-genesis-pos-closing") {
     errors.push("schemaがclub-genesis-pos-closingではありません。");
   }
-  if (Number(data.schemaVersion || 0) !== 1) {
-    errors.push("schemaVersion 1のJSONを選択してください。");
+  const schemaVersion = Number(data.schemaVersion || 0);
+  if (![1, 2].includes(schemaVersion)) {
+    errors.push("schemaVersion 1または2のJSONを選択してください。");
+  }
+  if (schemaVersion === 2) {
+    if (!String(data.submissionId || data.source?.submissionId || "").trim()) {
+      errors.push("schemaVersion 2にはsubmissionIdが必要です。");
+    }
+    if (!String(data.generatedAt || "").trim() || Number.isNaN(Date.parse(data.generatedAt))) {
+      errors.push("schemaVersion 2のgeneratedAtが不正です。");
+    }
+    if (
+      !data.rosterSnapshot
+      || typeof data.rosterSnapshot !== "object"
+      || typeof data.rosterSnapshot.complete !== "boolean"
+      || !Array.isArray(data.rosterSnapshot.casts)
+    ) {
+      errors.push("schemaVersion 2にはrosterSnapshotが必要です。");
+    }
+    if (!Array.isArray(data.lifecycleEvents)) {
+      errors.push("schemaVersion 2にはlifecycleEventsが必要です。");
+    } else {
+      data.lifecycleEvents.forEach((event, index) => {
+        const type = String(event?.eventType || event?.type || event?.status || "");
+        const sourceCastId = String(event?.castId || event?.posCastId || event?.id || "");
+        if (!String(event?.eventId || "").trim() || !sourceCastId.trim()) {
+          errors.push(`lifecycleEvents[${index}]のeventIdまたはcastIdがありません。`);
+        }
+        if (!["entered", "departed", "trial", "active", "enter", "exit", "exited"].includes(type)) {
+          errors.push(`lifecycleEvents[${index}]のeventTypeが不正です。`);
+        }
+        if (!String(event?.eventAt || event?.occurredAt || "").trim()
+          || Number.isNaN(Date.parse(event.eventAt || event.occurredAt))) {
+          errors.push(`lifecycleEvents[${index}]のeventAtが不正です。`);
+        }
+      });
+    }
+    if (
+      data.rosterSnapshot
+      && (!String(data.rosterSnapshot.capturedAt || "").trim()
+        || Number.isNaN(Date.parse(data.rosterSnapshot.capturedAt)))
+    ) {
+      errors.push("rosterSnapshot.capturedAtが不正です。");
+    }
+    (data.rosterSnapshot?.casts || []).forEach((cast, index) => {
+      if (!String(cast?.castId || cast?.posCastId || cast?.id || "").trim()) {
+        errors.push(`rosterSnapshot.casts[${index}]のcastIdがありません。`);
+      }
+    });
   }
   const businessDate = String(data.businessDate || data.date || "");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(businessDate)) {
@@ -356,14 +429,18 @@ function makeOption(value, label) {
 
 async function loadMasters() {
   try {
-    const [staffSnapshot, castSnapshot, introducerSnapshot] = await Promise.all([
+    const [staffSnapshot, castSnapshot, introducerSnapshot, sourceLinkSnapshot, importSnapshot] = await Promise.all([
       getDocs(collection(db, staffCollectionName)),
       getDocs(collection(db, castCollectionName)),
-      getDocs(collection(db, introducerCollectionName))
+      getDocs(collection(db, introducerCollectionName)),
+      getDocs(collection(db, castSourceLinkCollectionName)),
+      getDocs(collection(db, jsonImportCollectionName))
     ]);
     staffMembers = staffSnapshot.docs.map((item) => ({ id: item.id, ...item.data() })).sort(sortByName);
     allCastMembers = castSnapshot.docs.map((item) => ({ id: item.id, ...item.data() })).sort(sortByName);
     castMembers = allCastMembers.filter((cast) => cast.deleted !== true);
+    castSourceLinks = sourceLinkSnapshot.docs.map((item) => ({ id: item.id, ...item.data() }));
+    jsonImportHistory = importSnapshot.docs.map((item) => ({ id: item.id, ...item.data() }));
     introducers = introducerSnapshot.docs
       .map((item) => ({ id: item.id, ...item.data() }))
       .sort(sortByName);
@@ -376,87 +453,8 @@ async function loadMasters() {
   }
 }
 
-async function syncPosCasts(showSuccess) {
-  const button = document.getElementById("syncCastsButton");
-  button.disabled = true;
-  setCastSyncStatus("POSのキャスト名簿を同期しています。");
-  try {
-    const posCasts = await loadPosCastCandidates();
-    if (!posCasts.length) {
-      throw new Error("POSに通常キャストの名簿データがありません。");
-    }
-    const localByPosId = new Map(allCastMembers
-      .filter((cast) => cast.deleted !== true && cast.posCastId)
-      .map((cast) => [String(cast.posCastId), cast]));
-    await Promise.all(posCasts.map((posCast) => {
-      const existing = localByPosId.get(posCast.posCastId);
-      const changed = !existing
-        || existing.name !== posCast.name
-        || existing.status !== posCast.status
-        || Number(existing.internalNo || 0) !== posCast.internalNo
-        || (posCast.entryDate && existing.entryDate !== posCast.entryDate)
-        || (posCast.exitedDate && existing.exitedDate !== posCast.exitedDate)
-        || existing.posEnteredAt !== posCast.posEnteredAt
-        || existing.posExitedAt !== posCast.posExitedAt;
-      if (!changed) return Promise.resolve();
-      const sourceData = { ...posCast };
-      if (!sourceData.entryDate) delete sourceData.entryDate;
-      if (!sourceData.exitedDate) delete sourceData.exitedDate;
-      return setDoc(doc(db, castCollectionName, existing?.id || castDocumentId(posCast.posCastId)), {
-        ...sourceData,
-        source: "pos",
-        syncedAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
-      }, { merge: true });
-    }));
-    await loadCastMembers();
-    const activeCount = castMembers.filter((cast) => cast.status === "active").length;
-    const departedCount = castMembers.filter((cast) => cast.status === "departed").length;
-    setCastSyncStatus(`POS名簿と同期済み：在籍中 ${activeCount}名 / 退店済み ${departedCount}名`);
-    if (showSuccess) showMessage("successMessage", "POSのキャスト名簿を再同期しました。", false);
-  } catch (error) {
-    setCastSyncStatus(`POS名簿の同期に失敗しました。${error.message}`, true);
-    showMessage("errorMessage", `POS名簿の同期に失敗しました。${error.message}`);
-  } finally {
-    button.disabled = false;
-  }
-}
-
-function normalizePosCast(cast) {
-  const posCastId = String(cast.id);
-  return {
-    posCastId,
-    name: String(cast.name).trim(),
-    internalNo: Number(cast.internalNo || 0),
-    status: cast.active === false ? "departed" : "active",
-    entryDate: cast.enteredBizDay || timestampToDate(cast.enteredAt || cast.registeredAt),
-    posEnteredAt: Number(cast.enteredAt || cast.registeredAt || 0),
-    posExitedAt: Number(cast.exitedAt || 0),
-    exitedDate: cast.exitedBizDay || timestampToDate(cast.exitedAt)
-  };
-}
-
-async function loadPosCastCandidates() {
-  const snapshot = await get(ref(posDb, posCastPath));
-  const rawCasts = snapshot.val();
-  return (Array.isArray(rawCasts) ? rawCasts : Object.values(rawCasts || {}))
-    .filter((cast) => cast && cast.castType !== "trial" && cast.id != null && String(cast.name || "").trim())
-    .map(normalizePosCast)
-    .sort((a, b) =>
-      Number(a.internalNo || Number.MAX_SAFE_INTEGER) - Number(b.internalNo || Number.MAX_SAFE_INTEGER)
-      || String(a.name || "").localeCompare(String(b.name || ""), "ja")
-    );
-}
-
-function timestampToDate(value) {
-  const timestamp = Number(value || 0);
-  if (!timestamp) return "";
-  const date = new Date(timestamp);
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-}
-
 function castDocumentId(posCastId) {
-  return `pos_${String(posCastId).replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+  return `member_${sourceLinkDocumentId(posCastId)}`;
 }
 
 function findCastMemberByPosId(posCastId) {
@@ -465,8 +463,8 @@ function findCastMemberByPosId(posCastId) {
   );
 }
 
-function trialCastMemberPayload(row) {
-  const existing = findCastMemberByPosId(row.castId);
+function trialCastMemberPayload(row, members = allCastMembers) {
+  const existing = resolvedMemberForSource(row.castId, members) || findCastMemberByPosId(row.castId);
   const posCastId = String(row.castId || existing?.posCastId || "");
   const name = String(row.castName || existing?.name || "");
   const advisoryFeeAmount = Number(existing?.advisoryFeeAmount || 0);
@@ -554,89 +552,294 @@ async function loadSentClosings() {
   }
 }
 
-async function syncCastLifecycle(closings) {
-  const updates = new Map();
-  const mergeLifecycleUpdate = (update) => {
-    const key = String(update.posCastId || "");
-    const current = updates.get(key) || {};
-    updates.set(key, {
-      ...current,
-      ...update,
-      entryDate: current.entryDate || update.entryDate || "",
-      posEnteredAt: current.posEnteredAt || update.posEnteredAt || 0,
-      exitedDate: update.exitedDate || current.exitedDate || "",
-      posExitedAt: update.posExitedAt || current.posExitedAt || 0
-    });
-  };
-  [...closings]
-    .sort((a, b) => String(a.businessDate || a.date || "").localeCompare(String(b.businessDate || b.date || "")))
-    .forEach((closing) => {
-    const eventDate = closing.businessDate || closing.date || "";
-    (closing.enteredCasts || []).forEach((cast) => {
-      if (cast.castId == null || !String(cast.castName || "").trim()) return;
-      mergeLifecycleUpdate({
-        posCastId: String(cast.castId),
-        name: String(cast.castName).trim(),
-        internalNo: Number(cast.internalNo || 0),
-        status: "active",
-        entryDate: eventDate,
-        posEnteredAt: Number(cast.enteredAt || 0)
-      });
-    });
-    (closing.exitedCasts || []).forEach((cast) => {
-      if (cast.castId == null || !String(cast.castName || "").trim()) return;
-      mergeLifecycleUpdate({
-        posCastId: String(cast.castId),
-        name: String(cast.castName).trim(),
-        internalNo: Number(cast.internalNo || 0),
-        status: "departed",
-        exitedDate: eventDate,
-        posExitedAt: Number(cast.exitedAt || 0)
-      });
-    });
-    (closing.trialCasts || []).forEach((cast) => {
-      if (cast.castId == null || !String(cast.castName || "").trim()) return;
-      mergeLifecycleUpdate({
-        posCastId: String(cast.castId),
-        name: String(cast.castName).trim(),
-        internalNo: Number(cast.internalNo || 0),
-        status: "trial",
-        entryDate: cast.trialBizDay || eventDate,
-        trialBizDay: cast.trialBizDay || eventDate,
-        posEnteredAt: Number(cast.trialRegisteredAt || 0),
-        posExitedAt: Number(cast.trialEndedAt || 0)
-      });
-    });
-  });
-  if (!updates.size) return;
-  const byPosId = new Map(allCastMembers
-    .filter((cast) => cast.deleted !== true)
-    .map((cast) => [String(cast.posCastId || ""), cast]));
-  await Promise.all([...updates.values()].map((update) => {
-    const existing = byPosId.get(update.posCastId);
-    const previousPosCastIds = new Set(normalizeAliasList(existing?.previousPosCastIds));
-    if (existing?.posCastId && existing.posCastId !== update.posCastId) previousPosCastIds.add(String(existing.posCastId));
-    const changed = !existing
-      || existing.name !== update.name
-      || existing.status !== update.status
-      || Number(existing.internalNo || 0) !== update.internalNo
-      || (update.entryDate && existing.entryDate !== update.entryDate)
-      || (update.exitedDate && existing.exitedDate !== update.exitedDate)
-      || (update.trialBizDay && existing.trialBizDay !== update.trialBizDay)
-      || (update.posEnteredAt && existing.posEnteredAt !== update.posEnteredAt)
-      || (update.posExitedAt && existing.posExitedAt !== update.posExitedAt)
-      || previousPosCastIds.size !== normalizeAliasList(existing?.previousPosCastIds).length;
-    if (!changed) return Promise.resolve();
-    return setDoc(doc(db, castCollectionName, existing?.id || castDocumentId(update.posCastId)), {
-      ...update,
-      personKey: existing?.personKey || `person_${existing?.id || castDocumentId(update.posCastId)}`,
-      previousPosCastIds: [...previousPosCastIds],
-      source: "pos",
-      lifecycleSyncedAt: serverTimestamp(),
+function safeDocumentId(value) {
+  return sourceLinkDocumentId(`doc:${String(value || "")}`);
+}
+
+function renderCastDataStatus() {
+  const completed = jsonImportHistory.filter((item) => item.status === "completed");
+  const latest = completed.map((item) => item.businessDate || "").filter(Boolean).sort().at(-1) || "なし";
+  setCastSyncStatus(`GMS独立管理 / JSON取込済み ${completed.length}件 / 最新営業日 ${latest}`);
+}
+
+async function assertImportIsNew(closing) {
+  const reference = doc(db, jsonImportCollectionName, safeDocumentId(closing.submissionId));
+  const snapshot = await getDoc(reference);
+  if (snapshot.exists()) {
+    const existing = snapshot.data();
+    if (!(existing.status === "failed" && String(existing.checksum || "") === String(closing.checksum || ""))) {
+      if (String(existing.checksum || "") === String(closing.checksum || "")) {
+        throw new Error("このJSONは既に取り込み済みです。取込履歴を確認してください。");
+      }
+      throw new Error("同じsubmissionIdで内容の異なるJSONが存在します。訂正版として確認が必要です。");
+    }
+  }
+  const sameDateSnapshot = await getDocs(query(
+    collection(db, jsonImportCollectionName),
+    where("businessDate", "==", closing.businessDate)
+  ));
+  const completed = sameDateSnapshot.docs
+    .map((item) => ({ id: item.id, ...item.data() }))
+    .filter((item) => item.status === "completed" && item.submissionId !== closing.submissionId);
+  if (!completed.length) return;
+  const supersedesSubmissionId = String(closing.supersedesSubmissionId || "");
+  const superseded = completed.find((item) => String(item.submissionId || "") === supersedesSubmissionId);
+  if (!superseded) {
+    throw new Error("同じ営業日のJSONが取込済みです。訂正版にはsupersedesSubmissionIdを指定してください。");
+  }
+  const previousClosing = await getDoc(doc(db, closingsCollectionName, superseded.closingId));
+  if (previousClosing.exists() && previousClosing.data().status === "finalized") {
+    throw new Error("訂正対象は経理確定済みです。先に確定データの扱いを確認してください。");
+  }
+  closing.supersedesClosingId = superseded.closingId;
+}
+
+async function claimJsonImport(closing) {
+  const reference = doc(db, jsonImportCollectionName, safeDocumentId(closing.submissionId));
+  await runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(reference);
+    if (snapshot.exists()) {
+      const existing = snapshot.data();
+      if (String(existing.checksum || "") !== String(closing.checksum || "")) {
+        throw new Error("同じsubmissionIdで内容の異なるJSONが存在します。");
+      }
+      if (existing.status === "completed") {
+        throw new Error("このJSONは既に取り込み済みです。");
+      }
+      if (existing.status === "processing") {
+        const processingMillis = typeof existing.processingAt?.toMillis === "function"
+          ? existing.processingAt.toMillis()
+          : 0;
+        if (!processingMillis || Date.now() - processingMillis < 15 * 60 * 1000) {
+          throw new Error("このJSONは別の端末で処理中です。完了後に取込履歴を確認してください。");
+        }
+      }
+    }
+    transaction.set(reference, {
+      submissionId: closing.submissionId,
+      checksum: closing.checksum,
+      schemaVersion: Number(closing.schemaVersion || 1),
+      businessDate: closing.businessDate,
+      status: "processing",
+      processingBy: currentUser.uid,
+      processingAt: serverTimestamp(),
       updatedAt: serverTimestamp()
     }, { merge: true });
-  }));
-  await loadCastMembers();
+  });
+}
+
+async function markJsonImportFailed(closing, error) {
+  if (!closing?.submissionId) return;
+  await setDoc(doc(db, jsonImportCollectionName, safeDocumentId(closing.submissionId)), {
+    status: "failed",
+    failureMessage: String(error?.message || "unknown").slice(0, 500),
+    failedBy: currentUser.uid,
+    failedAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  }, { merge: true }).catch(() => {});
+}
+
+function resolvedMemberForSource(sourceCastId, localMembers) {
+  const selected = pendingCastResolutions.get(String(sourceCastId));
+  if (selected && selected !== "new") {
+    return localMembers.find((member) => member.id === selected) || null;
+  }
+  if (selected === "new") {
+    return findMemberBySourceId(
+      localMembers.filter((member) => member.deleted !== true),
+      sourceCastId
+    );
+  }
+  const link = castSourceLinks.find((item) =>
+    item.status !== "unlinked" && String(item.sourceCastId || "") === String(sourceCastId)
+  );
+  return localMembers.find((member) => member.id === link?.memberId)
+    || findMemberBySourceId(localMembers, sourceCastId);
+}
+
+async function applyCastImport(closing, targetClosingId, reportPayload) {
+  const analysis = analyzeCastImport(closing, allCastMembers, castSourceLinks);
+  const localMembers = [...allCastMembers];
+  const batch = writeBatch(db);
+  const memberUpdates = new Map();
+  const mergeMemberUpdate = (memberId, update) => {
+    memberUpdates.set(memberId, { ...(memberUpdates.get(memberId) || {}), ...update });
+  };
+  let writeCount = 1;
+  batch.set(doc(db, closingsCollectionName, targetClosingId), reportPayload, { merge: true });
+  if (closing.supersedesClosingId) {
+    batch.set(doc(db, closingsCollectionName, closing.supersedesClosingId), {
+      status: "superseded",
+      supersededByClosingId: targetClosingId,
+      supersededAt: serverTimestamp(),
+      supersededBy: currentUser.uid,
+      updatedAt: serverTimestamp()
+    }, { merge: true });
+    writeCount += 1;
+  }
+  for (const identity of analysis.unresolved) {
+    const resolution = pendingCastResolutions.get(identity.sourceCastId);
+    if (!resolution) throw new Error(`${identity.sourceName || identity.sourceCastId}の人物紐づけが未完了です。`);
+    if (resolution === "new") {
+      const baseId = castDocumentId(identity.sourceCastId);
+      const id = localMembers.some((member) => member.id === baseId)
+        ? `${baseId}_${safeDocumentId(closing.submissionId).slice(-12)}`
+        : baseId;
+      const firstEvent = normalizeLifecycleEvents(closing)
+        .filter((event) => event.sourceCastId === identity.sourceCastId)
+        .sort((a, b) => a.eventAt.localeCompare(b.eventAt))[0];
+      const member = {
+        id,
+        posCastId: identity.sourceCastId,
+        name: String(identity.sourceName || `未設定（${identity.sourceCastId}）`).slice(0, 40),
+        internalNo: Number(firstEvent?.internalNo || 0),
+        status: firstEvent ? lifecycleStatus(firstEvent.eventType) : "active",
+        source: "pos",
+        personKey: `person_${id}`,
+        deleted: false
+      };
+      mergeMemberUpdate(id, {
+        ...member,
+        createdFromJson: true,
+        createdBy: currentUser.uid,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp()
+      });
+      localMembers.push(member);
+    }
+  }
+
+  const identities = [...analysis.resolved, ...analysis.unresolved];
+  for (const identity of identities) {
+    const member = resolvedMemberForSource(identity.sourceCastId, localMembers);
+    if (!member) throw new Error(`${identity.sourceName || identity.sourceCastId}の人物を確定できません。`);
+    const previousPosCastIds = new Set(normalizeAliasList(member.previousPosCastIds));
+    if (String(member.posCastId || "") !== identity.sourceCastId) previousPosCastIds.add(identity.sourceCastId);
+    mergeMemberUpdate(member.id, {
+      personKey: member.personKey || `person_${member.id}`,
+      previousPosCastIds: [...previousPosCastIds],
+      updatedAt: serverTimestamp()
+    });
+    member.previousPosCastIds = [...previousPosCastIds];
+    const linkId = sourceLinkDocumentId(identity.sourceCastId);
+    const existingLink = castSourceLinks.find((item) =>
+      String(item.sourceCastId || "") === identity.sourceCastId
+    );
+    const firstSeenBusinessDate = [existingLink?.firstSeenBusinessDate, closing.businessDate]
+      .filter(Boolean).sort()[0] || closing.businessDate;
+    const lastSeenBusinessDate = [existingLink?.lastSeenBusinessDate, closing.businessDate]
+      .filter(Boolean).sort().at(-1) || closing.businessDate;
+    batch.set(doc(db, castSourceLinkCollectionName, linkId), {
+      sourceSystem: "club-genesis-pos",
+      sourceCastId: identity.sourceCastId,
+      sourceName: identity.sourceName || "",
+      memberId: member.id,
+      personKey: member.personKey || `person_${member.id}`,
+      status: "linked",
+      firstSeenBusinessDate,
+      lastSeenBusinessDate,
+      linkedBy: currentUser.uid,
+      ...(existingLink ? {} : { linkedAt: serverTimestamp() }),
+      updatedAt: serverTimestamp()
+    }, { merge: true });
+    writeCount += 1;
+  }
+
+  const lifecycleEvents = normalizeLifecycleEvents(closing);
+  const lifecycleSnapshots = await Promise.all(lifecycleEvents.map((event) =>
+    getDoc(doc(db, castLifecycleEventCollectionName, safeDocumentId(event.eventId)))
+  ));
+  for (let eventIndex = 0; eventIndex < lifecycleEvents.length; eventIndex += 1) {
+    const event = lifecycleEvents[eventIndex];
+    const member = resolvedMemberForSource(event.sourceCastId, localMembers);
+    const eventExists = lifecycleSnapshots[eventIndex].exists();
+    const decision = eventExists
+      ? { apply: false, reason: "duplicate-event" }
+      : lifecycleDecision(member, event);
+    if (!eventExists) {
+      batch.set(doc(db, castLifecycleEventCollectionName, safeDocumentId(event.eventId)), {
+        ...event,
+        memberId: member?.id || "",
+        personKey: member?.personKey || "",
+        affectsCurrentStatus: decision.apply === true,
+        ignoredReason: decision.apply ? "" : decision.reason,
+        importedBy: currentUser.uid,
+        importedAt: serverTimestamp()
+      }, { merge: true });
+      writeCount += 1;
+    }
+    if (!member || !decision.apply) continue;
+    const status = lifecycleStatus(event.eventType);
+    mergeMemberUpdate(member.id, {
+      status,
+      statusEffectiveAt: event.eventAt,
+      statusSourceEventId: event.eventId,
+      ...(status === "active" ? { entryDate: event.entryDate, exitedDate: "" } : {}),
+      ...(status === "departed" ? { exitedDate: event.exitedDate } : {}),
+      ...(status === "trial" ? { trialBizDay: event.businessDate } : {}),
+      lifecycleSyncedAt: serverTimestamp(),
+      updatedAt: serverTimestamp()
+    });
+    member.status = status;
+    member.statusEffectiveAt = event.eventAt;
+    member.statusSourceEventId = event.eventId;
+    if (status === "active") {
+      member.entryDate = event.entryDate;
+      member.exitedDate = "";
+    } else if (status === "departed") {
+      member.exitedDate = event.exitedDate;
+    } else {
+      member.trialBizDay = event.businessDate;
+    }
+  }
+
+  for (const row of reportPayload.trialWork || []) {
+    batch.set(
+      doc(db, trialCastCollectionName, trialCastRecordId(targetClosingId, row.castId)),
+      {
+        ...row,
+        businessDate: reportPayload.businessDate,
+        sourceClosingId: targetClosingId,
+        updatedBy: currentUser.uid,
+        updatedAt: serverTimestamp()
+      },
+      { merge: true }
+    );
+    const member = resolvedMemberForSource(row.castId, localMembers);
+    mergeMemberUpdate(
+      member?.id || castDocumentId(row.castId),
+      trialCastMemberPayload(row, localMembers)
+    );
+    writeCount += 1;
+  }
+  memberUpdates.forEach((update, memberId) => {
+    batch.set(doc(db, castCollectionName, memberId), update, { merge: true });
+    writeCount += 1;
+  });
+  batch.set(doc(db, jsonImportCollectionName, safeDocumentId(closing.submissionId)), {
+    submissionId: closing.submissionId,
+    checksum: closing.checksum,
+    schemaVersion: Number(closing.schemaVersion || 1),
+    businessDate: closing.businessDate,
+    generatedAt: String(closing.generatedAt || ""),
+    fileName: closing.source?.importedFileName || "",
+    status: "completed",
+    failureMessage: "",
+    failedAt: null,
+    closingId: closing.id,
+    supersedesSubmissionId: String(closing.supersedesSubmissionId || ""),
+    supersedesClosingId: String(closing.supersedesClosingId || ""),
+    unresolvedCount: 0,
+    rosterSnapshotComplete: closing.rosterSnapshot?.complete === true,
+    importedBy: currentUser.uid,
+    importedAt: serverTimestamp(),
+    updatedAt: serverTimestamp()
+  }, { merge: true });
+  writeCount += 1;
+  if (writeCount > 450) {
+    throw new Error(`JSONの更新件数が安全上限を超えています（${writeCount}件）。ファイルを確認してください。`);
+  }
+  await batch.commit();
 }
 
 function renderPendingClosings() {
@@ -1081,7 +1284,7 @@ function renderCastDetailList() {
     const linkPos = document.createElement("button");
     linkPos.type = "button";
     linkPos.className = "secondary-button";
-    linkPos.textContent = "POS紐づけ";
+    linkPos.textContent = "JSON ID紐づけ";
     linkPos.addEventListener("click", () => openPosCastLink(member));
     const convert = document.createElement("button");
     convert.type = "button";
@@ -1102,7 +1305,7 @@ function renderCastDetailList() {
 }
 
 async function deleteCastData(member) {
-  if (!confirm(`${member.name}のGMSキャストデータを削除しますか？\n削除後はPOS再同期でも自動復元されません。`)) return;
+  if (!confirm(`${member.name}のGMSキャストデータを削除しますか？\n削除後はJSONを取り込んでも自動復元されません。`)) return;
   try {
     await setDoc(doc(db, castCollectionName, member.id), {
       deleted: true,
@@ -1152,128 +1355,68 @@ function openCastEdit(member, convertTrial = false) {
 
 async function openPosCastLink(member) {
   document.getElementById("linkingCastId").value = member.id;
-  document.getElementById("posCastLinkTitle").textContent = `${member.name}のPOS正式キャスト紐づけ`;
+  document.getElementById("posCastLinkTitle").textContent = `${member.name}のJSON POS ID紐づけ`;
   document.getElementById("posCastLinkCurrent").textContent =
-    `現在のGMS情報：No.${member.internalNo || "-"} / POS ID ${member.posCastId || "未設定"} / 名前 ${member.name || "-"}`;
-  document.getElementById("posCastLinkSearch").value = "";
-  document.getElementById("posCastLinkSelect").replaceChildren(makeOption("", "POS名簿を読み込み中..."));
-  document.getElementById("posCastLinkPreview").textContent = "";
+    `現在：No.${member.internalNo || "-"} / POS ID ${member.posCastId || "未設定"} / ${member.name || "-"}`;
+  document.getElementById("posCastLinkSourceId").value = member.posCastId || "";
   hideMessage("posCastLinkError");
   document.getElementById("posCastLinkModal").showModal();
-  try {
-    posCastLinkCandidates = (await loadPosCastCandidates()).filter((cast) => cast.status === "active");
-    renderPosCastLinkOptions();
-    if (member.posCastId && posCastLinkCandidates.some((cast) => cast.posCastId === String(member.posCastId))) {
-      document.getElementById("posCastLinkSelect").value = String(member.posCastId);
-    }
-    renderPosCastLinkPreview();
-  } catch (error) {
-    posCastLinkCandidates = [];
-    document.getElementById("posCastLinkSelect").replaceChildren(makeOption("", "POS名簿を読み込めませんでした"));
-    showMessage("posCastLinkError", `POSキャスト名簿の取得に失敗しました。${error.message}`);
-  }
-}
-
-function renderPosCastLinkOptions() {
-  const select = document.getElementById("posCastLinkSelect");
-  const currentValue = select.value;
-  const queryText = document.getElementById("posCastLinkSearch").value.trim().toLocaleLowerCase("ja");
-  const linkingId = document.getElementById("linkingCastId").value;
-  const options = posCastLinkCandidates.filter((cast) => {
-    if (!queryText) return true;
-    return String(cast.name || "").toLocaleLowerCase("ja").includes(queryText)
-      || String(cast.internalNo || "").includes(queryText)
-      || String(cast.posCastId || "").toLocaleLowerCase("ja").includes(queryText);
-  });
-  select.replaceChildren(makeOption("", options.length ? "選択してください" : "該当するPOSキャストがありません"));
-  options.forEach((cast) => {
-    const linked = allCastMembers.find((member) =>
-      member.id !== linkingId
-      && member.deleted !== true
-      && String(member.posCastId || "") === String(cast.posCastId)
-    );
-    const label = `No.${cast.internalNo || "-"} ${cast.name} / POS ID ${cast.posCastId}${linked ? ` / GMS登録済み:${linked.name}` : ""}`;
-    select.appendChild(makeOption(cast.posCastId, label));
-  });
-  if (currentValue && options.some((cast) => String(cast.posCastId) === currentValue)) select.value = currentValue;
-  renderPosCastLinkPreview();
-}
-
-function renderPosCastLinkPreview() {
-  const cast = posCastLinkCandidates.find((item) => String(item.posCastId) === document.getElementById("posCastLinkSelect").value);
-  const preview = document.getElementById("posCastLinkPreview");
-  if (!cast) {
-    preview.textContent = "POS正式キャストを選択してください。";
-    return;
-  }
-  const linked = allCastMembers.find((member) =>
-    member.id !== document.getElementById("linkingCastId").value
-    && member.deleted !== true
-    && String(member.posCastId || "") === String(cast.posCastId)
-  );
-  preview.textContent = `選択中：No.${cast.internalNo || "-"} / ${cast.name} / POS ID ${cast.posCastId}`
-    + (linked ? `。既存のGMSデータ「${linked.name}」は統合済みとして非表示にします。` : "");
 }
 
 async function savePosCastLink() {
   const member = castMembers.find((cast) => cast.id === document.getElementById("linkingCastId").value);
-  const selected = posCastLinkCandidates.find((cast) => String(cast.posCastId) === document.getElementById("posCastLinkSelect").value);
+  const sourceCastId = document.getElementById("posCastLinkSourceId").value.trim();
   if (!member) {
     showMessage("posCastLinkError", "GMSキャスト情報が見つかりません。");
     return;
   }
-  if (!selected) {
-    markInvalid(document.getElementById("posCastLinkSelect"), true);
-    showMessage("posCastLinkError", "紐づけるPOS正式キャストを選択してください。");
+  if (!sourceCastId) {
+    markInvalid(document.getElementById("posCastLinkSourceId"), true);
+    showMessage("posCastLinkError", "JSONに記録されているPOSキャストIDを入力してください。");
     return;
   }
-  markInvalid(document.getElementById("posCastLinkSelect"), false);
-  const duplicate = allCastMembers.find((cast) =>
-    cast.id !== member.id
-    && cast.deleted !== true
-    && String(cast.posCastId || "") === String(selected.posCastId)
+  markInvalid(document.getElementById("posCastLinkSourceId"), false);
+  const duplicateLink = castSourceLinks.find((link) =>
+    link.status !== "unlinked"
+    && String(link.sourceCastId || "") === sourceCastId
+    && String(link.memberId || "") !== member.id
   );
+  const duplicateMember = findMemberBySourceId(allCastMembers, sourceCastId);
+  if (duplicateLink || (duplicateMember && duplicateMember.id !== member.id)) {
+    showMessage("posCastLinkError", "このPOS IDは別のGMS人物へ紐づけ済みです。");
+    return;
+  }
   const previousPosCastIds = new Set(normalizeAliasList(member.previousPosCastIds));
-  if (member.posCastId && String(member.posCastId) !== String(selected.posCastId)) previousPosCastIds.add(String(member.posCastId));
-  const previousNames = new Set(normalizeAliasList(member.previousNames));
-  if (member.name && member.name !== selected.name) previousNames.add(member.name);
+  if (member.posCastId && String(member.posCastId) !== sourceCastId) previousPosCastIds.add(String(member.posCastId));
   const button = document.getElementById("savePosCastLinkButton");
   button.disabled = true;
   hideMessage("posCastLinkError");
   try {
     await setDoc(doc(db, castCollectionName, member.id), {
-      posCastId: selected.posCastId,
-      name: selected.name,
-      internalNo: selected.internalNo,
-      status: selected.status,
-      entryDate: selected.entryDate || member.entryDate || "",
-      exitedDate: selected.exitedDate || "",
-      posEnteredAt: selected.posEnteredAt,
-      posExitedAt: selected.posExitedAt,
+      posCastId: sourceCastId,
       personKey: personKeyFor(member),
-      previousNames: [...previousNames],
       previousPosCastIds: [...previousPosCastIds],
       linkedPosCastAt: serverTimestamp(),
       linkedPosCastBy: currentUser.uid,
       source: "pos",
       updatedAt: serverTimestamp()
     }, { merge: true });
-    if (duplicate) {
-      await setDoc(doc(db, castCollectionName, duplicate.id), {
-        deleted: true,
-        mergedIntoCastId: member.id,
-        mergedIntoPersonKey: personKeyFor(member),
-        mergedAt: serverTimestamp(),
-        mergedBy: currentUser.uid,
-        updatedAt: serverTimestamp()
-      }, { merge: true });
-    }
+    await setDoc(doc(db, castSourceLinkCollectionName, sourceLinkDocumentId(sourceCastId)), {
+      sourceSystem: "club-genesis-pos",
+      sourceCastId,
+      memberId: member.id,
+      personKey: personKeyFor(member),
+      status: "linked",
+      linkedAt: serverTimestamp(),
+      linkedBy: currentUser.uid,
+      updatedAt: serverTimestamp()
+    }, { merge: true });
     document.getElementById("posCastLinkModal").close();
-    await loadCastMembers();
+    await loadMasters();
     renderCastDetailList();
-    showMessage("successMessage", `${member.name}をPOS正式キャスト「${selected.name}」へ紐づけました。`, false);
+    showMessage("successMessage", `${member.name}へPOS ID ${sourceCastId}を紐づけました。`, false);
   } catch (error) {
-    showMessage("posCastLinkError", `POS正式キャストとの紐づけに失敗しました。${error.message}`);
+    showMessage("posCastLinkError", `POS IDの紐づけに失敗しました。${error.message}`);
   } finally {
     button.disabled = false;
   }
@@ -2227,6 +2370,17 @@ function buildPayload() {
     businessDate,
     date: businessDate,
     status: "submitted",
+    schema: selectedPending?.schema || "",
+    schemaVersion: Number(selectedPending?.schemaVersion || 0),
+    submissionId: selectedPending?.submissionId || "",
+    checksum: selectedPending?.checksum || "",
+    generatedAt: selectedPending?.generatedAt || "",
+    supersedesSubmissionId: selectedPending?.supersedesSubmissionId || "",
+    rosterSnapshot: selectedPending?.rosterSnapshot || null,
+    lifecycleEvents: selectedPending?.lifecycleEvents || [],
+    enteredCasts: selectedPending?.enteredCasts || [],
+    exitedCasts: selectedPending?.exitedCasts || [],
+    trialCasts: selectedPending?.trialCasts || [],
     sales: {
       totalSales,
       cashSales: numberValue("cashSales"),
@@ -2281,6 +2435,13 @@ function buildPayload() {
 
 function validatePayload(payload) {
   const errors = [];
+  if (pendingCastImportAnalysis) {
+    pendingCastImportAnalysis.unresolved.forEach((identity) => {
+      if (!pendingCastResolutions.get(identity.sourceCastId)) {
+        errors.push(`${identity.sourceName || identity.sourceCastId}のGMS人物紐づけを選択してください。`);
+      }
+    });
+  }
   if (!payload.businessDate) errors.push("日付を入力してください。");
   if (payload.businessDate > todayString()) errors.push("未来の日付は送信できません。");
   payload.staffWork.forEach((row) => {
@@ -2407,33 +2568,51 @@ async function saveReport() {
   hideMessage("confirmSaveError");
 
   let saveStep = "締めデータ";
+  let importClaimed = false;
   try {
     const targetClosingId = selectedPending?.id || pendingPayload.businessDate;
-    await setDoc(doc(db, closingsCollectionName, targetClosingId), pendingPayload, { merge: true });
-    saveStep = "体入キャスト記録";
-    await Promise.all(pendingPayload.trialWork.map((row) => setDoc(
-      doc(db, trialCastCollectionName, trialCastRecordId(targetClosingId, row.castId)),
-      {
-        ...row,
-        businessDate: pendingPayload.businessDate,
-        sourceClosingId: targetClosingId,
-        updatedBy: currentUser.uid,
-        updatedAt: serverTimestamp()
-      },
-      { merge: true }
-    )));
-    saveStep = "体入キャスト名簿";
-    await Promise.all(pendingPayload.trialWork.map((row) => setDoc(
-      doc(db, castCollectionName, castDocumentId(row.castId)),
-      trialCastMemberPayload(row),
-      { merge: true }
-    )));
+    const isNewJsonImport = selectedPending?.source?.importMethod === "jsonFile"
+      && selectedPending?.sourceCollection === "pos-json-file";
+    if (isNewJsonImport) {
+      saveStep = "JSONキャスト紐づけ・履歴";
+      await claimJsonImport(selectedPending);
+      importClaimed = true;
+      await applyCastImport(selectedPending, targetClosingId, pendingPayload);
+    } else {
+      await setDoc(doc(db, closingsCollectionName, targetClosingId), pendingPayload, { merge: true });
+      saveStep = "体入キャスト記録";
+      await Promise.all(pendingPayload.trialWork.map((row) => setDoc(
+        doc(db, trialCastCollectionName, trialCastRecordId(targetClosingId, row.castId)),
+        {
+          ...row,
+          businessDate: pendingPayload.businessDate,
+          sourceClosingId: targetClosingId,
+          updatedBy: currentUser.uid,
+          updatedAt: serverTimestamp()
+        },
+        { merge: true }
+      )));
+      saveStep = "体入キャスト名簿";
+      await Promise.all(pendingPayload.trialWork.map((row) => setDoc(
+        doc(
+          db,
+          castCollectionName,
+          resolvedMemberForSource(row.castId, allCastMembers)?.id || castDocumentId(row.castId)
+        ),
+        trialCastMemberPayload(row),
+        { merge: true }
+      )));
+    }
     document.getElementById("confirmModal").close();
     selectedPending = null;
+    pendingCastImportAnalysis = null;
+    pendingCastResolutions = new Map();
     pendingClosings = pendingClosings.filter((closing) => closing.id !== targetClosingId);
+    await loadMasters();
     await loadSentClosings();
     showMessage("successMessage", "経理側へ送信しました。", false);
   } catch (error) {
+    if (importClaimed) await markJsonImportFailed(selectedPending, error);
     const message = `経理送信に失敗しました。失敗箇所：${saveStep}。${firestoreErrorMessage(error)}`;
     showMessage("confirmSaveError", message);
     showMessage("errorMessage", message);
@@ -2491,9 +2670,15 @@ async function copyPreviousDay() {
 
 function loadClosingIntoForm(closing, isSent = false) {
   selectedPending = closing;
+  pendingCastImportAnalysis = closing.source?.importMethod === "jsonFile"
+    && closing.sourceCollection === "pos-json-file"
+    ? analyzeCastImport(closing, allCastMembers, castSourceLinks)
+    : null;
+  pendingCastResolutions = new Map();
   applyClosingToForm(closing);
   document.getElementById(isSent ? "sentClosingModal" : "pendingClosingModal").close();
   showWorkspace("closing");
+  renderCastImportResolution();
   hideMessage("errorMessage");
   showMessage(
     "successMessage",
@@ -2502,6 +2687,72 @@ function loadClosingIntoForm(closing, isSent = false) {
       : `${closing.businessDate} のPOS JSONを読み込みました。確認後、経理へ送信してください。`,
     false
   );
+}
+
+function renderCastImportResolution() {
+  const section = document.getElementById("castImportResolutionSection");
+  const root = document.getElementById("castImportResolutionRows");
+  const summary = document.getElementById("castImportSafetySummary");
+  root.replaceChildren();
+  if (!pendingCastImportAnalysis || !selectedPending) {
+    section.classList.add("hidden");
+    return;
+  }
+  section.classList.remove("hidden");
+  const ignoredEvents = pendingCastImportAnalysis.lifecycle.filter((item) => !item.decision.apply);
+  const completeRoster = selectedPending.rosterSnapshot?.complete === true;
+  summary.textContent = [
+    `照合済み ${pendingCastImportAnalysis.resolved.length}件`,
+    `要確認 ${pendingCastImportAnalysis.unresolved.length}件`,
+    `現在状態へ反映しない履歴 ${ignoredEvents.length}件`,
+    completeRoster ? "完全名簿スナップショットあり" : "完全名簿スナップショットなし",
+    completeRoster ? `POS名簿にいないGMS在籍者 ${pendingCastImportAnalysis.roster.gmsOnlyActive.length}件` : "",
+    completeRoster ? `状態差分 ${pendingCastImportAnalysis.roster.statusMismatches.length}件` : ""
+  ].filter(Boolean).join(" / ");
+  pendingCastImportAnalysis.unresolved.forEach((identity) => {
+    const row = document.createElement("article");
+    row.className = "dynamic-row";
+    const info = document.createElement("div");
+    info.innerHTML = `<strong>${escapeHtml(identity.sourceName || "名称未設定")}</strong>`
+      + `<span class="block text-xs text-slate-500">POS ID: ${escapeHtml(identity.sourceCastId)} / ${escapeHtml(identity.usages.join(", "))}</span>`
+      + (identity.blockedMember
+        ? `<span class="block text-xs font-bold text-red-600">削除済み人物「${escapeHtml(identity.blockedMember.name || "")}」に一致。自動復元しません。</span>`
+        : "");
+    const select = document.createElement("select");
+    select.className = "form-select cast-import-resolution";
+    select.dataset.sourceCastId = identity.sourceCastId;
+    select.appendChild(makeOption("", "紐づけ方法を選択"));
+    select.appendChild(makeOption("new", "新規GMS人物として登録"));
+    castMembers
+      .filter((member) => member.deleted !== true)
+      .sort(sortCasts)
+      .forEach((member) => select.appendChild(makeOption(member.id, `既存：${castDisplayName(member)}`)));
+    select.addEventListener("change", () => {
+      if (select.value) pendingCastResolutions.set(identity.sourceCastId, select.value);
+      else pendingCastResolutions.delete(identity.sourceCastId);
+      markInvalid(select, !select.value);
+    });
+    row.append(info, select);
+    root.appendChild(row);
+  });
+  pendingCastImportAnalysis.roster.gmsOnlyActive.forEach((member) => {
+    const warning = document.createElement("div");
+    warning.className = "alert alert-error";
+    warning.textContent = `完全名簿に在籍中の「${member.name}」が存在しません。自動退店は行いません。`;
+    root.appendChild(warning);
+  });
+  pendingCastImportAnalysis.roster.statusMismatches.forEach((item) => {
+    const warning = document.createElement("div");
+    warning.className = "notice";
+    warning.textContent = `状態差分：${item.member.name}（GMS ${item.member.status} / JSON ${item.sourceStatus}）。ライフサイクルイベントを優先します。`;
+    root.appendChild(warning);
+  });
+  if (!pendingCastImportAnalysis.unresolved.length) {
+    const message = document.createElement("div");
+    message.className = "notice";
+    message.textContent = "すべてのPOS IDがGMS人物へ照合済みです。";
+    root.appendChild(message);
+  }
 }
 
 function applyClosingToForm(data) {
@@ -2720,11 +2971,7 @@ function normalizeStaffWork(work) {
 function normalizeCastWork(work) {
   if (!Array.isArray(work)) return [];
   return work.map((row) => {
-    const member = castMembers.find((cast) =>
-      String(cast.posCastId || "") === String(row.castId || "")
-      || cast.id === row.castId
-      || cast.name === (row.castName || row.name)
-    );
+    const member = findMemberBySourceId(castMembers, row.castId || row.posCastId || row.id);
     return {
       ...row,
       castId: member?.id || row.castId || "",
