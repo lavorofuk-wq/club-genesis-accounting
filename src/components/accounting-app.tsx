@@ -105,7 +105,7 @@ export function AccountingApp() {
         <div>
           <div className="brand-mark">CLUB GENESIS</div>
           <div className="brand-title">GMS Accounting</div>
-          <div className="version">Ver2.0.1</div>
+          <div className="version">Ver2.0.2</div>
         </div>
         <nav className="nav">
           {(Object.keys(viewInfo) as View[]).map((key) => (
@@ -242,7 +242,7 @@ function Login() {
         }
       }}>
         <div>
-          <p className="eyebrow">CLUB GENESIS · VER2.0.1</p>
+          <p className="eyebrow">CLUB GENESIS · VER2.0.2</p>
           <h1>GMS Accounting</h1>
           <p className="muted">経理専用Firebaseへログインします。</p>
         </div>
