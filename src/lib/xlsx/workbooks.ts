@@ -14,7 +14,7 @@ const thinBorder: Partial<ExcelJS.Borders> = {
 
 function workbook() {
   const book = new ExcelJS.Workbook();
-  book.creator = "GENESIS Management System Ver2.0.2";
+  book.creator = "GENESIS Management System Ver2.0.3";
   book.created = new Date();
   return book;
 }
@@ -23,13 +23,13 @@ function title(sheet: ExcelJS.Worksheet, value: string, range: string) {
   sheet.mergeCells(range);
   const cell = sheet.getCell(range.split(":")[0]);
   cell.value = value;
-  cell.font = { name: "OCR-B", size: 16, bold: true, color: { argb: "FF142C3F" } };
+  cell.font = { name: "BIZ UDPGothic", size: 16, bold: true, color: { argb: "FF183E5A" } };
   cell.alignment = { horizontal: "center", vertical: "middle" };
 }
 
 function header(row: ExcelJS.Row) {
   row.eachCell((cell) => {
-    cell.font = { name: "OCR-B", size: 10, bold: true, color: { argb: "FFFFFFFF" } };
+    cell.font = { name: "BIZ UDPGothic", size: 10, bold: true, color: { argb: "FFFFFFFF" } };
     cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF142C3F" } };
     cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
     cell.border = thinBorder;
@@ -40,7 +40,7 @@ function body(sheet: ExcelJS.Worksheet, first: number, last: number) {
   for (let rowIndex = first; rowIndex <= last; rowIndex += 1) {
     const row = sheet.getRow(rowIndex);
     row.eachCell({ includeEmpty: true }, (cell) => {
-      cell.font = { name: "OCR-B", size: 10 };
+      cell.font = { name: "BIZ UDPGothic", size: 10 };
       cell.alignment = { vertical: "middle", wrapText: true };
       cell.border = thinBorder;
     });
@@ -193,7 +193,7 @@ export function createCastStatementsWorkbook(
     sheet.addRow(["支給額", reward.payable]);
     [6, 7, 8, 9, 10, 11, 12].forEach((row) => { sheet.getCell(`B${row}`).numFmt = yenFormat; });
     body(sheet, 2, 12);
-    sheet.getRow(12).font = { name: "OCR-B", bold: true };
+    sheet.getRow(12).font = { name: "BIZ UDPGothic", bold: true };
     sheet.pageSetup.printArea = "A1:B12";
   });
   if (!rewards.length) {
