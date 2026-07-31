@@ -1,0 +1,116 @@
+:root {
+  color-scheme: light;
+  --ink: #18212b;
+  --muted: #68737f;
+  --line: #dfe4e8;
+  --paper: #ffffff;
+  --wash: #f3f5f6;
+  --navy: #142c3f;
+  --gold: #b99857;
+  --danger: #a34141;
+  --success: #2c7056;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--wash);
+  color: var(--ink);
+  font-family: "Yu Gothic UI", "Hiragino Kaku Gothic ProN", sans-serif;
+}
+button, input, select { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: .48; }
+
+.shell { min-height: 100vh; display: grid; grid-template-columns: 248px 1fr; }
+.sidebar {
+  padding: 28px 20px;
+  color: #f8fafc;
+  background: var(--navy);
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+.brand-mark { color: #d9c088; font-size: 11px; font-weight: 800; letter-spacing: .18em; }
+.brand-title { margin: 8px 0 0; font-family: Georgia, serif; font-size: 25px; font-weight: 500; }
+.version { color: #aeb9c2; font-size: 12px; }
+.nav { display: grid; gap: 7px; }
+.nav button {
+  border: 0;
+  border-radius: 8px;
+  padding: 11px 12px;
+  color: #c9d1d8;
+  background: transparent;
+  text-align: left;
+}
+.nav button:hover, .nav button.active { color: white; background: rgba(255,255,255,.1); }
+.sidebar-bottom { margin-top: auto; display: grid; gap: 12px; }
+.env { color: #d9c088; font-size: 12px; }
+
+.main { padding: 38px clamp(24px, 4vw, 64px) 64px; overflow: hidden; }
+.page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 28px; }
+.eyebrow { margin: 0 0 7px; color: var(--gold); font-size: 11px; font-weight: 800; letter-spacing: .16em; }
+h1 { margin: 0; font-family: Georgia, "Yu Mincho", serif; font-size: clamp(28px, 4vw, 42px); font-weight: 500; }
+h2 { margin: 0; font-size: 18px; }
+p { line-height: 1.7; }
+.muted { color: var(--muted); }
+.grid { display: grid; gap: 18px; }
+.grid.metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--paper);
+  padding: 22px;
+  box-shadow: 0 1px 2px rgba(20,44,63,.035);
+}
+.metric-label { color: var(--muted); font-size: 12px; }
+.metric-value { margin-top: 8px; font-family: Georgia, serif; font-size: 31px; }
+.section-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+.stack { display: grid; gap: 14px; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.button {
+  border: 1px solid var(--navy);
+  border-radius: 7px;
+  padding: 10px 15px;
+  background: var(--navy);
+  color: white;
+  font-weight: 700;
+}
+.button.secondary { background: white; color: var(--navy); }
+.button.danger { border-color: var(--danger); background: var(--danger); }
+.input {
+  width: 100%;
+  border: 1px solid #cbd2d8;
+  border-radius: 7px;
+  padding: 10px 11px;
+  background: white;
+}
+.field { display: grid; gap: 7px; }
+.field label { color: var(--muted); font-size: 12px; font-weight: 700; }
+.notice { border-left: 3px solid var(--gold); background: #faf7ef; padding: 12px 14px; line-height: 1.6; }
+.notice.error { border-color: var(--danger); background: #fff4f4; color: #7e2f2f; }
+.notice.success { border-color: var(--success); background: #f1faf6; color: #215b45; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { border-bottom: 1px solid var(--line); padding: 11px 9px; text-align: left; white-space: nowrap; }
+th { color: var(--muted); font-size: 11px; letter-spacing: .04em; }
+.pill { display: inline-flex; border-radius: 999px; padding: 4px 8px; background: #edf1f3; font-size: 11px; font-weight: 700; }
+.pill.warn { background: #fff1d6; color: #795a16; }
+.pill.good { background: #e5f5ed; color: #245e47; }
+.login { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+.login-card { width: min(440px, 100%); }
+
+@media (max-width: 900px) {
+  .shell { grid-template-columns: 1fr; }
+  .sidebar { padding: 18px; }
+  .nav { grid-template-columns: repeat(3, 1fr); }
+  .sidebar-bottom { margin-top: 0; }
+  .grid.metrics, .grid.two { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 560px) {
+  .main { padding: 26px 16px 48px; }
+  .nav { grid-template-columns: 1fr 1fr; }
+  .grid.metrics, .grid.two { grid-template-columns: 1fr; }
+}
