@@ -33,11 +33,11 @@ type View = "home" | "import" | "closings" | "casts" | "exports";
 type Notice = { kind: "error" | "success"; text: string } | null;
 
 const viewInfo: Record<View, { label: string; eyebrow: string; title: string; description: string }> = {
-  home: { label: "概要", eyebrow: "ACCOUNTING OVERVIEW", title: "経理ダッシュボード", description: "確定前後のデータと月次処理を一か所で確認します。" },
-  import: { label: "POS JSON取込", eyebrow: "CONTROLLED IMPORT", title: "POS JSON取込", description: "ファイルを検証し、在籍差分を確認してから経理Firebaseへ保存します。" },
-  closings: { label: "確定データ", eyebrow: "DAILY CLOSINGS", title: "受信・確定データ", description: "取り込んだ営業日データを確認し、経理確定します。" },
-  casts: { label: "キャスト", eyebrow: "CAST REGISTRY", title: "キャスト台帳", description: "POS IDとは独立したGMS人物台帳と現在の状態です。" },
-  exports: { label: "XLSX出力", eyebrow: "MONTHLY OUTPUTS", title: "帳票出力", description: "月次データから保存対象の4帳票を生成します。" }
+  home: { label: "概要", eyebrow: "経理業務", title: "経理ダッシュボード", description: "確定前後のデータと月次処理を確認します。" },
+  import: { label: "POS JSON取込", eyebrow: "POS連携", title: "POS JSON取込", description: "ファイルと在籍差分を確認してから経理データへ保存します。" },
+  closings: { label: "確定データ", eyebrow: "営業日管理", title: "受信・確定データ", description: "取り込んだ営業日データを確認し、経理確定します。" },
+  casts: { label: "キャスト", eyebrow: "人物台帳", title: "キャスト台帳", description: "GMSで管理している人物と在籍状態を表示します。" },
+  exports: { label: "XLSX出力", eyebrow: "月次帳票", title: "帳票出力", description: "対象月を選び、必要な帳票を出力します。" }
 };
 
 const yen = new Intl.NumberFormat("ja-JP", { style: "currency", currency: "JPY", maximumFractionDigits: 0 });
@@ -104,8 +104,8 @@ export function AccountingApp() {
       <aside className="sidebar">
         <div>
           <div className="brand-mark">CLUB GENESIS</div>
-          <div className="brand-title">GMS Accounting</div>
-          <div className="version">Ver2.0.2</div>
+          <div className="brand-title">GENESIS 経理</div>
+          <div className="version">Ver2.0.3</div>
         </div>
         <nav className="nav">
           {(Object.keys(viewInfo) as View[]).map((key) => (
@@ -242,9 +242,9 @@ function Login() {
         }
       }}>
         <div>
-          <p className="eyebrow">CLUB GENESIS · VER2.0.2</p>
-          <h1>GMS Accounting</h1>
-          <p className="muted">経理専用Firebaseへログインします。</p>
+          <p className="eyebrow">CLUB GENESIS　Ver2.0.3</p>
+          <h1>経理システム</h1>
+          <p className="muted">経理担当者のアカウントでログインしてください。</p>
         </div>
         <div className="field"><label>メールアドレス</label><input className="input" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} /></div>
         <div className="field"><label>パスワード</label><input className="input" type="password" required value={password} onChange={(e) => setPassword(e.target.value)} /></div>
@@ -269,7 +269,7 @@ function Home({ data }: { data: WorkspaceData }) {
         <Metric label="当月経費" value={yen.format(expense)} />
       </section>
       <section className="card">
-        <div className="section-head"><h2>Ver2.0 データ境界</h2></div>
+        <div className="section-head"><h2>データ連携の状態</h2></div>
         <div className="grid two">
           <div><p className="eyebrow">POS</p><p>POS Firebaseには接続しません。POSが出力したJSONファイルだけを入口にします。</p></div>
           <div><p className="eyebrow">GMS</p><p>経理専用Firebaseでキャスト人物台帳、取込履歴、確定データを管理します。</p></div>

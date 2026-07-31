@@ -76,10 +76,10 @@ describe("preserved XLSX outputs", () => {
     });
   });
 
-  it("帳票のタイトル・見出し・本文をOCR-Bへ統一する", () => {
+  it("帳票のタイトル・見出し・本文をBIZ UDPゴシックへ統一する", () => {
     const sheet = createFinalizedWorkbook([closing], "2026-07").getWorksheet("ジェネシス収支表")!;
-    expect(sheet.getCell("A1").font.name).toBe("OCR-B");
-    expect(sheet.getCell("A2").font.name).toBe("OCR-B");
-    expect(sheet.getCell("A3").font.name).toBe("OCR-B");
+    expect(sheet.getCell("A1").font.name).toBe("BIZ UDPGothic");
+    expect(sheet.getCell("A2").font.name).toBe("BIZ UDPGothic");
+    expect(sheet.getCell("A3").font.name).toBe("BIZ UDPGothic");
   });
 });
