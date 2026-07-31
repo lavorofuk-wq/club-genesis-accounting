@@ -1,6 +1,6 @@
 "use client";
 
-import ExcelJS from "exceljs";
+import ExcelJS from "exceljs/dist/exceljs.min.js";
 import type { CastMember, FinalizedClosing, FixedExpense } from "@/domain/types";
 import { calculateCastRewards, closingTotals, rowsForMonth } from "@/domain/monthly";
 
@@ -14,7 +14,7 @@ const thinBorder: Partial<ExcelJS.Borders> = {
 
 function workbook() {
   const book = new ExcelJS.Workbook();
-  book.creator = "GENESIS Management System Ver2.0";
+  book.creator = "GENESIS Management System Ver2.0.1";
   book.created = new Date();
   return book;
 }
@@ -105,7 +105,7 @@ export function createFinalizedWorkbook(closings: FinalizedClosing[], month: str
   }
   const totalRow = sheet.addRow(["合計", ...Array(9).fill(null)]);
   for (let column = 2; column <= 10; column += 1) {
-    totalRow.getCell(column).value = { formula: `SUM(${sheet.getColumn(column).letter}3:${sheet.getColumn(column).letter}33)` };
+    totalRow.getCell(column).value = { formula: `SUM(${sheet.getColumn(column).letter}3:${sheet.getColumn(column).letter}33)`, result: 0 };
     if ([2, 3, 4, 7, 8, 9, 10].includes(column)) totalRow.getCell(column).numFmt = yenFormat;
   }
   header(totalRow);
@@ -147,7 +147,7 @@ export function createExpenseWorkbook(
       const amount = bucket?.get(category) || 0;
       values.push(amount ? category : "", amount);
     });
-    values.push({ formula: `SUM(C${day + 2},E${day + 2},G${day + 2},I${day + 2},K${day + 2},M${day + 2},O${day + 2},Q${day + 2})` });
+    values.push({ formula: `SUM(C${day + 2},E${day + 2},G${day + 2},I${day + 2},K${day + 2},M${day + 2},O${day + 2},Q${day + 2})`, result: 0 });
     const row = sheet.addRow(values);
     for (let column = 3; column <= 18; column += 2) row.getCell(column).numFmt = yenFormat;
   }
@@ -159,7 +159,7 @@ export function createExpenseWorkbook(
     fixed?.rent || 0, fixed?.karaoke || 0, fixed?.towel || 0, fixed?.leasekin || 0,
     fixed?.landline || 0, fixed?.saibuGas || 0, fixed?.usen || 0
   ];
-  const fixedRow = sheet.addRow(["金額", ...fixedValues, { formula: "SUM(B36:H36)" }]);
+  const fixedRow = sheet.addRow(["金額", ...fixedValues, { formula: "SUM(B36:H36)", result: 0 }]);
   fixedRow.eachCell((cell, column) => { if (column > 1) cell.numFmt = yenFormat; });
   body(sheet, 3, 33);
   body(sheet, 36, 36);
@@ -252,7 +252,7 @@ export function createCastMonthlyWorkbook(
     }
     const total = sheet.addRow(["合計"]);
     for (let column = 2; column <= 7; column += 1) {
-      total.getCell(column).value = { formula: `SUM(${sheet.getColumn(column).letter}3:${sheet.getColumn(column).letter}33)` };
+      total.getCell(column).value = { formula: `SUM(${sheet.getColumn(column).letter}3:${sheet.getColumn(column).letter}33)`, result: 0 };
       if (column >= 3) total.getCell(column).numFmt = yenFormat;
     }
     header(total);
