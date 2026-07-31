@@ -34,6 +34,7 @@ export function collectionNames() {
     casts: `castMembers${suffix}`,
     staff: `staffMembers${suffix}`,
     introducers: `introducers${suffix}`,
+    liquorCosts: `liquorCosts${suffix}`,
     fixedExpenses: `fixedExpenses${suffix}`,
     castSourceLinks: `castSourceLinks${suffix}`,
     castLifecycleEvents: `castLifecycleEvents${suffix}`,

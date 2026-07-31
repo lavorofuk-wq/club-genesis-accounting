@@ -143,6 +143,15 @@ export function parsePosClosing(input: unknown): PosClosing {
   if (lifecycleEvents.some((event) => !event.castId)) {
     throw new Error("lifecycleEventsにcastIdがないイベントがあります。");
   }
+  const eventTypesByCast = new Map<string, Set<LifecycleEvent["eventType"]>>();
+  lifecycleEvents.forEach((event) => {
+    const types = eventTypesByCast.get(event.castId) || new Set<LifecycleEvent["eventType"]>();
+    types.add(event.eventType);
+    eventTypesByCast.set(event.castId, types);
+  });
+  if ([...eventTypesByCast.values()].some((types) => types.size > 1)) {
+    throw new Error("同じキャストに複数種類の入退店イベントがあります。POS側で当日の状態を確認してJSONを再出力してください。");
+  }
   return {
     ...result.data,
     businessDate,
@@ -262,6 +271,15 @@ function referencedCasts(closing: PosClosing): RosterCast[] {
   closing.castSales.forEach((row) => {
     const raw = row as Record<string, unknown>;
     add(raw.castId || raw.posCastId || raw.id, raw.castName || raw.name, raw.internalNo);
+  });
+  closing.transactions.forEach((transaction) => {
+    transaction.items?.forEach((item) => {
+      add(item.castId, item.castName);
+      (item.banaiExtCastIds || []).forEach((castId) => add(castId, ""));
+      add(item.banaiExtCastId, "");
+    });
+    (transaction.honShimeiCastIds || []).forEach((castId) => add(castId, ""));
+    (transaction.banaiCastIds || []).forEach((castId) => add(castId, ""));
   });
   closing.lifecycleEvents.forEach((event) => add(event.castId, event.castName, 0, event.eventType === "trial" ? "trial" : "active"));
   return [...values.values()];

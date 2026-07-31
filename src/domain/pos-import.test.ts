@@ -77,4 +77,18 @@ describe("POS JSON import", () => {
       sourceInternalNo: 9
     });
   });
+
+  it("同一キャストの相反する入退店イベントを拒否する", () => {
+    const base = payload();
+    const value = {
+      ...base,
+      checksum: undefined,
+      lifecycleEvents: [
+        { eventId: "e1", eventType: "entered", castId: "pos-1", eventAt: "2026-07-31T12:00:00+09:00" },
+        { eventId: "e2", eventType: "departed", castId: "pos-1", eventAt: "2026-07-31T13:00:00+09:00" }
+      ]
+    };
+    const input = { ...value, checksum: closingChecksum(value) };
+    expect(() => parsePosClosing(input)).toThrow("複数種類");
+  });
 });

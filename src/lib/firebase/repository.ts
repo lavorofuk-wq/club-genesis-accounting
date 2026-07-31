@@ -14,13 +14,28 @@ import {
   writeBatch
 } from "firebase/firestore";
 import type { User } from "firebase/auth";
-import type { CastMember, FinalizedClosing, FixedExpense, ImportPreview, PosClosing } from "@/domain/types";
+import type {
+  CastMember,
+  FinalizedClosing,
+  FixedExpense,
+  ImportPreview,
+  Introducer,
+  LiquorCost,
+  LocalLifecycleAction,
+  PartTimeWorker,
+  PosClosing,
+  StoreClosingInput
+} from "@/domain/types";
 import { safeDocumentId } from "@/domain/pos-import";
+import { applyIdentityResolutions } from "@/domain/closing-calculation";
 import { collectionNames, db } from "./client";
 
 export type WorkspaceData = {
   closings: (PosClosing & { id: string })[];
   casts: CastMember[];
+  staff: PartTimeWorker[];
+  introducers: Introducer[];
+  liquorCosts: LiquorCost[];
   fixedExpenses: FixedExpense[];
 };
 
@@ -81,15 +96,21 @@ function withoutUndefined<T>(value: T): T {
 }
 
 export async function userRole(user: User): Promise<string> {
+  const token = await user.getIdTokenResult();
+  const claimRole = String(token.claims.role || "");
+  if (claimRole === "shop" || claimRole === "accounting") return claimRole;
   const snapshot = await getDoc(doc(db, "users", user.uid));
   return snapshot.exists() ? String(snapshot.data().role || "") : "";
 }
 
 export async function loadWorkspaceData(): Promise<WorkspaceData> {
   const names = collectionNames();
-  const [closingsSnapshot, castsSnapshot, fixedSnapshot] = await Promise.all([
+  const [closingsSnapshot, castsSnapshot, staffSnapshot, introducerSnapshot, liquorSnapshot, fixedSnapshot] = await Promise.all([
     getDocs(collection(db, names.closings)),
     getDocs(collection(db, names.casts)),
+    getDocs(collection(db, names.staff)),
+    getDocs(collection(db, names.introducers)),
+    getDocs(collection(db, names.liquorCosts)),
     getDocs(collection(db, names.fixedExpenses))
   ]);
   return {
@@ -97,12 +118,29 @@ export async function loadWorkspaceData(): Promise<WorkspaceData> {
       .map((item) => normalizeClosing(item.id, item.data()))
       .sort((a, b) => b.businessDate.localeCompare(a.businessDate)),
     casts: castsSnapshot.docs.map((item) => ({ id: item.id, ...item.data() } as CastMember)),
+    staff: staffSnapshot.docs.map((item) => ({ id: item.id, ...item.data() } as PartTimeWorker)),
+    introducers: introducerSnapshot.docs.map((item) => ({
+      id: item.id,
+      name: String(item.data().name || ""),
+      introductionFeeAmount: number(item.data().introductionFeeAmount),
+      advisoryFeeEnabled: item.data().advisoryFeeEnabled === true,
+      advisoryFeeAmount: number(item.data().advisoryFeeAmount),
+      note: String(item.data().note || ""),
+      feeSystem: item.data().feeSystem || "higher10"
+    } as Introducer)),
+    liquorCosts: liquorSnapshot.docs.map((item) => ({
+      id: item.id,
+      brandName: String(item.data().brandName || ""),
+      costAmount: number(item.data().costAmount)
+    })),
     fixedExpenses: fixedSnapshot.docs.map((item) => ({
       month: String(item.data().month || item.id),
       rent: number(item.data().rent),
+      utilities: number(item.data().utilities ?? item.data().saibuGas),
       karaoke: number(item.data().karaoke),
       towel: number(item.data().towel),
       leasekin: number(item.data().leasekin),
+      communications: number(item.data().communications ?? item.data().landline) + number(item.data().usen),
       landline: number(item.data().landline),
       saibuGas: number(item.data().saibuGas),
       usen: number(item.data().usen)
@@ -110,10 +148,38 @@ export async function loadWorkspaceData(): Promise<WorkspaceData> {
   };
 }
 
-export async function importClosing(preview: ImportPreview, user: User): Promise<void> {
+type ImportOptions = {
+  lifecycleActions?: LocalLifecycleAction[];
+  identityResolutions?: StoreClosingInput["identityResolutions"];
+  staffWork?: StoreClosingInput["staffWork"];
+  expenses?: StoreClosingInput["expenses"];
+  auricLiquorAmount?: number;
+  payrollDeductions?: StoreClosingInput["payrollDeductions"];
+};
+
+export async function importClosing(preview: ImportPreview, user: User, options: ImportOptions = {}): Promise<void> {
   if (preview.blockingCount) throw new Error("未解決の在籍差分があります。取込を中止しました。");
   const names = collectionNames();
-  const closing = preview.closing;
+  const lifecycleActions = options.lifecycleActions || [];
+  const actionMemberIds = new Map(lifecycleActions.map((action) => [
+    action.id,
+    action.eventType === "trial" ? `member_${safeDocumentId(action.id)}` : String(action.memberId || "")
+  ]));
+  const identityResolutions = (options.identityResolutions || []).map((resolution) => ({
+    ...resolution,
+    targetId: actionMemberIds.get(resolution.targetId) || resolution.targetId
+  }));
+  const resolvedSourceIds = new Set(identityResolutions.map((item) => item.sourceCastId));
+  const closing = applyIdentityResolutions(preview.closing, identityResolutions);
+  if (options.staffWork) closing.staffWork = options.staffWork;
+  if (options.expenses) closing.expenses = options.expenses;
+  if (options.auricLiquorAmount !== undefined) closing.auricLiquorAmount = number(options.auricLiquorAmount);
+  if (options.payrollDeductions) {
+    closing.payrollDeductions = options.payrollDeductions.map((item) => ({
+      ...item,
+      personId: actionMemberIds.get(String(item.personId || "")) || item.personId
+    }));
+  }
   const importId = safeDocumentId(closing.submissionId);
   const importReference = doc(db, names.jsonImports, importId);
   const sameDate = await getDocs(query(collection(db, names.jsonImports), where("businessDate", "==", closing.businessDate)));
@@ -132,7 +198,9 @@ export async function importClosing(preview: ImportPreview, user: User): Promise
     }
   }
   const estimatedWrites = 2
-    + preview.differences.filter((item) => item.kind === "new").length * 2
+    + preview.differences.filter((item) => item.kind === "new" && !resolvedSourceIds.has(item.sourceCastId)).length * 2
+    + lifecycleActions.length * 2
+    + identityResolutions.length
     + closing.lifecycleEvents.length
     + (supersededClosingId ? 1 : 0);
   if (estimatedWrites > 450) {
@@ -192,7 +260,7 @@ export async function importClosing(preview: ImportPreview, user: User): Promise
       }, { merge: true });
     }
 
-    preview.differences.filter((item) => item.kind === "new").forEach((item) => {
+    preview.differences.filter((item) => item.kind === "new" && !resolvedSourceIds.has(item.sourceCastId)).forEach((item) => {
       const memberId = `member_${safeDocumentId(item.sourceCastId)}`;
       batch.set(doc(db, names.casts, memberId), {
         posCastId: item.sourceCastId,
@@ -213,6 +281,68 @@ export async function importClosing(preview: ImportPreview, user: User): Promise
         sourceCastId: item.sourceCastId,
         memberId,
         personKey: `person_${memberId}`,
+        status: "linked",
+        updatedBy: user.uid,
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+    });
+
+    lifecycleActions.forEach((action) => {
+      const memberId = actionMemberIds.get(action.id);
+      if (!memberId) return;
+      const matchingSource = identityResolutions.find((item) =>
+        (options.identityResolutions || []).some((raw) =>
+          raw.sourceCastId === item.sourceCastId && raw.targetId === action.id));
+      if (action.eventType === "trial") {
+        const posCastId = matchingSource?.sourceCastId || `local_trial_${closing.businessDate}_${action.id}`;
+        batch.set(doc(db, names.casts, memberId), {
+          posCastId,
+          personKey: `person_${memberId}`,
+          name: action.name,
+          internalNo: 0,
+          status: "trial",
+          source: "pos",
+          hourlyRate: number(action.hourlyRate),
+          introducerId: action.introducerId || "",
+          introducerName: action.introducerName || "",
+          previousNames: [],
+          previousPosCastIds: [],
+          entryDate: "",
+          createdBy: user.uid,
+          createdAt: serverTimestamp(),
+          updatedBy: user.uid,
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+      } else {
+        batch.set(doc(db, names.casts, memberId), {
+          status: action.eventType === "entered" ? "active" : "departed",
+          ...(action.eventType === "entered"
+            ? { entryDate: closing.businessDate, exitedDate: "" }
+            : { exitedDate: closing.businessDate }),
+          updatedBy: user.uid,
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+      }
+      const localEventId = `${closing.submissionId}_local_${action.id}`;
+      batch.set(doc(db, names.castLifecycleEvents, safeDocumentId(localEventId)), {
+        eventId: localEventId,
+        eventType: action.eventType,
+        sourceCastId: matchingSource?.sourceCastId || memberId,
+        castName: action.name,
+        eventAt: `${closing.businessDate}T12:00:00+09:00`,
+        businessDate: closing.businessDate,
+        submissionId: closing.submissionId,
+        createdBy: user.uid,
+        createdAt: serverTimestamp()
+      });
+    });
+
+    identityResolutions.forEach((resolution) => {
+      batch.set(doc(db, names.castSourceLinks, safeDocumentId(resolution.sourceCastId)), {
+        sourceSystem: "club-genesis-pos",
+        sourceCastId: resolution.sourceCastId,
+        memberId: resolution.targetId,
+        personKey: `person_${resolution.targetId}`,
         status: "linked",
         updatedBy: user.uid,
         updatedAt: serverTimestamp()
@@ -250,6 +380,77 @@ export async function importClosing(preview: ImportPreview, user: User): Promise
     }, { merge: true }).catch(() => undefined);
     throw error;
   }
+}
+
+export async function submitStoreClosing(input: StoreClosingInput, user: User): Promise<void> {
+  await importClosing(input.preview, user, input);
+}
+
+function entityId(prefix: string, label: string) {
+  return `${prefix}_${safeDocumentId(`${label}_${Date.now()}`)}`;
+}
+
+export async function saveIntroducer(value: Omit<Introducer, "id"> & { id?: string }, user: User): Promise<void> {
+  const names = collectionNames();
+  const id = value.id || entityId("introducer", value.name);
+  await setDoc(doc(db, names.introducers, id), {
+    name: value.name.trim(),
+    feeSystem: value.feeSystem || "higher10",
+    introductionFeeAmount: Math.max(0, Math.round(value.introductionFeeAmount)),
+    advisoryFeeEnabled: value.advisoryFeeEnabled,
+    advisoryFeeAmount: value.advisoryFeeEnabled ? Math.max(0, Math.round(value.advisoryFeeAmount)) : 0,
+    note: value.note.trim(),
+    updatedBy: user.uid,
+    updatedAt: serverTimestamp()
+  }, { merge: true });
+}
+
+export async function savePartTimeWorker(value: Omit<PartTimeWorker, "id" | "employmentType" | "jobType" | "status"> & {
+  id?: string;
+  jobType?: PartTimeWorker["jobType"];
+  status?: PartTimeWorker["status"];
+}, user: User): Promise<void> {
+  const names = collectionNames();
+  const id = value.id || entityId("staff", value.name);
+  await setDoc(doc(db, names.staff, id), {
+    name: value.name.trim(),
+    employmentType: "partTime",
+    jobType: value.jobType || "hall",
+    payType: value.payType,
+    payAmount: Math.max(1, Math.round(value.payAmount)),
+    status: value.status || "active",
+    updatedBy: user.uid,
+    updatedAt: serverTimestamp()
+  }, { merge: true });
+}
+
+export async function saveLiquorCost(value: Omit<LiquorCost, "id"> & { id?: string }, user: User): Promise<void> {
+  const names = collectionNames();
+  const id = value.id || entityId("liquor", value.brandName);
+  await setDoc(doc(db, names.liquorCosts, id), {
+    brandName: value.brandName.trim(),
+    costAmount: Math.max(0, Math.round(value.costAmount)),
+    updatedBy: user.uid,
+    updatedAt: serverTimestamp()
+  }, { merge: true });
+}
+
+export async function saveFixedExpense(value: FixedExpense, user: User): Promise<void> {
+  const names = collectionNames();
+  await setDoc(doc(db, names.fixedExpenses, value.month), {
+    month: value.month,
+    rent: Math.max(0, Math.round(value.rent)),
+    utilities: Math.max(0, Math.round(value.utilities)),
+    karaoke: Math.max(0, Math.round(value.karaoke)),
+    towel: Math.max(0, Math.round(value.towel)),
+    leasekin: Math.max(0, Math.round(value.leasekin)),
+    communications: Math.max(0, Math.round(value.communications)),
+    landline: 0,
+    saibuGas: 0,
+    usen: 0,
+    updatedBy: user.uid,
+    updatedAt: serverTimestamp()
+  }, { merge: true });
 }
 
 export async function finalizeClosing(id: string, user: User): Promise<void> {

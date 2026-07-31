@@ -14,7 +14,7 @@ const thinBorder: Partial<ExcelJS.Borders> = {
 
 function workbook() {
   const book = new ExcelJS.Workbook();
-  book.creator = "GENESIS Management System Ver2.0.3";
+  book.creator = "GENESIS Management System Ver2.1.0";
   book.created = new Date();
   return book;
 }
@@ -123,7 +123,23 @@ export function createExpenseWorkbook(
   const book = workbook();
   const sheet = book.addWorksheet("ジェネシス経費表");
   setup(sheet);
-  const categories = ["酒代", "店内宣伝費", "店外宣伝費", "消耗品/備品", "交際費", "交通費", "その他", "美容室"];
+  const categories = ["酒代", "紹介料・広告等", "備品・消耗品他", "交際費・プレゼント等", "交通費", "美容バック", "その他", "旧データ"];
+  const categoryLabels: Record<string, string> = {
+    beautyBack: "美容バック",
+    introducerAdvertising: "紹介料・広告等",
+    supplies: "備品・消耗品他",
+    entertainment: "交際費・プレゼント等",
+    liquor: "酒代",
+    transport: "交通費",
+    "美容室": "美容バック",
+    "店内宣伝費": "紹介料・広告等",
+    "店外宣伝費": "紹介料・広告等",
+    "消耗品/備品": "備品・消耗品他",
+    "交際費": "交際費・プレゼント等",
+    "酒代": "酒代",
+    "交通費": "交通費",
+    "その他": "その他"
+  };
   sheet.columns = [{ width: 6 }, ...categories.flatMap(() => [{ width: 15 }, { width: 12 }]), { width: 14 }];
   title(sheet, `${month.replace("-", "年")}月度 ジェネシス経費表`, `A1:${sheet.getColumn(18).letter}1`);
   const heading = ["日", ...categories.flatMap((category) => [category, "金額"]), "合計"];
@@ -135,7 +151,7 @@ export function createExpenseWorkbook(
     const day = Number(closing.businessDate.slice(8));
     const bucket = byDay.get(day) || new Map<string, number>();
     closing.expenses.forEach((expense) => {
-      const category = expense.category || "その他";
+      const category = categoryLabels[expense.category || ""] || "旧データ";
       bucket.set(category, (bucket.get(category) || 0) + Number(expense.amount || 0));
     });
     byDay.set(day, bucket);
@@ -153,11 +169,13 @@ export function createExpenseWorkbook(
   }
   const fixed = fixedExpenses.find((item) => item.month === month);
   sheet.addRow([]);
-  const fixedHeading = sheet.addRow(["固定費", "賃料", "カラオケ", "おしぼり", "リースキン", "固定電話", "西部ガス", "USEN", "合計"]);
+  const fixedHeading = sheet.addRow(["固定費", "賃料", "光熱費", "おしぼり", "カラオケ", "リースキン", "通信費", "オーリック", "合計"]);
   header(fixedHeading);
+  const monthlyAuric = monthRows.reduce((sum, closing) => sum + Number(closing.auricLiquorAmount || 0), 0);
   const fixedValues = [
-    fixed?.rent || 0, fixed?.karaoke || 0, fixed?.towel || 0, fixed?.leasekin || 0,
-    fixed?.landline || 0, fixed?.saibuGas || 0, fixed?.usen || 0
+    fixed?.rent || 0, fixed?.utilities || fixed?.saibuGas || 0, fixed?.towel || 0,
+    fixed?.karaoke || 0, fixed?.leasekin || 0,
+    fixed?.communications || (fixed?.landline || 0) + (fixed?.usen || 0), monthlyAuric
   ];
   const fixedRow = sheet.addRow(["金額", ...fixedValues, { formula: "SUM(B36:H36)", result: 0 }]);
   fixedRow.eachCell((cell, column) => { if (column > 1) cell.numFmt = yenFormat; });
