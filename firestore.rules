@@ -115,6 +115,9 @@ service cloud.firestore {
       && (!request.resource.data.keys().hasAny(['guaranteedHourlyRate'])
         || (request.resource.data.guaranteedHourlyRate is int
           && request.resource.data.guaranteedHourlyRate >= 0))
+      && (!request.resource.data.keys().hasAny(['hourlyRate'])
+        || (request.resource.data.hourlyRate is int
+          && request.resource.data.hourlyRate >= 0))
       && (!request.resource.data.keys().hasAny(['introducerId'])
         || (request.resource.data.introducerId is string
           && request.resource.data.introducerId.size() <= 100))
@@ -182,6 +185,15 @@ service cloud.firestore {
         || request.resource.data.feeSystem == 'pay10'
         || request.resource.data.feeSystem == 'higher10')
       && request.resource.data.advisoryFeeEnabled is bool
+      && (!request.resource.data.keys().hasAny(['introductionFeeAmount'])
+        || (request.resource.data.introductionFeeAmount is int
+          && request.resource.data.introductionFeeAmount >= 0))
+      && (!request.resource.data.keys().hasAny(['advisoryFeeAmount'])
+        || (request.resource.data.advisoryFeeAmount is int
+          && request.resource.data.advisoryFeeAmount >= 0))
+      && (request.resource.data.advisoryFeeEnabled == false
+        || (request.resource.data.keys().hasAny(['advisoryFeeAmount'])
+          && request.resource.data.advisoryFeeAmount > 0))
       && request.resource.data.note is string
       && request.resource.data.note.size() <= 500;
     }
@@ -212,7 +224,13 @@ service cloud.firestore {
       && request.resource.data.leasekin >= 0
       && request.resource.data.landline >= 0
       && request.resource.data.saibuGas >= 0
-      && request.resource.data.usen >= 0;
+      && request.resource.data.usen >= 0
+      && (!request.resource.data.keys().hasAny(['utilities'])
+        || (request.resource.data.utilities is int
+          && request.resource.data.utilities >= 0))
+      && (!request.resource.data.keys().hasAny(['communications'])
+        || (request.resource.data.communications is int
+          && request.resource.data.communications >= 0));
     }
 
     function isTrialCastRecord() {

@@ -11,6 +11,8 @@ export type CastRewardRow = {
   jonaiExtensionSales: number;
   attributedSales: number;
   allowances: number;
+  deductions: number;
+  grossPayable: number;
   payable: number;
 };
 
@@ -20,16 +22,21 @@ export const rowsForMonth = (rows: FinalizedClosing[], month: string) =>
   rows.filter((row) => monthOf(row.businessDate) === month);
 
 const castId = (row: Record<string, unknown>) =>
-  String(row.castId || row.posCastId || row.id || row.castName || row.name || "");
+  String(row.personId || row.castId || row.posCastId || row.id || row.personName || row.castName || row.name || "");
 const castName = (row: Record<string, unknown>) =>
-  String(row.castName || row.name || row.castId || row.posCastId || row.id || "名称未設定");
+  String(row.personName || row.castName || row.name || row.personId || row.castId || row.posCastId || row.id || "名称未設定");
 
 export function calculateCastRewards(
   closings: FinalizedClosing[],
   members: CastMember[]
 ): CastRewardRow[] {
   const rows = new Map<string, CastRewardRow>();
-  const memberBySource = new Map(members.map((member) => [member.posCastId, member]));
+  const memberBySource = new Map<string, CastMember>();
+  members.forEach((member) => {
+    [member.id, member.posCastId, member.personKey, ...(member.previousPosCastIds || [])]
+      .filter(Boolean)
+      .forEach((id) => memberBySource.set(String(id), member));
+  });
   const ensure = (id: string, name: string) => {
     const member = memberBySource.get(id);
     const key = member?.personKey || member?.id || id || name;
@@ -39,12 +46,14 @@ export function calculateCastRewards(
         name: member?.name || name,
         days: 0,
         hours: 0,
-        hourlyRate: number(member?.guaranteedHourlyRate),
+        hourlyRate: number(member?.guaranteedHourlyRate || member?.hourlyRate),
         hourlyPay: 0,
         honShimeiSales: 0,
         jonaiExtensionSales: 0,
         attributedSales: 0,
         allowances: 0,
+        deductions: 0,
+        grossPayable: 0,
         payable: 0
       });
     }
@@ -76,16 +85,28 @@ export function calculateCastRewards(
       const id = castId(raw);
       if (id) ensure(id, castName(raw)).allowances += number(allowance.amount);
     });
+    (closing.payrollDeductions || []).forEach((deduction) => {
+      if (deduction.personType !== "cast" && deduction.personType !== "trial") return;
+      const raw = deduction as Record<string, unknown>;
+      const id = String(raw.personId || raw.castId || raw.id || "");
+      if (id) ensure(id, String(raw.personName || raw.castName || raw.name || "")).deductions += number(deduction.amount);
+    });
   });
-  return [...rows.values()].map((row) => ({
-    ...row,
-    hourlyPay: Math.round(row.hourlyRate * row.hours),
-    payable: Math.round(row.hourlyRate * row.hours) + row.allowances
-  })).sort((a, b) => a.name.localeCompare(b.name, "ja"));
+  return [...rows.values()].map((row) => {
+    const hourlyPay = Math.round(row.hourlyRate * row.hours);
+    const grossPayable = hourlyPay + row.allowances;
+    return {
+      ...row,
+      hourlyPay,
+      grossPayable,
+      payable: Math.max(0, grossPayable - row.deductions)
+    };
+  }).sort((a, b) => a.name.localeCompare(b.name, "ja"));
 }
 
 export function closingTotals(closing: FinalizedClosing) {
-  const expense = closing.expenses.reduce((sum, row) => sum + number(row.amount), 0);
+  const expense = closing.expenses.reduce((sum, row) => sum + number(row.amount), 0)
+    + number(closing.auricLiquorAmount);
   const allowance = closing.allowances.reduce((sum, row) => sum + number(row.amount), 0);
   return {
     sales: number(closing.sales.totalSales),

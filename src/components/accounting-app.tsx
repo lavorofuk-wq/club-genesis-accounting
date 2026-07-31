@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   browserLocalPersistence,
   onAuthStateChanged,
@@ -13,13 +13,16 @@ import { auth, collectionNames, isProductionEnvironment } from "@/lib/firebase/c
 import {
   finalizeClosing,
   finalizedOnly,
-  importClosing,
   loadWorkspaceData,
+  saveFixedExpense,
+  saveIntroducer,
+  saveLiquorCost,
+  savePartTimeWorker,
+  submitStoreClosing,
   userRole,
   type WorkspaceData
 } from "@/lib/firebase/repository";
-import { parsePosClosing, previewRoster } from "@/domain/pos-import";
-import type { ImportPreview } from "@/domain/types";
+import type { FixedExpense, Introducer, LiquorCost, PartTimeWorker, StoreClosingInput } from "@/domain/types";
 import {
   createCastMonthlyWorkbook,
   createCastStatementsWorkbook,
@@ -28,18 +31,33 @@ import {
   downloadWorkbook
 } from "@/lib/xlsx/workbooks";
 import { closingTotals } from "@/domain/monthly";
+import { StoreClosingWorkflow } from "./store-closing-workflow";
+import {
+  AccountingSummaryView,
+  CastsView,
+  FixedExpenseView,
+  SalesWorkView,
+  SharedMastersView
+} from "./system-views";
 
-type View = "home" | "import" | "closings" | "casts" | "exports";
+type View = "home" | "today" | "accounting" | "closings" | "casts" | "salesWork" | "masters" | "fixed" | "exports";
 type Notice = { kind: "error" | "success"; text: string } | null;
+type Role = "shop" | "accounting";
 
-const viewInfo: Record<View, { label: string; eyebrow: string; title: string; description: string }> = {
-  home: { label: "概要", eyebrow: "経理業務", title: "経理ダッシュボード", description: "確定前後のデータと月次処理を確認します。" },
-  import: { label: "POS JSON取込", eyebrow: "POS連携", title: "POS JSON取込", description: "ファイルと在籍差分を確認してから経理データへ保存します。" },
-  closings: { label: "確定データ", eyebrow: "営業日管理", title: "受信・確定データ", description: "取り込んだ営業日データを確認し、経理確定します。" },
-  casts: { label: "キャスト", eyebrow: "人物台帳", title: "キャスト台帳", description: "GMSで管理している人物と在籍状態を表示します。" },
-  exports: { label: "XLSX出力", eyebrow: "月次帳票", title: "帳票出力", description: "対象月を選び、必要な帳票を出力します。" }
+const viewInfo: Record<View, { label: string; eyebrow: string; title: string; description: string; roles: Role[] }> = {
+  home: { label: "概要", eyebrow: "基幹システム", title: "業務ダッシュボード", description: "店舗と経理で共有する最新情報を確認します。", roles: ["shop", "accounting"] },
+  today: { label: "今日の締め", eyebrow: "店舗業務", title: "今日の締め作業", description: "9段階の確認を終えて経理へ送信します。", roles: ["shop"] },
+  accounting: { label: "総収支", eyebrow: "経理業務", title: "売上データ・総収支", description: "経理確定済みの売上と支出を月単位で確認します。", roles: ["accounting"] },
+  closings: { label: "受信・確定", eyebrow: "経理業務", title: "店舗締め受信データ", description: "店舗から届いた締めデータを確認して経理確定します。", roles: ["accounting"] },
+  casts: { label: "キャスト情報", eyebrow: "共有機能", title: "キャスト情報", description: "在籍・体入・退店キャストを共通の人物台帳で管理します。", roles: ["shop", "accounting"] },
+  salesWork: { label: "売上・勤務", eyebrow: "共有機能", title: "売上・報酬・勤務時間", description: "キャスト売上、報酬、勤務時間を月単位で確認します。", roles: ["shop", "accounting"] },
+  masters: { label: "共有設定", eyebrow: "共有機能", title: "共有マスター設定", description: "紹介者、アルバイト、酒代原価を店舗と経理で共有します。", roles: ["shop", "accounting"] },
+  fixed: { label: "固定費", eyebrow: "経理業務", title: "固定費設定", description: "月別の固定費とオーリック酒代月合計を管理します。", roles: ["accounting"] },
+  exports: { label: "XLSX出力", eyebrow: "経理業務", title: "帳票出力", description: "既存の4種類のXLSX帳票を出力します。", roles: ["accounting"] }
 };
-
+const emptyData: WorkspaceData = {
+  closings: [], casts: [], staff: [], introducers: [], liquorCosts: [], fixedExpenses: []
+};
 const yen = new Intl.NumberFormat("ja-JP", { style: "currency", currency: "JPY", maximumFractionDigits: 0 });
 const currentMonth = () => {
   const date = new Date();
@@ -51,17 +69,15 @@ export function AccountingApp() {
   const [authReady, setAuthReady] = useState(false);
   const [role, setRole] = useState("");
   const [view, setView] = useState<View>("home");
-  const [data, setData] = useState<WorkspaceData>({ closings: [], casts: [], fixedExpenses: [] });
+  const [data, setData] = useState<WorkspaceData>(emptyData);
   const [loading, setLoading] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
-  const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [month, setMonth] = useState(currentMonth());
 
   const reload = useCallback(async () => {
     setLoading(true);
     try {
       setData(await loadWorkspaceData());
-      setNotice(null);
     } catch (error) {
       setNotice({ kind: "error", text: `データを読み込めませんでした。${messageOf(error)}` });
     } finally {
@@ -76,15 +92,17 @@ export function AccountingApp() {
       setAuthReady(true);
       if (!nextUser) {
         setRole("");
+        setData(emptyData);
         return;
       }
       try {
         const nextRole = await userRole(nextUser);
         setRole(nextRole);
-        if (nextRole !== "accounting") {
-          setNotice({ kind: "error", text: "経理権限のあるアカウントでログインしてください。" });
+        if (nextRole !== "shop" && nextRole !== "accounting") {
+          setNotice({ kind: "error", text: "店舗または経理の権限が設定されたアカウントでログインしてください。" });
           return;
         }
+        setView("home");
         await reload();
       } catch (error) {
         setNotice({ kind: "error", text: `権限を確認できませんでした。${messageOf(error)}` });
@@ -95,131 +113,88 @@ export function AccountingApp() {
   if (!authReady) return <div className="login"><p>認証状態を確認しています…</p></div>;
   if (!user) return <Login />;
 
+  const validRole = role === "shop" || role === "accounting" ? role : null;
   const info = viewInfo[view];
+  const nav = validRole ? (Object.keys(viewInfo) as View[]).filter((key) => viewInfo[key].roles.includes(validRole)) : [];
   const finalized = finalizedOnly(data.closings);
-  const received = data.closings.filter((closing) => closing.status !== "finalized" && closing.status !== "superseded");
 
-  return (
-    <div className="shell">
-      <aside className="sidebar">
-        <div>
-          <div className="brand-mark">CLUB GENESIS</div>
-          <div className="brand-title">GENESIS 経理</div>
-          <div className="version">Ver2.0.3</div>
-        </div>
-        <nav className="nav">
-          {(Object.keys(viewInfo) as View[]).map((key) => (
-            <button key={key} className={view === key ? "active" : ""} onClick={() => setView(key)}>
-              {viewInfo[key].label}
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-bottom">
-          <span className="env">{isProductionEnvironment() ? "本番環境" : "開発環境"} · {collectionNames().closings}</span>
-          <span className="version">{user.email}</span>
-          <button className="button secondary" onClick={() => signOut(auth)}>ログアウト</button>
-        </div>
-      </aside>
-      <main className="main">
-        <header className="page-header">
-          <div>
-            <p className="eyebrow">{info.eyebrow}</p>
-            <h1>{info.title}</h1>
-            <p className="muted">{info.description}</p>
-          </div>
-          <button className="button secondary" disabled={loading || role !== "accounting"} onClick={reload}>
-            {loading ? "読込中…" : "再読込"}
-          </button>
-        </header>
-        {notice && <div className={`notice ${notice.kind}`}>{notice.text}</div>}
-        {role !== "accounting" ? (
-          <div className="card"><p>この画面を利用する権限がありません。</p></div>
-        ) : (
-          <>
-            {view === "home" && <Home data={data} />}
-            {view === "import" && (
-              <ImportView
-                preview={preview}
-                onFile={async (file) => {
-                  try {
-                    const parsed = parsePosClosing(JSON.parse((await file.text()).replace(/^\uFEFF/, "")));
-                    setPreview(previewRoster(parsed, data.casts));
-                    setNotice(null);
-                  } catch (error) {
-                    setPreview(null);
-                    setNotice({ kind: "error", text: messageOf(error) });
-                  }
-                }}
-                onAcknowledge={() => setPreview((current) => current ? {
-                  ...current,
-                  differences: current.differences.map((item) =>
-                    item.kind === "missing-local" ? { ...item, blocking: false, message: `${item.message}（GMS状態を維持）` } : item),
-                  blockingCount: current.differences.filter((item) => item.blocking && item.kind !== "missing-local").length
-                } : null)}
-                onImport={async () => {
-                  if (!preview) return;
-                  setLoading(true);
-                  try {
-                    await importClosing(preview, user);
-                    await reload();
-                    setPreview(null);
-                    setNotice({ kind: "success", text: `${preview.closing.businessDate} のJSONを安全に取り込みました。` });
-                  } catch (error) {
-                    setNotice({ kind: "error", text: `取込を完了できませんでした。${messageOf(error)}` });
-                  } finally {
-                    setLoading(false);
-                  }
-                }}
-                loading={loading}
-              />
-            )}
-            {view === "closings" && (
-              <ClosingsView
-                rows={data.closings}
-                onFinalize={async (id) => {
-                  if (!window.confirm("この受信データを経理確定しますか？")) return;
-                  setLoading(true);
-                  try {
-                    await finalizeClosing(id, user);
-                    await reload();
-                    setNotice({ kind: "success", text: "経理確定しました。" });
-                  } catch (error) {
-                    setNotice({ kind: "error", text: `経理確定できませんでした。${messageOf(error)}` });
-                  } finally {
-                    setLoading(false);
-                  }
-                }}
-              />
-            )}
-            {view === "casts" && <CastsView rows={data.casts} />}
-            {view === "exports" && (
-              <ExportsView
-                month={month}
-                setMonth={setMonth}
-                onExport={async (kind) => {
-                  try {
-                    const stamp = month.replace("-", "");
-                    if (kind === "finalized") {
-                      await downloadWorkbook(createFinalizedWorkbook(finalized, month), `gms_income_statement_${stamp}.xlsx`);
-                    } else if (kind === "expense") {
-                      await downloadWorkbook(createExpenseWorkbook(finalized, data.fixedExpenses, month), `genesis_expenses_${stamp}.xlsx`);
-                    } else if (kind === "statement") {
-                      await downloadWorkbook(createCastStatementsWorkbook(finalized, data.casts, month), `cast_rewards_${stamp}.xlsx`);
-                    } else {
-                      await downloadWorkbook(createCastMonthlyWorkbook(finalized, data.casts, month), `cast_reward_monthly_${stamp}.xlsx`);
-                    }
-                    setNotice({ kind: "success", text: "XLSXを出力しました。" });
-                  } catch (error) {
-                    setNotice({ kind: "error", text: `XLSXを出力できませんでした。${messageOf(error)}` });
-                  }
-                }}
-              />
-            )}
-          </>
-        )}
-      </main>
-    </div>
-  );
+  const runSave = async (action: () => Promise<void>, success: string) => {
+    setLoading(true);
+    setNotice(null);
+    try {
+      await action();
+      await reload();
+      setNotice({ kind: "success", text: success });
+    } catch (error) {
+      setNotice({ kind: "error", text: `保存できませんでした。${messageOf(error)}` });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return <div className="shell">
+    <aside className="sidebar">
+      <div>
+        <div className="brand-mark">CLUB GENESIS</div>
+        <div className="brand-title">GENESIS 基幹</div>
+        <div className="version">Ver2.1.0 · {role === "shop" ? "店舗" : role === "accounting" ? "経理" : "権限未設定"}</div>
+      </div>
+      <nav className="nav">{nav.map((key) => <button key={key} className={view === key ? "active" : ""} onClick={() => setView(key)}>{viewInfo[key].label}</button>)}</nav>
+      <div className="sidebar-bottom">
+        <span className="env">{isProductionEnvironment() ? "本番" : "開発"} · {collectionNames().closings}</span>
+        <span className="version">{user.email}</span>
+        <button className="button secondary" onClick={() => signOut(auth)}>ログアウト</button>
+      </div>
+    </aside>
+    <main className="main">
+      <header className="page-header"><div><p className="eyebrow">{info.eyebrow}</p><h1>{info.title}</h1><p className="muted">{info.description}</p></div>
+        <button className="button secondary" disabled={loading || !validRole} onClick={reload}>{loading ? "読込中…" : "再読込"}</button>
+      </header>
+      {notice && <div className={`notice ${notice.kind}`}>{notice.text}</div>}
+      {!validRole ? <section className="card"><p>この画面を利用する権限がありません。</p></section> : <>
+        {view === "home" && <Home data={data} role={validRole} onStart={() => setView("today")} />}
+        {view === "today" && validRole === "shop" && <StoreClosingWorkflow data={data} loading={loading} onSubmit={async (input: StoreClosingInput) => {
+          setLoading(true); setNotice(null);
+          try {
+            await submitStoreClosing(input, user);
+            await reload();
+            setNotice({ kind: "success", text: `${input.preview.closing.businessDate} の締めデータを経理へ送信しました。` });
+            setView("home");
+          } catch (error) {
+            setNotice({ kind: "error", text: `経理へ送信できませんでした。${messageOf(error)}` });
+            throw error;
+          } finally {
+            setLoading(false);
+          }
+        }} />}
+        {view === "accounting" && validRole === "accounting" && <AccountingSummaryView data={data} />}
+        {view === "closings" && validRole === "accounting" && <ClosingsView rows={data.closings} onFinalize={(id) => {
+          if (!window.confirm("この店舗締めデータを経理確定しますか？")) return;
+          void runSave(() => finalizeClosing(id, user), "経理確定しました。総収支とXLSXへ反映されます。");
+        }} />}
+        {view === "casts" && <CastsView rows={data.casts} />}
+        {view === "salesWork" && <SalesWorkView data={data} />}
+        {view === "masters" && <SharedMastersView data={data} busy={loading}
+          onSaveIntroducer={(value: Omit<Introducer, "id">) => runSave(() => saveIntroducer(value, user), "紹介者を登録しました。")}
+          onSaveStaff={(value: Pick<PartTimeWorker, "name" | "payType" | "payAmount">) => runSave(() => savePartTimeWorker(value, user), "アルバイトを登録しました。")}
+          onSaveLiquor={(value: Omit<LiquorCost, "id">) => runSave(() => saveLiquorCost(value, user), "酒代原価を登録しました。")} />}
+        {view === "fixed" && validRole === "accounting" && <FixedExpenseView data={data} busy={loading}
+          onSave={(value: FixedExpense) => runSave(() => saveFixedExpense(value, user), "固定費を保存しました。")} />}
+        {view === "exports" && validRole === "accounting" && <ExportsView month={month} setMonth={setMonth} onExport={async (kind) => {
+          try {
+            const stamp = month.replace("-", "");
+            if (kind === "finalized") await downloadWorkbook(createFinalizedWorkbook(finalized, month), `gms_income_statement_${stamp}.xlsx`);
+            else if (kind === "expense") await downloadWorkbook(createExpenseWorkbook(finalized, data.fixedExpenses, month), `genesis_expenses_${stamp}.xlsx`);
+            else if (kind === "statement") await downloadWorkbook(createCastStatementsWorkbook(finalized, data.casts, month), `cast_rewards_${stamp}.xlsx`);
+            else await downloadWorkbook(createCastMonthlyWorkbook(finalized, data.casts, month), `cast_reward_monthly_${stamp}.xlsx`);
+            setNotice({ kind: "success", text: "XLSXを出力しました。" });
+          } catch (error) {
+            setNotice({ kind: "error", text: `XLSXを出力できませんでした。${messageOf(error)}` });
+          }
+        }} />}
+      </>}
+    </main>
+  </div>;
 }
 
 function Login() {
@@ -227,201 +202,72 @@ function Login() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  return (
-    <main className="login">
-      <form className="card login-card stack" onSubmit={async (event) => {
-        event.preventDefault();
-        setBusy(true);
-        setError("");
-        try {
-          await signInWithEmailAndPassword(auth, email.trim(), password);
-        } catch {
-          setError("ログインできませんでした。メールアドレスとパスワードを確認してください。");
-        } finally {
-          setBusy(false);
-        }
-      }}>
-        <div>
-          <p className="eyebrow">CLUB GENESIS　Ver2.0.3</p>
-          <h1>経理システム</h1>
-          <p className="muted">経理担当者のアカウントでログインしてください。</p>
-        </div>
-        <div className="field"><label>メールアドレス</label><input className="input" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} /></div>
-        <div className="field"><label>パスワード</label><input className="input" type="password" required value={password} onChange={(e) => setPassword(e.target.value)} /></div>
-        {error && <div className="notice error">{error}</div>}
-        <button className="button" disabled={busy}>{busy ? "ログイン中…" : "ログイン"}</button>
-      </form>
-    </main>
-  );
+  return <main className="login"><form className="card login-card stack" onSubmit={async (event) => {
+    event.preventDefault(); setBusy(true); setError("");
+    try { await signInWithEmailAndPassword(auth, email.trim(), password); }
+    catch { setError("ログインできませんでした。メールアドレスとパスワードを確認してください。"); }
+    finally { setBusy(false); }
+  }}>
+    <div><p className="eyebrow">CLUB GENESIS　Ver2.1.0</p><h1>基幹システム</h1><p className="muted">店舗または経理アカウントでログインしてください。</p></div>
+    <div className="field"><label>メールアドレス</label><input className="input" type="email" required value={email} onChange={(event) => setEmail(event.target.value)} /></div>
+    <div className="field"><label>パスワード</label><input className="input" type="password" required value={password} onChange={(event) => setPassword(event.target.value)} /></div>
+    {error && <div className="notice error">{error}</div>}
+    <button className="button" disabled={busy}>{busy ? "ログイン中…" : "ログイン"}</button>
+  </form></main>;
 }
 
-function Home({ data }: { data: WorkspaceData }) {
-  const finalized = finalizedOnly(data.closings);
-  const monthRows = finalized.filter((row) => row.businessDate.startsWith(currentMonth()));
-  const sales = monthRows.reduce((sum, row) => sum + closingTotals(row).sales, 0);
-  const expense = monthRows.reduce((sum, row) => sum + closingTotals(row).expense, 0);
-  return (
-    <div className="grid">
-      <section className="grid metrics">
-        <Metric label="受信・未確定" value={`${data.closings.filter((row) => row.status !== "finalized" && row.status !== "superseded").length}件`} />
-        <Metric label="確定済み" value={`${finalized.length}件`} />
-        <Metric label="当月売上" value={yen.format(sales)} />
-        <Metric label="当月経費" value={yen.format(expense)} />
-      </section>
-      <section className="card">
-        <div className="section-head"><h2>データ連携の状態</h2></div>
-        <div className="grid two">
-          <div><p className="eyebrow">POS</p><p>POS Firebaseには接続しません。POSが出力したJSONファイルだけを入口にします。</p></div>
-          <div><p className="eyebrow">GMS</p><p>経理専用Firebaseでキャスト人物台帳、取込履歴、確定データを管理します。</p></div>
-        </div>
-      </section>
-    </div>
-  );
+function Home({ data, role, onStart }: { data: WorkspaceData; role: Role; onStart: () => void }) {
+  const rows = data.closings.filter((row) => row.businessDate.startsWith(currentMonth()) && row.status !== "superseded");
+  const sales = rows.reduce((sum, row) => sum + closingTotals(row as Parameters<typeof closingTotals>[0]).sales, 0);
+  const pending = data.closings.filter((row) => row.status === "submitted").length;
+  return <div className="grid">
+    {role === "shop" && <section className="card today-callout"><div><p className="eyebrow">本日の店舗業務</p><h2>締め作業は9項目を順番に確認します</h2><p className="muted">JSON、キャスト紐づけ、勤務、経費、日払いまで一度に経理へ送信します。</p></div><button className="button" onClick={onStart}>今日の締め作業を開始</button></section>}
+    <section className="grid metrics">
+      <Metric label="当月送信売上" value={yen.format(sales)} />
+      <Metric label={role === "accounting" ? "経理確認待ち" : "経理へ送信済み"} value={`${pending}件`} />
+      <Metric label="在籍キャスト" value={`${data.casts.filter((row) => !row.deleted && row.status === "active").length}名`} />
+      <Metric label="体入キャスト" value={`${data.casts.filter((row) => !row.deleted && row.status === "trial").length}名`} />
+    </section>
+    <section className="card"><div className="section-head"><h2>基盤の接続状態</h2><span className="pill good">完全分離</span></div>
+      <div className="grid three architecture-list"><div><b>POS</b><p>Firebaseには接続せず、店舗締めJSONだけを読み込みます。</p></div>
+        <div><b>店舗・経理</b><p>同じ経理専用Firebaseで人物、勤務、売上、設定を共有します。</p></div>
+        <div><b>確定データ</b><p>店舗送信後に経理が確定し、総収支と4帳票へ反映します。</p></div></div>
+    </section>
+  </div>;
+}
+
+function ClosingsView({ rows, onFinalize }: { rows: WorkspaceData["closings"]; onFinalize: (id: string) => void }) {
+  return <section className="card"><div className="section-head"><h2>店舗からの受信データ</h2><span className="pill">{rows.length}件</span></div>
+    <div className="table-wrap"><table><thead><tr><th>営業日</th><th>状態</th><th>売上</th><th>店舗経費</th><th>オーリック</th><th>キャスト勤務</th><th>操作</th></tr></thead>
+      <tbody>{rows.map((row) => <tr key={row.id}><td>{row.businessDate}</td><td><span className={`pill ${row.status === "finalized" ? "good" : "warn"}`}>{closingStatus(String(row.status))}</span></td>
+        <td>{yen.format(row.sales.totalSales)}</td><td>{yen.format(row.expenses.reduce((sum, item) => sum + Number(item.amount || 0), 0))}</td>
+        <td>{yen.format(Number(row.auricLiquorAmount || 0))}</td><td>{row.castWork.length + row.trialWork.length}名</td>
+        <td>{row.status === "submitted" ? <button className="button" onClick={() => onFinalize(row.id)}>経理確定</button> : "—"}</td></tr>)}
+        {!rows.length && <tr><td colSpan={7}>受信データはありません。</td></tr>}</tbody></table></div>
+  </section>;
+}
+
+function ExportsView({ month, setMonth, onExport }: {
+  month: string; setMonth: (value: string) => void;
+  onExport: (kind: "expense" | "statement" | "monthly" | "finalized") => void;
+}) {
+  const rows = [
+    ["expense", "経費表XLSX", "日別変動費と月別固定費"],
+    ["statement", "明細書XLSX", "キャストごとの報酬明細"],
+    ["monthly", "月次報酬表XLSX", "キャストの日別・月次報酬"],
+    ["finalized", "確定データXLSX", "売上・決済・経費・収支"]
+  ] as const;
+  return <div className="grid"><section className="card"><div className="field short-field"><label>対象月</label><input className="input" type="month" value={month} onChange={(event) => setMonth(event.target.value)} /></div></section>
+    <section className="grid two">{rows.map(([kind, label, description]) => <div className="card stack" key={kind}><h2>{label}</h2><p className="muted">{description}</p>
+      <button className="button" disabled={!month} onClick={() => onExport(kind)}>XLSX出力</button></div>)}</section></div>;
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
   return <div className="card"><div className="metric-label">{label}</div><div className="metric-value">{value}</div></div>;
 }
-
-function ImportView({ preview, onFile, onAcknowledge, onImport, loading }: {
-  preview: ImportPreview | null;
-  onFile: (file: File) => void;
-  onAcknowledge: () => void;
-  onImport: () => void;
-  loading: boolean;
-}) {
-  return (
-    <div className="grid">
-      <section className="card stack">
-        <div className="section-head"><h2>1. JSONファイルを選択</h2></div>
-        <input className="input" type="file" accept=".json,application/json" onChange={(event) => {
-          const file = event.target.files?.[0];
-          if (file) onFile(file);
-          event.currentTarget.value = "";
-        }} />
-        <p className="muted">schemaVersion 1/2を検証します。Ver2ではsubmissionId、生成日時、在籍スナップショット、ライフサイクルイベントを必須確認します。</p>
-      </section>
-      {preview && (
-        <section className="card stack">
-          <div className="section-head">
-            <div><h2>2. 取込前レビュー</h2><p className="muted">{preview.closing.businessDate} · {preview.closing.submissionId}</p></div>
-            <span className={`pill ${preview.blockingCount ? "warn" : "good"}`}>
-              {preview.blockingCount ? `要確認 ${preview.blockingCount}件` : "取込可能"}
-            </span>
-          </div>
-          <div className="grid metrics">
-            <Metric label="売上" value={yen.format(preview.closing.sales.totalSales)} />
-            <Metric label="会計" value={`${preview.closing.transactions.length}件`} />
-            <Metric label="在籍スナップショット" value={`${preview.closing.rosterSnapshot?.casts.length || 0}名`} />
-            <Metric label="新規人物" value={`${preview.newCount}名`} />
-          </div>
-          <div className="table-wrap">
-            <table>
-              <thead><tr><th>判定</th><th>POS ID</th><th>POS名</th><th>GMS名</th><th>処理</th></tr></thead>
-              <tbody>
-                {preview.differences.map((item, index) => (
-                  <tr key={`${item.kind}-${item.sourceCastId}-${index}`}>
-                    <td><span className={`pill ${item.blocking ? "warn" : "good"}`}>{differenceLabel(item.kind)}</span></td>
-                    <td>{item.sourceCastId}</td><td>{item.sourceName || "—"}</td><td>{item.memberName || "—"}</td><td>{item.message}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <div className="actions">
-            {preview.differences.some((item) => item.kind === "missing-local" && item.blocking) && (
-              <button className="button secondary" onClick={onAcknowledge}>不在者のGMS状態を維持して続行</button>
-            )}
-            <button className="button" disabled={loading || preview.blockingCount > 0} onClick={onImport}>
-              {loading ? "取込中…" : "検証済みJSONを取り込む"}
-            </button>
-          </div>
-        </section>
-      )}
-    </div>
-  );
+function closingStatus(status: string) {
+  return { submitted: "経理確認待ち", finalized: "経理確定", superseded: "訂正前データ", rejected: "差し戻し" }[status] || status;
 }
-
-function ClosingsView({ rows, onFinalize }: { rows: WorkspaceData["closings"]; onFinalize: (id: string) => void }) {
-  return (
-    <section className="card">
-      <div className="section-head"><h2>営業日データ</h2><span className="pill">{rows.length}件</span></div>
-      <div className="table-wrap">
-        <table>
-          <thead><tr><th>営業日</th><th>状態</th><th>売上</th><th>現金</th><th>カード</th><th>会計数</th><th>操作</th></tr></thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.id}>
-                <td>{row.businessDate}</td>
-                <td><span className={`pill ${row.status === "finalized" ? "good" : "warn"}`}>{row.status === "finalized" ? "経理確定" : row.status}</span></td>
-                <td>{yen.format(row.sales.totalSales)}</td><td>{yen.format(row.sales.cashSales)}</td><td>{yen.format(row.sales.cardSales)}</td>
-                <td>{row.transactions.length}</td>
-                <td>{row.status !== "finalized" && row.status !== "superseded" ? <button className="button" onClick={() => onFinalize(row.id)}>経理確定</button> : "—"}</td>
-              </tr>
-            ))}
-            {!rows.length && <tr><td colSpan={7}>データがありません。</td></tr>}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  );
-}
-
-function CastsView({ rows }: { rows: WorkspaceData["casts"] }) {
-  const sorted = useMemo(() => [...rows].sort((a, b) => a.internalNo - b.internalNo || a.name.localeCompare(b.name, "ja")), [rows]);
-  return (
-    <section className="card">
-      <div className="section-head"><h2>人物台帳</h2><span className="pill">{rows.filter((row) => !row.deleted).length}名</span></div>
-      <div className="table-wrap">
-        <table>
-          <thead><tr><th>No.</th><th>名前</th><th>状態</th><th>POS ID</th><th>人物キー</th><th>報酬方式</th></tr></thead>
-          <tbody>
-            {sorted.map((row) => (
-              <tr key={row.id}>
-                <td>{row.internalNo || "—"}</td><td>{row.name}</td>
-                <td><span className={`pill ${row.status === "active" ? "good" : "warn"}`}>{row.deleted ? "削除済み" : row.status}</span></td>
-                <td>{row.posCastId}</td><td>{row.personKey || row.id}</td><td>{row.rewardSystem || "未設定"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  );
-}
-
-function ExportsView({ month, setMonth, onExport }: {
-  month: string;
-  setMonth: (value: string) => void;
-  onExport: (kind: "expense" | "statement" | "monthly" | "finalized") => void;
-}) {
-  const exports = [
-    ["expense", "経費表XLSX", "日別変動費と月別固定費を出力"],
-    ["statement", "明細書XLSX", "キャストごとの報酬明細書を出力"],
-    ["monthly", "月次報酬表XLSX", "キャストごとの日別月次報酬表を出力"],
-    ["finalized", "確定データXLSX", "売上・決済・経費・収支の月次表を出力"]
-  ] as const;
-  return (
-    <div className="grid">
-      <section className="card">
-        <div className="field"><label>対象月</label><input className="input" type="month" value={month} onChange={(event) => setMonth(event.target.value)} /></div>
-      </section>
-      <section className="grid two">
-        {exports.map(([kind, label, description]) => (
-          <div className="card stack" key={kind}>
-            <h2>{label}</h2><p className="muted">{description}</p>
-            <button className="button" disabled={!month} onClick={() => onExport(kind)}>XLSX出力</button>
-          </div>
-        ))}
-      </section>
-    </div>
-  );
-}
-
-function differenceLabel(kind: ImportPreview["differences"][number]["kind"]) {
-  return { linked: "一致", new: "新規", renamed: "名称差分", "missing-local": "POSに不在", conflict: "競合" }[kind];
-}
-
 function messageOf(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }

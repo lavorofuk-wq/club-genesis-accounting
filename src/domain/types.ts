@@ -1,8 +1,12 @@
 export type MoneyRow = {
+  id?: string;
   category?: string;
   type?: string;
   amount: number;
   note?: string;
+  personId?: string;
+  personName?: string;
+  personType?: "cast" | "trial" | "staff";
 };
 
 export type WorkRow = {
@@ -16,6 +20,8 @@ export type WorkRow = {
   endTime?: string;
   hours: number;
   isTrial?: boolean;
+  payType?: "hourly" | "daily" | string;
+  payAmount?: number;
 };
 
 export type CastSalesRow = {
@@ -29,16 +35,31 @@ export type CastSalesRow = {
 };
 
 export type TransactionItem = {
+  itemId?: string;
+  id?: string;
   name?: string;
   label?: string;
   category?: string;
+  price?: number;
   unitPrice?: number;
   quantity?: number;
+  qty?: number;
   amount?: number;
+  lineTotal?: number;
+  priceTotal?: number;
+  subtotal?: number;
+  total?: number;
+  castId?: string;
+  castName?: string;
+  banaiExtCastIds?: string[];
+  banaiExtCastId?: string;
+  isSet?: boolean;
   isHonShimei?: boolean;
   isBanaiShimei?: boolean;
   isExtension?: boolean;
   isBanaiExtension?: boolean;
+  isVipCharge?: boolean;
+  isDiscount?: boolean;
 };
 
 export type ClosingTransaction = {
@@ -94,6 +115,8 @@ export type PosClosing = {
   };
   expenses: MoneyRow[];
   allowances: MoneyRow[];
+  auricLiquorAmount?: number;
+  payrollDeductions?: MoneyRow[];
   transactions: ClosingTransaction[];
   castSales: CastSalesRow[];
   castWork: WorkRow[];
@@ -119,6 +142,10 @@ export type CastMember = {
   deleted?: boolean;
   rewardSystem?: "" | "slideHourly" | "guaranteedHourly";
   guaranteedHourlyRate?: number;
+  hourlyRate?: number;
+  introducerId?: string;
+  introducerName?: string;
+  note?: string;
   entryDate?: string;
   exitedDate?: string;
   previousNames?: string[];
@@ -133,12 +160,66 @@ export type FinalizedClosing = PosClosing & {
 export type FixedExpense = {
   month: string;
   rent: number;
+  utilities: number;
   karaoke: number;
   towel: number;
   leasekin: number;
-  landline: number;
-  saibuGas: number;
-  usen: number;
+  communications: number;
+  landline?: number;
+  saibuGas?: number;
+  usen?: number;
+};
+
+export type Introducer = {
+  id: string;
+  name: string;
+  introductionFeeAmount: number;
+  advisoryFeeEnabled: boolean;
+  advisoryFeeAmount: number;
+  note: string;
+  feeSystem?: "sales10" | "pay10" | "higher10";
+};
+
+export type PartTimeWorker = {
+  id: string;
+  name: string;
+  employmentType: "partTime";
+  jobType: "hall" | "kitchen" | "driver";
+  payType: "hourly" | "daily";
+  payAmount: number;
+  status: "active" | "departed";
+};
+
+export type LiquorCost = {
+  id: string;
+  brandName: string;
+  costAmount: number;
+};
+
+export type LocalLifecycleAction = {
+  id: string;
+  eventType: LifecycleEvent["eventType"];
+  memberId?: string;
+  name: string;
+  hourlyRate?: number;
+  introducerId?: string;
+  introducerName?: string;
+};
+
+export type IdentityResolution = {
+  sourceCastId: string;
+  targetId: string;
+  targetName: string;
+};
+
+export type StoreClosingInput = {
+  preview: ImportPreview;
+  lifecycleActions: LocalLifecycleAction[];
+  identityResolutions: IdentityResolution[];
+  staffWork: WorkRow[];
+  expenses: MoneyRow[];
+  auricLiquorAmount: number;
+  payrollDeductions: MoneyRow[];
 };
 
 export type ImportDifference = {
