@@ -178,6 +178,7 @@ export type Introducer = {
   advisoryFeeAmount: number;
   note: string;
   feeSystem?: "sales10" | "pay10" | "higher10";
+  deleted?: boolean;
 };
 
 export type PartTimeWorker = {
@@ -194,6 +195,7 @@ export type LiquorCost = {
   id: string;
   brandName: string;
   costAmount: number;
+  deleted?: boolean;
 };
 
 export type LocalLifecycleAction = {

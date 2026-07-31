@@ -191,11 +191,15 @@ service cloud.firestore {
       && (!request.resource.data.keys().hasAny(['advisoryFeeAmount'])
         || (request.resource.data.advisoryFeeAmount is int
           && request.resource.data.advisoryFeeAmount >= 0))
-      && (request.resource.data.advisoryFeeEnabled == false
+      && ((request.resource.data.keys().hasAny(['deleted'])
+          && request.resource.data.deleted == true)
+        || request.resource.data.advisoryFeeEnabled == false
         || (request.resource.data.keys().hasAny(['advisoryFeeAmount'])
           && request.resource.data.advisoryFeeAmount > 0))
       && request.resource.data.note is string
-      && request.resource.data.note.size() <= 500;
+      && request.resource.data.note.size() <= 500
+      && (!request.resource.data.keys().hasAny(['deleted'])
+        || request.resource.data.deleted is bool);
     }
 
     function isFixedExpense(document) {
@@ -266,7 +270,9 @@ service cloud.firestore {
       && request.resource.data.brandName.size() > 0
       && request.resource.data.brandName.size() <= 80
       && request.resource.data.costAmount is int
-      && request.resource.data.costAmount >= 0;
+      && request.resource.data.costAmount >= 0
+      && (!request.resource.data.keys().hasAny(['deleted'])
+        || request.resource.data.deleted is bool);
     }
 
     function isCastSourceLink() {

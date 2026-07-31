@@ -224,7 +224,7 @@ export function StoreClosingWorkflow({ data, loading, onSubmit }: {
               <div className="field"><label>時給</label><input className="input" type="number" min="1" value={hourlyRate || ""} onChange={(event) => setHourlyRate(Number(event.target.value))} /></div>
               <div className="field"><label>紹介者</label><select className="input" value={introducerId} onChange={(event) => setIntroducerId(event.target.value)}>
                 <option value="">選択してください</option>
-                {data.introducers.map((row) => <option key={row.id} value={row.id}>{row.name}</option>)}
+                {data.introducers.filter((row) => !row.deleted).map((row) => <option key={row.id} value={row.id}>{row.name}</option>)}
               </select></div>
             </>
           ) : (

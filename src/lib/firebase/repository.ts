@@ -126,12 +126,14 @@ export async function loadWorkspaceData(): Promise<WorkspaceData> {
       advisoryFeeEnabled: item.data().advisoryFeeEnabled === true,
       advisoryFeeAmount: number(item.data().advisoryFeeAmount),
       note: String(item.data().note || ""),
-      feeSystem: item.data().feeSystem || "higher10"
+      feeSystem: item.data().feeSystem || "higher10",
+      deleted: item.data().deleted === true
     } as Introducer)),
     liquorCosts: liquorSnapshot.docs.map((item) => ({
       id: item.id,
       brandName: String(item.data().brandName || ""),
-      costAmount: number(item.data().costAmount)
+      costAmount: number(item.data().costAmount),
+      deleted: item.data().deleted === true
     })),
     fixedExpenses: fixedSnapshot.docs.map((item) => ({
       month: String(item.data().month || item.id),
@@ -400,6 +402,7 @@ export async function saveIntroducer(value: Omit<Introducer, "id"> & { id?: stri
     advisoryFeeEnabled: value.advisoryFeeEnabled,
     advisoryFeeAmount: value.advisoryFeeEnabled ? Math.max(0, Math.round(value.advisoryFeeAmount)) : 0,
     note: value.note.trim(),
+    deleted: false,
     updatedBy: user.uid,
     updatedAt: serverTimestamp()
   }, { merge: true });
@@ -430,9 +433,43 @@ export async function saveLiquorCost(value: Omit<LiquorCost, "id"> & { id?: stri
   await setDoc(doc(db, names.liquorCosts, id), {
     brandName: value.brandName.trim(),
     costAmount: Math.max(0, Math.round(value.costAmount)),
+    deleted: false,
     updatedBy: user.uid,
     updatedAt: serverTimestamp()
   }, { merge: true });
+}
+
+export async function archiveIntroducer(id: string, user: User): Promise<void> {
+  const names = collectionNames();
+  await updateDoc(doc(db, names.introducers, id), {
+    deleted: true,
+    deletedBy: user.uid,
+    deletedAt: serverTimestamp(),
+    updatedBy: user.uid,
+    updatedAt: serverTimestamp()
+  });
+}
+
+export async function archivePartTimeWorker(id: string, user: User): Promise<void> {
+  const names = collectionNames();
+  await updateDoc(doc(db, names.staff, id), {
+    status: "departed",
+    deletedBy: user.uid,
+    deletedAt: serverTimestamp(),
+    updatedBy: user.uid,
+    updatedAt: serverTimestamp()
+  });
+}
+
+export async function archiveLiquorCost(id: string, user: User): Promise<void> {
+  const names = collectionNames();
+  await updateDoc(doc(db, names.liquorCosts, id), {
+    deleted: true,
+    deletedBy: user.uid,
+    deletedAt: serverTimestamp(),
+    updatedBy: user.uid,
+    updatedAt: serverTimestamp()
+  });
 }
 
 export async function saveFixedExpense(value: FixedExpense, user: User): Promise<void> {
