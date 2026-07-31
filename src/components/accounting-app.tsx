@@ -11,6 +11,9 @@ import {
 } from "firebase/auth";
 import { auth, collectionNames, isProductionEnvironment } from "@/lib/firebase/client";
 import {
+  archiveIntroducer,
+  archiveLiquorCost,
+  archivePartTimeWorker,
   finalizeClosing,
   finalizedOnly,
   loadWorkspaceData,
@@ -125,8 +128,10 @@ export function AccountingApp() {
       await action();
       await reload();
       setNotice({ kind: "success", text: success });
+      return true;
     } catch (error) {
-      setNotice({ kind: "error", text: `保存できませんでした。${messageOf(error)}` });
+      setNotice({ kind: "error", text: `処理できませんでした。${messageOf(error)}` });
+      return false;
     } finally {
       setLoading(false);
     }
@@ -137,7 +142,7 @@ export function AccountingApp() {
       <div>
         <div className="brand-mark">CLUB GENESIS</div>
         <div className="brand-title">GENESIS 基幹</div>
-        <div className="version">Ver2.1.0 · {role === "shop" ? "店舗" : role === "accounting" ? "経理" : "権限未設定"}</div>
+        <div className="version">Ver2.2.0 · {role === "shop" ? "店舗" : role === "accounting" ? "経理" : "権限未設定"}</div>
       </div>
       <nav className="nav">{nav.map((key) => <button key={key} className={view === key ? "active" : ""} onClick={() => setView(key)}>{viewInfo[key].label}</button>)}</nav>
       <div className="sidebar-bottom">
@@ -175,9 +180,18 @@ export function AccountingApp() {
         {view === "casts" && <CastsView rows={data.casts} />}
         {view === "salesWork" && <SalesWorkView data={data} />}
         {view === "masters" && <SharedMastersView data={data} busy={loading}
-          onSaveIntroducer={(value: Omit<Introducer, "id">) => runSave(() => saveIntroducer(value, user), "紹介者を登録しました。")}
-          onSaveStaff={(value: Pick<PartTimeWorker, "name" | "payType" | "payAmount">) => runSave(() => savePartTimeWorker(value, user), "アルバイトを登録しました。")}
-          onSaveLiquor={(value: Omit<LiquorCost, "id">) => runSave(() => saveLiquorCost(value, user), "酒代原価を登録しました。")} />}
+          onSaveIntroducer={(value: Omit<Introducer, "id"> & { id?: string }) =>
+            runSave(() => saveIntroducer(value, user), value.id ? "紹介者を更新しました。" : "紹介者を登録しました。")}
+          onSaveStaff={(value: Pick<PartTimeWorker, "name" | "payType" | "payAmount"> & {
+            id?: string;
+            jobType?: PartTimeWorker["jobType"];
+          }) =>
+            runSave(() => savePartTimeWorker(value, user), value.id ? "アルバイトを更新しました。" : "アルバイトを登録しました。")}
+          onSaveLiquor={(value: Omit<LiquorCost, "id"> & { id?: string }) =>
+            runSave(() => saveLiquorCost(value, user), value.id ? "酒代原価を更新しました。" : "酒代原価を登録しました。")}
+          onDeleteIntroducer={(id) => runSave(() => archiveIntroducer(id, user), "紹介者を削除しました。")}
+          onDeleteStaff={(id) => runSave(() => archivePartTimeWorker(id, user), "アルバイトを削除しました。")}
+          onDeleteLiquor={(id) => runSave(() => archiveLiquorCost(id, user), "酒代原価を削除しました。")} />}
         {view === "fixed" && validRole === "accounting" && <FixedExpenseView data={data} busy={loading}
           onSave={(value: FixedExpense) => runSave(() => saveFixedExpense(value, user), "固定費を保存しました。")} />}
         {view === "exports" && validRole === "accounting" && <ExportsView month={month} setMonth={setMonth} onExport={async (kind) => {
@@ -208,7 +222,7 @@ function Login() {
     catch { setError("ログインできませんでした。メールアドレスとパスワードを確認してください。"); }
     finally { setBusy(false); }
   }}>
-    <div><p className="eyebrow">CLUB GENESIS　Ver2.1.0</p><h1>基幹システム</h1><p className="muted">店舗または経理アカウントでログインしてください。</p></div>
+    <div><p className="eyebrow">CLUB GENESIS　Ver2.2.0</p><h1>基幹システム</h1><p className="muted">店舗または経理アカウントでログインしてください。</p></div>
     <div className="field"><label>メールアドレス</label><input className="input" type="email" required value={email} onChange={(event) => setEmail(event.target.value)} /></div>
     <div className="field"><label>パスワード</label><input className="input" type="password" required value={password} onChange={(event) => setPassword(event.target.value)} /></div>
     {error && <div className="notice error">{error}</div>}

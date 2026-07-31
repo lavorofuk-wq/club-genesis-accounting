@@ -144,6 +144,8 @@ tbody tr:hover { background: #f7f9fa; }
 .metric-card.danger .metric-value { color: var(--danger); }
 .master-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; }
 .master-grid table { font-size: 12px; }
+.row-actions { display: flex; gap: 5px; }
+.button.mini { padding: 5px 8px; font-size: 11px; white-space: nowrap; }
 .check-row { min-height: 39px; display: flex; align-items: center; gap: 8px; color: var(--ink) !important; font-weight: 500 !important; }
 .derived-cost {
   display: flex;

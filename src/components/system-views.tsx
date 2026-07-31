@@ -75,23 +75,56 @@ export function SalesWorkView({ data }: { data: WorkspaceData }) {
   </div>;
 }
 
-export function SharedMastersView({ data, busy, onSaveIntroducer, onSaveStaff, onSaveLiquor }: {
+export function SharedMastersView({
+  data,
+  busy,
+  onSaveIntroducer,
+  onSaveStaff,
+  onSaveLiquor,
+  onDeleteIntroducer,
+  onDeleteStaff,
+  onDeleteLiquor
+}: {
   data: WorkspaceData;
   busy: boolean;
-  onSaveIntroducer: (value: Omit<Introducer, "id">) => Promise<void>;
-  onSaveStaff: (value: Pick<PartTimeWorker, "name" | "payType" | "payAmount">) => Promise<void>;
-  onSaveLiquor: (value: Omit<LiquorCost, "id">) => Promise<void>;
+  onSaveIntroducer: (value: Omit<Introducer, "id"> & { id?: string }) => Promise<boolean>;
+  onSaveStaff: (value: Pick<PartTimeWorker, "name" | "payType" | "payAmount"> & {
+    id?: string;
+    jobType?: PartTimeWorker["jobType"];
+  }) => Promise<boolean>;
+  onSaveLiquor: (value: Omit<LiquorCost, "id"> & { id?: string }) => Promise<boolean>;
+  onDeleteIntroducer: (id: string) => Promise<boolean>;
+  onDeleteStaff: (id: string) => Promise<boolean>;
+  onDeleteLiquor: (id: string) => Promise<boolean>;
 }) {
+  const [editingIntroId, setEditingIntroId] = useState("");
   const [introName, setIntroName] = useState("");
   const [introFee, setIntroFee] = useState(0);
   const [advisory, setAdvisory] = useState(false);
   const [advisoryAmount, setAdvisoryAmount] = useState(0);
   const [introNote, setIntroNote] = useState("");
+  const [introFeeSystem, setIntroFeeSystem] = useState<Introducer["feeSystem"]>("higher10");
+  const [editingStaffId, setEditingStaffId] = useState("");
+  const [staffJobType, setStaffJobType] = useState<PartTimeWorker["jobType"]>("hall");
   const [staffName, setStaffName] = useState("");
   const [payType, setPayType] = useState<"hourly" | "daily">("hourly");
   const [payAmount, setPayAmount] = useState(0);
+  const [editingLiquorId, setEditingLiquorId] = useState("");
   const [brand, setBrand] = useState("");
   const [cost, setCost] = useState(0);
+  const resetIntro = () => {
+    setEditingIntroId(""); setIntroName(""); setIntroFee(0);
+    setAdvisory(false); setAdvisoryAmount(0); setIntroNote(""); setIntroFeeSystem("higher10");
+  };
+  const resetStaff = () => {
+    setEditingStaffId(""); setStaffName(""); setStaffJobType("hall"); setPayType("hourly"); setPayAmount(0);
+  };
+  const resetLiquor = () => {
+    setEditingLiquorId(""); setBrand(""); setCost(0);
+  };
+  const visibleIntroducers = data.introducers.filter((row) => !row.deleted);
+  const visibleStaff = data.staff.filter((row) => row.status !== "departed");
+  const visibleLiquorCosts = data.liquorCosts.filter((row) => !row.deleted);
   return <div className="grid master-grid">
     <MasterCard title="紹介者設定" description="紹介料と顧問料を共有します。">
       <div className="grid two">
@@ -101,12 +134,39 @@ export function SharedMastersView({ data, busy, onSaveIntroducer, onSaveStaff, o
         <Field label="顧問料金額"><input className="input" type="number" min="0" disabled={!advisory} value={advisoryAmount || ""} onChange={(event) => setAdvisoryAmount(Number(event.target.value))} /></Field>
       </div>
       <Field label="備考"><input className="input" value={introNote} onChange={(event) => setIntroNote(event.target.value)} /></Field>
-      <button className="button" disabled={busy || !introName.trim() || (advisory && advisoryAmount <= 0)} onClick={async () => {
-        await onSaveIntroducer({ name: introName, introductionFeeAmount: introFee, advisoryFeeEnabled: advisory, advisoryFeeAmount: advisory ? advisoryAmount : 0, note: introNote, feeSystem: "higher10" });
-        setIntroName(""); setIntroFee(0); setAdvisory(false); setAdvisoryAmount(0); setIntroNote("");
-      }}>紹介者を登録</button>
-      <SimpleTable headers={["紹介者", "紹介料", "顧問料", "備考"]} rows={data.introducers.map((row) => [
-        row.name, yen.format(row.introductionFeeAmount), row.advisoryFeeEnabled ? yen.format(row.advisoryFeeAmount) : "なし", row.note || "—"
+      <div className="actions">
+        <button className="button" disabled={busy || !introName.trim() || (advisory && advisoryAmount <= 0)} onClick={async () => {
+          const saved = await onSaveIntroducer({
+            id: editingIntroId || undefined,
+            name: introName,
+            introductionFeeAmount: introFee,
+            advisoryFeeEnabled: advisory,
+            advisoryFeeAmount: advisory ? advisoryAmount : 0,
+            note: introNote,
+            feeSystem: introFeeSystem || "higher10"
+          });
+          if (saved) resetIntro();
+        }}>{editingIntroId ? "紹介者を更新" : "紹介者を登録"}</button>
+        {editingIntroId && <button className="button secondary" disabled={busy} onClick={resetIntro}>編集を取消</button>}
+      </div>
+      <SimpleTable headers={["紹介者", "紹介料", "顧問料", "備考", "操作"]} rows={visibleIntroducers.map((row) => [
+        row.name,
+        yen.format(row.introductionFeeAmount),
+        row.advisoryFeeEnabled ? yen.format(row.advisoryFeeAmount) : "なし",
+        row.note || "—",
+        <MasterActions key={row.id} busy={busy} onEdit={() => {
+          setEditingIntroId(row.id);
+          setIntroName(row.name);
+          setIntroFee(row.introductionFeeAmount);
+          setAdvisory(row.advisoryFeeEnabled);
+          setAdvisoryAmount(row.advisoryFeeAmount);
+          setIntroNote(row.note);
+          setIntroFeeSystem(row.feeSystem || "higher10");
+        }} onDelete={async () => {
+          if (!window.confirm(`紹介者「${row.name}」を削除しますか？過去データの参照は保持されます。`)) return;
+          const deleted = await onDeleteIntroducer(row.id);
+          if (deleted && editingIntroId === row.id) resetIntro();
+        }} />
       ])} />
     </MasterCard>
 
@@ -116,11 +176,34 @@ export function SharedMastersView({ data, busy, onSaveIntroducer, onSaveStaff, o
         <Field label="給与区分"><select className="input" value={payType} onChange={(event) => setPayType(event.target.value as typeof payType)}><option value="hourly">時給</option><option value="daily">日給</option></select></Field>
         <Field label="金額"><input className="input" type="number" min="1" value={payAmount || ""} onChange={(event) => setPayAmount(Number(event.target.value))} /></Field>
       </div>
-      <button className="button" disabled={busy || !staffName.trim() || payAmount <= 0} onClick={async () => {
-        await onSaveStaff({ name: staffName, payType, payAmount }); setStaffName(""); setPayAmount(0);
-      }}>アルバイトを登録</button>
-      <SimpleTable headers={["名前", "区分", "金額", "状態"]} rows={data.staff.map((row) => [
-        row.name, row.payType === "hourly" ? "時給" : "日給", yen.format(row.payAmount), row.status === "active" ? "在籍" : "退職"
+      <div className="actions">
+        <button className="button" disabled={busy || !staffName.trim() || payAmount <= 0} onClick={async () => {
+          const saved = await onSaveStaff({
+            id: editingStaffId || undefined,
+            name: staffName,
+            jobType: staffJobType,
+            payType,
+            payAmount
+          });
+          if (saved) resetStaff();
+        }}>{editingStaffId ? "アルバイトを更新" : "アルバイトを登録"}</button>
+        {editingStaffId && <button className="button secondary" disabled={busy} onClick={resetStaff}>編集を取消</button>}
+      </div>
+      <SimpleTable headers={["名前", "区分", "金額", "操作"]} rows={visibleStaff.map((row) => [
+        row.name,
+        row.payType === "hourly" ? "時給" : "日給",
+        yen.format(row.payAmount),
+        <MasterActions key={row.id} busy={busy} onEdit={() => {
+          setEditingStaffId(row.id);
+          setStaffName(row.name);
+          setStaffJobType(row.jobType);
+          setPayType(row.payType);
+          setPayAmount(row.payAmount);
+        }} onDelete={async () => {
+          if (!window.confirm(`アルバイト「${row.name}」を削除しますか？過去の勤務データは保持されます。`)) return;
+          const deleted = await onDeleteStaff(row.id);
+          if (deleted && editingStaffId === row.id) resetStaff();
+        }} />
       ])} />
     </MasterCard>
 
@@ -129,10 +212,26 @@ export function SharedMastersView({ data, busy, onSaveIntroducer, onSaveStaff, o
         <Field label="銘柄"><input className="input" value={brand} onChange={(event) => setBrand(event.target.value)} /></Field>
         <Field label="原価金額"><input className="input" type="number" min="0" value={cost || ""} onChange={(event) => setCost(Number(event.target.value))} /></Field>
       </div>
-      <button className="button" disabled={busy || !brand.trim()} onClick={async () => {
-        await onSaveLiquor({ brandName: brand, costAmount: cost }); setBrand(""); setCost(0);
-      }}>酒代原価を登録</button>
-      <SimpleTable headers={["銘柄", "原価"]} rows={data.liquorCosts.map((row) => [row.brandName, yen.format(row.costAmount)])} />
+      <div className="actions">
+        <button className="button" disabled={busy || !brand.trim()} onClick={async () => {
+          const saved = await onSaveLiquor({ id: editingLiquorId || undefined, brandName: brand, costAmount: cost });
+          if (saved) resetLiquor();
+        }}>{editingLiquorId ? "酒代原価を更新" : "酒代原価を登録"}</button>
+        {editingLiquorId && <button className="button secondary" disabled={busy} onClick={resetLiquor}>編集を取消</button>}
+      </div>
+      <SimpleTable headers={["銘柄", "原価", "操作"]} rows={visibleLiquorCosts.map((row) => [
+        row.brandName,
+        yen.format(row.costAmount),
+        <MasterActions key={row.id} busy={busy} onEdit={() => {
+          setEditingLiquorId(row.id);
+          setBrand(row.brandName);
+          setCost(row.costAmount);
+        }} onDelete={async () => {
+          if (!window.confirm(`酒代原価「${row.brandName}」を削除しますか？過去データは保持されます。`)) return;
+          const deleted = await onDeleteLiquor(row.id);
+          if (deleted && editingLiquorId === row.id) resetLiquor();
+        }} />
+      ])} />
     </MasterCard>
   </div>;
 }
@@ -178,7 +277,7 @@ export function AccountingSummaryView({ data }: { data: WorkspaceData }) {
 export function FixedExpenseView({ data, busy, onSave }: {
   data: WorkspaceData;
   busy: boolean;
-  onSave: (value: FixedExpense) => Promise<void>;
+  onSave: (value: FixedExpense) => Promise<boolean>;
 }) {
   const [month, setMonth] = useState(currentMonth());
   const stored = data.fixedExpenses.find((row) => row.month === month);
@@ -212,7 +311,7 @@ export function FixedExpenseView({ data, busy, onSave }: {
         ] as const).map(([key, label]) => <Field key={key} label={label}><input className="input" type="number" min="0" value={displayed[key] || ""} onChange={(event) => update(key, Number(event.target.value))} /></Field>)}
       </div>
       <div className="derived-cost"><span>オーリック酒代（月合計・自動算出）</span><strong>{yen.format(auric)}</strong></div>
-      <button className="button" disabled={busy || !month} onClick={() => onSave({ ...displayed, month })}>固定費を保存</button>
+      <button className="button" disabled={busy || !month} onClick={() => void onSave({ ...displayed, month })}>固定費を保存</button>
     </section>
   </div>;
 }
@@ -226,7 +325,17 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 function SmallMetric({ label, value, tone }: { label: string; value: string; tone?: string }) {
   return <div className={`card metric-card ${tone || ""}`}><div className="metric-label">{label}</div><div className="metric-value">{value}</div></div>;
 }
-function SimpleTable({ headers, rows }: { headers: string[]; rows: (string | number)[][] }) {
+function MasterActions({ busy, onEdit, onDelete }: {
+  busy: boolean;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  return <div className="row-actions">
+    <button className="button secondary mini" disabled={busy} onClick={onEdit}>編集</button>
+    <button className="button danger mini" disabled={busy} onClick={onDelete}>削除</button>
+  </div>;
+}
+function SimpleTable({ headers, rows }: { headers: string[]; rows: React.ReactNode[][] }) {
   return <div className="table-wrap"><table><thead><tr>{headers.map((header) => <th key={header}>{header}</th>)}</tr></thead>
     <tbody>{rows.map((row, index) => <tr key={index}>{row.map((cell, cellIndex) => <td key={cellIndex}>{cell}</td>)}</tr>)}
       {!rows.length && <tr><td colSpan={headers.length}>データがありません。</td></tr>}</tbody></table></div>;
