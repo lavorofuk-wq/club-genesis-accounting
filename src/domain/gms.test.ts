@@ -1,0 +1,88 @@
+import { describe, expect, it } from "vitest";
+import {
+  buildDailyCasts,
+  calculateCash,
+  calculateCastRewards,
+  floorHundred,
+  hoursBetweenQuarter,
+  parsePosClosingV3,
+  rewardRateForSales,
+  sha256Checksum,
+  type DailyClosing,
+  type PosClosingV3
+} from "./gms";
+
+function pos(): PosClosingV3 {
+  return {
+    schema: "club-genesis-pos-closing",
+    schemaVersion: 3,
+    businessDate: "2026-09-02",
+    status: "submitted",
+    sales: { totalSales: 100000, cashSales: 60000, cardSales: 40000 },
+    customers: { groupCount: 1, totalCustomers: 1 },
+    nominations: { honShimeiCount: 1, jonaiCount: 0 },
+    transactions: [{
+      transactionId: "tx1", tableId: "1", tableLabel: "1", startTime: new Date("2026-09-02T20:30:00+09:00").getTime(), endTime: new Date("2026-09-03T00:30:00+09:00").getTime(), payMethod: "cash", splits: [{ method: "cash", amount: 100000 }], subtotal: 100000, discount: 0, tax: 0, total: 100000,
+      items: [
+        { itemId: "hon", label: "本指名", category: "honShimei", price: 2000, quantity: 1, castId: "p1", castName: "花子", backTargetCastIds: [], backTargetCastNames: [], banaiExtCastIds: [], isSet: false, isHonShimei: true, isBanaiShimei: false, isExtension: false, isBanaiExtension: false, isDiscount: false },
+        { itemId: "dohan", label: "同伴料", category: "dohan", price: 3000, quantity: 1, backTargetCastIds: ["p1"], backTargetCastNames: ["花子"], backType: "dohan", backAllocation: "single", banaiExtCastIds: [], isSet: false, isHonShimei: false, isBanaiShimei: false, isExtension: false, isBanaiExtension: false, isDiscount: false },
+        { itemId: "extension", label: "延長60分", category: "extension", price: 7000, quantity: 1, backTargetCastIds: [], backTargetCastNames: [], banaiExtCastIds: [], isSet: false, isHonShimei: false, isBanaiShimei: false, isExtension: true, isBanaiExtension: false, isDiscount: false },
+        { itemId: "bottle", label: "テストシャンパン", category: "champagneWine", price: 30000, quantity: 1, backTargetCastIds: ["p1", "p2"], backTargetCastNames: ["花子", "春子"], backType: "champagneWine", backAllocation: "equal", banaiExtCastIds: [], isSet: false, isHonShimei: false, isBanaiShimei: false, isExtension: false, isBanaiExtension: false, isDiscount: false },
+        { itemId: "drink", label: "キャストドリンク", category: "castDrink", price: 2000, quantity: 1, backTargetCastIds: ["p1"], backTargetCastNames: ["花子"], backType: "castDrink", backAllocation: "single", banaiExtCastIds: [], isSet: false, isHonShimei: false, isBanaiShimei: false, isExtension: false, isBanaiExtension: false, isDiscount: false }
+      ]
+    }],
+    castSales: [{ castId: "p1", castName: "花子", honShimeiSales: 1300000, jonaiExtensionSales: 0, drinkSales: 2000, totalAttributedSales: 1300000 }, { castId: "p2", castName: "春子", honShimeiSales: 0, jonaiExtensionSales: 0, drinkSales: 0, totalAttributedSales: 0 }],
+    castWork: [{ castId: "p1", castName: "花子", castType: "regular", isTrial: false, startTime: "20:00", endTime: "00:07", breakMinutes: 0, hours: 4 }, { castId: "p2", castName: "春子", castType: "regular", isTrial: false, startTime: "20:00", endTime: "00:00", breakMinutes: 0, hours: 4 }],
+    submissionId: "submission-1", generatedAt: "2026-09-03T03:00:00+09:00", checksumAlgorithm: "sha256", checksumCanonicalization: "recursive-key-sort-v1", checksum: "0".repeat(64)
+  };
+}
+
+describe("GMS報酬・日次計算", () => {
+  it("100円未満と15分未満を切り捨てる", () => {
+    expect(floorHundred(1234)).toBe(1200);
+    expect(hoursBetweenQuarter("20:00", "02:07")).toBe(6);
+  });
+
+  it("売上報酬率の境界を正しく判定する", () => {
+    expect(rewardRateForSales(1209999)).toBe(0);
+    expect(rewardRateForSales(1210000)).toBe(0.6);
+    expect(rewardRateForSales(2510000)).toBe(0.65);
+    expect(rewardRateForSales(8010000)).toBe(0.8);
+  });
+
+  it("複数キャストのボトル売上と原価を均等分配する", () => {
+    const rows = buildDailyCasts(pos(), {
+      p1: { masterId: "c1", name: "花子", kind: "regular", hourlyRate: 3000 },
+      p2: { masterId: "c2", name: "春子", kind: "regular", hourlyRate: 3000 }
+    }, [{ id: "l1", kind: "champagneWine", name: "テストシャンパン", salePrice: 30000, costPrice: 10000, createdAt: "", updatedAt: "" }], {});
+    expect(rows[0].bottles[0].salesAmount).toBe(15000);
+    expect(rows[0].bottles[0].costAmount).toBe(5000);
+    expect(rows[0].dohanBack).toBe(5000);
+  });
+
+  it("時給＋バックと売上報酬を比較する", () => {
+    const rows = buildDailyCasts(pos(), { p1: { masterId: "c1", name: "花子", kind: "regular", hourlyRate: 3000 }, p2: { masterId: "c2", name: "春子", kind: "regular", hourlyRate: 3000 } }, [{ id: "l1", kind: "champagneWine", name: "テストシャンパン", salePrice: 30000, costPrice: 10000, createdAt: "", updatedAt: "" }], {});
+    const closing = { id: "d1", businessDate: "2026-09-02", status: "approved", casts: rows } as DailyClosing;
+    const rewards = calculateCastRewards([closing], [], "2026-09");
+    expect(rewards[0].salesRewardBase).toBe(1297500);
+    expect(rewards[0].salesReward).toBe(778500);
+    expect(rewards[0].adoptedSystem).toBe("salesReward");
+  });
+
+  it("営業終了時点の現金残額を算出する", () => {
+    const result = calculateCash({ sales: { totalSales: 100000, cashSales: 60000, cardSales: 40000 }, cashFloat: 200000, expenses: 10000, regularDailyPayments: 5000, trialDailyPayments: 5000, staffDailyPayments: 0, dispatchCastPayment: 0, dispatchStaffPayment: 0, dispatchFee: 0, actualClosingCash: 240000 });
+    expect(result.expectedClosingCash).toBe(240000);
+    expect(result.cashProfit).toBe(40000);
+    expect(result.difference).toBe(0);
+  });
+});
+
+describe("POS schemaVersion 3", () => {
+  it("SHA-256を検証して取り込む", async () => {
+    const value = pos() as unknown as Record<string, unknown>;
+    value.checksum = await sha256Checksum(value);
+    await expect(parsePosClosingV3(value)).resolves.toMatchObject({ schemaVersion: 3, submissionId: "submission-1" });
+    (value.sales as { totalSales: number }).totalSales = 99999;
+    await expect(parsePosClosingV3(value)).rejects.toThrow("チェックサム");
+  });
+});
