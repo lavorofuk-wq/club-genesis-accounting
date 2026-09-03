@@ -476,6 +476,7 @@ export type CastReward = {
   honShimeiSales: number;
   jonaiExtensionSales: number;
   liquorCost: number;
+  honShimeiLiquorCost: number;
   honShimeiBack: number;
   banaiShimeiBack: number;
   dohanBack: number;
@@ -779,6 +780,30 @@ function bottleBack(rows: BottleAllocation[]) {
   }, 0));
 }
 
+function honShimeiLiquorCostForClosing(closing: DailyClosing, row: DailyCast) {
+  const transactions = closing.posSnapshot?.transactions || [];
+  if (!transactions.length) {
+    // posSnapshotがない旧データでは、本指名売上だけの日に限り全原価を本指名分として扱う。
+    return row.honShimeiSales > 0 && row.jonaiExtensionSales === 0 ? asNumber(row.liquorCost) : 0;
+  }
+  const honShimeiBottleItemIds = new Set(transactions
+    .filter((transaction) => (transaction.items || []).some((item) => item.isHonShimei))
+    .flatMap((transaction) => (transaction.items || [])
+      .filter((item) => ["champagneWine", "keepBottle"].includes(item.category))
+      .map((item) => item.itemId)));
+  return (row.bottles || []).reduce((total, bottle) =>
+    total + (honShimeiBottleItemIds.has(bottle.itemId) ? asNumber(bottle.costAmount) : 0), 0);
+}
+
+export function introducerSalesBase(
+  reward: Pick<CastReward, "honShimeiSales" | "honShimeiLiquorCost">,
+  feeType: IntroducerFeeType
+) {
+  const netOfLiquorCost = feeType === "netSales10" || feeType === "higherNetSalesGross10";
+  return Math.max(0, asNumber(reward.honShimeiSales)
+    - (netOfLiquorCost ? asNumber(reward.honShimeiLiquorCost) : 0));
+}
+
 export function calculateCastRewards(
   closings: DailyClosing[],
   casts: CastRecord[],
@@ -795,10 +820,10 @@ export function calculateCastRewards(
     }
     return row.masterId || row.posCastId;
   };
-  const grouped = new Map<string, { businessDate: string; row: DailyCast }[]>();
+  const grouped = new Map<string, { businessDate: string; row: DailyCast; closing: DailyClosing }[]>();
   approved.forEach((closing) => (closing.casts ?? []).forEach((row) => {
     const key = identity(row);
-    grouped.set(key, [...(grouped.get(key) || []), { businessDate: closing.businessDate, row }]);
+    grouped.set(key, [...(grouped.get(key) || []), { businessDate: closing.businessDate, row, closing }]);
   }));
   return [...grouped.entries()].map(([id, entries]): CastReward => {
     const member = castById.get(id);
@@ -812,6 +837,8 @@ export function calculateCastRewards(
     const honShimeiSales = sum("honShimeiSales");
     const jonaiExtensionSales = sum("jonaiExtensionSales");
     const liquorCost = sum("liquorCost");
+    const honShimeiLiquorCost = entries.reduce((total, entry) =>
+      total + honShimeiLiquorCostForClosing(entry.closing, entry.row), 0);
     const honShimeiBack = trialOnly ? 0 : floorHundred(sum("honShimeiCount") * 1000);
     const banaiShimeiBack = trialOnly ? 0 : floorHundred(sum("banaiShimeiCount") * 500);
     const totalDohanBack = trialOnly ? 0 : floorHundred(sum("dohanBack"));
@@ -840,6 +867,7 @@ export function calculateCastRewards(
       honShimeiSales,
       jonaiExtensionSales,
       liquorCost,
+      honShimeiLiquorCost,
       honShimeiBack,
       banaiShimeiBack,
       dohanBack: totalDohanBack,

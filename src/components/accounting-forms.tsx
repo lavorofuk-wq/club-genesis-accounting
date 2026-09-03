@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { User } from "firebase/auth";
 import type { CastReward, DailyClosing, MonthlyAdjustments, WorkspaceData } from "@/domain/gms";
-import { calculateCastRewards, floorHundred } from "@/domain/gms";
+import { calculateCastRewards, floorHundred, introducerSalesBase } from "@/domain/gms";
 import { approveClosing, returnClosing, saveMonthlyAdjustments } from "@/lib/firebase/repository";
 import { Card, Field, MoneyInput, StatusPill, Table, currentMonth, yen } from "./ui";
 
@@ -100,24 +100,25 @@ function CastRewards({ rows, onWithholding }: { rows: CastReward[]; onWithholdin
   return <Card title="キャスト報酬データ" description="時給＋バックと売上報酬を比較し、高い方を採用します。"><Table headers={["キャスト", "勤務", "基本報酬", "指名・同伴", "ボトル", "ドリンク", "原価", "売上報酬", "採用", "美容室", "総支給", "日払・立替・送迎", "源泉所得税", "差引支給"]}>{rows.map((row) => <tr key={row.id}><td><strong>{row.name}</strong>{row.trialOnly && <><br /><StatusPill>体入時給のみ</StatusPill></>}</td><td>{row.days}日 / {row.hours}h</td><td>{yen.format(row.hourlyPay)}</td><td>{yen.format(row.honShimeiBack + row.banaiShimeiBack + row.dohanBack)}</td><td>{yen.format(row.bottleBack)}</td><td>{yen.format(row.drinkBack)}</td><td>{yen.format(row.liquorCost)}</td><td>{row.rewardRate ? `${Math.round(row.rewardRate * 100)}% / ${yen.format(row.salesReward)}` : "対象外"}</td><td><StatusPill tone="good">{row.trialOnly ? "体入時給" : row.adoptedSystem === "salesReward" ? "売上報酬" : "時給＋バック"} {yen.format(row.adoptedReward)}</StatusPill></td><td>{yen.format(row.beautyAllowance)}</td><td><strong>{yen.format(row.grossPay)}</strong></td><td>{yen.format(row.dailyPayment + row.advancePayment + row.transportFee)}</td><td><MoneyInput value={row.withholding} step={1} onChange={(value) => onWithholding(row.id, value)} /></td><td><strong>{yen.format(row.netPay)}</strong></td></tr>)}</Table></Card>;
 }
 
-type IntroRow = { id: string; introducer: string; cast: string; feeType: string; salesBase: number; salesFee: number; grossBase: number; grossFee: number; adopted: string; advisory: number; total: number };
+type IntroRow = { id: string; introducer: string; cast: string; feeType: string; honShimeiLiquorCost: number; salesBase: number; salesFee: number; grossBase: number; grossFee: number; adopted: string; advisory: number; total: number };
 function introducerPayments(rewards: CastReward[], data: WorkspaceData, month: string): IntroRow[] {
   return rewards.filter((row) => row.introducer).map((row) => {
     const intro = row.introducer!;
     const feeType = typeof intro.feeType === "string" ? intro.feeType : "";
     const validFeeType = introducerFeeTypes.has(feeType);
-    const salesBase = validFeeType ? (feeType === "netSales10" || feeType === "higherNetSalesGross10" ? Math.max(0, row.honShimeiSales - row.liquorCost) : row.honShimeiSales) : 0;
+    const salesBase = validFeeType ? introducerSalesBase(row, intro.feeType) : 0;
     const salesFee = validFeeType ? Math.floor(salesBase * 0.1) : 0;
     const grossFee = Math.floor(row.grossPay * 0.1);
-    let adopted = validFeeType ? "売上10%" : "報酬形態未設定"; let fee = salesFee;
+    const salesLabel = feeType === "netSales10" || feeType === "higherNetSalesGross10" ? "酒代原価引き売上10%" : "売上10%";
+    let adopted = validFeeType ? salesLabel : "報酬形態未設定"; let fee = salesFee;
     if (feeType === "gross10") { adopted = "総支給額10%"; fee = grossFee; }
-    if (["higherSalesGross10", "higherNetSalesGross10"].includes(feeType)) { const grossWins = grossFee > salesFee; adopted = grossWins ? "総支給額10%" : "売上10%"; fee = Math.max(salesFee, grossFee); }
+    if (["higherSalesGross10", "higherNetSalesGross10"].includes(feeType)) { const grossWins = grossFee > salesFee; adopted = grossWins ? "総支給額10%" : salesLabel; fee = Math.max(salesFee, grossFee); }
     const member = data.casts.find((cast) => cast.id === row.id);
     const advisory = row.advisoryDays * intro.attendanceAdvisoryFee + (member?.hiredAt?.startsWith(month) ? intro.entryAdvisoryFee : 0);
-    return { id: `${intro.id}_${row.id}`, introducer: intro.name, cast: row.name, feeType, salesBase, salesFee, grossBase: row.grossPay, grossFee, adopted, advisory, total: fee + advisory };
+    return { id: `${intro.id}_${row.id}`, introducer: intro.name, cast: row.name, feeType, honShimeiLiquorCost: row.honShimeiLiquorCost, salesBase, salesFee, grossBase: row.grossPay, grossFee, adopted, advisory, total: fee + advisory };
   });
 }
-function IntroducerPayments({ rows }: { rows: IntroRow[] }) { return <Card title="紹介者支払データ"><Table headers={["紹介者", "対象キャスト", "売上算定額", "売上10%", "総支給額", "総支給10%", "採用タイプ", "顧問料", "支払合計"]}>{rows.map((row) => <tr key={row.id}><td>{row.introducer}</td><td>{row.cast}</td><td>{yen.format(row.salesBase)}</td><td>{yen.format(row.salesFee)}</td><td>{yen.format(row.grossBase)}</td><td>{yen.format(row.grossFee)}</td><td>{row.adopted}</td><td>{yen.format(row.advisory)}</td><td><strong>{yen.format(row.total)}</strong></td></tr>)}</Table></Card>; }
+function IntroducerPayments({ rows }: { rows: IntroRow[] }) { return <Card title="紹介者支払データ" description="売上基準は本指名売上のみです。場内延長売上は含みません。"><Table headers={["紹介者", "対象キャスト", "本指名酒代原価", "売上算定額", "売上10%", "総支給額", "総支給10%", "採用タイプ", "顧問料", "支払合計"]}>{rows.map((row) => <tr key={row.id}><td>{row.introducer}</td><td>{row.cast}</td><td>{yen.format(row.honShimeiLiquorCost)}</td><td>{yen.format(row.salesBase)}</td><td>{yen.format(row.salesFee)}</td><td>{yen.format(row.grossBase)}</td><td>{yen.format(row.grossFee)}</td><td>{row.adopted}</td><td>{yen.format(row.advisory)}</td><td><strong>{yen.format(row.total)}</strong></td></tr>)}</Table></Card>; }
 
 type StaffRow = { id: string; name: string; hours: number; hourly: number; sales: number; bottle: number; gross: number; daily: number; net: number };
 function staffPayroll(closings: DailyClosing[], adjustments: MonthlyAdjustments): StaffRow[] { const map = new Map<string, StaffRow>(); closings.forEach((closing) => (closing.staffWork ?? []).forEach((work) => { const row = map.get(work.staffId) || { id: work.staffId, name: work.name, hours: 0, hourly: 0, sales: adjustments.staffSalesAllowance[work.staffId] || 0, bottle: adjustments.staffBottleAllowance[work.staffId] || 0, gross: 0, daily: 0, net: 0 }; row.hours += work.hours; row.hourly += work.hourlyRate * work.hours; row.daily += work.dailyPayment; map.set(work.staffId, row); })); return [...map.values()].map((row) => { const hourly = floorHundred(row.hourly); return { ...row, hourly, gross: hourly + row.sales + row.bottle, net: hourly + row.sales + row.bottle - row.daily }; }); }
