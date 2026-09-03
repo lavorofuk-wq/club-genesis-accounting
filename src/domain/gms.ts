@@ -270,9 +270,12 @@ export type DailyClosing = {
   submittedBy?: string;
   withdrawnAt?: string;
   returnedAt?: string;
+  returnedBy?: string;
+  returnedFromStatus?: "submitted" | "approved";
   returnReason?: string;
   approvedAt?: string;
   approvedBy?: string;
+  integrityIssues?: string[];
   updatedAt: string;
 };
 
@@ -285,10 +288,107 @@ function storedList<T>(value: unknown): T[] {
   return rows.filter((row): row is T => row !== null && row !== undefined);
 }
 
-/** Realtime Databaseで保存時に消える空配列を、読込境界で復元する。 */
-export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
+function storedNumber(value: unknown): number {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function hasFiniteNumbers(value: unknown, keys: string[]): boolean {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return keys.every(
+    (key) => typeof record[key] === "number" && Number.isFinite(record[key]),
+  );
+}
+
+function normalizePosSnapshot(value: PosClosingV3): PosClosingV3 {
   return {
     ...value,
+    businessDate: String(value.businessDate || ""),
+    sales: {
+      totalSales: storedNumber(value.sales?.totalSales),
+      cashSales: storedNumber(value.sales?.cashSales),
+      cardSales: storedNumber(value.sales?.cardSales),
+    },
+    customers: {
+      groupCount: storedNumber(value.customers?.groupCount),
+      totalCustomers: storedNumber(value.customers?.totalCustomers),
+      ...(value.customers?.customerUnitPrice === undefined
+        ? {}
+        : { customerUnitPrice: storedNumber(value.customers.customerUnitPrice) }),
+    },
+    nominations: {
+      honShimeiCount: storedNumber(value.nominations?.honShimeiCount),
+      jonaiCount: storedNumber(value.nominations?.jonaiCount),
+    },
+    transactions: storedList<PosTransaction>(value.transactions).map((transaction) => ({
+      ...transaction,
+      splits: storedList<PosTransaction["splits"][number]>(transaction.splits),
+      items: storedList<PosItem>(transaction.items).map((item) => ({
+        ...item,
+        backTargetCastIds: storedList<string>(item.backTargetCastIds),
+        backTargetCastNames: storedList<string>(item.backTargetCastNames),
+        banaiExtCastIds: storedList<string>(item.banaiExtCastIds),
+      })),
+    })),
+    castSales: storedList<PosCastSales>(value.castSales),
+    castWork: storedList<PosCastWork>(value.castWork),
+    ...(value.rosterSnapshot
+      ? {
+          rosterSnapshot: {
+            ...value.rosterSnapshot,
+            casts: storedList<Record<string, unknown>>(value.rosterSnapshot.casts),
+          },
+        }
+      : {}),
+    ...(value.lifecycleEvents !== undefined
+      ? { lifecycleEvents: storedList<Record<string, unknown>>(value.lifecycleEvents) }
+      : {}),
+  };
+}
+
+/** Realtime Databaseで保存時に消える空配列を、読込境界で復元する。 */
+export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
+  const integrityIssues = storedList<string>(value.integrityIssues);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value.businessDate || ""))) {
+    integrityIssues.push("営業日が未設定または不正です。");
+  }
+  if (!hasFiniteNumbers(value.sales, ["totalSales", "cashSales", "cardSales"])) {
+    integrityIssues.push("売上データが不完全です。店舗送信データを確認してください。");
+  }
+  if (!hasFiniteNumbers(value.cash, ["cashSales", "cardSales", "totalSales", "cashFloat", "expenseAndPaymentTotal", "expectedClosingCash", "cashProfit", "actualClosingCash", "difference"])) {
+    integrityIssues.push("現金照合データが不完全です。店舗送信データを確認してください。");
+  }
+  return {
+    ...value,
+    businessDate: String(value.businessDate || ""),
+    sales: {
+      totalSales: storedNumber(value.sales?.totalSales),
+      cashSales: storedNumber(value.sales?.cashSales),
+      cardSales: storedNumber(value.sales?.cardSales),
+    },
+    customers: {
+      groupCount: storedNumber(value.customers?.groupCount),
+      totalCustomers: storedNumber(value.customers?.totalCustomers),
+      ...(value.customers?.customerUnitPrice === undefined
+        ? {}
+        : { customerUnitPrice: storedNumber(value.customers.customerUnitPrice) }),
+    },
+    nominations: {
+      honShimeiCount: storedNumber(value.nominations?.honShimeiCount),
+      jonaiCount: storedNumber(value.nominations?.jonaiCount),
+    },
+    cash: {
+      cashSales: storedNumber(value.cash?.cashSales),
+      cardSales: storedNumber(value.cash?.cardSales),
+      totalSales: storedNumber(value.cash?.totalSales),
+      cashFloat: storedNumber(value.cash?.cashFloat),
+      expenseAndPaymentTotal: storedNumber(value.cash?.expenseAndPaymentTotal),
+      expectedClosingCash: storedNumber(value.cash?.expectedClosingCash),
+      cashProfit: storedNumber(value.cash?.cashProfit),
+      actualClosingCash: storedNumber(value.cash?.actualClosingCash),
+      difference: storedNumber(value.cash?.difference),
+    },
     casts: storedList<DailyCast>(value.casts).map((row) => ({
       ...row,
       bottles: storedList<BottleAllocation>(row.bottles),
@@ -296,6 +396,13 @@ export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
     staffWork: storedList<DailyStaffWork>(value.staffWork),
     drivers: storedList<DailyDriverWork>(value.drivers),
     expenses: storedList<DailyExpense>(value.expenses),
+    staffDailyPaymentTotal: storedNumber(value.staffDailyPaymentTotal),
+    dispatchStaffPayment: storedNumber(value.dispatchStaffPayment),
+    dispatchCastPayment: storedNumber(value.dispatchCastPayment),
+    dispatchFee: storedNumber(value.dispatchFee),
+    liquorDeliveryAmount: storedNumber(value.liquorDeliveryAmount),
+    integrityIssues: [...new Set(integrityIssues)],
+    ...(value.posSnapshot ? { posSnapshot: normalizePosSnapshot(value.posSnapshot) } : {}),
   };
 }
 
@@ -311,6 +418,41 @@ export type MonthlyAdjustments = {
   updatedAt?: string;
   updatedBy?: string;
 };
+
+function storedNumberMap(value: unknown): Record<string, number> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([key, amount]) => [
+      key,
+      storedNumber(amount),
+    ]),
+  );
+}
+
+/** Realtime Databaseの配列・空オブジェクト表現を月次入力の型へ揃える。 */
+export function normalizeMonthlyAdjustments(
+  value: MonthlyAdjustments,
+): MonthlyAdjustments {
+  return {
+    ...value,
+    month: String(value.month || ""),
+    withholdingByCast: storedNumberMap(value.withholdingByCast),
+    staffSalesAllowance: storedNumberMap(value.staffSalesAllowance),
+    staffBottleAllowance: storedNumberMap(value.staffBottleAllowance),
+    driverRemoteAllowance: storedNumberMap(value.driverRemoteAllowance),
+    fixedExpenses: storedList<MonthlyAdjustments["fixedExpenses"][number]>(
+      value.fixedExpenses,
+    ).map((row) => ({
+      id: String(row.id || ""),
+      account: String(row.account || ""),
+      amount: storedNumber(row.amount),
+    })),
+    cardFee: storedNumber(value.cardFee),
+    ...(value.liquorDeliveryAmount === undefined
+      ? {}
+      : { liquorDeliveryAmount: storedNumber(value.liquorDeliveryAmount) }),
+  };
+}
 
 export type WorkspaceData = {
   casts: CastRecord[];
