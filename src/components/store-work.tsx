@@ -57,8 +57,8 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished }: Props & {
   const [actualCash, setActualCash] = useState(initial?.cash.actualClosingCash || 0);
   const [error, setError] = useState("");
   const references = useMemo(() => pos ? posCastReferences(pos) : [], [pos]);
-  const missingBottles = useMemo(() => pos ? pos.transactions.flatMap((tx) => tx.items).filter((item) => requiresBottleCost(item, mapping)
-    && !data.liquor.some((row) => row.kind === item.category && row.name === item.label && row.salePrice === item.price)) : [], [data.liquor, mapping, pos]);
+  const missingBottles = useMemo(() => pos ? pos.transactions.flatMap((tx) => tx.items.filter((item) => requiresBottleCost(tx, item, mapping)))
+    .filter((item) => !data.liquor.some((row) => row.kind === item.category && row.name === item.label && row.salePrice === item.price)) : [], [data.liquor, mapping, pos]);
   const month = pos?.businessDate.slice(0, 7) || "";
 
   const candidates = (kind: CastKind, name: string) => kind === "dispatch" ? [] : data.casts.filter((row) => row.status === (kind === "trial" ? "trial" : "active") && row.name === name);
