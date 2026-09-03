@@ -26,11 +26,12 @@ function pos(): PosClosingV3 {
     status: "submitted",
     sales: { totalSales: 100000, cashSales: 60000, cardSales: 40000 },
     customers: { groupCount: 1, totalCustomers: 1 },
-    nominations: { honShimeiCount: 1, jonaiCount: 0 },
+    nominations: { honShimeiCount: 2, jonaiCount: 0 },
     transactions: [{
       transactionId: "tx1", tableId: "1", tableLabel: "1", startTime: new Date("2026-09-02T20:30:00+09:00").getTime(), endTime: new Date("2026-09-03T00:30:00+09:00").getTime(), payMethod: "cash", splits: [{ method: "cash", amount: 100000 }], subtotal: 100000, discount: 0, tax: 0, total: 100000,
       items: [
         { itemId: "hon", label: "本指名", category: "honShimei", price: 2000, quantity: 1, castId: "p1", castName: "花子", backTargetCastIds: [], backTargetCastNames: [], banaiExtCastIds: [], isSet: false, isHonShimei: true, isBanaiShimei: false, isExtension: false, isBanaiExtension: false, isDiscount: false },
+        { itemId: "hon-2", label: "本指名", category: "honShimei", price: 2000, quantity: 1, castId: "p2", castName: "春子", backTargetCastIds: [], backTargetCastNames: [], banaiExtCastIds: [], isSet: false, isHonShimei: true, isBanaiShimei: false, isExtension: false, isBanaiExtension: false, isDiscount: false },
         { itemId: "dohan", label: "同伴料", category: "dohan", price: 3000, quantity: 1, backTargetCastIds: ["p1"], backTargetCastNames: ["花子"], backType: "dohan", backAllocation: "single", banaiExtCastIds: [], isSet: false, isHonShimei: false, isBanaiShimei: false, isExtension: false, isBanaiExtension: false, isDiscount: false },
         { itemId: "extension", label: "延長60分", category: "extension", price: 7000, quantity: 1, backTargetCastIds: [], backTargetCastNames: [], banaiExtCastIds: [], isSet: false, isHonShimei: false, isBanaiShimei: false, isExtension: true, isBanaiExtension: false, isDiscount: false },
         { itemId: "bottle", label: "テストシャンパン", category: "champagneWine", price: 30000, quantity: 1, backTargetCastIds: ["p1", "p2"], backTargetCastNames: ["花子", "春子"], backType: "champagneWine", backAllocation: "equal", banaiExtCastIds: [], isSet: false, isHonShimei: false, isBanaiShimei: false, isExtension: false, isBanaiExtension: false, isDiscount: false },
@@ -64,6 +65,34 @@ describe("GMS報酬・日次計算", () => {
     expect(rows[0].bottles[0].salesAmount).toBe(15000);
     expect(rows[0].bottles[0].costAmount).toBe(5000);
     expect(rows[0].dohanBack).toBe(5000);
+  });
+
+  it("フリー卓のボトルはバック・酒代原価の対象にしない", () => {
+    const value = pos();
+    value.transactions[0].items = value.transactions[0].items.filter((item) => !item.isHonShimei);
+    const bottle = value.transactions[0].items.find((item) => item.itemId === "bottle")!;
+    const rows = buildDailyCasts(value, {
+      p1: { masterId: "c1", name: "花子", kind: "regular", hourlyRate: 3000 },
+      p2: { masterId: "c2", name: "春子", kind: "regular", hourlyRate: 3000 }
+    }, [{ id: "l1", kind: "champagneWine", name: "テストシャンパン", salePrice: 30000, costPrice: 10000, createdAt: "", updatedAt: "" }], {});
+
+    expect(rows.every((row) => row.bottles.length === 0 && row.liquorCost === 0)).toBe(true);
+    expect(requiresBottleCost(value.transactions[0], bottle, { p1: "c1", p2: "c2" })).toBe(false);
+  });
+
+  it("フリー卓でも場内延長後のボトルは対象者へ均等分配する", () => {
+    const value = pos();
+    value.transactions[0].items = value.transactions[0].items.filter((item) => !item.isHonShimei);
+    const extension = value.transactions[0].items.find((item) => item.itemId === "extension")!;
+    extension.isBanaiExtension = true;
+    extension.banaiExtCastIds = ["p1", "p2"];
+    const rows = buildDailyCasts(value, {
+      p1: { masterId: "c1", name: "花子", kind: "regular", hourlyRate: 3000 },
+      p2: { masterId: "c2", name: "春子", kind: "regular", hourlyRate: 3000 }
+    }, [{ id: "l1", kind: "champagneWine", name: "テストシャンパン", salePrice: 30000, costPrice: 10000, createdAt: "", updatedAt: "" }], {});
+
+    expect(rows[0].bottles[0]).toMatchObject({ salesAmount: 15000, costAmount: 5000 });
+    expect(rows[1].bottles[0]).toMatchObject({ salesAmount: 15000, costAmount: 5000 });
   });
 
   it("Firebaseで消えた空配列を復元して経理集計を継続する", () => {
@@ -164,9 +193,11 @@ describe("GMS報酬・日次計算", () => {
   });
 
   it("派遣キャストだけを対象とするボトルは原価照合を要求しない", () => {
-    const bottle = pos().transactions[0].items.find((item) => item.itemId === "bottle")!;
-    expect(requiresBottleCost(bottle, { p1: "dispatch", p2: "dispatch" })).toBe(false);
-    expect(requiresBottleCost(bottle, { p1: "dispatch", p2: "cast-2" })).toBe(true);
+    const value = pos();
+    const transaction = value.transactions[0];
+    const bottle = transaction.items.find((item) => item.itemId === "bottle")!;
+    expect(requiresBottleCost(transaction, bottle, { p1: "dispatch", p2: "dispatch" })).toBe(false);
+    expect(requiresBottleCost(transaction, bottle, { p1: "dispatch", p2: "cast-2" })).toBe(true);
   });
 
   it("時給＋バックと売上報酬を比較する", () => {
@@ -193,5 +224,29 @@ describe("POS schemaVersion 3", () => {
     await expect(parsePosClosingV3(value)).resolves.toMatchObject({ schemaVersion: 3, submissionId: "submission-1" });
     (value.sales as { totalSales: number }).totalSales = 99999;
     await expect(parsePosClosingV3(value)).rejects.toThrow("チェックサム");
+  });
+
+  it("フリー卓の有償ボトルはバック対象なしで取り込める", async () => {
+    const value = pos();
+    value.transactions[0].items = value.transactions[0].items
+      .filter((item) => !item.isHonShimei)
+      .map((item) => item.itemId === "bottle" ? {
+        ...item,
+        backTargetCastIds: [],
+        backTargetCastNames: [],
+        backType: undefined,
+        backAllocation: undefined
+      } : item);
+    value.checksum = await sha256Checksum(value as unknown as Record<string, unknown>);
+
+    await expect(parsePosClosingV3(value)).resolves.toMatchObject({ schemaVersion: 3 });
+  });
+
+  it("フリー卓のボトルにバック対象がある不正データは拒否する", async () => {
+    const value = pos();
+    value.transactions[0].items = value.transactions[0].items.filter((item) => !item.isHonShimei);
+    value.checksum = await sha256Checksum(value as unknown as Record<string, unknown>);
+
+    await expect(parsePosClosingV3(value)).rejects.toThrow("本指名・場内延長対象外");
   });
 });

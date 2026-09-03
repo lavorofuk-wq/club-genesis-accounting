@@ -581,9 +581,14 @@ export async function parsePosClosingV3(input: unknown): Promise<PosClosingV3> {
     assert(splitTotal === asNumber(transaction.total), `テーブル${transaction.tableLabel}の決済内訳と会計金額が一致しません。`);
     (transaction.items || []).forEach((item) => {
       const paidBottle = ["champagneWine", "keepBottle"].includes(item.category) && asNumber(item.price) * asNumber(item.quantity) > 0;
-      if (paidBottle) {
-        assert(item.backTargetCastIds?.length, `「${item.label}」のボトルバック対象がありません。`);
-        const expectedAllocation = item.backTargetCastIds.length > 1 ? "equal" : "single";
+      const bottleTargets = item.backTargetCastIds || [];
+      if (paidBottle && bottleTargets.length) {
+        const eligibleTargets = new Set(bottleBackContextCastIds(transaction, item));
+        assert(
+          bottleTargets.every((id) => eligibleTargets.has(id)),
+          `「${item.label}」のボトルバック対象に本指名・場内延長対象外のキャストが含まれています。`
+        );
+        const expectedAllocation = bottleTargets.length > 1 ? "equal" : "single";
         assert(item.backAllocation === expectedAllocation, `「${item.label}」のバック配分は${expectedAllocation}である必要があります。`);
       }
       if (item.category === "dohan") {
@@ -599,6 +604,36 @@ export async function parsePosClosingV3(input: unknown): Promise<PosClosingV3> {
     assert(calculated === asNumber(work.hours), `${work.castName}の勤務時間が出退勤時刻と一致しません。`);
   });
   return closing;
+}
+
+function uniqueCastIds(values: Array<string | undefined>) {
+  return [...new Set(values.map((value) => String(value || "")).filter(Boolean))];
+}
+
+/**
+ * ボトルバック対象になれるキャストを、POSの売上帰属と同じ卓内ルールで求める。
+ * 本指名卓は本指名キャスト、フリー卓は当該ボトルより前に開始した場内延長キャストだけが対象。
+ */
+function bottleBackContextCastIds(transaction: PosTransaction, bottle: PosItem) {
+  const items = transaction.items || [];
+  const honShimeiCastIds = uniqueCastIds(items
+    .filter((item) => item.isHonShimei)
+    .map((item) => item.castId));
+  if (honShimeiCastIds.length) return honShimeiCastIds;
+
+  let banaiExtensionCastIds: string[] = [];
+  for (const item of items) {
+    if (item.isBanaiExtension) {
+      banaiExtensionCastIds = uniqueCastIds([...(item.banaiExtCastIds || []), item.castId]);
+    }
+    if (item === bottle) return banaiExtensionCastIds;
+  }
+  return [];
+}
+
+function effectiveBottleBackTargets(transaction: PosTransaction, item: PosItem) {
+  const eligibleTargets = new Set(bottleBackContextCastIds(transaction, item));
+  return (item.backTargetCastIds || []).filter((id) => eligibleTargets.has(id));
 }
 
 export function posCastReferences(closing: PosClosingV3) {
@@ -618,7 +653,13 @@ export function posCastReferences(closing: PosClosingV3) {
   closing.castSales.forEach((row) => add(row.castId, row.castName));
   closing.transactions.forEach((transaction) => transaction.items.forEach((item) => {
     add(item.castId, item.castName);
-    (item.backTargetCastIds || []).forEach((id, index) => add(id, item.backTargetCastNames?.[index]));
+    const targetIds = ["champagneWine", "keepBottle"].includes(item.category)
+      ? effectiveBottleBackTargets(transaction, item)
+      : (item.backTargetCastIds || []);
+    targetIds.forEach((id) => {
+      const nameIndex = (item.backTargetCastIds || []).indexOf(id);
+      add(id, item.backTargetCastNames?.[nameIndex]);
+    });
     item.banaiExtCastIds.forEach((id) => add(id, ""));
   }));
   return [...rows.values()];
@@ -640,10 +681,10 @@ export function isCastMappingComplete(
   });
 }
 
-export function requiresBottleCost(item: PosItem, mapping: Record<string, string>) {
+export function requiresBottleCost(transaction: PosTransaction, item: PosItem, mapping: Record<string, string>) {
   return ["champagneWine", "keepBottle"].includes(item.category)
     && asNumber(item.price) * asNumber(item.quantity) > 0
-    && item.backTargetCastIds.some((id) => mapping[id] !== "dispatch");
+    && effectiveBottleBackTargets(transaction, item).some((id) => mapping[id] !== "dispatch");
 }
 
 function dohanBack(transaction: PosTransaction) {
@@ -678,7 +719,9 @@ export function buildDailyCasts(
       const quantity = asNumber(item.quantity) || 1;
       if (item.isHonShimei && item.castId === source.id) honCount += quantity;
       if (item.isBanaiShimei && item.castId === source.id) banaiCount += quantity;
-      const targets = item.backTargetCastIds || [];
+      const targets = ["champagneWine", "keepBottle"].includes(item.category)
+        ? effectiveBottleBackTargets(transaction, item)
+        : (item.backTargetCastIds || []);
       if (item.category === "dohan" && targets.includes(source.id)) {
         dohanCount += quantity;
         dohanAmount += dohanBack(transaction) * quantity;
