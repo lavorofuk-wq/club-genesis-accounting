@@ -3,9 +3,13 @@ import {
   buildDailyCasts,
   calculateCash,
   calculateCastRewards,
+  canMapAsDispatch,
   floorHundred,
   hoursBetweenQuarter,
+  isCastMappingComplete,
   parsePosClosingV3,
+  posCastReferences,
+  requiresBottleCost,
   rewardRateForSales,
   sha256Checksum,
   type DailyClosing,
@@ -58,6 +62,36 @@ describe("GMS報酬・日次計算", () => {
     expect(rows[0].bottles[0].salesAmount).toBe(15000);
     expect(rows[0].bottles[0].costAmount).toBe(5000);
     expect(rows[0].dohanBack).toBe(5000);
+  });
+
+  it("POSの派遣区分を売上・商品参照で在籍へ上書きしない", () => {
+    const value = pos();
+    value.castWork[0] = { ...value.castWork[0], castType: "dispatch", isTrial: false };
+    expect(posCastReferences(value).find((row) => row.id === "p1")?.kind).toBe("dispatch");
+  });
+
+  it("体入扱いで出力された派遣キャストを日次キャストデータから除外する", () => {
+    const value = pos();
+    value.castWork[0] = { ...value.castWork[0], castType: "trial", isTrial: true };
+    const rows = buildDailyCasts(value, {
+      p1: { masterId: "", name: "花子", kind: "dispatch", hourlyRate: 0 },
+      p2: { masterId: "c2", name: "春子", kind: "regular", hourlyRate: 3000 }
+    }, [{ id: "l1", kind: "champagneWine", name: "テストシャンパン", salePrice: 30000, costPrice: 10000, createdAt: "", updatedAt: "" }], {});
+    expect(rows.map((row) => row.posCastId)).toEqual(["p2"]);
+    expect(rows[0].bottles[0]).toMatchObject({ salesAmount: 15000, costAmount: 5000 });
+  });
+
+  it("体入行は派遣を選ぶと照合完了になり、在籍行では派遣を選べない", () => {
+    expect(canMapAsDispatch("trial")).toBe(true);
+    expect(canMapAsDispatch("regular")).toBe(false);
+    expect(isCastMappingComplete([{ id: "trial-1", name: "派遣A", kind: "trial" }], { "trial-1": "dispatch" })).toBe(true);
+    expect(isCastMappingComplete([{ id: "regular-1", name: "在籍A", kind: "regular" }], { "regular-1": "dispatch" })).toBe(false);
+  });
+
+  it("派遣キャストだけを対象とするボトルは原価照合を要求しない", () => {
+    const bottle = pos().transactions[0].items.find((item) => item.itemId === "bottle")!;
+    expect(requiresBottleCost(bottle, { p1: "dispatch", p2: "dispatch" })).toBe(false);
+    expect(requiresBottleCost(bottle, { p1: "dispatch", p2: "cast-2" })).toBe(true);
   });
 
   it("時給＋バックと売上報酬を比較する", () => {

@@ -6,7 +6,7 @@ import type {
   CastKind, DailyCast, DailyClosing, DailyDriverWork, DailyExpense, DailyStaffWork, ExpenseCategory,
   PosClosingV3, WorkspaceData
 } from "@/domain/gms";
-import { buildDailyCasts, calculateCash, floorHundred, hoursBetweenQuarter, parsePosClosingV3, posCastReferences, rateForMonth } from "@/domain/gms";
+import { buildDailyCasts, calculateCash, canMapAsDispatch, floorHundred, hoursBetweenQuarter, isCastMappingComplete, parsePosClosingV3, posCastReferences, rateForMonth, requiresBottleCost } from "@/domain/gms";
 import { submitClosing, withdrawClosing } from "@/lib/firebase/repository";
 import { Card, Field, MoneyInput, StatusPill, Table, today, yen } from "./ui";
 
@@ -57,11 +57,12 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished }: Props & {
   const [actualCash, setActualCash] = useState(initial?.cash.actualClosingCash || 0);
   const [error, setError] = useState("");
   const references = useMemo(() => pos ? posCastReferences(pos) : [], [pos]);
-  const missingBottles = useMemo(() => pos ? pos.transactions.flatMap((tx) => tx.items).filter((item) => ["champagneWine", "keepBottle"].includes(item.category) && item.price * item.quantity > 0 && !data.liquor.some((row) => row.kind === item.category && row.name === item.label && row.salePrice === item.price)) : [], [data.liquor, pos]);
+  const missingBottles = useMemo(() => pos ? pos.transactions.flatMap((tx) => tx.items).filter((item) => requiresBottleCost(item, mapping)
+    && !data.liquor.some((row) => row.kind === item.category && row.name === item.label && row.salePrice === item.price)) : [], [data.liquor, mapping, pos]);
   const month = pos?.businessDate.slice(0, 7) || "";
 
   const candidates = (kind: CastKind, name: string) => kind === "dispatch" ? [] : data.casts.filter((row) => row.status === (kind === "trial" ? "trial" : "active") && row.name === name);
-  const mappingComplete = references.every((source) => source.kind === "dispatch" ? mapping[source.id] === "dispatch" : Boolean(mapping[source.id]));
+  const mappingComplete = isCastMappingComplete(references, mapping);
   const costsComplete = missingBottles.every((item) => specialCosts[item.itemId] >= 0 && Object.hasOwn(specialCosts, item.itemId));
 
   const hydrateMapping = (closing: PosClosingV3) => {
@@ -135,7 +136,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished }: Props & {
     {stage === "json" && <div className="stack section-pad">
       <Field label="POS営業終了JSON（schemaVersion 3）"><input className="input" type="file" accept=".json,application/json" onChange={async (event) => { const file = event.target.files?.[0]; if (!file) return; try { const parsed = await parsePosClosingV3(JSON.parse((await file.text()).replace(/^\uFEFF/, ""))); setPos(parsed); hydrateMapping(parsed); setSpecialCosts({}); setCastRows([]); setError(""); } catch (caught) { setPos(null); setError(caught instanceof Error ? caught.message : String(caught)); } finally { event.currentTarget.value = ""; } }} /></Field>
       {pos && <><div className="summary-strip"><span><small>営業日</small><strong>{pos.businessDate}</strong></span><span><small>総売上</small><strong>{yen.format(pos.sales.totalSales)}</strong></span><span><small>会計</small><strong>{pos.transactions.length}件</strong></span><span><small>勤務</small><strong>{pos.castWork.length}名</strong></span></div>
-        <h3>キャストデータ照合</h3><Table headers={["POS名", "区分", "GMSデータ", "状態"]}>{references.map((source) => { const options = candidates(source.kind, source.name); return <tr key={source.id}><td>{source.name}</td><td>{source.kind === "regular" ? "在籍" : source.kind === "trial" ? "体入" : "派遣"}</td><td>{source.kind === "dispatch" ? <select className="input table-input" value={mapping[source.id] || ""} onChange={(e) => setMapping({ ...mapping, [source.id]: e.target.value })}><option value="">選択</option><option value="dispatch">派遣キャストとして処理</option></select> : <select className="input table-input" value={mapping[source.id] || ""} onChange={(e) => setMapping({ ...mapping, [source.id]: e.target.value })}><option value="">一致するデータを選択</option>{options.map((row) => <option key={row.id} value={row.id}>{row.name}（{row.trialDate || row.hiredAt}）</option>)}</select>}</td><td>{mapping[source.id] ? <StatusPill tone="good">照合済み</StatusPill> : <StatusPill tone="danger">未照合</StatusPill>}</td></tr>; })}</Table>
+        <h3>キャストデータ照合</h3><Table headers={["POS名", "区分", "GMSデータ", "状態"]}>{references.map((source) => { const options = candidates(source.kind, source.name); return <tr key={source.id}><td>{source.name}</td><td>{source.kind === "regular" ? "在籍" : source.kind === "trial" ? "体入" : "派遣"}</td><td>{source.kind === "dispatch" ? <select className="input table-input" value={mapping[source.id] || ""} onChange={(e) => setMapping({ ...mapping, [source.id]: e.target.value })}><option value="">選択</option><option value="dispatch">派遣キャストとして処理</option></select> : <select className="input table-input" value={mapping[source.id] || ""} onChange={(e) => setMapping({ ...mapping, [source.id]: e.target.value })}><option value="">一致するデータを選択</option>{options.map((row) => <option key={row.id} value={row.id}>{row.name}（{row.trialDate || row.hiredAt}）</option>)}{canMapAsDispatch(source.kind) && <option value="dispatch">派遣キャストとして処理（マスタ登録不要）</option>}</select>}</td><td>{mapping[source.id] ? <StatusPill tone="good">照合済み</StatusPill> : <StatusPill tone="danger">未照合</StatusPill>}</td></tr>; })}</Table>
         {missingBottles.length > 0 && <><h3>酒代原価未登録</h3><div className="notice error">マスタ未登録のボトルがあります。共通フォームへ登録するか、今回のみの特別原価を入力してください。</div><Table headers={["区分", "ボトル", "販売額", "今回のみの原価"]}>{missingBottles.map((item) => <tr key={item.itemId}><td>{item.category === "champagneWine" ? "シャンパン・ワイン" : "キープボトル"}</td><td>{item.label}</td><td>{yen.format(item.price * item.quantity)}</td><td><MoneyInput value={specialCosts[item.itemId] || 0} onChange={(value) => setSpecialCosts({ ...specialCosts, [item.itemId]: value })} /></td></tr>)}</Table></>}
         <button className="button wide-button" disabled={!mappingComplete || !costsComplete} onClick={createRows}>照合を確定して店舗データ作成へ</button></>}
     </div>}

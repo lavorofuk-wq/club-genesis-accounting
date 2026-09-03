@@ -442,7 +442,12 @@ export function posCastReferences(closing: PosClosingV3) {
     const key = String(id || "");
     if (!key) return;
     const previous = rows.get(key);
-    rows.set(key, { id: key, name: String(name || previous?.name || ""), kind: previous?.kind === "trial" ? "trial" : kind });
+    rows.set(key, {
+      id: key,
+      name: String(name || previous?.name || ""),
+      // castSalesや商品明細から同じ人物が再登場しても、勤務データの体入・派遣区分を失わない。
+      kind: previous && kind === "regular" ? previous.kind : kind
+    });
   };
   closing.castWork.forEach((row) => add(row.castId, row.castName, row.castType));
   closing.castSales.forEach((row) => add(row.castId, row.castName));
@@ -452,6 +457,28 @@ export function posCastReferences(closing: PosClosingV3) {
     item.banaiExtCastIds.forEach((id) => add(id, ""));
   }));
   return [...rows.values()];
+}
+
+export function canMapAsDispatch(kind: CastKind) {
+  return kind === "trial" || kind === "dispatch";
+}
+
+export function isCastMappingComplete(
+  references: ReturnType<typeof posCastReferences>,
+  mapping: Record<string, string>
+) {
+  return references.every((source) => {
+    const selected = mapping[source.id];
+    if (selected === "dispatch") return canMapAsDispatch(source.kind);
+    if (source.kind === "dispatch") return false;
+    return Boolean(selected);
+  });
+}
+
+export function requiresBottleCost(item: PosItem, mapping: Record<string, string>) {
+  return ["champagneWine", "keepBottle"].includes(item.category)
+    && asNumber(item.price) * asNumber(item.quantity) > 0
+    && item.backTargetCastIds.some((id) => mapping[id] !== "dispatch");
 }
 
 function dohanBack(transaction: PosTransaction) {
@@ -470,7 +497,9 @@ export function buildDailyCasts(
 ) {
   const sales = new Map(closing.castSales.map((row) => [row.castId, row]));
   const work = new Map(closing.castWork.map((row) => [row.castId, row]));
-  return posCastReferences(closing).filter((source) => source.kind !== "dispatch").map((source): DailyCast => {
+  return posCastReferences(closing)
+    .filter((source) => source.kind !== "dispatch" && mapping[source.id]?.kind !== "dispatch")
+    .map((source): DailyCast => {
     const target = mapping[source.id];
     const shift = work.get(source.id);
     const sale = sales.get(source.id);
@@ -532,7 +561,7 @@ export function buildDailyCasts(
       transportFee: 0,
       introducer: target?.introducer
     };
-  });
+    });
 }
 
 function bottleBack(rows: BottleAllocation[]) {
