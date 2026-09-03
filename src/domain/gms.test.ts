@@ -6,6 +6,7 @@ import {
   canMapAsDispatch,
   floorHundred,
   hoursBetweenQuarter,
+  introducerSalesBase,
   isCastMappingComplete,
   normalizeDailyClosing,
   normalizeMonthlyAdjustments,
@@ -207,6 +208,41 @@ describe("GMS報酬・日次計算", () => {
     expect(rewards[0].salesRewardBase).toBe(1297500);
     expect(rewards[0].salesReward).toBe(778500);
     expect(rewards[0].adoptedSystem).toBe("salesReward");
+  });
+
+  it("紹介者の原価引き売上は本指名売上から本指名酒代原価だけを控除する", () => {
+    const hon = pos();
+    const banai = pos();
+    banai.businessDate = "2026-09-03";
+    banai.transactions[0].items = banai.transactions[0].items.filter((item) => !item.isHonShimei);
+    const extension = banai.transactions[0].items.find((item) => item.itemId === "extension")!;
+    extension.isBanaiExtension = true;
+    extension.banaiExtCastIds = ["p1", "p2"];
+    banai.castSales = banai.castSales.map((row) => ({
+      ...row,
+      honShimeiSales: 0,
+      jonaiExtensionSales: row.castId === "p1" ? 400000 : 0,
+      totalAttributedSales: row.castId === "p1" ? 400000 : 0
+    }));
+    const mapping = {
+      p1: { masterId: "c1", name: "花子", kind: "regular" as const, hourlyRate: 3000 },
+      p2: { masterId: "c2", name: "春子", kind: "regular" as const, hourlyRate: 3000 }
+    };
+    const liquor = [{ id: "l1", kind: "champagneWine" as const, name: "テストシャンパン", salePrice: 30000, costPrice: 10000, createdAt: "", updatedAt: "" }];
+    const honRows = buildDailyCasts(hon, mapping, liquor, {});
+    const banaiRows = buildDailyCasts(banai, mapping, liquor, {});
+    const reward = calculateCastRewards([
+      { id: "hon", businessDate: hon.businessDate, status: "approved", casts: honRows, posSnapshot: hon },
+      { id: "banai", businessDate: banai.businessDate, status: "approved", casts: banaiRows, posSnapshot: banai }
+    ] as DailyClosing[], [], "2026-09").find((row) => row.id === "c1")!;
+
+    expect(reward.honShimeiSales).toBe(1300000);
+    expect(reward.jonaiExtensionSales).toBe(400000);
+    expect(reward.liquorCost).toBe(10000);
+    expect(reward.honShimeiLiquorCost).toBe(5000);
+    expect(introducerSalesBase(reward, "sales10")).toBe(1300000);
+    expect(introducerSalesBase(reward, "netSales10")).toBe(1295000);
+    expect(introducerSalesBase(reward, "higherNetSalesGross10")).toBe(1295000);
   });
 
   it("営業終了時点の現金残額を算出する", () => {
