@@ -12,22 +12,52 @@ type Section = "approval" | "castRewards" | "introducers" | "staffPayroll" | "dr
 
 const statusLabel = { submitted: "確認待ち", returned: "差戻し", approved: "承認済み", withdrawn: "取下げ" } as const;
 const expenseLabels: Record<string, string> = { beautyTrial: "美容室手当", introduction: "紹介料", advertising: "広告等", supplies: "備品・消耗品他", entertainment: "交際費・プレゼント等", liquor: "酒代", transportOther: "交通費・その他" };
+const introducerFeeTypes = new Set(["sales10", "netSales10", "gross10", "higherSalesGross10", "higherNetSalesGross10"]);
 
 export function AccountingForms({ section, ...props }: Props & { section: Section }) {
   if (section === "approval") return <ApprovalView {...props} />;
   return <MonthlyAccounting section={section} {...props} />;
 }
 
-function ApprovalView({ data, user, run }: Props) {
+function ApprovalView({ data, user, busy, run }: Props) {
   const [expanded, setExpanded] = useState("");
-  return <div className="grid"><div className="grid metrics"><Metric label="経理確認待ち" value={`${data.closings.filter((row) => row.status === "submitted").length}件`} /><Metric label="承認済み" value={`${data.closings.filter((row) => row.status === "approved").length}件`} /><Metric label="差戻し" value={`${data.closings.filter((row) => row.status === "returned").length}件`} /><Metric label="当月承認売上" value={yen.format(data.closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(currentMonth())).reduce((sum, row) => sum + row.sales.totalSales, 0))} /></div>
-    <Card title="店舗送信データの確認・承認" description="店舗データと現金照合を確認して承認または差戻しします。"><Table headers={["営業日", "状態", "総売上", "経費・支払", "現金実在高", "差額", "操作"]}>{data.closings.filter((row) => row.status !== "withdrawn").map((row) => <tr key={row.id}><td>{row.businessDate}</td><td><StatusPill tone={row.status === "approved" ? "good" : row.status === "returned" ? "danger" : "warn"}>{statusLabel[row.status]}</StatusPill></td><td>{yen.format(row.sales.totalSales)}</td><td>{yen.format(row.cash.expenseAndPaymentTotal)}</td><td>{yen.format(row.cash.actualClosingCash)}</td><td className={row.cash.difference ? "text-danger" : "text-good"}>{yen.format(row.cash.difference)}</td><td><div className="row-actions"><button className="button secondary mini" onClick={() => setExpanded(expanded === row.id ? "" : row.id)}>{expanded === row.id ? "閉じる" : "詳細"}</button>{row.status === "submitted" && <><button className="button mini" onClick={() => { if (window.confirm(`${row.businessDate}を経理承認しますか？`)) void run(() => approveClosing(row.id, user), "店舗データを承認しました。"); }}>承認</button><button className="button danger mini" onClick={() => { const reason = window.prompt("差戻し理由を入力してください。"); if (reason) void run(() => returnClosing(row.id, reason, user), "店舗へ差し戻しました。"); }}>差戻し</button></>}</div></td></tr>).flatMap((row) => row)}</Table>
-      {expanded && <ClosingDetail closing={data.closings.find((row) => row.id === expanded)!} />}
-    </Card></div>;
+  const expandedClosing = data.closings.find((row) => row.id === expanded);
+  return <div className="grid">
+    <div className="grid metrics">
+      <Metric label="経理確認待ち" value={`${data.closings.filter((row) => row.status === "submitted").length}件`} />
+      <Metric label="承認済み" value={`${data.closings.filter((row) => row.status === "approved").length}件`} />
+      <Metric label="差戻し" value={`${data.closings.filter((row) => row.status === "returned").length}件`} />
+      <Metric label="当月承認売上" value={yen.format(data.closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(currentMonth())).reduce((sum, row) => sum + row.sales.totalSales, 0))} />
+    </div>
+    <Card title="店舗送信データの確認・承認" description="店舗データと現金照合を確認して承認または差戻しします。">
+      <Table headers={["営業日", "状態", "総売上", "経費・支払", "現金実在高", "差額", "操作"]}>
+        {data.closings.filter((row) => row.status !== "withdrawn").map((row) => <tr key={row.id}>
+          <td>{row.businessDate}</td>
+          <td><StatusPill tone={row.status === "approved" ? "good" : row.status === "returned" ? "danger" : "warn"}>{statusLabel[row.status]}</StatusPill></td>
+          <td>{yen.format(row.sales.totalSales)}</td>
+          <td>{yen.format(row.cash.expenseAndPaymentTotal)}</td>
+          <td>{yen.format(row.cash.actualClosingCash)}</td>
+          <td className={row.cash.difference ? "text-danger" : "text-good"}>{yen.format(row.cash.difference)}</td>
+          <td><div className="row-actions">
+            <button className="button secondary mini" disabled={busy} onClick={() => setExpanded(expanded === row.id ? "" : row.id)}>{expanded === row.id ? "閉じる" : "詳細"}</button>
+            {row.status === "submitted" && <button className="button mini" disabled={busy} onClick={() => { if (window.confirm(`${row.businessDate}を経理承認しますか？`)) void run(() => approveClosing(row.id, user), "店舗データを承認しました。"); }}>承認</button>}
+            {(row.status === "submitted" || row.status === "approved") && <button className="button danger mini" disabled={busy} onClick={() => {
+              if (row.status === "approved" && !window.confirm(`${row.businessDate}の承認を取り消して店舗へ差し戻しますか？\n再送・再承認されるまで、給与・経費・収支の月次集計から除外されます。`)) return;
+              const message = row.status === "approved" ? "承認後の差戻し理由を入力してください（500文字以内）。" : "差戻し理由を入力してください（500文字以内）。";
+              const reason = window.prompt(message);
+              if (reason) void run(() => returnClosing(row.id, reason, user), "店舗へ差し戻しました。");
+            }}>差戻し</button>}
+          </div></td>
+        </tr>)}
+      </Table>
+      {expandedClosing && <ClosingDetail closing={expandedClosing} />}
+      {expanded && !expandedClosing && <div className="notice error">対象データが更新されたため、最新データを読み込んでください。</div>}
+    </Card>
+  </div>;
 }
 
 function ClosingDetail({ closing }: { closing: DailyClosing }) {
-  return <div className="detail-panel"><div className="summaryetho"><div className="summary-strip"><span><small>現金売上</small><strong>{yen.format(closing.sales.cashSales)}</strong></span><span><small>カード売上</small><strong>{yen.format(closing.sales.cardSales)}</strong></span><span><small>計算上現金残額</small><strong>{yen.format(closing.cash.expectedClosingCash)}</strong></span><span><small>実在高</small><strong>{yen.format(closing.cash.actualClosingCash)}</strong></span></div></div><h3>キャスト日次データ</h3><Table headers={["名前", "勤務", "本指名/場内/同伴", "本指名売上", "場内延長売上", "酒代原価", "手当・控除"]}>{(closing.casts ?? []).map((row) => <tr key={row.posCastId}><td>{row.name}</td><td>{row.startTime}–{row.endTime}（{row.hours}h）</td><td>{row.honShimeiCount}/{row.banaiShimeiCount}/{row.dohanCount}</td><td>{yen.format(row.honShimeiSales)}</td><td>{yen.format(row.jonaiExtensionSales)}</td><td>{yen.format(row.liquorCost)}</td><td>{yen.format(row.beautyAllowance - row.dailyPayment - row.advancePayment - row.transportFee)}</td></tr>)}</Table><h3>スタッフ・ドライバー</h3><Table headers={["区分", "名前", "勤務・給与基準", "日払い"]}>{[...(closing.staffWork ?? []).map((row) => <tr key={`staff-${row.staffId}`}><td>{row.kind === "trial" ? "体入スタッフ" : "スタッフ"}</td><td>{row.name}</td><td>{row.startTime}–{row.endTime}（{row.hours}h）</td><td>{yen.format(row.dailyPayment)}</td></tr>), ...(closing.drivers ?? []).map((row) => <tr key={`driver-${row.driverId}`}><td>送迎ドライバー</td><td>{row.name}</td><td>日給 {yen.format(row.dailyRate)}</td><td>—</td></tr>)]}</Table><h3>当日経費</h3><Table headers={["勘定科目", "支払先", "金額"]}>{(closing.expenses ?? []).map((row) => <tr key={row.id}><td>{expenseLabels[row.category]}</td><td>{row.payee}</td><td>{yen.format(row.amount)}</td></tr>)}</Table></div>;
+  return <div className="detail-panel">{(closing.integrityIssues?.length || 0) > 0 && <div className="notice error"><strong>この営業日のデータが不完全です。</strong><ul>{closing.integrityIssues?.map((issue) => <li key={issue}>{issue}</li>)}</ul></div>}<div className="summaryetho"><div className="summary-strip"><span><small>現金売上</small><strong>{yen.format(closing.sales.cashSales)}</strong></span><span><small>カード売上</small><strong>{yen.format(closing.sales.cardSales)}</strong></span><span><small>計算上現金残額</small><strong>{yen.format(closing.cash.expectedClosingCash)}</strong></span><span><small>実在高</small><strong>{yen.format(closing.cash.actualClosingCash)}</strong></span></div></div><h3>キャスト日次データ</h3><Table headers={["名前", "勤務", "本指名/場内/同伴", "本指名売上", "場内延長売上", "酒代原価", "手当・控除"]}>{(closing.casts ?? []).map((row) => <tr key={row.posCastId}><td>{row.name}</td><td>{row.startTime}–{row.endTime}（{row.hours}h）</td><td>{row.honShimeiCount}/{row.banaiShimeiCount}/{row.dohanCount}</td><td>{yen.format(row.honShimeiSales)}</td><td>{yen.format(row.jonaiExtensionSales)}</td><td>{yen.format(row.liquorCost)}</td><td>{yen.format(row.beautyAllowance - row.dailyPayment - row.advancePayment - row.transportFee)}</td></tr>)}</Table><h3>スタッフ・ドライバー</h3><Table headers={["区分", "名前", "勤務・給与基準", "日払い"]}>{[...(closing.staffWork ?? []).map((row) => <tr key={`staff-${row.staffId}`}><td>{row.kind === "trial" ? "体入スタッフ" : "スタッフ"}</td><td>{row.name}</td><td>{row.startTime}–{row.endTime}（{row.hours}h）</td><td>{yen.format(row.dailyPayment)}</td></tr>), ...(closing.drivers ?? []).map((row) => <tr key={`driver-${row.driverId}`}><td>送迎ドライバー</td><td>{row.name}</td><td>日給 {yen.format(row.dailyRate)}</td><td>—</td></tr>)]}</Table><h3>当日経費</h3><Table headers={["勘定科目", "支払先", "金額"]}>{(closing.expenses ?? []).map((row) => <tr key={row.id}><td>{expenseLabels[row.category] || row.category || "科目未設定"}</td><td>{row.payee}</td><td>{yen.format(row.amount)}</td></tr>)}</Table></div>;
 }
 
 function MonthlyAccounting({ section, data, user, busy, run }: Props & { section: Exclude<Section, "approval"> }) {
@@ -74,15 +104,17 @@ type IntroRow = { id: string; introducer: string; cast: string; feeType: string;
 function introducerPayments(rewards: CastReward[], data: WorkspaceData, month: string): IntroRow[] {
   return rewards.filter((row) => row.introducer).map((row) => {
     const intro = row.introducer!;
-    const salesBase = intro.feeType.includes("netSales") || intro.feeType.includes("NetSales") ? Math.max(0, row.honShimeiSales - row.liquorCost) : row.honShimeiSales;
-    const salesFee = Math.floor(salesBase * 0.1);
+    const feeType = typeof intro.feeType === "string" ? intro.feeType : "";
+    const validFeeType = introducerFeeTypes.has(feeType);
+    const salesBase = validFeeType ? (feeType === "netSales10" || feeType === "higherNetSalesGross10" ? Math.max(0, row.honShimeiSales - row.liquorCost) : row.honShimeiSales) : 0;
+    const salesFee = validFeeType ? Math.floor(salesBase * 0.1) : 0;
     const grossFee = Math.floor(row.grossPay * 0.1);
-    let adopted = "売上10%"; let fee = salesFee;
-    if (intro.feeType === "gross10") { adopted = "総支給額10%"; fee = grossFee; }
-    if (["higherSalesGross10", "higherNetSalesGross10"].includes(intro.feeType)) { const grossWins = grossFee > salesFee; adopted = grossWins ? "総支給額10%" : "売上10%"; fee = Math.max(salesFee, grossFee); }
+    let adopted = validFeeType ? "売上10%" : "報酬形態未設定"; let fee = salesFee;
+    if (feeType === "gross10") { adopted = "総支給額10%"; fee = grossFee; }
+    if (["higherSalesGross10", "higherNetSalesGross10"].includes(feeType)) { const grossWins = grossFee > salesFee; adopted = grossWins ? "総支給額10%" : "売上10%"; fee = Math.max(salesFee, grossFee); }
     const member = data.casts.find((cast) => cast.id === row.id);
     const advisory = row.advisoryDays * intro.attendanceAdvisoryFee + (member?.hiredAt?.startsWith(month) ? intro.entryAdvisoryFee : 0);
-    return { id: `${intro.id}_${row.id}`, introducer: intro.name, cast: row.name, feeType: intro.feeType, salesBase, salesFee, grossBase: row.grossPay, grossFee, adopted, advisory, total: fee + advisory };
+    return { id: `${intro.id}_${row.id}`, introducer: intro.name, cast: row.name, feeType, salesBase, salesFee, grossBase: row.grossPay, grossFee, adopted, advisory, total: fee + advisory };
   });
 }
 function IntroducerPayments({ rows }: { rows: IntroRow[] }) { return <Card title="紹介者支払データ"><Table headers={["紹介者", "対象キャスト", "売上算定額", "売上10%", "総支給額", "総支給10%", "採用タイプ", "顧問料", "支払合計"]}>{rows.map((row) => <tr key={row.id}><td>{row.introducer}</td><td>{row.cast}</td><td>{yen.format(row.salesBase)}</td><td>{yen.format(row.salesFee)}</td><td>{yen.format(row.grossBase)}</td><td>{yen.format(row.grossFee)}</td><td>{row.adopted}</td><td>{yen.format(row.advisory)}</td><td><strong>{yen.format(row.total)}</strong></td></tr>)}</Table></Card>; }
@@ -103,6 +135,6 @@ function Expenses({ totals, adjustments, setAdjustments, deliveryAmount, total }
 
 function Balance({ sales, cast, introducer, staff, driver, expenses, totalCosts, days, warnings }: { sales: number; cast: number; introducer: number; staff: number; driver: number; expenses: number; totalCosts: number; days: number; warnings: string[] }) { return <div className="grid"><div className="grid metrics"><Metric label="合計売上" value={yen.format(sales)} /><Metric label="総支出" value={yen.format(totalCosts)} /><Metric label="収支" value={yen.format(sales - totalCosts)} /><Metric label="承認営業日" value={`${days}日`} /></div><Card title="収支データ"><Table headers={["区分", "金額"]}><tr><td>合計売上</td><td>{yen.format(sales)}</td></tr><tr><td>キャスト報酬</td><td>− {yen.format(cast)}</td></tr><tr><td>紹介者支払</td><td>− {yen.format(introducer)}</td></tr><tr><td>スタッフ給与</td><td>− {yen.format(staff)}</td></tr><tr><td>送迎ドライバー給与</td><td>− {yen.format(driver)}</td></tr><tr><td>経費</td><td>− {yen.format(expenses)}</td></tr><tr className="total-row"><td><strong>収支</strong></td><td><strong>{yen.format(sales - totalCosts)}</strong></td></tr></Table>{warnings.length === 0 && <div className="notice success top-gap">すべての承認済みデータから収支を算出しました。</div>}</Card></div>; }
 
-function accountingWarnings(rows: DailyClosing[]) { const warnings: string[] = []; rows.forEach((closing) => { if (closing.cash.difference !== 0) warnings.push(`${closing.businessDate}の現金照合に${yen.format(closing.cash.difference)}の差額があります。`); (closing.casts ?? []).filter((row) => row.kind === "regular" && row.hourlyRate <= 0).forEach((row) => warnings.push(`${closing.businessDate}・${row.name}の時給が未設定です。`)); }); return [...new Set(warnings)]; }
-function blankAdjustments(month: string, stored?: MonthlyAdjustments): MonthlyAdjustments { return stored ? { ...stored, withholdingByCast: stored.withholdingByCast || {}, staffSalesAllowance: stored.staffSalesAllowance || {}, staffBottleAllowance: stored.staffBottleAllowance || {}, driverRemoteAllowance: stored.driverRemoteAllowance || {}, fixedExpenses: stored.fixedExpenses || [], cardFee: stored.cardFee || 0 } : { month, withholdingByCast: {}, staffSalesAllowance: {}, staffBottleAllowance: {}, driverRemoteAllowance: {}, fixedExpenses: [], cardFee: 0 }; }
+function accountingWarnings(rows: DailyClosing[]) { const warnings: string[] = []; rows.forEach((closing) => { (closing.integrityIssues ?? []).forEach((issue) => warnings.push(`${closing.businessDate || closing.id}: ${issue}`)); if (closing.cash.difference !== 0) warnings.push(`${closing.businessDate}の現金照合に${yen.format(closing.cash.difference)}の差額があります。`); (closing.casts ?? []).filter((row) => row.kind === "regular" && row.hourlyRate <= 0).forEach((row) => warnings.push(`${closing.businessDate}・${row.name}の時給が未設定です。`)); (closing.casts ?? []).filter((row) => row.introducer && !introducerFeeTypes.has(String(row.introducer.feeType || ""))).forEach((row) => warnings.push(`${closing.businessDate}・${row.name}の紹介者報酬形態が未設定です。`)); }); return [...new Set(warnings)]; }
+function blankAdjustments(month: string, stored?: MonthlyAdjustments): MonthlyAdjustments { return stored ? { ...stored, withholdingByCast: stored.withholdingByCast || {}, staffSalesAllowance: stored.staffSalesAllowance || {}, staffBottleAllowance: stored.staffBottleAllowance || {}, driverRemoteAllowance: stored.driverRemoteAllowance || {}, fixedExpenses: Array.isArray(stored.fixedExpenses) ? stored.fixedExpenses : Object.values(stored.fixedExpenses || {}), cardFee: stored.cardFee || 0 } : { month, withholdingByCast: {}, staffSalesAllowance: {}, staffBottleAllowance: {}, driverRemoteAllowance: {}, fixedExpenses: [], cardFee: 0 }; }
 function Metric({ label, value }: { label: string; value: string }) { return <div className="card metric-card"><small>{label}</small><strong>{value}</strong></div>; }

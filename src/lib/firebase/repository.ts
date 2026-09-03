@@ -3,7 +3,7 @@
 import { get, remove, set, update, ref } from "firebase/database";
 import type { User } from "firebase/auth";
 import { database, rootRef } from "./client";
-import { normalizeDailyClosing } from "@/domain/gms";
+import { normalizeDailyClosing, normalizeMonthlyAdjustments } from "@/domain/gms";
 import type {
   CastRecord,
   DailyClosing,
@@ -51,14 +51,14 @@ export async function loadWorkspaceData(role?: Role): Promise<WorkspaceData> {
   ]);
   const configValue = (config.val() || {}) as Record<string, unknown>;
   return {
-    casts: asArray<CastRecord>(casts.val()).sort((a, b) => a.name.localeCompare(b.name, "ja")),
-    staff: asArray<StaffRecord>(staff.val()).sort((a, b) => a.name.localeCompare(b.name, "ja")),
-    drivers: asArray<DriverRecord>(drivers.val()).sort((a, b) => a.name.localeCompare(b.name, "ja")),
-    introducers: asArray<IntroducerRecord>(introducers.val()).sort((a, b) => a.name.localeCompare(b.name, "ja")),
-    liquor: asArray<LiquorRecord>(liquor.val()).sort((a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name, "ja")),
+    casts: asArray<CastRecord>(casts.val()).sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ja")),
+    staff: asArray<StaffRecord>(staff.val()).sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ja")),
+    drivers: asArray<DriverRecord>(drivers.val()).sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ja")),
+    introducers: asArray<IntroducerRecord>(introducers.val()).sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ja")),
+    liquor: asArray<LiquorRecord>(liquor.val()).sort((a, b) => String(a.kind || "").localeCompare(String(b.kind || "")) || String(a.name || "").localeCompare(String(b.name || ""), "ja")),
     closings: asArray<DailyClosing>(closings.val()).map(normalizeDailyClosing).sort((a, b) => b.businessDate.localeCompare(a.businessDate)),
     adjustments: Object.entries((adjustments?.val() || {}) as Record<string, Omit<MonthlyAdjustments, "month">>)
-      .map(([month, row]) => ({ month, ...row })),
+      .map(([month, row]) => normalizeMonthlyAdjustments({ month, ...row } as MonthlyAdjustments)),
     cashFloat: Number(configValue.cashFloat ?? 200000)
   };
 }
@@ -177,13 +177,13 @@ export async function submitClosing(value: DailyClosing, user: User) {
   if (duplicate) throw new Error(`${duplicate.businessDate}に同じPOS JSONが送信済みです。`);
   const existing = (await get(rootRef(`history/${value.id}`))).val() as DailyClosing | null;
   if (existing?.status === "approved") throw new Error("承認済みデータは店舗側から変更できません。");
-  await set(rootRef(`history/${value.id}`), clean({ ...value, status: "submitted", returnReason: null, submittedAt: now(), submittedBy: user.uid, updatedAt: now() }));
+  await set(rootRef(`history/${value.id}`), clean({ ...value, status: "submitted", approvedAt: null, approvedBy: null, returnReason: null, submittedAt: now(), submittedBy: user.uid, updatedAt: now() }));
 }
 export async function withdrawClosing(id: string, user: User) {
   await requireUser(user, ["shop", "op"]);
   const existing = (await get(rootRef(`history/${id}`))).val() as DailyClosing | null;
   if (!existing || !["submitted", "returned"].includes(existing.status)) throw new Error("このデータは取り下げできません。");
-  await update(rootRef(`history/${id}`), { status: "withdrawn", withdrawnAt: now(), updatedAt: now() });
+  await update(rootRef(`history/${id}`), { status: "withdrawn", approvedAt: null, approvedBy: null, withdrawnAt: now(), updatedAt: now() });
 }
 export async function approveClosing(id: string, user: User) {
   await requireUser(user, ["accounting", "op"]);
@@ -193,10 +193,20 @@ export async function approveClosing(id: string, user: User) {
 }
 export async function returnClosing(id: string, reason: string, user: User) {
   await requireUser(user, ["accounting", "op"]);
-  if (!reason.trim()) throw new Error("差戻し理由を入力してください。");
+  const normalizedReason = reason.trim();
+  if (!normalizedReason) throw new Error("差戻し理由を入力してください。");
+  if (normalizedReason.length > 500) throw new Error("差戻し理由は500文字以内で入力してください。");
   const existing = (await get(rootRef(`history/${id}`))).val() as DailyClosing | null;
-  if (!existing || existing.status !== "submitted") throw new Error("経理確認待ちのデータだけ差し戻せます。");
-  await update(rootRef(`history/${id}`), { status: "returned", returnedAt: now(), returnReason: reason.trim(), updatedAt: now() });
+  if (!existing || !["submitted", "approved"].includes(existing.status)) throw new Error("経理確認待ちまたは承認済みのデータだけ差し戻せます。");
+  const returnedAt = now();
+  await update(rootRef(`history/${id}`), {
+    status: "returned",
+    returnedAt,
+    returnedBy: user.uid,
+    returnedFromStatus: existing.status,
+    returnReason: normalizedReason,
+    updatedAt: returnedAt,
+  });
 }
 
 export async function saveMonthlyAdjustments(value: MonthlyAdjustments, user: User) {

@@ -8,6 +8,7 @@ import {
   hoursBetweenQuarter,
   isCastMappingComplete,
   normalizeDailyClosing,
+  normalizeMonthlyAdjustments,
   parsePosClosingV3,
   posCastReferences,
   requiresBottleCost,
@@ -66,6 +67,11 @@ describe("GMS報酬・日次計算", () => {
   });
 
   it("Firebaseで消えた空配列を復元して経理集計を継続する", () => {
+    const snapshot = pos();
+    const itemWithoutEmptyArrays = { ...snapshot.transactions[0].items[0] } as Record<string, unknown>;
+    delete itemWithoutEmptyArrays.backTargetCastIds;
+    delete itemWithoutEmptyArrays.backTargetCastNames;
+    delete itemWithoutEmptyArrays.banaiExtCastIds;
     const rows = buildDailyCasts(pos(), {
       p1: { masterId: "c1", name: "花子", kind: "regular", hourlyRate: 3000 },
       p2: { masterId: "c2", name: "春子", kind: "regular", hourlyRate: 3000 }
@@ -81,7 +87,14 @@ describe("GMS報酬・日次計算", () => {
       }),
       staffWork: undefined,
       drivers: undefined,
-      expenses: undefined
+      expenses: undefined,
+      posSnapshot: {
+        ...snapshot,
+        transactions: [{
+          ...snapshot.transactions[0],
+          items: [itemWithoutEmptyArrays, ...snapshot.transactions[0].items.slice(1)]
+        }]
+      }
     } as unknown as DailyClosing;
 
     const normalized = normalizeDailyClosing(stored);
@@ -92,8 +105,38 @@ describe("GMS報酬・日次計算", () => {
     expect(normalized.casts.every((row) => Array.isArray(row.bottles))).toBe(true);
     expect(normalized.casts[0].bottles).toHaveLength(1);
     expect(normalized.casts[1].bottles).toEqual([]);
+    expect(normalized.posSnapshot.transactions[0].items[0].backTargetCastIds).toEqual([]);
+    expect(normalized.posSnapshot.transactions[0].items[0].backTargetCastNames).toEqual([]);
+    expect(normalized.posSnapshot.transactions[0].items[0].banaiExtCastIds).toEqual([]);
+    expect(normalized.sales).toEqual({ totalSales: 0, cashSales: 0, cardSales: 0 });
+    expect(normalized.cash.difference).toBe(0);
+    expect(normalized.integrityIssues).toEqual(expect.arrayContaining([
+      "売上データが不完全です。店舗送信データを確認してください。",
+      "現金照合データが不完全です。店舗送信データを確認してください。",
+    ]));
     expect(() => calculateCastRewards([stored], [], "2026-09")).not.toThrow();
     expect(() => calculateCastRewards([normalized], [], "2026-09")).not.toThrow();
+  });
+
+  it("Firebaseの月次調整オブジェクトを安全な配列と金額マップへ復元する", () => {
+    const normalized = normalizeMonthlyAdjustments({
+      month: "2026-09",
+      withholdingByCast: { c1: 1234 },
+      staffSalesAllowance: undefined,
+      staffBottleAllowance: undefined,
+      driverRemoteAllowance: undefined,
+      fixedExpenses: {
+        0: { id: "fixed-1", account: "家賃", amount: 100000 },
+      },
+      cardFee: undefined,
+    } as unknown as Parameters<typeof normalizeMonthlyAdjustments>[0]);
+
+    expect(normalized.withholdingByCast).toEqual({ c1: 1234 });
+    expect(normalized.staffSalesAllowance).toEqual({});
+    expect(normalized.fixedExpenses).toEqual([
+      { id: "fixed-1", account: "家賃", amount: 100000 },
+    ]);
+    expect(normalized.cardFee).toBe(0);
   });
 
   it("POSの派遣区分を売上・商品参照で在籍へ上書きしない", () => {

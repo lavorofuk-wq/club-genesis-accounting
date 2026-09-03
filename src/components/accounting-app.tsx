@@ -1,6 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  Component,
+  type ErrorInfo,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   browserLocalPersistence,
   onAuthStateChanged,
@@ -38,6 +46,47 @@ type View =
   | "drivers"
   | "cash";
 type Notice = { kind: "error" | "success"; text: string } | null;
+
+type PageErrorBoundaryProps = {
+  children: ReactNode;
+  resetKey: string;
+  onRetry: () => void;
+};
+
+class PageErrorBoundary extends Component<
+  PageErrorBoundaryProps,
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidUpdate(previous: PageErrorBoundaryProps) {
+    if (this.state.hasError && previous.resetKey !== this.props.resetKey) {
+      this.setState({ hasError: false });
+    }
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("GMS page render error", error, info);
+  }
+
+  render() {
+    if (!this.state.hasError) return this.props.children;
+    return (
+      <Card title="このページの表示中に問題が発生しました">
+        <p>
+          読み込んだデータの一部を表示できませんでした。別のページへ移動するか、最新データを読み直してください。
+        </p>
+        <button className="button secondary" onClick={this.props.onRetry}>
+          最新データを読み直す
+        </button>
+      </Card>
+    );
+  }
+}
 
 const emptyData: WorkspaceData = {
   casts: [],
@@ -174,12 +223,14 @@ export function AccountingApp() {
   const [view, setView] = useState<View>("home");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
+  const [pageRevision, setPageRevision] = useState(0);
   const roleRef = useRef<Role | null>(null);
 
   const reload = useCallback(async () => {
     setBusy(true);
     try {
       setData(await loadWorkspaceData(roleRef.current || undefined));
+      setPageRevision((revision) => revision + 1);
     } catch (error) {
       setNotice({
         kind: "error",
@@ -212,6 +263,22 @@ export function AccountingApp() {
       }
     });
   }, [reload]);
+
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+    void navigator.serviceWorker
+      .getRegistrations()
+      .then((registrations) =>
+        Promise.all(registrations.map((registration) => registration.unregister())),
+      )
+      .catch((error) => console.warn("Legacy service worker cleanup failed", error));
+    if ("caches" in window) {
+      void caches
+        .keys()
+        .then((keys) => Promise.all(keys.map((key) => caches.delete(key))))
+        .catch((error) => console.warn("Legacy cache cleanup failed", error));
+    }
+  }, []);
 
   if (!authReady)
     return (
@@ -267,6 +334,9 @@ export function AccountingApp() {
       "balance",
     ] as View[]
   ).includes(view);
+  const integrityIssueCount = data.closings.filter(
+    (row) => (row.integrityIssues?.length || 0) > 0,
+  ).length;
 
   return (
     <div className="app-shell">
@@ -311,7 +381,7 @@ export function AccountingApp() {
           </StatusPill>
           <small>{user.email}</small>
           <small>
-            Ver2.3.4 ·{" "}
+            Ver2.4.0 ·{" "}
             {role === "shop" ? "店舗" : role === "accounting" ? "経理" : "OP"}
           </small>
           <button className="button secondary" onClick={() => signOut(auth)}>
@@ -338,55 +408,65 @@ export function AccountingApp() {
           </div>
         </header>
         {notice && <div className={`notice ${notice.kind}`}>{notice.text}</div>}
-        {!permitted ? (
+        {integrityIssueCount > 0 && (
           <div className="notice error">
-            このフォームへアクセスする権限がありません。
+            読込データが不完全な営業日が{integrityIssueCount}件あります。対象日の詳細と店舗送信データを確認してください。
           </div>
-        ) : (
-          <>
-            {view === "home" && (
-              <Dashboard data={data} role={role} onNavigate={setView} />
-            )}
-            {view === "store" && (
-              <StoreWork data={data} user={user} busy={busy} run={run} />
-            )}
-            {commonSection && (
-              <CommonForms
-                section={
-                  view as
-                    | "casts"
-                    | "staff"
-                    | "drivers"
-                    | "introducers"
-                    | "liquor"
-                    | "cash"
-                }
-                data={data}
-                user={user}
-                busy={busy}
-                run={run}
-              />
-            )}
-            {accountingSection && (
-              <AccountingForms
-                section={
-                  (view === "introducersPay" ? "introducers" : view) as
-                    | "approval"
-                    | "castRewards"
-                    | "introducers"
-                    | "staffPayroll"
-                    | "driverPayroll"
-                    | "expenses"
-                    | "balance"
-                }
-                data={data}
-                user={user}
-                busy={busy}
-                run={run}
-              />
-            )}
-          </>
         )}
+        <PageErrorBoundary
+          resetKey={`${view}:${pageRevision}`}
+          onRetry={() => void reload()}
+        >
+          {!permitted ? (
+            <div className="notice error">
+              このフォームへアクセスする権限がありません。
+            </div>
+          ) : (
+            <>
+              {view === "home" && (
+                <Dashboard data={data} role={role} onNavigate={setView} />
+              )}
+              {view === "store" && (
+                <StoreWork data={data} user={user} busy={busy} run={run} />
+              )}
+              {commonSection && (
+                <CommonForms
+                  section={
+                    view as
+                      | "casts"
+                      | "staff"
+                      | "drivers"
+                      | "introducers"
+                      | "liquor"
+                      | "cash"
+                  }
+                  data={data}
+                  user={user}
+                  busy={busy}
+                  run={run}
+                />
+              )}
+              {accountingSection && (
+                <AccountingForms
+                  section={
+                    (view === "introducersPay" ? "introducers" : view) as
+                      | "approval"
+                      | "castRewards"
+                      | "introducers"
+                      | "staffPayroll"
+                      | "driverPayroll"
+                      | "expenses"
+                      | "balance"
+                  }
+                  data={data}
+                  user={user}
+                  busy={busy}
+                  run={run}
+                />
+              )}
+            </>
+          )}
+        </PageErrorBoundary>
       </main>
     </div>
   );
@@ -418,7 +498,7 @@ function Login() {
           <span>CLUB GENESIS</span>
           <strong>GMS</strong>
           <p>GENESIS Management System</p>
-          <small>Ver2.3.4</small>
+          <small>Ver2.4.0</small>
         </div>
         <div className="stack">
           <label className="field">
