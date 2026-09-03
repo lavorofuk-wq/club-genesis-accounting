@@ -1,0 +1,126 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "users": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": false
+      }
+    },
+    "accounting": {
+      "casts": {
+        ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+        "$id": {
+          ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+          ".validate": "!newData.exists() || (newData.hasChildren(['name', 'legalName', 'status', 'createdAt', 'updatedAt']) && newData.child('name').isString() && newData.child('legalName').isString() && (newData.child('status').val() === 'active' || newData.child('status').val() === 'trial' || newData.child('status').val() === 'departed'))"
+        }
+      },
+      "staff": {
+        ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+        "$id": {
+          ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+          ".validate": "!newData.exists() || (newData.hasChildren(['name', 'status', 'createdAt', 'updatedAt']) && newData.child('name').isString() && (newData.child('status').val() === 'active' || newData.child('status').val() === 'trial' || newData.child('status').val() === 'departed'))"
+        }
+      },
+      "drivers": {
+        ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+        "$id": {
+          ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+          ".validate": "!newData.exists() || (newData.hasChildren(['name', 'status', 'hiredAt', 'dailyRate', 'createdAt', 'updatedAt']) && newData.child('name').isString() && (newData.child('status').val() === 'active' || newData.child('status').val() === 'departed') && newData.child('dailyRate').isNumber() && newData.child('dailyRate').val() >= 0)"
+        }
+      },
+      "introducers": {
+        ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+        "$id": {
+          ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+          ".validate": "!newData.exists() || (newData.hasChildren(['name', 'feeType', 'createdAt', 'updatedAt']) && newData.child('name').isString() && (newData.child('feeType').val() === 'sales10' || newData.child('feeType').val() === 'netSales10' || newData.child('feeType').val() === 'gross10' || newData.child('feeType').val() === 'higherSalesGross10' || newData.child('feeType').val() === 'higherNetSalesGross10'))"
+        }
+      },
+      "liquorCosts": {
+        ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+        "$id": {
+          ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+          ".validate": "!newData.exists() || (newData.hasChildren(['name', 'kind', 'salePrice', 'costPrice', 'createdAt', 'updatedAt']) && newData.child('name').isString() && (newData.child('kind').val() === 'champagneWine' || newData.child('kind').val() === 'keepBottle') && newData.child('salePrice').isNumber() && newData.child('salePrice').val() >= 0 && newData.child('costPrice').isNumber() && newData.child('costPrice').val() >= 0)"
+        }
+      },
+      "config": {
+        ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+        "cashFloat": {
+          ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+          ".validate": "newData.isNumber() && newData.val() >= 0"
+        }
+      },
+      "history": {
+        ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+        "$id": {
+          ".write": "auth != null && (((root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'op') && ((!data.exists() && newData.child('status').val() === 'submitted' && newData.child('submittedBy').val() === auth.uid) || (data.child('status').val() === 'submitted' && newData.child('status').val() === 'withdrawn') || (data.child('status').val() === 'returned' && (newData.child('status').val() === 'submitted' || newData.child('status').val() === 'withdrawn')) || (data.child('status').val() === 'withdrawn' && newData.child('status').val() === 'submitted'))) || ((root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op') && data.exists() && data.child('status').val() === 'submitted' && (newData.child('status').val() === 'approved' || newData.child('status').val() === 'returned')))",
+          ".validate": "newData.hasChildren(['businessDate', 'status', 'submissionId', 'checksum', 'sales', 'cash', 'posSnapshot', 'updatedAt']) && (newData.child('status').val() === 'submitted' || newData.child('status').val() === 'withdrawn' || newData.child('status').val() === 'approved' || newData.child('status').val() === 'returned') && (!data.exists() || (newData.child('status').val() !== 'approved' && newData.child('status').val() !== 'returned') || (newData.child('businessDate').val() === data.child('businessDate').val() && newData.child('submissionId').val() === data.child('submissionId').val() && newData.child('checksum').val() === data.child('checksum').val() && newData.child('sales').val() === data.child('sales').val() && newData.child('customers').val() === data.child('customers').val() && newData.child('nominations').val() === data.child('nominations').val() && newData.child('casts').val() === data.child('casts').val() && newData.child('staffWork').val() === data.child('staffWork').val() && newData.child('drivers').val() === data.child('drivers').val() && newData.child('expenses').val() === data.child('expenses').val() && newData.child('staffDailyPaymentTotal').val() === data.child('staffDailyPaymentTotal').val() && newData.child('dispatchStaffPayment').val() === data.child('dispatchStaffPayment').val() && newData.child('dispatchCastPayment').val() === data.child('dispatchCastPayment').val() && newData.child('dispatchFee').val() === data.child('dispatchFee').val() && newData.child('liquorDeliveryAmount').val() === data.child('liquorDeliveryAmount').val() && newData.child('cash').val() === data.child('cash').val() && newData.child('posSnapshot').val() === data.child('posSnapshot').val() && newData.child('submittedAt').val() === data.child('submittedAt').val() && newData.child('submittedBy').val() === data.child('submittedBy').val()))"
+        }
+      },
+      "accountingAdjustments": {
+        ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+        "$month": {
+          ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')"
+        }
+      }
+    },
+    "accounting-dev": {
+      "casts": {
+        ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+        "$id": {
+          ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+          ".validate": "!newData.exists() || (newData.hasChildren(['name', 'legalName', 'status', 'createdAt', 'updatedAt']) && newData.child('name').isString() && newData.child('legalName').isString() && (newData.child('status').val() === 'active' || newData.child('status').val() === 'trial' || newData.child('status').val() === 'departed'))"
+        }
+      },
+      "staff": {
+        ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+        "$id": {
+          ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+          ".validate": "!newData.exists() || (newData.hasChildren(['name', 'status', 'createdAt', 'updatedAt']) && newData.child('name').isString() && (newData.child('status').val() === 'active' || newData.child('status').val() === 'trial' || newData.child('status').val() === 'departed'))"
+        }
+      },
+      "drivers": {
+        ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+        "$id": {
+          ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+          ".validate": "!newData.exists() || (newData.hasChildren(['name', 'status', 'hiredAt', 'dailyRate', 'createdAt', 'updatedAt']) && newData.child('name').isString() && (newData.child('status').val() === 'active' || newData.child('status').val() === 'departed') && newData.child('dailyRate').isNumber() && newData.child('dailyRate').val() >= 0)"
+        }
+      },
+      "introducers": {
+        ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+        "$id": {
+          ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+          ".validate": "!newData.exists() || (newData.hasChildren(['name', 'feeType', 'createdAt', 'updatedAt']) && newData.child('name').isString() && (newData.child('feeType').val() === 'sales10' || newData.child('feeType').val() === 'netSales10' || newData.child('feeType').val() === 'gross10' || newData.child('feeType').val() === 'higherSalesGross10' || newData.child('feeType').val() === 'higherNetSalesGross10'))"
+        }
+      },
+      "liquorCosts": {
+        ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+        "$id": {
+          ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+          ".validate": "!newData.exists() || (newData.hasChildren(['name', 'kind', 'salePrice', 'costPrice', 'createdAt', 'updatedAt']) && newData.child('name').isString() && (newData.child('kind').val() === 'champagneWine' || newData.child('kind').val() === 'keepBottle') && newData.child('salePrice').isNumber() && newData.child('salePrice').val() >= 0 && newData.child('costPrice').isNumber() && newData.child('costPrice').val() >= 0)"
+        }
+      },
+      "config": {
+        ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+        "cashFloat": {
+          ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+          ".validate": "newData.isNumber() && newData.val() >= 0"
+        }
+      },
+      "history": {
+        ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+        "$id": {
+          ".write": "auth != null && (((root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'op') && ((!data.exists() && newData.child('status').val() === 'submitted' && newData.child('submittedBy').val() === auth.uid) || (data.child('status').val() === 'submitted' && newData.child('status').val() === 'withdrawn') || (data.child('status').val() === 'returned' && (newData.child('status').val() === 'submitted' || newData.child('status').val() === 'withdrawn')) || (data.child('status').val() === 'withdrawn' && newData.child('status').val() === 'submitted'))) || ((root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op') && data.exists() && data.child('status').val() === 'submitted' && (newData.child('status').val() === 'approved' || newData.child('status').val() === 'returned')))",
+          ".validate": "newData.hasChildren(['businessDate', 'status', 'submissionId', 'checksum', 'sales', 'cash', 'posSnapshot', 'updatedAt']) && (newData.child('status').val() === 'submitted' || newData.child('status').val() === 'withdrawn' || newData.child('status').val() === 'approved' || newData.child('status').val() === 'returned') && (!data.exists() || (newData.child('status').val() !== 'approved' && newData.child('status').val() !== 'returned') || (newData.child('businessDate').val() === data.child('businessDate').val() && newData.child('submissionId').val() === data.child('submissionId').val() && newData.child('checksum').val() === data.child('checksum').val() && newData.child('sales').val() === data.child('sales').val() && newData.child('customers').val() === data.child('customers').val() && newData.child('nominations').val() === data.child('nominations').val() && newData.child('casts').val() === data.child('casts').val() && newData.child('staffWork').val() === data.child('staffWork').val() && newData.child('drivers').val() === data.child('drivers').val() && newData.child('expenses').val() === data.child('expenses').val() && newData.child('staffDailyPaymentTotal').val() === data.child('staffDailyPaymentTotal').val() && newData.child('dispatchStaffPayment').val() === data.child('dispatchStaffPayment').val() && newData.child('dispatchCastPayment').val() === data.child('dispatchCastPayment').val() && newData.child('dispatchFee').val() === data.child('dispatchFee').val() && newData.child('liquorDeliveryAmount').val() === data.child('liquorDeliveryAmount').val() && newData.child('cash').val() === data.child('cash').val() && newData.child('posSnapshot').val() === data.child('posSnapshot').val() && newData.child('submittedAt').val() === data.child('submittedAt').val() && newData.child('submittedBy').val() === data.child('submittedBy').val()))"
+        }
+      },
+      "accountingAdjustments": {
+        ".read": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
+        "$month": {
+          ".write": "auth != null && (root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')"
+        }
+      }
+    }
+  }
+}
