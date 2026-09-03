@@ -276,6 +276,29 @@ export type DailyClosing = {
   updatedAt: string;
 };
 
+function storedList<T>(value: unknown): T[] {
+  const rows = Array.isArray(value)
+    ? value
+    : value && typeof value === "object"
+      ? Object.values(value as Record<string, T>)
+      : [];
+  return rows.filter((row): row is T => row !== null && row !== undefined);
+}
+
+/** Realtime Databaseで保存時に消える空配列を、読込境界で復元する。 */
+export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
+  return {
+    ...value,
+    casts: storedList<DailyCast>(value.casts).map((row) => ({
+      ...row,
+      bottles: storedList<BottleAllocation>(row.bottles),
+    })),
+    staffWork: storedList<DailyStaffWork>(value.staffWork),
+    drivers: storedList<DailyDriverWork>(value.drivers),
+    expenses: storedList<DailyExpense>(value.expenses),
+  };
+}
+
 export type MonthlyAdjustments = {
   month: string;
   withholdingByCast: Record<string, number>;
@@ -442,7 +465,12 @@ export function posCastReferences(closing: PosClosingV3) {
     const key = String(id || "");
     if (!key) return;
     const previous = rows.get(key);
-    rows.set(key, { id: key, name: String(name || previous?.name || ""), kind: previous?.kind === "trial" ? "trial" : kind });
+    rows.set(key, {
+      id: key,
+      name: String(name || previous?.name || ""),
+      // castSalesや商品明細から同じ人物が再登場しても、勤務データの体入・派遣区分を失わない。
+      kind: previous && kind === "regular" ? previous.kind : kind
+    });
   };
   closing.castWork.forEach((row) => add(row.castId, row.castName, row.castType));
   closing.castSales.forEach((row) => add(row.castId, row.castName));
@@ -452,6 +480,28 @@ export function posCastReferences(closing: PosClosingV3) {
     item.banaiExtCastIds.forEach((id) => add(id, ""));
   }));
   return [...rows.values()];
+}
+
+export function canMapAsDispatch(kind: CastKind) {
+  return kind === "trial" || kind === "dispatch";
+}
+
+export function isCastMappingComplete(
+  references: ReturnType<typeof posCastReferences>,
+  mapping: Record<string, string>
+) {
+  return references.every((source) => {
+    const selected = mapping[source.id];
+    if (selected === "dispatch") return canMapAsDispatch(source.kind);
+    if (source.kind === "dispatch") return false;
+    return Boolean(selected);
+  });
+}
+
+export function requiresBottleCost(item: PosItem, mapping: Record<string, string>) {
+  return ["champagneWine", "keepBottle"].includes(item.category)
+    && asNumber(item.price) * asNumber(item.quantity) > 0
+    && item.backTargetCastIds.some((id) => mapping[id] !== "dispatch");
 }
 
 function dohanBack(transaction: PosTransaction) {
@@ -470,7 +520,9 @@ export function buildDailyCasts(
 ) {
   const sales = new Map(closing.castSales.map((row) => [row.castId, row]));
   const work = new Map(closing.castWork.map((row) => [row.castId, row]));
-  return posCastReferences(closing).filter((source) => source.kind !== "dispatch").map((source): DailyCast => {
+  return posCastReferences(closing)
+    .filter((source) => source.kind !== "dispatch" && mapping[source.id]?.kind !== "dispatch")
+    .map((source): DailyCast => {
     const target = mapping[source.id];
     const shift = work.get(source.id);
     const sale = sales.get(source.id);
@@ -532,7 +584,7 @@ export function buildDailyCasts(
       transportFee: 0,
       introducer: target?.introducer
     };
-  });
+    });
 }
 
 function bottleBack(rows: BottleAllocation[]) {
@@ -559,7 +611,7 @@ export function calculateCastRewards(
     return row.masterId || row.posCastId;
   };
   const grouped = new Map<string, { businessDate: string; row: DailyCast }[]>();
-  approved.forEach((closing) => closing.casts.forEach((row) => {
+  approved.forEach((closing) => (closing.casts ?? []).forEach((row) => {
     const key = identity(row);
     grouped.set(key, [...(grouped.get(key) || []), { businessDate: closing.businessDate, row }]);
   }));
@@ -578,7 +630,7 @@ export function calculateCastRewards(
     const honShimeiBack = trialOnly ? 0 : floorHundred(sum("honShimeiCount") * 1000);
     const banaiShimeiBack = trialOnly ? 0 : floorHundred(sum("banaiShimeiCount") * 500);
     const totalDohanBack = trialOnly ? 0 : floorHundred(sum("dohanBack"));
-    const totalBottleBack = trialOnly ? 0 : bottleBack(rows.flatMap((row) => row.bottles));
+    const totalBottleBack = trialOnly ? 0 : bottleBack(rows.flatMap((row) => row.bottles ?? []));
     const drinkBack = trialOnly ? 0 : floorHundred(sum("drinkSales") * 0.1);
     const hourlyAndBack = floorHundred(hourlyPay + honShimeiBack + banaiShimeiBack + totalDohanBack + totalBottleBack + drinkBack);
     const salesRewardBase = trialOnly ? 0 : floorHundred(Math.max(0, honShimeiSales + jonaiExtensionSales - liquorCost * 0.5));
