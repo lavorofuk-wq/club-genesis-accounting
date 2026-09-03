@@ -1,4 +1,4 @@
-# GMS Ver2.3 アーキテクチャ
+# GMS Ver2.3.1 アーキテクチャ
 
 ## 実行環境
 
@@ -6,6 +6,8 @@
 - Firebase Authentication（メールアドレス＋パスワード）
 - Firebase Realtime Database
 - Vercel（`main` は本番、`dev` はプレビュー）
+
+FirebaseプロジェクトはGMS専用の `club-genesis-gms` を使用する。
 
 Firebaseの保存ルートはホスト名で切り替える。本番の
 `club-genesis-accounting.vercel.app` だけが `accounting`、それ以外は
@@ -17,8 +19,8 @@ Firebaseの保存ルートはホスト名で切り替える。本番の
 - `accounting`: 経理作業、共通フォーム
 - `op`: 店舗作業、経理作業、共通フォーム
 
-権限はFirebaseのカスタムクレーム `role`、または
-`users/{uid}/role` で管理する。Realtime Databaseルールでも同じ権限を検査する。
+権限はFirebase Realtime Databaseの `users/{uid}/role` で一元管理する。
+Realtime Databaseルールでも同じ値を検査し、古い権限が残らないようにする。
 
 ## 主要データ
 
@@ -37,4 +39,3 @@ Firebaseの保存ルートはホスト名で切り替える。本番の
 
 `submitted`（店舗送信）→ `approved`（経理承認）または `returned`（差戻し）。
 店舗は承認前のデータを `withdrawn` にして再編集できる。
-

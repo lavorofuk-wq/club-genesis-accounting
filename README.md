@@ -2,6 +2,8 @@
 
 CLUB GENESISの店舗日次締め、共通マスター、経理承認、月次給与・経費・収支を管理するシステム。
 
+Firebaseプロジェクト: `club-genesis-gms`
+
 ## ローカル起動
 
 1. `.env.example` を `.env.local` にコピーし、Firebase Web Appの値を設定する。
@@ -19,4 +21,3 @@ CLUB GENESISの店舗日次締め、共通マスター、経理承認、月次�
 Firebase Authenticationでメール／パスワードを有効にし、各ユーザーの
 `users/{uid}/role` に `shop`、`accounting`、`op` のいずれかを設定する。
 本番運用前に `database.rules.json` を対象Firebaseプロジェクトへ反映する。
-

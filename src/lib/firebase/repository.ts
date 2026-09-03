@@ -36,9 +36,6 @@ async function requireUser(user: User, roles?: Role[]) {
 }
 
 export async function userRole(user: User): Promise<Role> {
-  const token = await user.getIdTokenResult();
-  const claim = String(token.claims.role || "");
-  if (claim === "shop" || claim === "accounting" || claim === "op") return claim;
   const snapshot = await get(ref(database, `users/${user.uid}/role`));
   const role = String(snapshot.val() || "");
   if (role === "shop" || role === "accounting" || role === "op") return role;
@@ -61,7 +58,7 @@ export async function loadWorkspaceData(role?: Role): Promise<WorkspaceData> {
     closings: asArray<DailyClosing>(closings.val()).sort((a, b) => b.businessDate.localeCompare(a.businessDate)),
     adjustments: Object.entries((adjustments?.val() || {}) as Record<string, Omit<MonthlyAdjustments, "month">>)
       .map(([month, row]) => ({ month, ...row })),
-    cashFloat: Number(configValue.cashFloat || 200000)
+    cashFloat: Number(configValue.cashFloat ?? 200000)
   };
 }
 
@@ -189,11 +186,15 @@ export async function withdrawClosing(id: string, user: User) {
 }
 export async function approveClosing(id: string, user: User) {
   await requireUser(user, ["accounting", "op"]);
+  const existing = (await get(rootRef(`history/${id}`))).val() as DailyClosing | null;
+  if (!existing || existing.status !== "submitted") throw new Error("経理確認待ちのデータだけ承認できます。");
   await update(rootRef(`history/${id}`), { status: "approved", approvedAt: now(), approvedBy: user.uid, returnReason: null, updatedAt: now() });
 }
 export async function returnClosing(id: string, reason: string, user: User) {
   await requireUser(user, ["accounting", "op"]);
   if (!reason.trim()) throw new Error("差戻し理由を入力してください。");
+  const existing = (await get(rootRef(`history/${id}`))).val() as DailyClosing | null;
+  if (!existing || existing.status !== "submitted") throw new Error("経理確認待ちのデータだけ差し戻せます。");
   await update(rootRef(`history/${id}`), { status: "returned", returnedAt: now(), returnReason: reason.trim(), updatedAt: now() });
 }
 
