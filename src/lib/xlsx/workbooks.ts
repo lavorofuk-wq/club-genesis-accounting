@@ -14,7 +14,7 @@ const thinBorder: Partial<ExcelJS.Borders> = {
 
 function workbook() {
   const book = new ExcelJS.Workbook();
-  book.creator = "GENESIS Management System Ver2.3.3";
+  book.creator = "GENESIS Management System Ver2.3.4";
   book.created = new Date();
   return book;
 }

@@ -7,6 +7,7 @@ import {
   floorHundred,
   hoursBetweenQuarter,
   isCastMappingComplete,
+  normalizeDailyClosing,
   parsePosClosingV3,
   posCastReferences,
   requiresBottleCost,
@@ -62,6 +63,37 @@ describe("GMS報酬・日次計算", () => {
     expect(rows[0].bottles[0].salesAmount).toBe(15000);
     expect(rows[0].bottles[0].costAmount).toBe(5000);
     expect(rows[0].dohanBack).toBe(5000);
+  });
+
+  it("Firebaseで消えた空配列を復元して経理集計を継続する", () => {
+    const rows = buildDailyCasts(pos(), {
+      p1: { masterId: "c1", name: "花子", kind: "regular", hourlyRate: 3000 },
+      p2: { masterId: "c2", name: "春子", kind: "regular", hourlyRate: 3000 }
+    }, [{ id: "l1", kind: "champagneWine", name: "テストシャンパン", salePrice: 30000, costPrice: 10000, createdAt: "", updatedAt: "" }], {});
+    const stored = {
+      id: "daily_20260902",
+      businessDate: "2026-09-02",
+      status: "approved",
+      casts: rows.map((row, index) => {
+        if (index === 0) return row;
+        const { bottles: _bottles, ...storedRow } = row;
+        return storedRow;
+      }),
+      staffWork: undefined,
+      drivers: undefined,
+      expenses: undefined
+    } as unknown as DailyClosing;
+
+    const normalized = normalizeDailyClosing(stored);
+
+    expect(normalized.staffWork).toEqual([]);
+    expect(normalized.drivers).toEqual([]);
+    expect(normalized.expenses).toEqual([]);
+    expect(normalized.casts.every((row) => Array.isArray(row.bottles))).toBe(true);
+    expect(normalized.casts[0].bottles).toHaveLength(1);
+    expect(normalized.casts[1].bottles).toEqual([]);
+    expect(() => calculateCastRewards([stored], [], "2026-09")).not.toThrow();
+    expect(() => calculateCastRewards([normalized], [], "2026-09")).not.toThrow();
   });
 
   it("POSの派遣区分を売上・商品参照で在籍へ上書きしない", () => {

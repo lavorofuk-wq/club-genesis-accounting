@@ -3,6 +3,7 @@
 import { get, remove, set, update, ref } from "firebase/database";
 import type { User } from "firebase/auth";
 import { database, rootRef } from "./client";
+import { normalizeDailyClosing } from "@/domain/gms";
 import type {
   CastRecord,
   DailyClosing,
@@ -55,7 +56,7 @@ export async function loadWorkspaceData(role?: Role): Promise<WorkspaceData> {
     drivers: asArray<DriverRecord>(drivers.val()).sort((a, b) => a.name.localeCompare(b.name, "ja")),
     introducers: asArray<IntroducerRecord>(introducers.val()).sort((a, b) => a.name.localeCompare(b.name, "ja")),
     liquor: asArray<LiquorRecord>(liquor.val()).sort((a, b) => a.kind.localeCompare(b.kind) || a.name.localeCompare(b.name, "ja")),
-    closings: asArray<DailyClosing>(closings.val()).sort((a, b) => b.businessDate.localeCompare(a.businessDate)),
+    closings: asArray<DailyClosing>(closings.val()).map(normalizeDailyClosing).sort((a, b) => b.businessDate.localeCompare(a.businessDate)),
     adjustments: Object.entries((adjustments?.val() || {}) as Record<string, Omit<MonthlyAdjustments, "month">>)
       .map(([month, row]) => ({ month, ...row })),
     cashFloat: Number(configValue.cashFloat ?? 200000)
