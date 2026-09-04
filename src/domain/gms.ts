@@ -214,6 +214,7 @@ export type DailyDriverWork = {
   driverId: string;
   name: string;
   dailyRate: number;
+  dailyPayment: number;
 };
 
 export type ExpenseCategory =
@@ -394,7 +395,11 @@ export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
       bottles: storedList<BottleAllocation>(row.bottles),
     })),
     staffWork: storedList<DailyStaffWork>(value.staffWork),
-    drivers: storedList<DailyDriverWork>(value.drivers),
+    drivers: storedList<DailyDriverWork>(value.drivers).map((row) => ({
+      ...row,
+      dailyRate: storedNumber(row.dailyRate),
+      dailyPayment: storedNumber(row.dailyPayment),
+    })),
     expenses: storedList<DailyExpense>(value.expenses),
     staffDailyPaymentTotal: storedNumber(value.staffDailyPaymentTotal),
     dispatchStaffPayment: storedNumber(value.dispatchStaffPayment),
@@ -891,6 +896,45 @@ export function calculateCastRewards(
   }).sort((left, right) => right.honShimeiSales + right.jonaiExtensionSales - (left.honShimeiSales + left.jonaiExtensionSales));
 }
 
+export type DriverPayrollRow = {
+  id: string;
+  name: string;
+  days: number;
+  basic: number;
+  remote: number;
+  gross: number;
+  dailyPayment: number;
+  net: number;
+};
+
+export function calculateDriverPayroll(
+  closings: DailyClosing[],
+  remoteAllowance: Record<string, number>
+): DriverPayrollRow[] {
+  const rows = new Map<string, DriverPayrollRow>();
+  closings.forEach((closing) => (closing.drivers || []).forEach((driver) => {
+    const row = rows.get(driver.driverId) || {
+      id: driver.driverId,
+      name: driver.name,
+      days: 0,
+      basic: 0,
+      remote: asNumber(remoteAllowance[driver.driverId]),
+      gross: 0,
+      dailyPayment: 0,
+      net: 0,
+    };
+    row.days += 1;
+    row.basic += asNumber(driver.dailyRate);
+    row.dailyPayment += asNumber(driver.dailyPayment);
+    rows.set(driver.driverId, row);
+  }));
+  return [...rows.values()].map((row) => ({
+    ...row,
+    gross: row.basic + row.remote,
+    net: row.basic + row.remote - row.dailyPayment,
+  }));
+}
+
 export function calculateCash(input: {
   sales: PosClosingV3["sales"];
   cashFloat: number;
@@ -898,13 +942,15 @@ export function calculateCash(input: {
   regularDailyPayments: number;
   trialDailyPayments: number;
   staffDailyPayments: number;
+  driverDailyPayments: number;
   dispatchCastPayment: number;
   dispatchStaffPayment: number;
   dispatchFee: number;
   actualClosingCash: number;
 }): CashReconciliation {
   const expenseAndPaymentTotal = input.expenses + input.regularDailyPayments + input.trialDailyPayments
-    + input.staffDailyPayments + input.dispatchCastPayment + input.dispatchStaffPayment + input.dispatchFee;
+    + input.staffDailyPayments + input.driverDailyPayments
+    + input.dispatchCastPayment + input.dispatchStaffPayment + input.dispatchFee;
   const expectedClosingCash = input.sales.cashSales + input.cashFloat - expenseAndPaymentTotal;
   const cashProfit = expectedClosingCash - input.cashFloat;
   return {
