@@ -14,11 +14,14 @@ export function Table({ headers, children, empty = "データがありません�
   const rows = Array.isArray(children) ? children.filter(Boolean) : children ? [children] : [];
   return <div className="table-wrap"><table><thead><tr>{headers.map((header) => <th key={header}>{header}</th>)}</tr></thead><tbody>{rows.length ? children : <tr><td colSpan={headers.length}>{empty}</td></tr>}</tbody></table></div>;
 }
-export function MoneyInput({ value, onChange, step = 100 }: { value: number; onChange: (value: number) => void; step?: number }) {
-  return <input className="input money-input" type="number" min="0" step={step} value={value || ""} onChange={(event) => onChange(Number(event.target.value))} />;
+export function MoneyInput({ value, onChange, step = 1, min = 0, disabled = false }: { value: number; onChange: (value: number) => void; step?: number; min?: number; disabled?: boolean }) {
+  return <input className="input money-input" type="number" min={min} step={step} disabled={disabled} value={value || ""} onChange={(event) => {
+    const next = Number(event.target.value);
+    onChange(Number.isFinite(next) ? Math.floor(Math.max(0, next)) : 0);
+  }} />;
 }
-export function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="modal" role="dialog" aria-modal="true" aria-label={title}><div className="section-head"><h2>{title}</h2><button className="icon-button" type="button" aria-label="閉じる" onClick={onClose}>×</button></div>{children}</section></div>;
+export function Modal({ title, children, onClose, disabled = false }: { title: string; children: ReactNode; onClose: () => void; disabled?: boolean }) {
+  return <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (!disabled && event.target === event.currentTarget) onClose(); }}><section className="modal" role="dialog" aria-modal="true" aria-label={title} aria-busy={disabled}><div className="section-head"><h2>{title}</h2><button className="icon-button" type="button" aria-label="閉じる" disabled={disabled} onClick={onClose}>×</button></div><fieldset className="modal-body" disabled={disabled}>{children}</fieldset></section></div>;
 }
 export function StatusPill({ children, tone = "neutral" }: { children: ReactNode; tone?: "neutral" | "good" | "warn" | "danger" }) {
   return <span className={`pill ${tone}`}>{children}</span>;

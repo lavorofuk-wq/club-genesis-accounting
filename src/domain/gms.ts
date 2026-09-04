@@ -23,6 +23,11 @@ export type CastRecord = {
   note: string;
   createdAt: string;
   updatedAt: string;
+  /** 直前版との原子的な更新競合検査に使う保存済みCAS値。 */
+  previousUpdatedAt?: string;
+  /** 完全削除後も過去集計の同一人物対応を保持する論理削除情報。 */
+  deletedAt?: string;
+  deletedBy?: string;
 };
 
 export type StaffRecord = {
@@ -39,7 +44,44 @@ export type StaffRecord = {
   note: string;
   createdAt: string;
   updatedAt: string;
+  /** 完全削除後も体入→在籍の変換関係を保持する論理削除情報。 */
+  deletedAt?: string;
+  deletedBy?: string;
 };
+
+/** 体入スタッフの採用日は、体入日と同日ではなく翌日以降に限る。 */
+export function isStaffHireDateAfterTrial(trialDate: string | undefined, hiredAt: string | undefined) {
+  return realBusinessDate(trialDate) && realBusinessDate(hiredAt) && hiredAt > trialDate;
+}
+
+/** 日付入力のmin属性に使用する、体入日の翌日。 */
+export function dayAfterIsoDate(value: string | undefined) {
+  if (!realBusinessDate(value)) return "";
+  const [year, month, day] = value.split("-").map(Number);
+  const next = new Date(Date.UTC(year, month - 1, day + 1));
+  return next.toISOString().slice(0, 10);
+}
+
+/**
+ * 営業日に勤務登録できるスタッフを返す。
+ * 旧版で体入日と採用日が同日になっている変換データも、体入当日は体入側だけを候補にする。
+ */
+export function staffCandidatesForBusinessDate(
+  staff: StaffRecord[],
+  archivedStaff: StaffRecord[],
+  businessDate: string,
+) {
+  if (!realBusinessDate(businessDate)) return [];
+  const staffById = new Map([...archivedStaff, ...staff].map((row) => [row.id, row]));
+  return staff.filter((row) => {
+    if (row.deletedAt) return false;
+    if (row.status === "trial") return row.trialDate === businessDate;
+    if (!row.hiredAt || row.hiredAt > businessDate || (row.departedAt && row.departedAt < businessDate)) return false;
+    if (row.convertedFromTrialId && row.trialDate === businessDate) return false;
+    const sourceTrial = row.convertedFromTrialId ? staffById.get(row.convertedFromTrialId) : undefined;
+    return sourceTrial?.trialDate !== businessDate;
+  });
+}
 
 export type DriverRecord = {
   id: string;
@@ -142,14 +184,23 @@ export type PosClosingV3 = {
   schemaVersion: 3;
   businessDate: string;
   status: string;
-  sales: { totalSales: number; cashSales: number; cardSales: number };
+  sales: {
+    totalSales: number;
+    cashSales: number;
+    cardSales: number;
+    discountTotal?: number;
+    taxServiceTotal?: number;
+  };
   customers: { groupCount: number; totalCustomers: number; customerUnitPrice?: number };
   nominations: { honShimeiCount: number; jonaiCount: number };
   transactions: PosTransaction[];
   castSales: PosCastSales[];
   castWork: PosCastWork[];
-  rosterSnapshot?: { complete: boolean; capturedAt: string; casts: Record<string, unknown>[] };
-  lifecycleEvents?: Record<string, unknown>[];
+  enteredCasts: Record<string, unknown>[];
+  exitedCasts: Record<string, unknown>[];
+  trialCasts: Record<string, unknown>[];
+  rosterSnapshot: { complete: boolean; capturedAt: string; casts: Record<string, unknown>[] };
+  lifecycleEvents: Record<string, unknown>[];
   source?: Record<string, unknown>;
   submissionId: string;
   generatedAt: string;
@@ -160,12 +211,28 @@ export type PosClosingV3 = {
 
 export type BottleAllocation = {
   itemId: string;
+  /** POS会計内の商品出現位置。商品IDが別会計で再利用されても一意になる。 */
+  sourceKey?: string;
   name: string;
   kind: "champagneWine" | "keepBottle";
   quantity: number;
   salesAmount: number;
   costAmount: number;
+  /** 商品1行全体の％バックを100円未満切捨て後、対象人数で均等割りした1人分（1円未満切捨て）。 */
+  backAmount?: number;
   specialCost: boolean;
+};
+
+/** POSの商品明細1行を、バック対象キャストへ配賦したドリンク売上。 */
+export type DrinkAllocation = {
+  itemId: string;
+  /** POS会計内の商品出現位置。商品IDが別会計で再利用されても一意になる。 */
+  sourceKey?: string;
+  name: string;
+  quantity: number;
+  salesAmount: number;
+  /** 商品1行全体の10%を100円未満切捨て後、対象人数で均等割りした1人分（1円未満切捨て）。 */
+  backAmount?: number;
 };
 
 export type DailyCast = {
@@ -184,6 +251,8 @@ export type DailyCast = {
   honShimeiSales: number;
   jonaiExtensionSales: number;
   drinkSales: number;
+  /** 旧保存データには存在しないため、集約済みdrinkSalesへフォールバックする。 */
+  drinkAllocations?: DrinkAllocation[];
   bottles: BottleAllocation[];
   liquorCost: number;
   beautyAllowance: number;
@@ -194,9 +263,57 @@ export type DailyCast = {
     id: string;
     name: string;
     feeType: IntroducerFeeType;
+    attendanceAdvisoryEnabled?: boolean;
+    entryAdvisoryEnabled?: boolean;
     attendanceAdvisoryFee: number;
     entryAdvisoryFee: number;
   };
+};
+
+/**
+ * 紹介者マスタを削除した月だけに適用する、キャスト単位の月次制御履歴。
+ * `deleted` は当月の紹介者支払を全額停止し、`reassigned` は削除後に
+ * キャストへ設定し直した紹介者条件を当月全体へ遡及適用する。
+ */
+export type IntroducerMonthEvent = {
+  id: string;
+  month: string;
+  castId: string;
+  castName: string;
+  state: "deleted" | "reassigned";
+  deletedIntroducerId: string;
+  deletedIntroducerName: string;
+  deletedAt: string;
+  deletedBy: string;
+  introducer?: NonNullable<DailyCast["introducer"]>;
+  reassignedAt?: string;
+  /** Firebaseサーバーが確定した再設定時刻（ミリ秒）。旧データでは未設定。 */
+  reassignedAtMs?: number;
+  reassignedBy?: string;
+  /** 体入から在籍化した際に、削除履歴を引き継いだ元キャストID。 */
+  sourceCastId?: string;
+  revision: number;
+  createdAt: string;
+  createdBy: string;
+  updatedAt: string;
+  /** Firebaseサーバーが確定した最終イベント保存時刻（ミリ秒）。旧データでは未設定。 */
+  updatedAtMs?: number;
+  updatedBy: string;
+};
+
+/** 紹介者マスタ削除を原子的に証明する月次tombstone。 */
+export type IntroducerDeletionCommit = {
+  id: string;
+  introducerId: string;
+  introducerName: string;
+  month: string;
+  token: string;
+  owner: string;
+  /** 削除ロックをFirebaseが確定した時刻。削除月の正本。 */
+  deletedAtMs: number;
+  completedAt: string;
+  completedAtMs: number;
+  linkedCastIds: string[];
 };
 
 export type DailyStaffWork = {
@@ -268,6 +385,8 @@ export type DailyClosing = {
   cash: CashReconciliation;
   posSnapshot: PosClosingV3;
   submittedAt?: string;
+  /** Firebaseサーバーが確定した店舗送信時刻（ミリ秒）。旧データでは未設定。 */
+  submittedAtMs?: number;
   submittedBy?: string;
   withdrawnAt?: string;
   returnedAt?: string;
@@ -289,9 +408,27 @@ function storedList<T>(value: unknown): T[] {
   return rows.filter((row): row is T => row !== null && row !== undefined);
 }
 
+function parsedStoredNumber(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== "string") return undefined;
+  const normalized = value
+    .normalize("NFKC")
+    .trim()
+    .replace(/^[¥￥]\s*/, "")
+    .replace(/\s*(?:円|時間|本|杯)$/, "")
+    .replace(/[,_\s]/g, "");
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(normalized)) return undefined;
+  const number = Number(normalized);
+  return Number.isFinite(number) ? number : undefined;
+}
+
 function storedNumber(value: unknown): number {
-  const number = Number(value);
-  return Number.isFinite(number) ? number : 0;
+  return parsedStoredNumber(value) ?? 0;
+}
+
+function storedBoolean(value: unknown): boolean {
+  if (typeof value === "string") return value.trim().toLowerCase() === "true" || value.trim() === "1";
+  return value === true || value === 1;
 }
 
 function hasFiniteNumbers(value: unknown, keys: string[]): boolean {
@@ -303,6 +440,9 @@ function hasFiniteNumbers(value: unknown, keys: string[]): boolean {
 }
 
 function normalizePosSnapshot(value: PosClosingV3): PosClosingV3 {
+  const storedRoster = value.rosterSnapshot && typeof value.rosterSnapshot === "object"
+    ? value.rosterSnapshot
+    : { complete: false, capturedAt: "", casts: [] };
   return {
     ...value,
     businessDate: String(value.businessDate || ""),
@@ -310,6 +450,12 @@ function normalizePosSnapshot(value: PosClosingV3): PosClosingV3 {
       totalSales: storedNumber(value.sales?.totalSales),
       cashSales: storedNumber(value.sales?.cashSales),
       cardSales: storedNumber(value.sales?.cardSales),
+      ...(value.sales?.discountTotal === undefined
+        ? {}
+        : { discountTotal: storedNumber(value.sales.discountTotal) }),
+      ...(value.sales?.taxServiceTotal === undefined
+        ? {}
+        : { taxServiceTotal: storedNumber(value.sales.taxServiceTotal) }),
     },
     customers: {
       groupCount: storedNumber(value.customers?.groupCount),
@@ -334,25 +480,32 @@ function normalizePosSnapshot(value: PosClosingV3): PosClosingV3 {
     })),
     castSales: storedList<PosCastSales>(value.castSales),
     castWork: storedList<PosCastWork>(value.castWork),
-    ...(value.rosterSnapshot
-      ? {
-          rosterSnapshot: {
-            ...value.rosterSnapshot,
-            casts: storedList<Record<string, unknown>>(value.rosterSnapshot.casts),
-          },
-        }
-      : {}),
-    ...(value.lifecycleEvents !== undefined
-      ? { lifecycleEvents: storedList<Record<string, unknown>>(value.lifecycleEvents) }
-      : {}),
+    enteredCasts: storedList<Record<string, unknown>>(value.enteredCasts),
+    exitedCasts: storedList<Record<string, unknown>>(value.exitedCasts),
+    trialCasts: storedList<Record<string, unknown>>(value.trialCasts),
+    rosterSnapshot: {
+      ...storedRoster,
+      casts: storedList<Record<string, unknown>>(storedRoster.casts),
+    },
+    lifecycleEvents: storedList<Record<string, unknown>>(value.lifecycleEvents),
   };
 }
 
 /** Realtime Databaseで保存時に消える空配列を、読込境界で復元する。 */
 export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
-  const integrityIssues = storedList<string>(value.integrityIssues);
+  const integrityIssues = storedList<unknown>(value.integrityIssues).map((issue) => String(issue));
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value.businessDate || ""))) {
     integrityIssues.push("営業日が未設定または不正です。");
+  }
+  if (!String(value.submissionId || "").trim()) {
+    integrityIssues.push("送信IDがありません。店舗から再送してください。");
+  }
+  if (!/^[0-9a-f]{64}$/.test(String(value.checksum || ""))) {
+    integrityIssues.push("POSチェックサムがないか形式が不正です。店舗から再送してください。");
+  }
+  if (value.submittedAtMs !== undefined
+    && (!Number.isSafeInteger(value.submittedAtMs) || value.submittedAtMs < 0)) {
+    integrityIssues.push("店舗送信のサーバー保存時刻が不正です。店舗から再送してください。");
   }
   if (!hasFiniteNumbers(value.sales, ["totalSales", "cashSales", "cardSales"])) {
     integrityIssues.push("売上データが不完全です。店舗送信データを確認してください。");
@@ -360,6 +513,210 @@ export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
   if (!hasFiniteNumbers(value.cash, ["cashSales", "cardSales", "totalSales", "cashFloat", "expenseAndPaymentTotal", "expectedClosingCash", "cashProfit", "actualClosingCash", "difference"])) {
     integrityIssues.push("現金照合データが不完全です。店舗送信データを確認してください。");
   }
+  const normalizeNumericFields = (
+    source: Record<string, unknown>,
+    keys: string[],
+    issueLabel: string,
+  ) => {
+    const corrected = keys.filter((key) => {
+      const parsed = parsedStoredNumber(source[key]);
+      return typeof source[key] !== "number" || !Number.isFinite(source[key] as number)
+        || parsed === undefined || parsed < 0;
+    });
+    if (corrected.length) {
+      integrityIssues.push(`${issueLabel}の数値データを補正しました（${corrected.join("、")}）。`);
+    }
+    return Object.fromEntries(keys.map((key) => [key, Math.max(0, storedNumber(source[key]))])) as Record<string, number>;
+  };
+  const castNumericKeys = [
+    "hours", "hourlyRate", "honShimeiCount", "banaiShimeiCount", "dohanCount",
+    "dohanBack", "honShimeiSales", "jonaiExtensionSales", "drinkSales", "liquorCost",
+    "beautyAllowance", "dailyPayment", "advancePayment", "transportFee",
+  ];
+  const casts = storedList<unknown>(value.casts).flatMap((candidate, index): DailyCast[] => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+      integrityIssues.push(`キャスト明細${index + 1}件目の形式が不正なため除外しました。`);
+      return [];
+    }
+    const row = candidate as unknown as DailyCast & Record<string, unknown>;
+    const label = `キャスト明細「${String(row.name || index + 1)}」`;
+    const numeric = normalizeNumericFields(row, castNumericKeys, label);
+    const bottles = storedList<unknown>(row.bottles).flatMap((bottleCandidate, bottleIndex): BottleAllocation[] => {
+      if (!bottleCandidate || typeof bottleCandidate !== "object" || Array.isArray(bottleCandidate)) {
+        integrityIssues.push(`${label}のボトル明細${bottleIndex + 1}件目を除外しました。`);
+        return [];
+      }
+      const bottle = bottleCandidate as BottleAllocation & Record<string, unknown>;
+      const bottleNumeric = normalizeNumericFields(
+        bottle,
+        ["quantity", "salesAmount", "costAmount"],
+        `${label}のボトル「${String(bottle.name || bottleIndex + 1)}」`,
+      );
+      const parsedBackAmount = bottle.backAmount === undefined ? undefined : parsedStoredNumber(bottle.backAmount);
+      if (bottle.backAmount !== undefined && (parsedBackAmount === undefined || parsedBackAmount < 0 || !Number.isSafeInteger(parsedBackAmount))) {
+        integrityIssues.push(`${label}のボトル「${String(bottle.name || bottleIndex + 1)}」のバック額を1円単位へ補正しました。`);
+      }
+      return [{
+        ...bottle,
+        itemId: String(bottle.itemId || ""),
+        ...(bottle.sourceKey === undefined ? {} : { sourceKey: String(bottle.sourceKey || "") }),
+        name: String(bottle.name || ""),
+        quantity: bottleNumeric.quantity,
+        salesAmount: bottleNumeric.salesAmount,
+        costAmount: bottleNumeric.costAmount,
+        ...(bottle.backAmount === undefined ? {} : { backAmount: Math.max(0, Math.floor(parsedBackAmount || 0)) }),
+        specialCost: Boolean(bottle.specialCost),
+      }];
+    });
+    const rawDrinkAllocations = row.drinkAllocations;
+    const drinkAllocations = rawDrinkAllocations === undefined
+      ? undefined
+      : storedList<unknown>(rawDrinkAllocations).flatMap((drinkCandidate, drinkIndex): DrinkAllocation[] => {
+        if (!drinkCandidate || typeof drinkCandidate !== "object" || Array.isArray(drinkCandidate)) {
+          integrityIssues.push(`${label}のドリンク明細${drinkIndex + 1}件目を除外しました。`);
+          return [];
+        }
+        const drink = drinkCandidate as DrinkAllocation & Record<string, unknown>;
+        const drinkNumeric = normalizeNumericFields(
+          drink,
+          ["quantity", "salesAmount"],
+          `${label}のドリンク「${String(drink.name || drinkIndex + 1)}」`,
+        );
+        const parsedBackAmount = drink.backAmount === undefined ? undefined : parsedStoredNumber(drink.backAmount);
+        if (drink.backAmount !== undefined && (parsedBackAmount === undefined || parsedBackAmount < 0 || !Number.isSafeInteger(parsedBackAmount))) {
+          integrityIssues.push(`${label}のドリンク「${String(drink.name || drinkIndex + 1)}」のバック額を1円単位へ補正しました。`);
+        }
+        return [{
+          itemId: String(drink.itemId || ""),
+          ...(drink.sourceKey === undefined ? {} : { sourceKey: String(drink.sourceKey || "") }),
+          name: String(drink.name || ""),
+          quantity: drinkNumeric.quantity,
+          salesAmount: drinkNumeric.salesAmount,
+          ...(drink.backAmount === undefined ? {} : { backAmount: Math.max(0, Math.floor(parsedBackAmount || 0)) }),
+        }];
+      });
+    const introducer = row.introducer && typeof row.introducer === "object"
+      ? (() => {
+          const fees = normalizeNumericFields(
+            row.introducer as unknown as Record<string, unknown>,
+            ["attendanceAdvisoryFee", "entryAdvisoryFee"],
+            `${label}の紹介者情報`,
+          );
+          return {
+            ...row.introducer,
+            id: String(row.introducer.id || ""),
+            name: String(row.introducer.name || ""),
+            ...(row.introducer.attendanceAdvisoryEnabled === undefined
+              ? {}
+              : { attendanceAdvisoryEnabled: storedBoolean(row.introducer.attendanceAdvisoryEnabled) }),
+            ...(row.introducer.entryAdvisoryEnabled === undefined
+              ? {}
+              : { entryAdvisoryEnabled: storedBoolean(row.introducer.entryAdvisoryEnabled) }),
+            attendanceAdvisoryFee: fees.attendanceAdvisoryFee,
+            entryAdvisoryFee: fees.entryAdvisoryFee,
+          };
+        })()
+      : undefined;
+    return [{
+      ...row,
+      masterId: String(row.masterId || ""),
+      posCastId: String(row.posCastId || ""),
+      name: String(row.name || ""),
+      startTime: String(row.startTime || ""),
+      endTime: String(row.endTime || ""),
+      ...numeric,
+      bottles,
+      ...(drinkAllocations === undefined ? {} : { drinkAllocations }),
+      introducer,
+    } as DailyCast];
+  });
+  const staffWork = storedList<unknown>(value.staffWork).flatMap((candidate, index): DailyStaffWork[] => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+      integrityIssues.push(`スタッフ勤務${index + 1}件目の形式が不正なため除外しました。`);
+      return [];
+    }
+    const row = candidate as DailyStaffWork & Record<string, unknown>;
+    const numeric = normalizeNumericFields(
+      row,
+      ["hours", "hourlyRate", "dailyPayment"],
+      `スタッフ勤務「${String(row.name || index + 1)}」`,
+    );
+    return [{
+      ...row,
+      staffId: String(row.staffId || ""),
+      name: String(row.name || ""),
+      startTime: String(row.startTime || ""),
+      endTime: String(row.endTime || ""),
+      ...numeric,
+    }];
+  });
+  const drivers = storedList<unknown>(value.drivers).flatMap((candidate, index): DailyDriverWork[] => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+      integrityIssues.push(`送迎ドライバー勤務${index + 1}件目の形式が不正なため除外しました。`);
+      return [];
+    }
+    const row = candidate as DailyDriverWork & Record<string, unknown>;
+    const numeric = normalizeNumericFields(
+      row,
+      ["dailyRate", "dailyPayment"],
+      `送迎ドライバー勤務「${String(row.name || index + 1)}」`,
+    );
+    return [{
+      ...row,
+      driverId: String(row.driverId || ""),
+      name: String(row.name || ""),
+      ...numeric,
+    }];
+  });
+  const expenses = storedList<unknown>(value.expenses).flatMap((candidate, index): DailyExpense[] => {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+      integrityIssues.push(`経費明細${index + 1}件目の形式が不正なため除外しました。`);
+      return [];
+    }
+    const row = candidate as DailyExpense & Record<string, unknown>;
+    const numeric = normalizeNumericFields(row, ["amount"], `経費明細「${String(row.payee || index + 1)}」`);
+    return [{
+      ...row,
+      id: String(row.id || ""),
+      payee: String(row.payee || ""),
+      amount: numeric.amount,
+      ...(row.personId === undefined ? {} : { personId: String(row.personId || "") }),
+      ...(row.personName === undefined ? {} : { personName: String(row.personName || "") }),
+    }];
+  });
+  const reportDuplicateIds = (label: string, ids: string[]) => {
+    const duplicates = [...new Set(ids.filter((id, index) => id && ids.indexOf(id) !== index))];
+    if (duplicates.length) integrityIssues.push(`${label}が重複しています（${duplicates.join("、")}）。`);
+  };
+  casts.forEach((row, index) => {
+    const label = row.name || `${index + 1}件目`;
+    if (row.kind !== "regular" && row.kind !== "trial" && row.kind !== "dispatch") {
+      integrityIssues.push(`キャスト明細「${label}」のキャスト区分が不正です。`);
+    }
+    if (!row.posCastId.trim()) integrityIssues.push(`キャスト明細「${label}」のPOSキャストIDがありません。`);
+    if ((row.kind === "regular" || row.kind === "trial") && !row.masterId.trim()) {
+      integrityIssues.push(`キャスト明細「${label}」のマスターIDがありません。`);
+    }
+    if (!row.name.trim()) integrityIssues.push(`キャスト明細${index + 1}件目の名前がありません。`);
+  });
+  reportDuplicateIds("キャスト明細のPOSキャストID", casts.map((row) => row.posCastId));
+  reportDuplicateIds(
+    "キャスト明細のマスターID",
+    casts.filter((row) => row.kind === "regular" || row.kind === "trial").map((row) => row.masterId),
+  );
+  staffWork.forEach((row, index) => {
+    if (row.kind !== "regular" && row.kind !== "trial") {
+      integrityIssues.push(`スタッフ勤務「${row.name || index + 1}件目」のスタッフ区分が不正です。`);
+    }
+    if (!row.staffId.trim()) integrityIssues.push(`スタッフ勤務「${row.name || index + 1}件目」のスタッフIDがありません。`);
+    if (!row.name.trim()) integrityIssues.push(`スタッフ勤務${index + 1}件目の名前がありません。`);
+  });
+  reportDuplicateIds("スタッフ勤務のスタッフID", staffWork.map((row) => row.staffId));
+  drivers.forEach((row, index) => {
+    if (!row.driverId.trim()) integrityIssues.push(`送迎ドライバー勤務「${row.name || index + 1}件目」のドライバーIDがありません。`);
+    if (!row.name.trim()) integrityIssues.push(`送迎ドライバー勤務${index + 1}件目の名前がありません。`);
+  });
+  reportDuplicateIds("送迎ドライバー勤務のドライバーID", drivers.map((row) => row.driverId));
   return {
     ...value,
     businessDate: String(value.businessDate || ""),
@@ -390,17 +747,10 @@ export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
       actualClosingCash: storedNumber(value.cash?.actualClosingCash),
       difference: storedNumber(value.cash?.difference),
     },
-    casts: storedList<DailyCast>(value.casts).map((row) => ({
-      ...row,
-      bottles: storedList<BottleAllocation>(row.bottles),
-    })),
-    staffWork: storedList<DailyStaffWork>(value.staffWork),
-    drivers: storedList<DailyDriverWork>(value.drivers).map((row) => ({
-      ...row,
-      dailyRate: storedNumber(row.dailyRate),
-      dailyPayment: storedNumber(row.dailyPayment),
-    })),
-    expenses: storedList<DailyExpense>(value.expenses),
+    casts,
+    staffWork,
+    drivers,
+    expenses,
     staffDailyPaymentTotal: storedNumber(value.staffDailyPaymentTotal),
     dispatchStaffPayment: storedNumber(value.dispatchStaffPayment),
     dispatchCastPayment: storedNumber(value.dispatchCastPayment),
@@ -420,9 +770,15 @@ export type MonthlyAdjustments = {
   fixedExpenses: { id: string; account: string; amount: number }[];
   liquorDeliveryAmount?: number;
   cardFee: number;
+  /** posSnapshotがない旧日次データのボトル区分。キーはlegacyBottleSourceKeyで生成する。 */
+  legacyBottleClassifications?: Record<string, LegacyBottleClassification>;
+  /** 複数端末保存時の競合検知に使用する世代番号。 */
+  revision?: number;
   updatedAt?: string;
   updatedBy?: string;
 };
+
+export type LegacyBottleClassification = "honShimei" | "jonaiExtension" | "excluded";
 
 function storedNumberMap(value: unknown): Record<string, number> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
@@ -438,6 +794,11 @@ function storedNumberMap(value: unknown): Record<string, number> {
 export function normalizeMonthlyAdjustments(
   value: MonthlyAdjustments,
 ): MonthlyAdjustments {
+  const classifications = value.legacyBottleClassifications;
+  const legacyBottleClassifications = classifications && typeof classifications === "object" && !Array.isArray(classifications)
+    ? Object.fromEntries(Object.entries(classifications).filter((entry): entry is [string, LegacyBottleClassification] =>
+        entry[1] === "honShimei" || entry[1] === "jonaiExtension" || entry[1] === "excluded"))
+    : {};
   return {
     ...value,
     month: String(value.month || ""),
@@ -453,6 +814,8 @@ export function normalizeMonthlyAdjustments(
       amount: storedNumber(row.amount),
     })),
     cardFee: storedNumber(value.cardFee),
+    legacyBottleClassifications,
+    revision: Math.max(0, Math.floor(storedNumber(value.revision))),
     ...(value.liquorDeliveryAmount === undefined
       ? {}
       : { liquorDeliveryAmount: storedNumber(value.liquorDeliveryAmount) }),
@@ -551,8 +914,82 @@ const asNumber = (value: unknown) => {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : 0;
 };
+const instantOrderValue = (value: string | undefined) => {
+  const parsed = value ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+};
+const validServerOrder = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
 
-export const floorHundred = (value: number) => Math.floor(Math.max(0, value) / 100) * 100;
+/** 店舗保存順。新規データはFirebaseサーバー時刻、旧データだけsubmittedAtへフォールバックする。 */
+export function dailyClosingSubmissionOrderValue(closing: Pick<DailyClosing, "submittedAt" | "submittedAtMs">) {
+  return validServerOrder(closing.submittedAtMs)
+    ? closing.submittedAtMs
+    : instantOrderValue(closing.submittedAt);
+}
+
+export function hasDailyClosingSubmissionOrder(closing: Pick<DailyClosing, "submittedAt" | "submittedAtMs">) {
+  return Number.isFinite(dailyClosingSubmissionOrderValue(closing));
+}
+
+export function compareDailyClosingSubmissionOrder(
+  left: Pick<DailyClosing, "submittedAt" | "submittedAtMs">,
+  right: Pick<DailyClosing, "submittedAt" | "submittedAtMs">,
+) {
+  const leftValue = dailyClosingSubmissionOrderValue(left);
+  const rightValue = dailyClosingSubmissionOrderValue(right);
+  return leftValue === rightValue ? 0 : leftValue - rightValue;
+}
+
+/** 異なる体入・在籍IDに残ったイベントも、Firebaseで最後に保存されたものを選ぶ。 */
+export function compareIntroducerMonthEventSaveOrder(left: IntroducerMonthEvent, right: IntroducerMonthEvent) {
+  const leftValue = validServerOrder(left.updatedAtMs) ? left.updatedAtMs : instantOrderValue(left.updatedAt);
+  const rightValue = validServerOrder(right.updatedAtMs) ? right.updatedAtMs : instantOrderValue(right.updatedAt);
+  return leftValue === rightValue
+    ? left.updatedAt.localeCompare(right.updatedAt)
+      || left.castId.localeCompare(right.castId)
+      || left.revision - right.revision
+    : leftValue - rightValue;
+}
+
+export function introducerMonthEventEffectiveOrderValue(event: IntroducerMonthEvent) {
+  if (event.state === "reassigned" && validServerOrder(event.reassignedAtMs)) return event.reassignedAtMs;
+  if (event.state === "deleted" && validServerOrder(event.updatedAtMs)) return event.updatedAtMs;
+  return instantOrderValue(event.reassignedAt || event.updatedAt);
+}
+
+export function compareIntroducerMonthEventEffectiveOrder(left: IntroducerMonthEvent, right: IntroducerMonthEvent) {
+  const leftValue = introducerMonthEventEffectiveOrderValue(left);
+  const rightValue = introducerMonthEventEffectiveOrderValue(right);
+  return leftValue === rightValue
+    ? compareIntroducerMonthEventSaveOrder(left, right)
+    : leftValue - rightValue;
+}
+
+/**
+ * 100円未満を切り捨てる。
+ *
+ * 0.7 や 0.15 を掛けた結果は、数学上ちょうど100円単位でも
+ * 99.99999999999999 のようになることがある。計算機誤差だけを最寄りの整数へ
+ * 戻してから切り捨て、実額の端数はそのまま切り捨てる。
+ */
+export const floorHundred = (value: number) => {
+  const hundredUnits = Math.max(0, value) / 100;
+  const nearestInteger = Math.round(hundredUnits);
+  const floatingPointTolerance = Number.EPSILON * Math.max(1, Math.abs(hundredUnits)) * 8;
+  const stableUnits = Math.abs(hundredUnits - nearestInteger) <= floatingPointTolerance
+    ? nearestInteger
+    : hundredUnits;
+  return Math.floor(stableUnits) * 100;
+};
+
+/**
+ * 商品1行全体の％バックを先に100円単位へ切り捨ててから均等割りする。
+ * 割り切れない1円未満は各人で切り捨て、余りは誰にも上乗せしない。
+ */
+export function splitItemBackPerTarget(totalEligibleAmount: number, rate: number, targetCount: number) {
+  if (!Number.isSafeInteger(targetCount) || targetCount <= 0) return 0;
+  return Math.floor(floorHundred(Math.max(0, totalEligibleAmount) * rate) / targetCount);
+}
 
 export function hoursBetweenQuarter(startTime: string, endTime: string, breakMinutes = 0) {
   const parse = (value: string) => {
@@ -606,32 +1043,204 @@ function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
+/** ISO日時を営業拠点（Asia/Tokyo）のYYYY-MMへ変換する。月初のUTC/JST差を残さない。 */
+export function japanMonthFromTimestamp(timestamp: string) {
+  const date = new Date(timestamp);
+  if (!Number.isFinite(date.getTime())) throw new Error("日時が正しくありません。");
+  const parts = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+  }).formatToParts(date);
+  const year = parts.find((part) => part.type === "year")?.value;
+  const month = parts.find((part) => part.type === "month")?.value;
+  if (!year || !month) throw new Error("日時を対象月へ変換できません。");
+  return `${year}-${month.padStart(2, "0")}`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function requiredRecord(value: unknown, label: string): Record<string, unknown> {
+  assert(isRecord(value), `${label}の形式が正しくありません。`);
+  return value;
+}
+
+function requiredArray(record: Record<string, unknown>, key: string, label = key): unknown[] {
+  assert(Array.isArray(record[key]), `${label}が配列ではないか、存在しません。`);
+  return record[key];
+}
+
+function finiteNonNegative(
+  record: Record<string, unknown>,
+  key: string,
+  label: string,
+  options: { optional?: boolean; positive?: boolean } = {},
+) {
+  if (options.optional && record[key] === undefined) return undefined;
+  const value = record[key];
+  assert(typeof value === "number" && Number.isFinite(value), `${label}は有限の数値で指定してください。`);
+  assert(options.positive ? value > 0 : value >= 0, `${label}は${options.positive ? "0より大きい" : "0以上の"}数値で指定してください。`);
+  return value;
+}
+
+function realBusinessDate(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year
+    && date.getUTCMonth() === month - 1
+    && date.getUTCDate() === day;
+}
+
+function validClockTime(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const match = /^(\d{2}):(\d{2})$/.exec(value);
+  return Boolean(match && Number(match[1]) <= 23 && Number(match[2]) <= 59);
+}
+
+function validInstant(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0 && !Number.isNaN(Date.parse(value));
+}
+
+function assertUniqueRequiredIds(values: unknown[], label: string) {
+  assert(values.every((value) => typeof value === "string" && value.length > 0), `${label}に空または文字列以外のIDがあります。`);
+  assert(new Set(values).size === values.length, `${label}に重複したIDがあります。`);
+}
+
 export async function parsePosClosingV3(input: unknown): Promise<PosClosingV3> {
-  assert(input && typeof input === "object", "JSONのルート形式が正しくありません。");
-  const value = input as Record<string, unknown>;
+  const value = requiredRecord(input, "JSONのルート");
   assert(value.schema === "club-genesis-pos-closing", "GMS取込用のPOS JSONではありません。");
   assert(value.schemaVersion === 3, "schemaVersion 3のPOS JSONを使用してください。");
-  assert(/^\d{4}-\d{2}-\d{2}$/.test(String(value.businessDate || "")), "営業日の形式が正しくありません。");
-  assert(String(value.submissionId || ""), "submissionIdがありません。");
-  assert(typeof value.generatedAt === "string" && !Number.isNaN(Date.parse(value.generatedAt)), "generatedAtが正しくありません。");
+  assert(realBusinessDate(value.businessDate), "営業日が実在しないか、YYYY-MM-DD形式ではありません。");
+  assert(typeof value.submissionId === "string" && value.submissionId.trim().length > 0, "submissionIdがありません。");
+  assert(validInstant(value.generatedAt), "generatedAtが正しくありません。");
   assert(value.checksumAlgorithm === "sha256", "checksumAlgorithmはsha256である必要があります。");
   assert(value.checksumCanonicalization === "recursive-key-sort-v1", "チェックサム正規化方式が一致しません。");
   assert(/^[0-9a-f]{64}$/.test(String(value.checksum || "")), "SHA-256チェックサムの形式が正しくありません。");
-  assert(Array.isArray(value.transactions), "transactionsがありません。");
-  assert(Array.isArray(value.castSales), "castSalesがありません。");
-  assert(Array.isArray(value.castWork), "castWorkがありません。");
+  const transactionValues = requiredArray(value, "transactions");
+  const castSalesValues = requiredArray(value, "castSales");
+  const castWorkValues = requiredArray(value, "castWork");
+  const enteredCastValues = requiredArray(value, "enteredCasts");
+  const exitedCastValues = requiredArray(value, "exitedCasts");
+  const trialCastValues = requiredArray(value, "trialCasts");
+  const lifecycleEventValues = requiredArray(value, "lifecycleEvents");
+  const rosterSnapshot = requiredRecord(value.rosterSnapshot, "rosterSnapshot");
+  const rosterCastValues = requiredArray(rosterSnapshot, "casts", "rosterSnapshot.casts");
+
+  // ネスト配列を先に検証し、不完全なJSONを後続処理で参照してクラッシュさせない。
+  transactionValues.forEach((candidate, transactionIndex) => {
+    const transaction = requiredRecord(candidate, `transactions[${transactionIndex}]`);
+    requiredArray(transaction, "splits", `transactions[${transactionIndex}].splits`)
+      .forEach((split, splitIndex) => requiredRecord(split, `transactions[${transactionIndex}].splits[${splitIndex}]`));
+    requiredArray(transaction, "items", `transactions[${transactionIndex}].items`)
+      .forEach((candidateItem, itemIndex) => {
+        const item = requiredRecord(candidateItem, `transactions[${transactionIndex}].items[${itemIndex}]`);
+        requiredArray(item, "backTargetCastIds", `transactions[${transactionIndex}].items[${itemIndex}].backTargetCastIds`);
+        requiredArray(item, "backTargetCastNames", `transactions[${transactionIndex}].items[${itemIndex}].backTargetCastNames`);
+        requiredArray(item, "banaiExtCastIds", `transactions[${transactionIndex}].items[${itemIndex}].banaiExtCastIds`);
+      });
+  });
+  castSalesValues.forEach((row, index) => requiredRecord(row, `castSales[${index}]`));
+  castWorkValues.forEach((row, index) => requiredRecord(row, `castWork[${index}]`));
+  enteredCastValues.forEach((row, index) => requiredRecord(row, `enteredCasts[${index}]`));
+  exitedCastValues.forEach((row, index) => requiredRecord(row, `exitedCasts[${index}]`));
+  trialCastValues.forEach((row, index) => requiredRecord(row, `trialCasts[${index}]`));
+  lifecycleEventValues.forEach((row, index) => requiredRecord(row, `lifecycleEvents[${index}]`));
+  rosterCastValues.forEach((row, index) => requiredRecord(row, `rosterSnapshot.casts[${index}]`));
+
   const checksum = await sha256Checksum(value);
   assert(checksum === value.checksum, "チェックサムが一致しません。POSからJSONを再出力してください。");
 
   const closing = value as unknown as PosClosingV3;
+  assert(validInstant(rosterSnapshot.capturedAt), "rosterSnapshot.capturedAtが正しくありません。");
+  enteredCastValues.forEach((candidate, index) => {
+    const row = candidate as Record<string, unknown>;
+    finiteNonNegative(row, "enteredAt", `enteredCasts[${index}]の入店時刻`);
+  });
+  exitedCastValues.forEach((candidate, index) => {
+    const row = candidate as Record<string, unknown>;
+    finiteNonNegative(row, "exitedAt", `exitedCasts[${index}]の退店時刻`);
+  });
+  trialCastValues.forEach((candidate, index) => {
+    const row = candidate as Record<string, unknown>;
+    finiteNonNegative(row, "trialRegisteredAt", `trialCasts[${index}]の体入登録時刻`);
+    finiteNonNegative(row, "trialEndedAt", `trialCasts[${index}]の体入終了時刻`);
+    assert(realBusinessDate(row.trialBizDay), `trialCasts[${index}]の体入営業日が不正です。`);
+  });
+  lifecycleEventValues.forEach((candidate, index) => {
+    const row = candidate as Record<string, unknown>;
+    assert(validInstant(row.eventAt), `lifecycleEvents[${index}]の発生時刻が不正です。`);
+    assert(realBusinessDate(row.entryDate), `lifecycleEvents[${index}]の営業日が不正です。`);
+  });
+  const sales = requiredRecord(value.sales, "sales");
+  finiteNonNegative(sales, "totalSales", "総売上");
+  finiteNonNegative(sales, "cashSales", "現金売上");
+  finiteNonNegative(sales, "cardSales", "カード売上");
+  finiteNonNegative(sales, "discountTotal", "値引合計", { optional: true });
+  finiteNonNegative(sales, "taxServiceTotal", "税・サービス料合計", { optional: true });
+  const customers = requiredRecord(value.customers, "customers");
+  finiteNonNegative(customers, "groupCount", "組数");
+  finiteNonNegative(customers, "totalCustomers", "来店人数");
+  finiteNonNegative(customers, "customerUnitPrice", "客単価", { optional: true });
+  const nominations = requiredRecord(value.nominations, "nominations");
+  finiteNonNegative(nominations, "honShimeiCount", "本指名本数");
+  finiteNonNegative(nominations, "jonaiCount", "場内指名本数");
+
+  if (value.source !== undefined) {
+    const source = requiredRecord(value.source, "source");
+    const businessStartedAt = finiteNonNegative(source, "businessStartedAt", "営業開始時刻", { optional: true });
+    const businessEndedAt = finiteNonNegative(source, "businessEndedAt", "営業終了時刻", { optional: true });
+    if (businessStartedAt !== undefined && businessEndedAt !== undefined) {
+      assert(businessEndedAt >= businessStartedAt, "営業終了時刻が営業開始時刻より前です。");
+    }
+  }
+
   const transactionIds = closing.transactions.map((row) => String(row.transactionId || ""));
-  assert(transactionIds.every(Boolean) && new Set(transactionIds).size === transactionIds.length, "会計IDの空欄または重複があります。");
+  assert(closing.transactions.every((row) => typeof row.transactionId === "string" && row.transactionId.length > 0)
+    && new Set(transactionIds).size === transactionIds.length, "会計IDの空欄、型不正または重複があります。");
+  let transactionTotal = 0;
+  let cashSplitTotal = 0;
+  let cardSplitTotal = 0;
   closing.transactions.forEach((transaction) => {
-    const splitTotal = (transaction.splits || []).reduce((sum, row) => sum + asNumber(row.amount), 0);
-    assert(splitTotal === asNumber(transaction.total), `テーブル${transaction.tableLabel}の決済内訳と会計金額が一致しません。`);
-    (transaction.items || []).forEach((item) => {
-      const paidBottle = ["champagneWine", "keepBottle"].includes(item.category) && asNumber(item.price) * asNumber(item.quantity) > 0;
-      const bottleTargets = item.backTargetCastIds || [];
+    const transactionRecord = transaction as unknown as Record<string, unknown>;
+    finiteNonNegative(transactionRecord, "startTime", `テーブル${transaction.tableLabel}の開始時刻`);
+    finiteNonNegative(transactionRecord, "endTime", `テーブル${transaction.tableLabel}の終了時刻`);
+    assert(transaction.endTime >= transaction.startTime, `テーブル${transaction.tableLabel}の終了時刻が開始時刻より前です。`);
+    finiteNonNegative(transactionRecord, "subtotal", `テーブル${transaction.tableLabel}の小計`);
+    finiteNonNegative(transactionRecord, "discount", `テーブル${transaction.tableLabel}の値引額`);
+    finiteNonNegative(transactionRecord, "tax", `テーブル${transaction.tableLabel}の税・サービス料`);
+    finiteNonNegative(transactionRecord, "total", `テーブル${transaction.tableLabel}の会計金額`);
+    finiteNonNegative(transactionRecord, "guests", `テーブル${transaction.tableLabel}の人数`, { optional: true });
+    // 金額分類はPOS実データのsplits.method（cash/card）を正とし、表示用payMethodは空欄だけを拒否する。
+    assert(typeof transaction.payMethod === "string" && transaction.payMethod.trim().length > 0, `テーブル${transaction.tableLabel}の決済方法が不正です。`);
+    const splitTotal = transaction.splits.reduce((sum, row, splitIndex) => {
+      const split = row as unknown as Record<string, unknown>;
+      const amount = finiteNonNegative(split, "amount", `テーブル${transaction.tableLabel}の決済内訳${splitIndex + 1}件目`) ?? 0;
+      assert(row.method === "cash" || row.method === "card", `テーブル${transaction.tableLabel}の決済内訳に未対応の方法があります。`);
+      if (row.method === "cash") cashSplitTotal += amount;
+      if (row.method === "card") cardSplitTotal += amount;
+      return sum + amount;
+    }, 0);
+    assert(splitTotal === transaction.total, `テーブル${transaction.tableLabel}の決済内訳と会計金額が一致しません。`);
+    transactionTotal += transaction.total;
+    const itemIds = transaction.items.map((item) => String(item.itemId || ""));
+    assert(transaction.items.every((item) => typeof item.itemId === "string" && item.itemId.length > 0)
+      && new Set(itemIds).size === itemIds.length, `テーブル${transaction.tableLabel}の商品IDに空欄、型不正または重複があります。`);
+    transaction.items.forEach((item) => {
+      const itemRecord = item as unknown as Record<string, unknown>;
+      finiteNonNegative(itemRecord, "price", `「${item.label}」の商品金額`);
+      const bottle = ["champagneWine", "keepBottle"].includes(item.category);
+      finiteNonNegative(itemRecord, "quantity", `「${item.label}」の商品数量`, { positive: bottle });
+      finiteNonNegative(itemRecord, "roomMinutes", `「${item.label}」のルーム時間`, { optional: true });
+      finiteNonNegative(itemRecord, "freeDrinkMinutes", `「${item.label}」のフリードリンク時間`, { optional: true });
+      const bottleTargets = item.backTargetCastIds;
+      assertUniqueRequiredIds(bottleTargets, `「${item.label}」のバック対象ID`);
+      assertUniqueRequiredIds(item.banaiExtCastIds, `「${item.label}」の場内延長対象ID`);
+      assert(item.backTargetCastNames.length === bottleTargets.length, `「${item.label}」のバック対象IDと対象名の件数が一致しません。`);
+      assert(item.backTargetCastNames.every((name) => typeof name === "string"), `「${item.label}」のバック対象名に文字列以外の値があります。`);
+      const paidBottle = bottle && item.price * item.quantity > 0;
       if (paidBottle && bottleTargets.length) {
         const eligibleTargets = new Set(bottleBackContextCastIds(transaction, item));
         assert(
@@ -642,17 +1251,54 @@ export async function parsePosClosingV3(input: unknown): Promise<PosClosingV3> {
         assert(item.backAllocation === expectedAllocation, `「${item.label}」のバック配分は${expectedAllocation}である必要があります。`);
       }
       if (item.category === "dohan") {
-        assert(item.backTargetCastIds?.length === 1, `テーブル${transaction.tableLabel}の同伴キャストは1名で指定してください。`);
+        assert(item.backTargetCastIds.length === 1, `テーブル${transaction.tableLabel}の同伴キャストは1名で指定してください。`);
       }
     });
   });
-  assert(asNumber(closing.sales.cashSales) + asNumber(closing.sales.cardSales) === asNumber(closing.sales.totalSales), "現金売上とカード売上の合計が総売上と一致しません。");
+  assert(transactionTotal === closing.sales.totalSales, "会計データの合計と総売上が一致しません。");
+  assert(cashSplitTotal === closing.sales.cashSales, "現金の決済内訳合計と現金売上が一致しません。");
+  assert(cardSplitTotal === closing.sales.cardSales, "カードの決済内訳合計とカード売上が一致しません。");
+  assert(closing.sales.cashSales + closing.sales.cardSales === closing.sales.totalSales, "現金売上とカード売上の合計が総売上と一致しません。");
+
+  const workIds = closing.castWork.map((work) => String(work.castId || ""));
+  assert(closing.castWork.every((work) => typeof work.castId === "string" && work.castId.length > 0)
+    && new Set(workIds).size === workIds.length, "キャスト勤務IDの空欄、型不正または重複があります。");
+  assert(closing.castWork.every((work) => typeof work.castName === "string" && work.castName.trim().length > 0), "キャスト勤務に名前の空欄または型不正があります。");
+  const castSalesIds = closing.castSales.map((sale) => String(sale.castId || ""));
+  assert(closing.castSales.every((sale) => typeof sale.castId === "string" && sale.castId.length > 0)
+    && new Set(castSalesIds).size === castSalesIds.length, "キャスト売上IDの空欄、型不正または重複があります。");
+  const workIdSet = new Set(workIds);
+  const workNameById = new Map(closing.castWork.map((work) => [work.castId, work.castName]));
+  assert(castSalesIds.every((id) => workIdSet.has(id)), "キャスト売上に勤務記録のないキャストが含まれています。");
+  assert(closing.castSales.every((sale) => typeof sale.castName === "string" && workNameById.get(sale.castId) === sale.castName), "キャスト売上のIDと名前が勤務記録に一致しません。");
+  closing.castSales.forEach((sale) => {
+    const saleRecord = sale as unknown as Record<string, unknown>;
+    finiteNonNegative(saleRecord, "honShimeiSales", `${sale.castName}の本指名売上`);
+    finiteNonNegative(saleRecord, "jonaiExtensionSales", `${sale.castName}の場内延長売上`);
+    finiteNonNegative(saleRecord, "jonaiExtensionBackSales", `${sale.castName}の場内延長バック売上`, { optional: true });
+    finiteNonNegative(saleRecord, "drinkSales", `${sale.castName}のドリンク売上`);
+    finiteNonNegative(saleRecord, "totalAttributedSales", `${sale.castName}の売上帰属合計`);
+  });
   closing.castWork.forEach((work) => {
+    const workRecord = work as unknown as Record<string, unknown>;
     assert(work.castType === "regular" || work.castType === "trial" || work.castType === "dispatch", `${work.castName}のキャスト区分が不正です。`);
     assert((work.castType === "trial") === Boolean(work.isTrial), `${work.castName}の体入区分が一致しません。`);
+    assert(validClockTime(work.startTime) && validClockTime(work.endTime), `${work.castName}の出退勤時刻がHH:mm形式ではありません。`);
+    finiteNonNegative(workRecord, "breakMinutes", `${work.castName}の休憩時間`);
+    finiteNonNegative(workRecord, "hours", `${work.castName}の勤務時間`);
     const calculated = hoursBetweenQuarter(work.startTime, work.endTime, work.breakMinutes);
-    assert(calculated === asNumber(work.hours), `${work.castName}の勤務時間が出退勤時刻と一致しません。`);
+    assert(calculated === work.hours, `${work.castName}の勤務時間が出退勤時刻と一致しません。`);
   });
+  closing.transactions.forEach((transaction) => transaction.items.forEach((item) => {
+    const ids = [...item.backTargetCastIds, ...item.banaiExtCastIds, ...(item.castId ? [item.castId] : [])];
+    assert(ids.every((id) => workIdSet.has(id)), `「${item.label}」に勤務記録のないキャストIDが含まれています。`);
+    if (item.castId) {
+      assert(typeof item.castName === "string" && workNameById.get(item.castId) === item.castName, `「${item.label}」のキャストIDと名前が勤務記録に一致しません。`);
+    }
+    item.backTargetCastIds.forEach((id, index) => {
+      assert(workNameById.get(id) === item.backTargetCastNames[index], `「${item.label}」のバック対象IDと名前が勤務記録に一致しません。`);
+    });
+  }));
   return closing;
 }
 
@@ -754,7 +1400,7 @@ export function buildDailyCasts(
   const sales = new Map(closing.castSales.map((row) => [row.castId, row]));
   const work = new Map(closing.castWork.map((row) => [row.castId, row]));
   return posCastReferences(closing)
-    .filter((source) => source.kind !== "dispatch" && mapping[source.id]?.kind !== "dispatch")
+    .filter((source) => work.has(source.id) && source.kind !== "dispatch" && mapping[source.id]?.kind !== "dispatch")
     .map((source): DailyCast => {
     const target = mapping[source.id];
     const shift = work.get(source.id);
@@ -764,9 +1410,10 @@ export function buildDailyCasts(
     let dohanCount = 0;
     let dohanAmount = 0;
     let drinkSales = 0;
+    const drinkAllocations: DrinkAllocation[] = [];
     const bottles: BottleAllocation[] = [];
-    closing.transactions.forEach((transaction) => transaction.items.forEach((item) => {
-      const quantity = asNumber(item.quantity) || 1;
+    closing.transactions.forEach((transaction) => transaction.items.forEach((item, itemIndex) => {
+      const quantity = asNumber(item.quantity);
       if (item.isHonShimei && item.castId === source.id) honCount += quantity;
       if (item.isBanaiShimei && item.castId === source.id) banaiCount += quantity;
       const targets = ["champagneWine", "keepBottle"].includes(item.category)
@@ -777,24 +1424,41 @@ export function buildDailyCasts(
         dohanAmount += dohanBack(transaction) * quantity;
       }
       if (item.category === "castDrink" && targets.includes(source.id)) {
-        drinkSales += asNumber(item.price) * quantity / Math.max(1, targets.length);
+        const divisor = Math.max(1, targets.length);
+        const salesAmount = asNumber(item.price) * quantity / divisor;
+        drinkSales += salesAmount;
+        drinkAllocations.push({
+          itemId: item.itemId,
+          sourceKey: posItemOccurrenceKey(transaction, itemIndex),
+          name: item.label,
+          quantity,
+          salesAmount,
+          backAmount: splitItemBackPerTarget(asNumber(item.price) * quantity, 0.1, divisor),
+        });
       }
       if (["champagneWine", "keepBottle"].includes(item.category) && asNumber(item.price) * quantity > 0 && targets.includes(source.id)) {
         const master = liquor.find((row) => row.kind === item.category && row.name === item.label && row.salePrice === asNumber(item.price));
-        const costPrice = master?.costPrice ?? specialCosts[item.itemId];
+        const sourceKey = posItemOccurrenceKey(transaction, itemIndex);
+        const costPrice = master?.costPrice ?? specialCosts[sourceKey];
         const divisor = Math.max(1, targets.length);
+        const totalSalesAmount = asNumber(item.price) * quantity;
+        const totalCostAmount = asNumber(costPrice) * quantity;
+        const rate = item.category === "champagneWine" ? 0.25 : 0.15;
         bottles.push({
           itemId: item.itemId,
+          sourceKey,
           name: item.label,
           kind: item.category as BottleAllocation["kind"],
           quantity,
-          salesAmount: asNumber(item.price) * quantity / divisor,
-          costAmount: asNumber(costPrice) * quantity / divisor,
+          salesAmount: totalSalesAmount / divisor,
+          costAmount: totalCostAmount / divisor,
+          backAmount: splitItemBackPerTarget(totalSalesAmount - totalCostAmount, rate, divisor),
           specialCost: !master
         });
       }
     }));
     const liquorCost = bottles.reduce((sum, row) => sum + row.costAmount, 0);
+    const roundedHours = shift ? hoursBetweenQuarter(shift.startTime, shift.endTime, shift.breakMinutes) : 0;
     return {
       masterId: target?.masterId || "",
       posCastId: source.id,
@@ -802,7 +1466,7 @@ export function buildDailyCasts(
       kind: target?.kind || source.kind,
       startTime: shift?.startTime || "",
       endTime: shift?.endTime || "",
-      hours: shift ? hoursBetweenQuarter(shift.startTime, shift.endTime, shift.breakMinutes) : 0,
+      hours: roundedHours,
       hourlyRate: target?.hourlyRate || 0,
       honShimeiCount: honCount,
       banaiShimeiCount: banaiCount,
@@ -811,10 +1475,11 @@ export function buildDailyCasts(
       honShimeiSales: floorHundred(asNumber(sale?.honShimeiSales)),
       jonaiExtensionSales: floorHundred(asNumber(sale?.jonaiExtensionSales)),
       drinkSales,
+      drinkAllocations,
       bottles,
       liquorCost,
       beautyAllowance: 0,
-      dailyPayment: source.kind === "trial" ? floorHundred((target?.hourlyRate || 0) * (shift?.hours || 0)) : 0,
+      dailyPayment: source.kind === "trial" ? floorHundred((target?.hourlyRate || 0) * roundedHours) : 0,
       advancePayment: 0,
       transportFee: 0,
       introducer: target?.introducer
@@ -823,48 +1488,272 @@ export function buildDailyCasts(
 }
 
 function bottleBack(rows: BottleAllocation[]) {
-  return floorHundred(rows.reduce((sum, row) => {
+  return rows.reduce((sum, row) => {
+    if (row.backAmount !== undefined) return sum + Math.max(0, Math.floor(asNumber(row.backAmount)));
     const rate = row.kind === "champagneWine" ? 0.25 : 0.15;
-    return sum + Math.max(0, row.salesAmount - row.costAmount) * rate;
-  }, 0));
+    return sum + floorHundred(Math.max(0, row.salesAmount - row.costAmount) * rate);
+  }, 0);
 }
 
-function bottleAllocationsBySalesType(closing: DailyClosing, row: DailyCast) {
+/**
+ * 新データはPOS商品1行ごと、明細を持たない旧データは従来どおり集約売上へ10%を掛ける。
+ * 新旧データが同月に混在しても、旧集約値を二重計上しない。
+ */
+function drinkBack(rows: DailyCast[]) {
+  let itemizedBack = 0;
+  let legacyDrinkSales = 0;
+  rows.forEach((row) => {
+    if (Array.isArray(row.drinkAllocations) && row.drinkAllocations.length > 0) {
+      itemizedBack += row.drinkAllocations.reduce(
+        (sum, allocation) => sum + (allocation.backAmount === undefined
+          ? floorHundred(asNumber(allocation.salesAmount) * 0.1)
+          : Math.max(0, Math.floor(asNumber(allocation.backAmount)))),
+        0,
+      );
+    } else {
+      legacyDrinkSales += asNumber(row.drinkSales);
+    }
+  });
+  return itemizedBack + floorHundred(legacyDrinkSales * 0.1);
+}
+
+export type UnclassifiedLegacyBottle = {
+  sourceKey: string;
+  closingId: string;
+  businessDate: string;
+  castId: string;
+  castName: string;
+  bottleIndex: number;
+  bottle: BottleAllocation;
+};
+
+/**
+ * Firebaseキーとして利用できる形で、旧ボトルの保存元リビジョンと明細位置を一意化する。
+ * 各要素を個別にencodeURIComponentするため、ID等に区切り文字が含まれても衝突しない。
+ */
+export function legacyBottleSourceKey(
+  closing: Pick<DailyClosing, "id" | "updatedAt" | "checksum">,
+  row: Pick<DailyCast, "posCastId">,
+  bottleIndex: number,
+) {
+  return [closing.id, closing.updatedAt || "", closing.checksum || "", row.posCastId, bottleIndex]
+    .map(firebaseKeyPart)
+    .join("|");
+}
+
+function firebaseKeyPart(value: unknown) {
+  return encodeURIComponent(String(value)).replace(/\./g, "%2E");
+}
+
+/** POSの商品IDではなく、会計と配列位置を含めた商品出現単位の一意キー。 */
+export function posItemOccurrenceKey(transaction: Pick<PosTransaction, "transactionId" | "items">, itemIndex: number) {
+  const itemId = transaction.items[itemIndex]?.itemId || "";
+  return [transaction.transactionId, itemIndex, itemId].map(firebaseKeyPart).join("|");
+}
+
+/** 保存済みの1人分原価から商品単価を復元し、POS商品行の正しい1人分バックを返す。 */
+export function bottleBackAmountFromPosItem(
+  item: Pick<PosItem, "category" | "price" | "quantity">,
+  allocation: Pick<BottleAllocation, "quantity" | "costAmount">,
+  targetCount: number,
+) {
+  const allocationQuantity = asNumber(allocation.quantity);
+  const unitCost = allocationQuantity > 0
+    ? Math.round(asNumber(allocation.costAmount) * targetCount / allocationQuantity)
+    : 0;
+  const totalCostAmount = unitCost * asNumber(item.quantity);
+  const rate = item.category === "champagneWine" ? 0.25 : 0.15;
+  return splitItemBackPerTarget(
+    asNumber(item.price) * asNumber(item.quantity) - totalCostAmount,
+    rate,
+    targetCount,
+  );
+}
+
+/**
+ * 旧保存形式の再編集時に、保存済みの手当・控除等は維持したまま、
+ * POS原本から商品出現キーと新しい1人分バック額だけを復元する。
+ */
+export function restoreDailyCastBackMetadata(closing: PosClosingV3, rows: DailyCast[]) {
+  return rows.map((row): DailyCast => {
+    const bottleOccurrences = closing.transactions.flatMap((transaction) =>
+      transaction.items.flatMap((item, itemIndex) => {
+        if (!["champagneWine", "keepBottle"].includes(item.category)
+          || asNumber(item.price) * asNumber(item.quantity) <= 0) return [];
+        const targets = effectiveBottleBackTargets(transaction, item);
+        if (!targets.includes(row.posCastId)) return [];
+        return [{ item, sourceKey: posItemOccurrenceKey(transaction, itemIndex), targetCount: targets.length }];
+      }));
+    const claimed = new Set<string>();
+    const bottles = (row.bottles || []).map((bottle) => {
+      const occurrence = (bottle.sourceKey
+        ? bottleOccurrences.find((candidate) => candidate.sourceKey === bottle.sourceKey)
+        : undefined)
+        || bottleOccurrences.find((candidate) => !claimed.has(candidate.sourceKey)
+          && candidate.item.itemId === bottle.itemId
+          && candidate.item.label === bottle.name
+          && candidate.item.category === bottle.kind);
+      if (!occurrence) return bottle;
+      claimed.add(occurrence.sourceKey);
+      return {
+        ...bottle,
+        sourceKey: occurrence.sourceKey,
+        backAmount: bottleBackAmountFromPosItem(occurrence.item, bottle, occurrence.targetCount),
+      };
+    });
+    const drinkAllocations = closing.transactions.flatMap((transaction) =>
+      transaction.items.flatMap((item, itemIndex): DrinkAllocation[] => {
+        const targets = item.backTargetCastIds || [];
+        if (item.category !== "castDrink" || !targets.includes(row.posCastId)) return [];
+        const divisor = Math.max(1, targets.length);
+        const salesAmount = asNumber(item.price) * asNumber(item.quantity) / divisor;
+        return [{
+          itemId: item.itemId,
+          sourceKey: posItemOccurrenceKey(transaction, itemIndex),
+          name: item.label,
+          quantity: asNumber(item.quantity),
+          salesAmount,
+          backAmount: splitItemBackPerTarget(asNumber(item.price) * asNumber(item.quantity), 0.1, divisor),
+        }];
+      }));
+    return {
+      ...row,
+      bottles,
+      drinkSales: drinkAllocations.reduce((sum, drink) => sum + drink.salesAmount, 0),
+      drinkAllocations,
+    };
+  });
+}
+
+function hasAttributablePosSnapshot(closing: DailyClosing) {
+  return Array.isArray(closing.posSnapshot?.transactions) && closing.posSnapshot.transactions.length > 0;
+}
+
+/** 承認済み旧データのうち、経理による手動区分がまだないボトル明細を返す。 */
+export function findUnclassifiedLegacyBottles(
+  closings: DailyClosing[],
+  month: string,
+  adjustments?: MonthlyAdjustments,
+): UnclassifiedLegacyBottle[] {
+  const classifications = adjustments?.legacyBottleClassifications || {};
+  return closings
+    .filter((closing) => closing.status === "approved"
+      && closing.businessDate.startsWith(month)
+      && !hasAttributablePosSnapshot(closing))
+    .flatMap((closing) => (closing.casts || []).flatMap((row) =>
+      (row.bottles || []).flatMap((bottle, bottleIndex) => {
+        const sourceKey = legacyBottleSourceKey(closing, row, bottleIndex);
+        return classifications[sourceKey] ? [] : [{
+          sourceKey,
+          closingId: closing.id,
+          businessDate: closing.businessDate,
+          castId: row.masterId || row.posCastId,
+          castName: row.name,
+          bottleIndex,
+          bottle,
+        }];
+      })));
+}
+
+function bottleAllocationsBySalesType(
+  closing: DailyClosing,
+  row: DailyCast,
+  adjustments?: MonthlyAdjustments,
+) {
   const transactions = closing.posSnapshot?.transactions || [];
   if (!transactions.length) {
-    // posSnapshotがない旧データでは、売上区分が一方だけの日に限り明細を同じ区分として扱う。
-    const bottles = row.bottles || [];
-    return row.honShimeiSales > 0 && row.jonaiExtensionSales === 0
-      ? { honShimei: bottles, jonaiExtension: [] as BottleAllocation[] }
-      : { honShimei: [] as BottleAllocation[], jonaiExtension: row.honShimeiSales === 0 ? bottles : [] };
+    // 旧データは売上額から推測しない。未分類・対象外は報酬計算へ一切含めない。
+    return (row.bottles || []).reduce((result, bottle, bottleIndex) => {
+      const sourceKey = legacyBottleSourceKey(closing, row, bottleIndex);
+      const classification = adjustments?.legacyBottleClassifications?.[sourceKey];
+      if (classification === "honShimei" || classification === "jonaiExtension") {
+        result[classification].push(bottle);
+      }
+      return result;
+    }, { honShimei: [] as BottleAllocation[], jonaiExtension: [] as BottleAllocation[] });
   }
-  const attributionByItemId = new Map<string, Array<"honShimei" | "jonaiExtension" | undefined>>();
+  type BottleAttribution = {
+    sourceKey: string;
+    attribution: "honShimei" | "jonaiExtension" | undefined;
+    item: PosItem;
+    targetCount: number;
+    claimed: boolean;
+  };
+  const attributionBySourceKey = new Map<string, BottleAttribution>();
+  const attributionByItemId = new Map<string, BottleAttribution[]>();
   transactions.forEach((transaction) => {
     const honShimei = (transaction.items || []).some((item) => item.isHonShimei);
-    (transaction.items || []).forEach((item) => {
+    (transaction.items || []).forEach((item, itemIndex) => {
       if (!["champagneWine", "keepBottle"].includes(item.category)) return;
       // 同じ銘柄が複数卓で注文されても、保存済みのボトル明細と注文順に対応させる。
       if (!(item.backTargetCastIds || []).includes(row.posCastId)) return;
       const eligible = bottleBackContextCastIds(transaction, item).includes(row.posCastId);
-      const attribution = eligible ? (honShimei ? "honShimei" : "jonaiExtension") : undefined;
-      attributionByItemId.set(item.itemId, [...(attributionByItemId.get(item.itemId) || []), attribution]);
+      const attribution: BottleAttribution["attribution"] = eligible
+        ? (honShimei ? "honShimei" : "jonaiExtension")
+        : undefined;
+      const sourceKey = posItemOccurrenceKey(transaction, itemIndex);
+      const record: BottleAttribution = {
+        sourceKey,
+        attribution,
+        item,
+        targetCount: effectiveBottleBackTargets(transaction, item).length,
+        claimed: false,
+      };
+      attributionBySourceKey.set(sourceKey, record);
+      attributionByItemId.set(item.itemId, [...(attributionByItemId.get(item.itemId) || []), record]);
     });
   });
   return (row.bottles || []).reduce((result, bottle) => {
-    const attribution = attributionByItemId.get(bottle.itemId)?.shift();
-    if (attribution) result[attribution].push(bottle);
+    const record = bottle.sourceKey
+      ? attributionBySourceKey.get(bottle.sourceKey)
+      : attributionByItemId.get(bottle.itemId)?.find((candidate) => !candidate.claimed);
+    if (record) record.claimed = true;
+    const attribution = record?.attribution;
+    if (attribution && record) {
+      result[attribution].push({
+        ...bottle,
+        // posSnapshot付きの既存データは、保存当時の配賦売上ではなく
+        // POSの商品1行全体と対象人数から新しい分配規則で再計算する。
+        backAmount: bottleBackAmountFromPosItem(record.item, bottle, record.targetCount),
+      });
+    }
     return result;
   }, { honShimei: [] as BottleAllocation[], jonaiExtension: [] as BottleAllocation[] });
 }
 
-function liquorCostBySalesType(closing: DailyClosing, row: DailyCast) {
-  const bottles = bottleAllocationsBySalesType(closing, row);
+function drinkBackFromPosSnapshot(closing: DailyClosing, row: DailyCast) {
+  if (!hasAttributablePosSnapshot(closing)) return undefined;
+  return closing.posSnapshot.transactions.reduce((transactionTotal, transaction) =>
+    transactionTotal + (transaction.items || []).reduce((itemTotal, item) => {
+      if (item.category !== "castDrink" || !(item.backTargetCastIds || []).includes(row.posCastId)) return itemTotal;
+      const targetCount = (item.backTargetCastIds || []).length;
+      return itemTotal + splitItemBackPerTarget(asNumber(item.price) * asNumber(item.quantity), 0.1, targetCount);
+    }, 0), 0);
+}
+
+/**
+ * posSnapshot付きの日次はPOSの商品行と対象人数を正とする。
+ * POS原本のない旧日次だけは、保存済み明細／集約値による従来計算を維持する。
+ */
+function drinkBackForEntries(entries: Array<{ closing: DailyClosing; row: DailyCast }>) {
+  let posItemBack = 0;
+  const legacyRows: DailyCast[] = [];
+  entries.forEach(({ closing, row }) => {
+    const back = drinkBackFromPosSnapshot(closing, row);
+    if (back === undefined) legacyRows.push(row);
+    else posItemBack += back;
+  });
+  return posItemBack + drinkBack(legacyRows);
+}
+
+function liquorCostBySalesType(closing: DailyClosing, row: DailyCast, adjustments?: MonthlyAdjustments) {
+  const bottles = bottleAllocationsBySalesType(closing, row, adjustments);
   const total = (rows: BottleAllocation[]) => rows.reduce((sum, bottle) => sum + asNumber(bottle.costAmount), 0);
   return { honShimei: total(bottles.honShimei), jonaiExtension: total(bottles.jonaiExtension) };
 }
 
-function honShimeiLiquorCostForClosing(closing: DailyClosing, row: DailyCast) {
-  return liquorCostBySalesType(closing, row).honShimei;
+function honShimeiLiquorCostForClosing(closing: DailyClosing, row: DailyCast, adjustments?: MonthlyAdjustments) {
+  return liquorCostBySalesType(closing, row, adjustments).honShimei;
 }
 
 export function introducerSalesBase(
@@ -884,7 +1773,7 @@ const castSalesBackLabels: Record<CastSalesBackBreakdown["key"], string> = {
   drink: "ドリンクバック",
 };
 
-function castSalesBacks(row: DailyCast, disabled: boolean, bottles: BottleAllocation[]): CastSalesBackBreakdown[] {
+function castSalesBacks(closing: DailyClosing, row: DailyCast, disabled: boolean, bottles: BottleAllocation[]): CastSalesBackBreakdown[] {
   const amounts: Record<CastSalesBackBreakdown["key"], number> = disabled ? {
     honShimei: 0, banaiShimei: 0, dohan: 0, bottle: 0, drink: 0,
   } : {
@@ -892,7 +1781,7 @@ function castSalesBacks(row: DailyCast, disabled: boolean, bottles: BottleAlloca
     banaiShimei: floorHundred(asNumber(row.banaiShimeiCount) * 500),
     dohan: floorHundred(asNumber(row.dohanBack)),
     bottle: bottleBack(bottles),
-    drink: floorHundred(asNumber(row.drinkSales) * 0.1),
+    drink: drinkBackForEntries([{ closing, row }]),
   };
   return (Object.keys(castSalesBackLabels) as CastSalesBackBreakdown["key"][])
     .map((key) => ({ key, label: castSalesBackLabels[key], amount: amounts[key] }));
@@ -904,35 +1793,76 @@ function summarizeBottles(rows: Array<Pick<BottleAllocation, "name" | "quantity"
   return [...bottles.entries()].map(([name, quantity]) => ({ name, quantity }));
 }
 
+function convertedCastForMonth(
+  masterId: string,
+  castById: Map<string, CastRecord>,
+  casts: CastRecord[],
+  month: string,
+) {
+  const source = castById.get(masterId);
+  const direct = source?.convertedToCastId ? castById.get(source.convertedToCastId) : undefined;
+  if (direct?.hiredAt?.startsWith(month)) return direct;
+  // 体入マスタが完全削除済みでも、在籍側に保存した逆参照で同月の履歴を統合する。
+  if (!source) {
+    return casts.find((candidate) =>
+      candidate.convertedFromTrialId === masterId && candidate.hiredAt?.startsWith(month));
+  }
+  return undefined;
+}
+
+export function castMasterIdentityForMonth(
+  masterId: string,
+  castById: Map<string, CastRecord>,
+  casts: CastRecord[],
+  month: string,
+  monthDailyMasterIds?: ReadonlySet<string>,
+) {
+  const source = castById.get(masterId);
+  // 旧版の物理削除で在籍側マスタだけが消えていても、残存する体入側の変換先IDと
+  // 同月regular日次のIDが一致する場合に限り、同一人物として復元する。
+  const missingConvertedTargetId = source?.convertedToCastId
+    && monthDailyMasterIds?.has(source.convertedToCastId)
+    ? source.convertedToCastId
+    : undefined;
+  return convertedCastForMonth(masterId, castById, casts, month)?.id
+    || missingConvertedTargetId
+    || masterId;
+}
+
+export function castIdentityForMonth(
+  row: DailyCast,
+  castById: Map<string, CastRecord>,
+  casts: CastRecord[],
+  month: string,
+  monthDailyMasterIds?: ReadonlySet<string>,
+) {
+  return castMasterIdentityForMonth(row.masterId, castById, casts, month, monthDailyMasterIds)
+    || row.posCastId;
+}
+
 export function calculateCastSalesReports(
   closings: DailyClosing[],
   casts: CastRecord[],
-  month: string
+  month: string,
+  adjustments?: MonthlyAdjustments,
 ): CastSalesReport[] {
   const castById = new Map(casts.map((row) => [row.id, row]));
-  const identity = (row: DailyCast) => {
-    const member = castById.get(row.masterId);
-    if (member?.convertedToCastId) {
-      const converted = castById.get(member.convertedToCastId);
-      if (converted?.hiredAt?.startsWith(month)) return converted.id;
-    }
-    return row.masterId || row.posCastId;
-  };
   const grouped = new Map<string, { closing: DailyClosing; row: DailyCast }[]>();
-  closings
-    .filter((closing) => closing.status === "approved" && closing.businessDate.startsWith(month))
-    .forEach((closing) => (closing.casts || []).forEach((row) => {
-      const id = identity(row);
+  const approved = closings.filter((closing) => closing.status === "approved" && closing.businessDate.startsWith(month));
+  const monthDailyMasterIds = new Set(approved.flatMap((closing) => (closing.casts || [])
+    .filter((row) => row.kind === "regular")
+    .map((row) => row.masterId)));
+  approved.forEach((closing) => (closing.casts || []).forEach((row) => {
+      const id = castIdentityForMonth(row, castById, casts, month, monthDailyMasterIds);
       grouped.set(id, [...(grouped.get(id) || []), { closing, row }]);
     }));
 
   return [...grouped.entries()].map(([id, entries]): CastSalesReport => {
     const rows = entries.map((entry) => entry.row);
-    const sourceMember = castById.get(rows[0]?.masterId);
-    const convertedMember = sourceMember?.convertedToCastId ? castById.get(sourceMember.convertedToCastId) : undefined;
-    const trialOnly = rows.every((row) => row.kind === "trial") && !convertedMember?.hiredAt?.startsWith(month);
+    const convertedMember = rows.map((row) => convertedCastForMonth(row.masterId, castById, casts, month)).find(Boolean);
+    const trialOnly = rows.every((row) => row.kind === "trial") && !convertedMember;
     const days = entries.map(({ closing, row }): CastSalesDay => {
-      const bottleAllocations = bottleAllocationsBySalesType(closing, row);
+      const bottleAllocations = bottleAllocationsBySalesType(closing, row, adjustments);
       const eligibleBottles = [...bottleAllocations.honShimei, ...bottleAllocations.jonaiExtension];
       const allocationCost = (bottles: BottleAllocation[]) => bottles.reduce((sum, bottle) => sum + asNumber(bottle.costAmount), 0);
       const liquorCosts = {
@@ -940,7 +1870,7 @@ export function calculateCastSalesReports(
         jonaiExtension: allocationCost(bottleAllocations.jonaiExtension),
       };
       const totalLiquorCost = liquorCosts.honShimei + liquorCosts.jonaiExtension;
-      const backs = castSalesBacks(row, trialOnly, eligibleBottles);
+      const backs = castSalesBacks(closing, row, trialOnly, eligibleBottles);
       return {
         businessDate: closing.businessDate,
         startTime: row.startTime,
@@ -959,7 +1889,9 @@ export function calculateCastSalesReports(
         backs,
         backTotal: backs.reduce((sum, back) => sum + back.amount, 0),
         bottles: summarizeBottles(eligibleBottles),
-        beautyAllowance: asNumber(row.beautyAllowance),
+        beautyAllowance: asNumber(row.beautyAllowance) + (closing.expenses || [])
+          .filter((expense) => expense.category === "beautyTrial" && expense.personId === row.masterId)
+          .reduce((sum, expense) => sum + asNumber(expense.amount), 0),
       };
     }).sort((left, right) => left.businessDate.localeCompare(right.businessDate));
     const total = (key: keyof CastSalesDay) => days.reduce((sum, day) => sum + asNumber(day[key]), 0);
@@ -999,43 +1931,45 @@ export function calculateCastRewards(
   closings: DailyClosing[],
   casts: CastRecord[],
   month: string,
-  adjustments?: MonthlyAdjustments
+  adjustments?: MonthlyAdjustments,
+  introducerMonthEvents: IntroducerMonthEvent[] = [],
+  introducerDeletionCommits: IntroducerDeletionCommit[] = [],
 ): CastReward[] {
   const approved = closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(month));
   const castById = new Map(casts.map((row) => [row.id, row]));
-  const identity = (row: DailyCast) => {
-    const member = castById.get(row.masterId);
-    if (member?.convertedToCastId) {
-      const converted = castById.get(member.convertedToCastId);
-      if (converted?.hiredAt?.startsWith(month)) return converted.id;
-    }
-    return row.masterId || row.posCastId;
-  };
   const grouped = new Map<string, { businessDate: string; row: DailyCast; closing: DailyClosing }[]>();
+  const monthDailyMasterIds = new Set(approved.flatMap((closing) => (closing.casts || [])
+    .filter((row) => row.kind === "regular")
+    .map((row) => row.masterId)));
   approved.forEach((closing) => (closing.casts ?? []).forEach((row) => {
-    const key = identity(row);
+    const key = castIdentityForMonth(row, castById, casts, month, monthDailyMasterIds);
     grouped.set(key, [...(grouped.get(key) || []), { businessDate: closing.businessDate, row, closing }]);
   }));
   return [...grouped.entries()].map(([id, entries]): CastReward => {
     const member = castById.get(id);
     const rows = entries.map((entry) => entry.row);
-    const sourceMember = castById.get(rows[0]?.masterId);
-    const convertedMember = sourceMember?.convertedToCastId ? castById.get(sourceMember.convertedToCastId) : undefined;
-    const trialOnly = rows.every((row) => row.kind === "trial") && !convertedMember?.hiredAt?.startsWith(month);
+    const convertedMember = rows.map((row) => convertedCastForMonth(row.masterId, castById, casts, month)).find(Boolean);
+    const trialOnly = rows.every((row) => row.kind === "trial") && !convertedMember;
     const sum = (key: keyof DailyCast) => rows.reduce((total, row) => total + asNumber(row[key]), 0);
     const monthlyRate = rateForMonth(member?.hourlyRates || {}, month);
     const hourlyPay = floorHundred(rows.reduce((total, row) => total + (row.kind === "regular" && monthlyRate > 0 ? monthlyRate : row.hourlyRate) * row.hours, 0));
     const honShimeiSales = sum("honShimeiSales");
     const jonaiExtensionSales = sum("jonaiExtensionSales");
-    const liquorCost = sum("liquorCost");
+    const eligibleBottles = entries.flatMap((entry) => {
+      const allocations = bottleAllocationsBySalesType(entry.closing, entry.row, adjustments);
+      return [...allocations.honShimei, ...allocations.jonaiExtension];
+    });
+    const liquorCost = eligibleBottles.reduce((total, bottle) => total + asNumber(bottle.costAmount), 0);
     const honShimeiLiquorCost = entries.reduce((total, entry) =>
-      total + honShimeiLiquorCostForClosing(entry.closing, entry.row), 0);
+      total + honShimeiLiquorCostForClosing(entry.closing, entry.row, adjustments), 0);
     const honShimeiBack = trialOnly ? 0 : floorHundred(sum("honShimeiCount") * 1000);
     const banaiShimeiBack = trialOnly ? 0 : floorHundred(sum("banaiShimeiCount") * 500);
     const totalDohanBack = trialOnly ? 0 : floorHundred(sum("dohanBack"));
-    const totalBottleBack = trialOnly ? 0 : bottleBack(rows.flatMap((row) => row.bottles ?? []));
-    const drinkBack = trialOnly ? 0 : floorHundred(sum("drinkSales") * 0.1);
-    const hourlyAndBack = floorHundred(hourlyPay + honShimeiBack + banaiShimeiBack + totalDohanBack + totalBottleBack + drinkBack);
+    const totalBottleBack = trialOnly ? 0 : bottleBack(eligibleBottles);
+    const totalDrinkBack = trialOnly ? 0 : drinkBackForEntries(entries);
+    // 各商品バックは商品全体で100円単位へ切捨て後、1円単位で人数割り済み。
+    // ここで再び100円単位へ落とすと333円等の正しい個人配分が失われるため、単純合計する。
+    const hourlyAndBack = hourlyPay + honShimeiBack + banaiShimeiBack + totalDohanBack + totalBottleBack + totalDrinkBack;
     const salesRewardBase = trialOnly ? 0 : floorHundred(Math.max(0, honShimeiSales + jonaiExtensionSales - liquorCost * 0.5));
     const rewardRate = trialOnly ? 0 : rewardRateForSales(salesRewardBase);
     const salesReward = floorHundred(salesRewardBase * rewardRate);
@@ -1047,6 +1981,57 @@ export function calculateCastRewards(
     const advancePayment = sum("advancePayment");
     const transportFee = sum("transportFee");
     const withholding = asNumber(adjustments?.withholdingByCast?.[id]);
+    // 月途中で条件が変わった場合は営業日・在籍区分ではなく、体入日も含めて
+    // 「最後に店舗保存された日次」に実際に入っている条件を正とする。
+    const latestIntroducerEntry = [...entries].sort((left, right) => {
+      return compareDailyClosingSubmissionOrder(left.closing, right.closing)
+        || left.businessDate.localeCompare(right.businessDate)
+        || left.closing.id.localeCompare(right.closing.id)
+        || left.row.posCastId.localeCompare(right.row.posCastId);
+    }).at(-1);
+    const latestIntroducer = latestIntroducerEntry?.row.introducer;
+    const latestDailySavedOrder = latestIntroducerEntry
+      ? dailyClosingSubmissionOrderValue(latestIntroducerEntry.closing)
+      : Number.NEGATIVE_INFINITY;
+    // 体入・在籍IDのどちらに履歴が残っていても、人物全体で最後に保存された
+    // イベントを採る。異なるパスのrevisionは大小比較できないため順序には使わない。
+    const aliasIds = new Set([
+      id,
+      member?.convertedFromTrialId,
+      ...rows.map((row) => row.masterId),
+    ].filter((value): value is string => Boolean(value)));
+    const monthEvent = introducerMonthEvents
+      .filter((event) => event.month === month && aliasIds.has(event.castId))
+      .sort(compareIntroducerMonthEventEffectiveOrder)
+      .at(-1);
+    const deletionCommit = introducerDeletionCommits
+      // linkedCastIdsは削除時に警告表示し、削除ロック下で固定した対象者の正本。
+      // 旧・破損commitで一覧が欠けても、現存キャストの当月最新日次が削除紹介者を
+      // 指している場合だけ安全側で0にする。archived/物理削除済み履歴は巻き込まない。
+      .filter((commit) => commit.month === month && (
+        commit.linkedCastIds.some((castId) => aliasIds.has(castId))
+        || (member !== undefined && !member.deletedAt && (
+          member.introducerId === commit.introducerId
+          || latestIntroducer?.id === commit.introducerId
+        ))
+      ))
+      .sort((left, right) => left.completedAtMs - right.completedAtMs || left.id.localeCompare(right.id))
+      .at(-1);
+    const latestSpecial = [
+      ...(monthEvent ? [{ kind: "event" as const, order: introducerMonthEventEffectiveOrderValue(monthEvent), event: monthEvent }] : []),
+      ...(deletionCommit ? [{ kind: "commit" as const, order: deletionCommit.completedAtMs, commit: deletionCommit }] : []),
+    ].sort((left, right) => left.order - right.order || (left.kind === "commit" ? 1 : -1)).at(-1);
+    const effectiveIntroducer = latestSpecial?.kind === "commit"
+      ? undefined
+      : latestSpecial?.event.state === "deleted"
+        ? undefined
+        : latestSpecial?.event.state === "reassigned"
+        // 再設定より後に日次が保存された場合は、その保存内容（紹介者なしを含む）を
+        // 新しい月内条件とする。同一時刻なら明示操作である再設定イベントを優先する。
+        ? latestDailySavedOrder > introducerMonthEventEffectiveOrderValue(latestSpecial.event)
+          ? latestIntroducer
+          : latestSpecial.event.introducer
+        : latestIntroducer;
     return {
       id,
       name: member?.name || rows[0]?.name || "名称未設定",
@@ -1063,7 +2048,7 @@ export function calculateCastRewards(
       banaiShimeiBack,
       dohanBack: totalDohanBack,
       bottleBack: totalBottleBack,
-      drinkBack,
+      drinkBack: totalDrinkBack,
       hourlyAndBack,
       rewardRate,
       salesRewardBase,
@@ -1077,9 +2062,20 @@ export function calculateCastRewards(
       transportFee,
       withholding,
       netPay: grossPay - dailyPayment - advancePayment - transportFee - withholding,
-      introducer: trialOnly ? undefined : rows.find((row) => row.introducer)?.introducer
+      introducer: trialOnly ? undefined : effectiveIntroducer
     };
   }).sort((left, right) => right.honShimeiSales + right.jonaiExtensionSales - (left.honShimeiSales + left.jonaiExtensionSales));
+}
+
+/**
+ * 旧版互換の公開関数。現在は最後に保存された日次条件を月全体へ適用する仕様のため、
+ * 月途中の条件差は確定阻害要因ではない。
+ */
+export function introducerTermConflicts(closings: DailyClosing[], casts: CastRecord[], month: string) {
+  void closings;
+  void casts;
+  void month;
+  return [] as string[];
 }
 
 export type DriverPayrollRow = {

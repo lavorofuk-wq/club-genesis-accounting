@@ -128,6 +128,7 @@ tbody tr:hover { background: #f8f9f9; }
 
 .modal-backdrop { position: fixed; inset: 0; z-index: 100; padding: 28px; background: rgba(15,29,36,.58); display: grid; place-items: center; overflow-y: auto; }
 .modal { width: min(760px, 100%); max-height: calc(100vh - 56px); overflow-y: auto; border: 1px solid #9ca9af; border-radius: 3px; background: #fff; padding: 21px; box-shadow: 0 12px 40px rgba(0,0,0,.22); }
+.modal-body { min-width: 0; margin: 0; border: 0; padding: 0; }
 
 .stepper { margin: -18px -18px 18px; display: grid; grid-template-columns: repeat(4, 1fr); border-bottom: 1px solid var(--line); background: #eef1f2; }
 .stepper span { padding: 11px 14px; border-right: 1px solid var(--line); color: var(--muted); font-size: 11px; font-weight: 700; }
@@ -209,8 +210,14 @@ details summary { list-style: none; cursor: pointer; }
   .nav-group p { display: none; }
   .sidebar nav button { width: auto; border-left: 0; border-bottom: 3px solid transparent; white-space: nowrap; }
   .sidebar nav button.active { border-bottom-color: #7bb5d2; }
-  .sidebar-foot { display: none; }
+  .sidebar-foot { margin-top: 0; padding: 10px 12px 12px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 5px 10px; }
+  .sidebar-foot > .pill { grid-row: 1 / span 2; }
+  .sidebar-foot small { min-width: 0; grid-column: 2; }
+  .sidebar-foot .button { margin: 0; grid-column: 3; grid-row: 1 / span 2; }
   .main { padding: 19px 12px 48px; }
+  .tabs { max-width: 100%; overflow-x: auto; justify-content: flex-start; }
+  .tabs button { flex: 0 0 auto; white-space: nowrap; }
+  .section-head { align-items: flex-start; flex-wrap: wrap; }
   .page-header { display: block; }
   .header-actions { margin-top: 12px; }
   .grid.two, .grid.three, .grid.four, .grid.metrics, .summary-strip, .form-row, .expense-row { grid-template-columns: 1fr; }
@@ -223,5 +230,5 @@ details summary { list-style: none; cursor: pointer; }
   .cast-sales-summary span { grid-column: 2; }
   .modal-backdrop { padding: 10px; }
   .modal { max-height: calc(100vh - 20px); }
-  .popover-preview { position: fixed; inset: 10px; width: auto; overflow: auto; }
+  .popover-preview { position: static; width: calc(100vw - 42px); max-height: 72vh; overflow: auto; }
 }
