@@ -161,6 +161,24 @@ details summary { list-style: none; cursor: pointer; }
 .detail-panel { margin-top: 16px; border-top: 1px solid var(--line-dark); padding-top: 16px; display: grid; gap: 13px; }
 .month-toolbar { display: flex; align-items: end; justify-content: space-between; gap: 20px; }
 .month-toolbar .field { width: 230px; }
+.cast-sales-card { padding: 0; overflow: hidden; }
+.cast-sales-summary { display: grid; grid-template-columns: 20px minmax(150px, 1fr) repeat(3, auto); align-items: center; gap: 12px 24px; padding: 16px 18px; background: #f7f8f8; }
+.cast-sales-summary:hover { background: var(--blue-soft); }
+.cast-sales-summary::before { content: "＋"; width: 20px; color: var(--blue); font-weight: 700; }
+.cast-sales-card[open] > .cast-sales-summary::before { content: "－"; }
+.cast-sales-summary strong { color: var(--navy); font-size: 17px; }
+.cast-sales-summary span { color: var(--muted); font-size: 12px; }
+.cast-sales-summary b { margin-left: 5px; color: var(--navy); }
+.cast-sales-card[open] > .cast-sales-summary { border-bottom: 1px solid var(--line-dark); }
+.cast-sales-content { padding: 16px 18px 18px; }
+.back-breakdown { min-width: 160px; display: grid; gap: 3px; }
+.back-breakdown span { display: flex; justify-content: space-between; gap: 10px; }
+.back-breakdown small { font-size: 10px; }
+.back-breakdown strong { font-size: 11px; }
+.cell-total { margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--line); text-align: right; font-weight: 700; }
+.bottle-summary { min-width: 130px; display: grid; gap: 3px; white-space: normal; }
+.bottle-summary span { display: flex; justify-content: space-between; gap: 8px; }
+.bottle-summary small { white-space: nowrap; }
 
 .login { min-height: 100vh; padding: 24px; display: grid; place-items: center; background: #e9ecee; }
 .login-card { width: min(430px, 100%); border: 1px solid #aab4b9; border-top: 5px solid var(--navy); border-radius: 3px; background: #fff; box-shadow: 0 12px 36px rgba(22,43,54,.13); }
@@ -201,6 +219,8 @@ details summary { list-style: none; cursor: pointer; }
   .month-toolbar, .actions.spread { align-items: stretch; flex-direction: column; }
   .month-toolbar { display: grid; }
   .month-toolbar .field { width: 100%; }
+  .cast-sales-summary { grid-template-columns: 20px 1fr; gap: 7px 10px; }
+  .cast-sales-summary span { grid-column: 2; }
   .modal-backdrop { padding: 10px; }
   .modal { max-height: calc(100vh - 20px); }
   .popover-preview { position: fixed; inset: 10px; width: auto; overflow: auto; }

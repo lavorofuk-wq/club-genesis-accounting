@@ -503,6 +503,44 @@ export type CastReward = {
   introducer?: DailyCast["introducer"];
 };
 
+export type CastSalesBackBreakdown = {
+  key: "honShimei" | "banaiShimei" | "dohan" | "bottle" | "drink";
+  label: string;
+  amount: number;
+};
+
+export type CastSalesBottleSummary = {
+  name: string;
+  quantity: number;
+};
+
+export type CastSalesDay = {
+  businessDate: string;
+  hours: number;
+  honShimeiSales: number;
+  jonaiExtensionSales: number;
+  totalSales: number;
+  honShimeiLiquorCost: number;
+  jonaiExtensionLiquorCost: number;
+  totalLiquorCost: number;
+  honShimeiCount: number;
+  banaiShimeiCount: number;
+  nominationCount: number;
+  dohanCount: number;
+  backs: CastSalesBackBreakdown[];
+  backTotal: number;
+  bottles: CastSalesBottleSummary[];
+  beautyAllowance: number;
+};
+
+export type CastSalesReport = {
+  id: string;
+  name: string;
+  attendanceDays: number;
+  days: CastSalesDay[];
+  totals: Omit<CastSalesDay, "businessDate">;
+};
+
 const asNumber = (value: unknown) => {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : 0;
@@ -785,19 +823,42 @@ function bottleBack(rows: BottleAllocation[]) {
   }, 0));
 }
 
-function honShimeiLiquorCostForClosing(closing: DailyClosing, row: DailyCast) {
+function bottleAllocationsBySalesType(closing: DailyClosing, row: DailyCast) {
   const transactions = closing.posSnapshot?.transactions || [];
   if (!transactions.length) {
-    // posSnapshotがない旧データでは、本指名売上だけの日に限り全原価を本指名分として扱う。
-    return row.honShimeiSales > 0 && row.jonaiExtensionSales === 0 ? asNumber(row.liquorCost) : 0;
+    // posSnapshotがない旧データでは、売上区分が一方だけの日に限り明細を同じ区分として扱う。
+    const bottles = row.bottles || [];
+    return row.honShimeiSales > 0 && row.jonaiExtensionSales === 0
+      ? { honShimei: bottles, jonaiExtension: [] as BottleAllocation[] }
+      : { honShimei: [] as BottleAllocation[], jonaiExtension: row.honShimeiSales === 0 ? bottles : [] };
   }
-  const honShimeiBottleItemIds = new Set(transactions
-    .filter((transaction) => (transaction.items || []).some((item) => item.isHonShimei))
-    .flatMap((transaction) => (transaction.items || [])
-      .filter((item) => ["champagneWine", "keepBottle"].includes(item.category))
-      .map((item) => item.itemId)));
-  return (row.bottles || []).reduce((total, bottle) =>
-    total + (honShimeiBottleItemIds.has(bottle.itemId) ? asNumber(bottle.costAmount) : 0), 0);
+  const attributionByItemId = new Map<string, Array<"honShimei" | "jonaiExtension" | undefined>>();
+  transactions.forEach((transaction) => {
+    const honShimei = (transaction.items || []).some((item) => item.isHonShimei);
+    (transaction.items || []).forEach((item) => {
+      if (!["champagneWine", "keepBottle"].includes(item.category)) return;
+      // 同じ銘柄が複数卓で注文されても、保存済みのボトル明細と注文順に対応させる。
+      if (!(item.backTargetCastIds || []).includes(row.posCastId)) return;
+      const eligible = bottleBackContextCastIds(transaction, item).includes(row.posCastId);
+      const attribution = eligible ? (honShimei ? "honShimei" : "jonaiExtension") : undefined;
+      attributionByItemId.set(item.itemId, [...(attributionByItemId.get(item.itemId) || []), attribution]);
+    });
+  });
+  return (row.bottles || []).reduce((result, bottle) => {
+    const attribution = attributionByItemId.get(bottle.itemId)?.shift();
+    if (attribution) result[attribution].push(bottle);
+    return result;
+  }, { honShimei: [] as BottleAllocation[], jonaiExtension: [] as BottleAllocation[] });
+}
+
+function liquorCostBySalesType(closing: DailyClosing, row: DailyCast) {
+  const bottles = bottleAllocationsBySalesType(closing, row);
+  const total = (rows: BottleAllocation[]) => rows.reduce((sum, bottle) => sum + asNumber(bottle.costAmount), 0);
+  return { honShimei: total(bottles.honShimei), jonaiExtension: total(bottles.jonaiExtension) };
+}
+
+function honShimeiLiquorCostForClosing(closing: DailyClosing, row: DailyCast) {
+  return liquorCostBySalesType(closing, row).honShimei;
 }
 
 export function introducerSalesBase(
@@ -807,6 +868,122 @@ export function introducerSalesBase(
   const netOfLiquorCost = feeType === "netSales10" || feeType === "higherNetSalesGross10";
   return Math.max(0, asNumber(reward.honShimeiSales)
     - (netOfLiquorCost ? asNumber(reward.honShimeiLiquorCost) : 0));
+}
+
+const castSalesBackLabels: Record<CastSalesBackBreakdown["key"], string> = {
+  honShimei: "本指名バック",
+  banaiShimei: "場内指名バック",
+  dohan: "同伴バック",
+  bottle: "ボトルバック",
+  drink: "ドリンクバック",
+};
+
+function castSalesBacks(row: DailyCast, disabled: boolean, bottles: BottleAllocation[]): CastSalesBackBreakdown[] {
+  const amounts: Record<CastSalesBackBreakdown["key"], number> = disabled ? {
+    honShimei: 0, banaiShimei: 0, dohan: 0, bottle: 0, drink: 0,
+  } : {
+    honShimei: floorHundred(asNumber(row.honShimeiCount) * 1000),
+    banaiShimei: floorHundred(asNumber(row.banaiShimeiCount) * 500),
+    dohan: floorHundred(asNumber(row.dohanBack)),
+    bottle: bottleBack(bottles),
+    drink: floorHundred(asNumber(row.drinkSales) * 0.1),
+  };
+  return (Object.keys(castSalesBackLabels) as CastSalesBackBreakdown["key"][])
+    .map((key) => ({ key, label: castSalesBackLabels[key], amount: amounts[key] }));
+}
+
+function summarizeBottles(rows: Array<Pick<BottleAllocation, "name" | "quantity">>): CastSalesBottleSummary[] {
+  const bottles = new Map<string, number>();
+  rows.forEach((row) => bottles.set(row.name, (bottles.get(row.name) || 0) + asNumber(row.quantity)));
+  return [...bottles.entries()].map(([name, quantity]) => ({ name, quantity }));
+}
+
+export function calculateCastSalesReports(
+  closings: DailyClosing[],
+  casts: CastRecord[],
+  month: string
+): CastSalesReport[] {
+  const castById = new Map(casts.map((row) => [row.id, row]));
+  const identity = (row: DailyCast) => {
+    const member = castById.get(row.masterId);
+    if (member?.convertedToCastId) {
+      const converted = castById.get(member.convertedToCastId);
+      if (converted?.hiredAt?.startsWith(month)) return converted.id;
+    }
+    return row.masterId || row.posCastId;
+  };
+  const grouped = new Map<string, { closing: DailyClosing; row: DailyCast }[]>();
+  closings
+    .filter((closing) => closing.status === "approved" && closing.businessDate.startsWith(month))
+    .forEach((closing) => (closing.casts || []).forEach((row) => {
+      const id = identity(row);
+      grouped.set(id, [...(grouped.get(id) || []), { closing, row }]);
+    }));
+
+  return [...grouped.entries()].map(([id, entries]): CastSalesReport => {
+    const rows = entries.map((entry) => entry.row);
+    const sourceMember = castById.get(rows[0]?.masterId);
+    const convertedMember = sourceMember?.convertedToCastId ? castById.get(sourceMember.convertedToCastId) : undefined;
+    const trialOnly = rows.every((row) => row.kind === "trial") && !convertedMember?.hiredAt?.startsWith(month);
+    const days = entries.map(({ closing, row }): CastSalesDay => {
+      const bottleAllocations = bottleAllocationsBySalesType(closing, row);
+      const eligibleBottles = [...bottleAllocations.honShimei, ...bottleAllocations.jonaiExtension];
+      const allocationCost = (bottles: BottleAllocation[]) => bottles.reduce((sum, bottle) => sum + asNumber(bottle.costAmount), 0);
+      const liquorCosts = {
+        honShimei: allocationCost(bottleAllocations.honShimei),
+        jonaiExtension: allocationCost(bottleAllocations.jonaiExtension),
+      };
+      const totalLiquorCost = liquorCosts.honShimei + liquorCosts.jonaiExtension;
+      const backs = castSalesBacks(row, trialOnly, eligibleBottles);
+      return {
+        businessDate: closing.businessDate,
+        hours: asNumber(row.hours),
+        honShimeiSales: asNumber(row.honShimeiSales),
+        jonaiExtensionSales: asNumber(row.jonaiExtensionSales),
+        totalSales: asNumber(row.honShimeiSales) + asNumber(row.jonaiExtensionSales),
+        honShimeiLiquorCost: liquorCosts.honShimei,
+        jonaiExtensionLiquorCost: liquorCosts.jonaiExtension,
+        totalLiquorCost,
+        honShimeiCount: asNumber(row.honShimeiCount),
+        banaiShimeiCount: asNumber(row.banaiShimeiCount),
+        nominationCount: asNumber(row.honShimeiCount) + asNumber(row.banaiShimeiCount),
+        dohanCount: asNumber(row.dohanCount),
+        backs,
+        backTotal: backs.reduce((sum, back) => sum + back.amount, 0),
+        bottles: summarizeBottles(eligibleBottles),
+        beautyAllowance: asNumber(row.beautyAllowance),
+      };
+    }).sort((left, right) => left.businessDate.localeCompare(right.businessDate));
+    const total = (key: keyof CastSalesDay) => days.reduce((sum, day) => sum + asNumber(day[key]), 0);
+    const backs = (Object.keys(castSalesBackLabels) as CastSalesBackBreakdown["key"][]).map((key) => ({
+      key,
+      label: castSalesBackLabels[key],
+      amount: days.reduce((sum, day) => sum + (day.backs.find((back) => back.key === key)?.amount || 0), 0),
+    }));
+    return {
+      id,
+      name: castById.get(id)?.name || rows[0]?.name || "名称未設定",
+      attendanceDays: new Set(days.map((day) => day.businessDate)).size,
+      days,
+      totals: {
+        hours: total("hours"),
+        honShimeiSales: total("honShimeiSales"),
+        jonaiExtensionSales: total("jonaiExtensionSales"),
+        totalSales: total("totalSales"),
+        honShimeiLiquorCost: total("honShimeiLiquorCost"),
+        jonaiExtensionLiquorCost: total("jonaiExtensionLiquorCost"),
+        totalLiquorCost: total("totalLiquorCost"),
+        honShimeiCount: total("honShimeiCount"),
+        banaiShimeiCount: total("banaiShimeiCount"),
+        nominationCount: total("nominationCount"),
+        dohanCount: total("dohanCount"),
+        backs,
+        backTotal: backs.reduce((sum, back) => sum + back.amount, 0),
+        bottles: summarizeBottles(days.flatMap((day) => day.bottles)),
+        beautyAllowance: total("beautyAllowance"),
+      },
+    };
+  }).sort((left, right) => right.totals.totalSales - left.totals.totalSales || left.name.localeCompare(right.name, "ja"));
 }
 
 export function calculateCastRewards(

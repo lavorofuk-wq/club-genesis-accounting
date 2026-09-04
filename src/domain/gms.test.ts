@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildDailyCasts,
   calculateCash,
+  calculateCastSalesReports,
   calculateCastRewards,
   calculateDriverPayroll,
   canMapAsDispatch,
@@ -255,6 +256,80 @@ describe("GMS報酬・日次計算", () => {
     expect(introducerSalesBase(reward, "sales10")).toBe(1300000);
     expect(introducerSalesBase(reward, "netSales10")).toBe(1295000);
     expect(introducerSalesBase(reward, "higherNetSalesGross10")).toBe(1295000);
+  });
+
+  it("キャスト売上を出勤日別に集計し本指名と場内延長の原価を分ける", () => {
+    const hon = pos();
+    const banai = pos();
+    banai.businessDate = "2026-09-03";
+    banai.transactions[0].items = banai.transactions[0].items.filter((item) => !item.isHonShimei);
+    const extension = banai.transactions[0].items.find((item) => item.itemId === "extension")!;
+    extension.isBanaiExtension = true;
+    extension.banaiExtCastIds = ["p1", "p2"];
+    banai.castSales = banai.castSales.map((row) => ({
+      ...row,
+      honShimeiSales: 0,
+      jonaiExtensionSales: row.castId === "p1" ? 400000 : 0,
+      totalAttributedSales: row.castId === "p1" ? 400000 : 0
+    }));
+    const mapping = {
+      p1: { masterId: "c1", name: "花子", kind: "regular" as const, hourlyRate: 3000 },
+      p2: { masterId: "c2", name: "春子", kind: "regular" as const, hourlyRate: 3000 }
+    };
+    const liquor = [{ id: "l1", kind: "champagneWine" as const, name: "テストシャンパン", salePrice: 30000, costPrice: 10000, createdAt: "", updatedAt: "" }];
+    const honRows = buildDailyCasts(hon, mapping, liquor, {}).map((row) => row.posCastId === "p1" ? { ...row, beautyAllowance: 500 } : row);
+    const banaiRows = buildDailyCasts(banai, mapping, liquor, {});
+    const reports = calculateCastSalesReports([
+      { id: "hon", businessDate: hon.businessDate, status: "approved", casts: honRows, posSnapshot: hon },
+      { id: "banai", businessDate: banai.businessDate, status: "approved", casts: banaiRows, posSnapshot: banai },
+      { id: "pending", businessDate: "2026-09-04", status: "submitted", casts: honRows, posSnapshot: hon }
+    ] as DailyClosing[], [], "2026-09");
+    const report = reports.find((row) => row.id === "c1")!;
+
+    expect(report.attendanceDays).toBe(2);
+    expect(report.days.map((day) => day.businessDate)).toEqual(["2026-09-02", "2026-09-03"]);
+    expect(report.days[0]).toMatchObject({
+      honShimeiSales: 1300000, jonaiExtensionSales: 0,
+      honShimeiLiquorCost: 5000, jonaiExtensionLiquorCost: 0,
+      beautyAllowance: 500
+    });
+    expect(report.days[1]).toMatchObject({
+      honShimeiSales: 0, jonaiExtensionSales: 400000,
+      honShimeiLiquorCost: 0, jonaiExtensionLiquorCost: 5000,
+      beautyAllowance: 0
+    });
+    expect(report.totals).toMatchObject({
+      honShimeiSales: 1300000, jonaiExtensionSales: 400000, totalSales: 1700000,
+      honShimeiLiquorCost: 5000, jonaiExtensionLiquorCost: 5000, totalLiquorCost: 10000,
+      beautyAllowance: 500
+    });
+    expect(report.totals.bottles).toEqual([{ name: "テストシャンパン", quantity: 2 }]);
+    expect(report.totals.backTotal).toBe(report.totals.backs.reduce((sum, back) => sum + back.amount, 0));
+  });
+
+  it("過去データに残るフリー卓ボトルをキャスト売上の原価へ含めない", () => {
+    const snapshot = pos();
+    const mapping = {
+      p1: { masterId: "c1", name: "花子", kind: "regular" as const, hourlyRate: 3000 },
+      p2: { masterId: "c2", name: "春子", kind: "regular" as const, hourlyRate: 3000 }
+    };
+    const liquor = [{ id: "l1", kind: "champagneWine" as const, name: "テストシャンパン", salePrice: 30000, costPrice: 10000, createdAt: "", updatedAt: "" }];
+    // 旧ロジックで本指名卓として作られた保存済み明細を再現する。
+    const storedRows = buildDailyCasts(snapshot, mapping, liquor, {});
+    // POSスナップショット上は本指名も場内延長もないフリー卓へ修正済み。
+    snapshot.transactions[0].items = snapshot.transactions[0].items.filter((item) => !item.isHonShimei);
+    snapshot.castSales = snapshot.castSales.map((row) => ({
+      ...row,
+      honShimeiSales: 0,
+      totalAttributedSales: 0
+    }));
+    const report = calculateCastSalesReports([
+      { id: "free", businessDate: snapshot.businessDate, status: "approved", casts: storedRows, posSnapshot: snapshot }
+    ] as DailyClosing[], [], "2026-09").find((row) => row.id === "c1")!;
+
+    expect(report.totals.totalLiquorCost).toBe(0);
+    expect(report.totals.bottles).toEqual([]);
+    expect(report.totals.backs.find((back) => back.key === "bottle")?.amount).toBe(0);
   });
 
   it("営業終了時点の現金残額を算出する", () => {
