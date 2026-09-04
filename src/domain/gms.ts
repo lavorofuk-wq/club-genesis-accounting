@@ -9,6 +9,13 @@ export function isUnapprovedClosingStatus(
   return status === "submitted" || status === "returned" || status === "withdrawn";
 }
 
+/** Firebase Rulesから動的参照しても安全な、POS提出の重複防止キー。 */
+export function posSubmissionClaimKey(checksum: unknown) {
+  const value = typeof checksum === "string" ? checksum : "";
+  if (!/^[0-9a-f]{64}$/.test(value)) throw new Error("POSチェックサムが正しくありません。");
+  return value;
+}
+
 export type MonthlyRates = Record<string, number>;
 
 export type CastRecord = {

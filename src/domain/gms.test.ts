@@ -19,6 +19,7 @@ import {
   normalizeDailyClosing,
   normalizeMonthlyAdjustments,
   parsePosClosingV3,
+  posSubmissionClaimKey,
   posItemOccurrenceKey,
   posCastReferences,
   requiresBottleCost,
@@ -73,6 +74,12 @@ describe("GMS報酬・日次計算", () => {
     expect(isUnapprovedClosingStatus("returned")).toBe(true);
     expect(isUnapprovedClosingStatus("withdrawn")).toBe(true);
     expect(isUnapprovedClosingStatus("approved")).toBe(false);
+  });
+
+  it("POS重複防止キーをRulesの動的パスで安全な64桁hexに限定する", () => {
+    expect(posSubmissionClaimKey("a".repeat(64))).toBe("a".repeat(64));
+    expect(() => posSubmissionClaimKey("A".repeat(64))).toThrow("POSチェックサムが正しくありません。");
+    expect(() => posSubmissionClaimKey(`submission~${"a".repeat(64)}`)).toThrow("POSチェックサムが正しくありません。");
   });
 
   it("UTC月末時刻をAsia/Tokyoの削除月へ変換する", () => {
