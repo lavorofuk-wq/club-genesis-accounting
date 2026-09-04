@@ -390,7 +390,7 @@ export function AccountingApp() {
           </StatusPill>
           <small>{user.email}</small>
           <small>
-            Ver2.6.0 ·{" "}
+            Ver2.7.0 ·{" "}
             {role === "shop" ? "店舗" : role === "accounting" ? "経理" : "OP"}
           </small>
           <button className="button secondary" onClick={() => signOut(auth)}>
@@ -508,7 +508,7 @@ function Login() {
           <span>CLUB GENESIS</span>
           <strong>GMS</strong>
           <p>GENESIS Management System</p>
-          <small>Ver2.6.0</small>
+          <small>Ver2.7.0</small>
         </div>
         <div className="stack">
           <label className="field">

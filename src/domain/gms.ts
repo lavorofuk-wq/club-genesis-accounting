@@ -516,6 +516,8 @@ export type CastSalesBottleSummary = {
 
 export type CastSalesDay = {
   businessDate: string;
+  startTime: string;
+  endTime: string;
   hours: number;
   honShimeiSales: number;
   jonaiExtensionSales: number;
@@ -533,12 +535,16 @@ export type CastSalesDay = {
   beautyAllowance: number;
 };
 
+export type CastSalesTotals = Omit<CastSalesDay, "businessDate" | "startTime" | "endTime"> & {
+  attendanceDays: number;
+};
+
 export type CastSalesReport = {
   id: string;
   name: string;
   attendanceDays: number;
   days: CastSalesDay[];
-  totals: Omit<CastSalesDay, "businessDate">;
+  totals: CastSalesTotals;
 };
 
 const asNumber = (value: unknown) => {
@@ -937,6 +943,8 @@ export function calculateCastSalesReports(
       const backs = castSalesBacks(row, trialOnly, eligibleBottles);
       return {
         businessDate: closing.businessDate,
+        startTime: row.startTime,
+        endTime: row.endTime,
         hours: asNumber(row.hours),
         honShimeiSales: asNumber(row.honShimeiSales),
         jonaiExtensionSales: asNumber(row.jonaiExtensionSales),
@@ -966,6 +974,7 @@ export function calculateCastSalesReports(
       attendanceDays: new Set(days.map((day) => day.businessDate)).size,
       days,
       totals: {
+        attendanceDays: new Set(days.map((day) => day.businessDate)).size,
         hours: total("hours"),
         honShimeiSales: total("honShimeiSales"),
         jonaiExtensionSales: total("jonaiExtensionSales"),
