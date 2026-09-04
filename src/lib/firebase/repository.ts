@@ -6,6 +6,7 @@ import { database, rootRef } from "./client";
 import {
   bottleBackAmountFromPosItem,
   compareIntroducerMonthEventEffectiveOrder,
+  isUnapprovedClosingStatus,
   isStaffHireDateAfterTrial,
   japanMonthFromTimestamp,
   normalizeDailyClosing,
@@ -78,6 +79,17 @@ type IntroducerDeletionLock = {
   expiresAt: number;
 };
 const INTRODUCER_DELETION_LOCK_TTL_MS = 120_000;
+
+type DailyClosingDeletionLock = ClosingRevision & {
+  id: string;
+  month: string;
+  claimKey: string;
+  token: string;
+  owner: string;
+  acquiredAtMs: number;
+  expiresAt: number;
+};
+const DAILY_CLOSING_DELETION_LOCK_TTL_MS = 120_000;
 
 type ConversionLock = {
   operationId: string;
@@ -287,6 +299,76 @@ async function releaseClaimAfterEntitySaved(path: string, key: string, id: strin
     if (await isReleased().catch(() => false)) return;
   }
   throw new Error(`${entityLabel}本体は更新されましたが、旧い重複防止情報を解放できませんでした。通信状態を確認し、管理者へ連絡してください。`);
+}
+
+async function acquireDailyClosingDeletionLock(
+  id: string,
+  expected: ClosingRevision,
+  user: User,
+): Promise<DailyClosingDeletionLock> {
+  const serverClock = await firebaseServerNow();
+  const pending: DailyClosingDeletionLock = {
+    id,
+    ...expected,
+    month: expected.businessDate.slice(0, 7),
+    claimKey: claimKey(expected.submissionId, expected.checksum),
+    token: crypto.randomUUID(),
+    owner: user.uid,
+    acquiredAtMs: serverOrderTimestamp(),
+    expiresAt: serverClock.milliseconds + DAILY_CLOSING_DELETION_LOCK_TTL_MS,
+  };
+  const result = await runTransaction(rootRef("dailyClosingDeletionLock"), (current) => {
+    const existing = current as DailyClosingDeletionLock | null;
+    if (existing && Number(existing.expiresAt || 0) > serverClock.milliseconds) {
+      throw new Error("別の端末で送信済みデータを削除中です。完了後に最新データを読み込んでください。");
+    }
+    return pending;
+  }, { applyLocally: false });
+  const stored = result.snapshot.val() as DailyClosingDeletionLock | null;
+  if (!result.committed || !stored || !Number.isSafeInteger(stored.acquiredAtMs)
+    || stored.id !== id || stored.token !== pending.token || stored.owner !== user.uid) {
+    throw new Error("送信済みデータの削除ロックを取得できませんでした。最新データを読み込んでやり直してください。");
+  }
+  return stored;
+}
+
+async function releaseDailyClosingDeletionLock(lock: DailyClosingDeletionLock) {
+  await runTransaction(rootRef("dailyClosingDeletionLock"), (current) => {
+    const existing = current as DailyClosingDeletionLock | null;
+    if (!existing || existing.id !== lock.id || existing.token !== lock.token || existing.owner !== lock.owner) return;
+    return null;
+  }, { applyLocally: false });
+}
+
+async function dailyClosingDeletionPlanApplied(lock: DailyClosingDeletionLock) {
+  const [historySnapshot, claimSnapshot, lockSnapshot] = await Promise.all([
+    get(rootRef(`history/${lock.id}`)),
+    get(rootRef(`posSubmissionClaims/${lock.claimKey}`)),
+    get(rootRef("dailyClosingDeletionLock")),
+  ]);
+  const storedLock = lockSnapshot.val() as DailyClosingDeletionLock | null;
+  return !historySnapshot.exists()
+    && claimId(claimSnapshot.val()) !== lock.id
+    && (!storedLock || storedLock.id !== lock.id || storedLock.token !== lock.token);
+}
+
+async function applyDailyClosingDeletionPlan(lock: DailyClosingDeletionLock) {
+  const plan = {
+    [`history/${lock.id}`]: null,
+    [`posSubmissionClaims/${lock.claimKey}`]: null,
+    dailyClosingDeletionLock: null,
+  };
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await update(rootRef(), plan);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (await dailyClosingDeletionPlanApplied(lock).catch(() => false)) return;
+    }
+  }
+  throw lastError;
 }
 
 function claimAcquisitionError(error: unknown, duplicateMessage: string) {
@@ -1777,6 +1859,46 @@ export async function withdrawClosing(id: string, expected: ClosingRevision, use
     });
   }, { applyLocally: false });
 }
+
+export async function deleteUnapprovedClosing(id: string, expected: ClosingRevision, user: User) {
+  await requireUser(user, ["shop", "op"]);
+  if (!id || /[.#$\/\[\]]/.test(id)) throw new Error("削除対象の店舗データIDが正しくありません。");
+  if (!validDate(expected.businessDate)) throw new Error("営業日が正しくありません。");
+  const month = expected.businessDate.slice(0, 7);
+  await assertMonthOpen(month);
+  const currentSnapshot = await get(rootRef(`history/${id}`));
+  const current = currentSnapshot.val() as DailyClosing | null;
+  if (!current) throw new Error("この送信済みデータはすでに削除されています。最新データを読み込んでください。");
+  assertClosingRevision(current, expected);
+  if (!isUnapprovedClosingStatus(current.status)) {
+    throw new Error("承認済みデータは完全削除できません。経理またはOPが差し戻してから削除してください。");
+  }
+  const currentClaimKey = claimKey(current.submissionId, current.checksum);
+  const currentClaimOwner = claimId((await get(rootRef(`posSubmissionClaims/${currentClaimKey}`))).val());
+  if (currentClaimOwner && currentClaimOwner !== id) {
+    throw new Error("POS重複防止情報が別の営業日データを参照しています。削除せず管理者へ連絡してください。");
+  }
+
+  let deletionLock: DailyClosingDeletionLock;
+  try {
+    deletionLock = await acquireDailyClosingDeletionLock(id, expected, user);
+  } catch (error) {
+    const detail = `${String((error as { code?: unknown } | null)?.code || "")} ${error instanceof Error ? error.message : String(error || "")}`;
+    if (/permission.?denied/i.test(detail)) {
+      throw new Error("削除対象の状態または月次状態が別の端末で更新されました。最新データを読み込んでからやり直してください。");
+    }
+    throw error;
+  }
+
+  let deleted = false;
+  try {
+    await applyDailyClosingDeletionPlan(deletionLock);
+    deleted = true;
+  } finally {
+    if (!deleted) await releaseDailyClosingDeletionLock(deletionLock).catch(() => undefined);
+  }
+}
+
 export async function approveClosing(id: string, expected: ClosingRevision, user: User) {
   await requireUser(user, ["accounting", "op"]);
   await assertMonthOpen(expected.businessDate.slice(0, 7));

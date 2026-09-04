@@ -3,6 +3,12 @@ export type PersonStatus = "active" | "trial" | "departed";
 export type CastKind = "regular" | "trial" | "dispatch";
 export type ClosingStatus = "submitted" | "returned" | "approved" | "withdrawn";
 
+export function isUnapprovedClosingStatus(
+  status: ClosingStatus,
+): status is Exclude<ClosingStatus, "approved"> {
+  return status === "submitted" || status === "returned" || status === "withdrawn";
+}
+
 export type MonthlyRates = Record<string, number>;
 
 export type CastRecord = {
