@@ -313,7 +313,6 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     </div>}
     {stage === "details" && pos && !workflowLock && <div className="stack section-pad">
       <h3>キャスト出勤・売上・手当控除</h3><Table headers={["キャスト", "勤務", "本指名", "場内", "同伴", "本指名売上", "場内延長売上", "ボトル/ドリンク", "美容室", "日払い", "立替", "送迎"]}>{castRows.map((row) => <tr key={row.posCastId}><td><strong>{row.name}</strong><br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td><td>{row.startTime}–{row.endTime}<br />{row.hours}時間</td><td>{row.honShimeiCount}本</td><td>{row.banaiShimeiCount}本</td><td>{row.dohanCount}本</td><td><MoneyInput value={row.honShimeiSales} onChange={(value) => updateCast(row.posCastId, { honShimeiSales: value })} /></td><td><MoneyInput value={row.jonaiExtensionSales} onChange={(value) => updateCast(row.posCastId, { jonaiExtensionSales: value })} /></td><td><CastProductSummary row={row} pos={pos} /></td><td><label className="check-row"><input type="checkbox" checked={row.beautyAllowance === 500} disabled={row.kind === "trial"} onChange={(e) => updateCast(row.posCastId, { beautyAllowance: e.target.checked ? 500 : 0 })} />500円</label></td><td><MoneyInput value={row.dailyPayment} onChange={(value) => updateCast(row.posCastId, { dailyPayment: value })} /></td><td><MoneyInput value={row.advancePayment} onChange={(value) => updateCast(row.posCastId, { advancePayment: value })} /></td><td><MoneyInput value={row.transportFee} step={500} onChange={(value) => updateCast(row.posCastId, { transportFee: value })} /></td></tr>)}</Table>
-      <h3>POSボトル・ドリンク注文明細</h3><PosProductDetails pos={pos} casts={castRows} />
       <h3>スタッフ勤務・日払い</h3><div className="grid form-row"><Field label="スタッフ"><select className="input" value={staffId} onChange={(e) => setStaffId(e.target.value)}><option value="">選択</option>{staffCandidates.map((row) => <option key={row.id} value={row.id}>{row.name}（{row.status === "trial" ? "体入" : "在籍"}）</option>)}</select></Field><Field label="出勤"><input className="input" type="time" value={staffStart} onChange={(e) => setStaffStart(e.target.value)} /></Field><Field label="退勤"><input className="input" type="time" value={staffEnd} onChange={(e) => setStaffEnd(e.target.value)} /></Field><button className="button compact" onClick={addStaff}>追加</button></div><Table headers={["スタッフ", "区分", "出勤", "退勤", "勤務", "時給", "日払い", "操作"]}>{staffWork.map((row) => <tr key={row.staffId}><td>{row.name}</td><td>{row.kind === "trial" ? "体入" : "在籍"}</td><td>{row.startTime}</td><td>{row.endTime}</td><td>{row.hours}時間</td><td>{yen.format(row.hourlyRate)}</td><td><MoneyInput value={row.dailyPayment} disabled={row.kind === "trial"} onChange={(value) => setStaffWork((rows) => rows.map((item) => item.staffId === row.staffId ? { ...item, dailyPayment: value } : item))} />{row.kind === "trial" && <small>基本給与全額を即日払い</small>}</td><td><button className="button danger mini" onClick={() => setStaffWork((rows) => rows.filter((item) => item.staffId !== row.staffId))}>削除</button></td></tr>)}</Table>
       <h3>送迎ドライバー・日払い</h3><div className="check-grid">{data.drivers.filter((row) => activeOnBusinessDate(row.hiredAt, row.departedAt)).map((row) => { const selected = driverWork.some((item) => item.driverId === row.id); return <label className="select-card" key={row.id}><input type="checkbox" checked={selected} onChange={(e) => setDriverWork(e.target.checked ? [...driverWork.filter((item) => item.driverId !== row.id), { driverId: row.id, name: row.name, dailyRate: row.dailyRate, dailyPayment: 0 }] : driverWork.filter((item) => item.driverId !== row.id))} /><span>{row.name}<small>日給 {yen.format(row.dailyRate)}</small></span></label>; })}</div><Table headers={["ドライバー", "日給", "日払い", "操作"]}>{driverWork.map((row) => <tr key={row.driverId}><td>{row.name}</td><td>{yen.format(row.dailyRate)}</td><td><MoneyInput value={row.dailyPayment} onChange={(value) => setDriverWork((rows) => rows.map((item) => item.driverId === row.driverId ? { ...item, dailyPayment: value } : item))} /></td><td><button className="button danger mini" onClick={() => setDriverWork((rows) => rows.filter((item) => item.driverId !== row.driverId))}>削除</button></td></tr>)}</Table>
       <h3>当日経費</h3><div className="grid form-row expense-row"><Field label="勘定科目"><select className="input" value={expenseCategory} onChange={(e) => { setExpenseCategory(e.target.value as ExpenseCategory); setExpensePayee(""); setExpensePersonId(""); }}>{Object.entries(expenseLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>{expenseCategory === "beautyTrial" ? <Field label="対象の体入キャスト"><select className="input" value={expensePersonId} onChange={(e) => setExpensePersonId(e.target.value)}><option value="">選択</option>{castRows.filter((row) => row.kind === "trial").map((row) => <option key={row.posCastId} value={row.posCastId}>{row.name}</option>)}</select></Field> : <Field label="支払先"><input className="input" value={expensePayee} onChange={(e) => setExpensePayee(e.target.value)} /></Field>}<Field label="金額"><MoneyInput value={expenseAmount} onChange={setExpenseAmount} /></Field><button className="button compact" onClick={addExpense}>追加</button></div><Table headers={["勘定科目", "支払先", "金額", "操作"]}>{expenses.map((row) => <tr key={row.id}><td>{expenseLabels[row.category]}</td><td>{row.payee}</td><td>{yen.format(row.amount)}</td><td><button className="button danger mini" onClick={() => setExpenses((rows) => rows.filter((item) => item.id !== row.id))}>削除</button></td></tr>)}</Table><div className="right-total">経費総計 <strong>{yen.format(expenseTotal)}</strong></div>
@@ -325,15 +324,13 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
   </Card>;
 }
 
-function DailyPreview({ closing }: { closing: DailyClosing }) {
+export function DailyPreview({ closing }: { closing: DailyClosing }) {
   const expenseTotal = closing.expenses.reduce((sum, row) => sum + row.amount, 0);
   return <div className="preview-sheet">
     <header><div><p className="eyebrow">営業日次データ</p><h2>{closing.businessDate}</h2></div><StatusPill tone={closing.status === "approved" ? "good" : "warn"}>{closingLabels[closing.status]}</StatusPill></header>
     <div className="grid metrics"><Metric label="総売上" value={closing.sales.totalSales} /><Metric label="現金売上" value={closing.sales.cashSales} /><Metric label="カード売上" value={closing.sales.cardSales} /><Metric label="経費総計" value={expenseTotal} /></div>
     <h3>キャスト</h3>
     <Table headers={["名前", "勤務", "本指名売上", "場内延長売上", "酒代原価", "美容室", "日払い・立替・送迎"]}>{closing.casts.map((row) => <tr key={row.posCastId}><td>{row.name}<br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td><td>{row.startTime}–{row.endTime}<br />{row.hours}時間</td><td>{yen.format(row.honShimeiSales)}</td><td>{yen.format(row.jonaiExtensionSales)}</td><td>{yen.format(row.liquorCost)}</td><td>{yen.format(row.beautyAllowance)}</td><td>{yen.format(row.dailyPayment + row.advancePayment + row.transportFee)}</td></tr>)}</Table>
-    <h3>POSボトル・ドリンク注文明細</h3>
-    <PosProductDetails pos={closing.posSnapshot} casts={closing.casts} />
     <h3>キャスト別ボトル・ドリンク配賦明細</h3>
     <div className="stack">{closing.casts.map((row) => <section key={row.posCastId}><strong>{row.name}</strong><CastProductDetails row={row} pos={closing.posSnapshot} /></section>)}</div>
     <h3>スタッフ</h3>
@@ -379,15 +376,55 @@ export function PosProductDetails({ pos, casts }: { pos?: PosClosingV3; casts: D
   })}</Table>;
 }
 
-function CastProductSummary({ row, pos }: { row: DailyCast; pos?: PosClosingV3 }) {
+export function CastProductSummary({ row, pos }: { row: DailyCast; pos?: PosClosingV3 }) {
   const bottleQuantity = row.bottles.reduce((sum, bottle) => sum + bottle.quantity, 0);
-  const drinkQuantity = row.drinkAllocations?.reduce((sum, drink) => sum + drink.quantity, 0);
-  const hasDetails = row.bottles.length > 0 || Boolean(row.drinkAllocations?.length) || row.drinkSales > 0;
+  const drinkSummaries = summarizeCastDrinksByPrice(row, pos);
+  const drinkQuantity = drinkSummaries.length > 0
+    ? drinkSummaries.reduce((sum, drink) => sum + drink.quantity, 0)
+    : undefined;
+  const hasDetails = row.bottles.length > 0 || drinkSummaries.length > 0 || row.drinkSales > 0;
   return <>
     <span>ボトル {bottleQuantity}本 / ドリンク {drinkQuantity === undefined ? "—" : `${drinkQuantity}杯`}</span><br />
     <small>売上 {yen.format(row.bottles.reduce((sum, bottle) => sum + bottle.salesAmount, row.drinkSales))} / 原価 {yen.format(row.liquorCost)}</small>
     {hasDetails && <details><summary className="text-button">商品明細を表示</summary><CastProductDetails row={row} pos={pos} /></details>}
   </>;
+}
+
+export type CastDrinkPriceSummary = {
+  unitPrice: number;
+  quantity: number;
+  salesAmount: number;
+};
+
+/** キャストドリンクを商品名ではなく、POSの販売単価ごとの杯数へまとめる。 */
+export function summarizeCastDrinksByPrice(
+  row: Pick<DailyCast, "posCastId" | "drinkAllocations">,
+  pos?: PosClosingV3,
+): CastDrinkPriceSummary[] {
+  const grouped = new Map<number, CastDrinkPriceSummary>();
+  const append = (unitPriceValue: number, quantity: number, salesAmount: number) => {
+    // 画面上で同じ円額になる注文は、商品名が異なっても同じ行へまとめる。
+    const unitPrice = Math.round(unitPriceValue);
+    const current = grouped.get(unitPrice) || { unitPrice, quantity: 0, salesAmount: 0 };
+    current.quantity += quantity;
+    current.salesAmount += salesAmount;
+    grouped.set(unitPrice, current);
+  };
+
+  let posDrinkCount = 0;
+  pos?.transactions.forEach((transaction) => transaction.items.forEach((item) => {
+    if (item.category !== "castDrink" || !item.backTargetCastIds.includes(row.posCastId)) return;
+    const divisor = Math.max(1, item.backTargetCastIds.length);
+    append(item.price, item.quantity, item.price * item.quantity / divisor);
+    posDrinkCount += 1;
+  }));
+
+  // POS注文を復元できない旧保存データだけは、保存済み配賦売上から単価を復元する。
+  if (posDrinkCount === 0) (row.drinkAllocations || []).forEach((drink) => {
+    const unitPrice = drink.quantity > 0 ? drink.salesAmount / drink.quantity : drink.salesAmount;
+    append(unitPrice, drink.quantity, drink.salesAmount);
+  });
+  return [...grouped.values()].sort((left, right) => left.unitPrice - right.unitPrice);
 }
 
 function CastProductDetails({ row, pos }: { row: DailyCast; pos?: PosClosingV3 }) {
@@ -399,13 +436,13 @@ function CastProductDetails({ row, pos }: { row: DailyCast; pos?: PosClosingV3 }
     <td>{yen.format(bottle.costAmount)}</td>
     <td>{bottleTargetLabel(pos, row.posCastId, bottle)}</td>
   </tr>);
-  const drinkRows = row.drinkAllocations?.map((drink, index) => <tr key={`drink-${drink.itemId}-${index}`}>
-    <td>{drink.name}</td><td>キャストドリンク</td><td>{drink.quantity}</td><td>{yen.format(drink.salesAmount)}</td><td>—</td><td>ドリンクバック対象</td>
-  </tr>) || [];
-  const legacyDrinkRow = row.drinkAllocations === undefined && row.drinkSales > 0
+  const drinkRows = summarizeCastDrinksByPrice(row, pos).map((drink) => <tr key={`drink-price-${drink.unitPrice}`}>
+    <td>{yen.format(drink.unitPrice)}</td><td>キャストドリンク</td><td>{drink.quantity}杯</td><td>{yen.format(drink.salesAmount)}</td><td>—</td><td>ドリンクバック対象</td>
+  </tr>);
+  const legacyDrinkRow = drinkRows.length === 0 && row.drinkSales > 0
     ? <tr key="legacy-drink"><td>ドリンク（旧保存データ）</td><td>キャストドリンク</td><td>—</td><td>{yen.format(row.drinkSales)}</td><td>—</td><td>ドリンクバック対象</td></tr>
     : null;
-  return <Table headers={["商品", "商品区分", "注文数量", "配賦売上", "配賦原価", "バック対象区分"]}>{[...bottleRows, ...drinkRows, legacyDrinkRow]}</Table>;
+  return <Table headers={["商品・単価", "商品区分", "注文数量", "配賦売上", "配賦原価", "バック対象区分"]}>{[...bottleRows, ...drinkRows, legacyDrinkRow]}</Table>;
 }
 
 function bottleTargetLabel(pos: PosClosingV3 | undefined, posCastId: string, bottle: BottleAllocation) {

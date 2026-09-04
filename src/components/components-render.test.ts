@@ -5,9 +5,9 @@ import { describe, expect, it } from "vitest";
 import type { DailyClosing } from "@/domain/gms";
 import type { AccountingWorkspaceData } from "@/domain/month-accounting";
 import { introducerDeletionLinkedCastSignature } from "@/lib/firebase/repository";
-import { AccountingForms } from "./accounting-forms";
+import { AccountingForms, ClosingCastProductDetails } from "./accounting-forms";
 import { CommonForms, introducerDeletionConfirmation } from "./common-forms";
-import { StoreWork } from "./store-work";
+import { CastProductSummary, DailyPreview, StoreWork, summarizeCastDrinksByPrice } from "./store-work";
 import { Modal, currentMonth } from "./ui";
 
 const month = currentMonth();
@@ -107,6 +107,74 @@ const data: AccountingWorkspaceData = {
 };
 
 describe("主要ページのSSRスモーク", () => {
+  it("キャストドリンクを販売単価ごとの杯数に集約する", () => {
+    const rows = summarizeCastDrinksByPrice({
+      posCastId: "pos-cast-1",
+      drinkAllocations: [
+        { itemId: "drink-a", name: "ドリンクA", quantity: 1, salesAmount: 2_000 },
+        { itemId: "drink-b", name: "ドリンクB", quantity: 3, salesAmount: 6_000 },
+        { itemId: "drink-c", name: "ドリンクC", quantity: 6, salesAmount: 18_000 },
+      ],
+    });
+    expect(rows).toEqual([
+      { unitPrice: 2_000, quantity: 4, salesAmount: 8_000 },
+      { unitPrice: 3_000, quantity: 6, salesAmount: 18_000 },
+    ]);
+  });
+
+  it("POS原本がある場合は複数対象への配賦後金額ではなく販売単価で集約する", () => {
+    const item = (itemId: string, price: number, quantity: number) => ({
+      itemId, label: itemId, category: "castDrink", price, quantity,
+      backTargetCastIds: ["pos-cast-1", "pos-cast-2"], backTargetCastNames: ["花子", "春子"],
+      banaiExtCastIds: [], isSet: false, isHonShimei: false, isBanaiShimei: false,
+      isExtension: false, isBanaiExtension: false, isDiscount: false,
+    });
+    const pos = {
+      ...closing.posSnapshot,
+      transactions: [{
+        transactionId: "tx-1", tableId: "table-1", tableLabel: "A",
+        startTime: 0, endTime: 0, payMethod: "cash", splits: [], subtotal: 26_000,
+        discount: 0, tax: 0, total: 26_000,
+        items: [item("drink-a", 2_000, 1), item("drink-b", 2_000, 3), item("drink-c", 3_000, 6)],
+      }],
+    };
+    expect(summarizeCastDrinksByPrice({ posCastId: "pos-cast-1", drinkAllocations: [] }, pos)).toEqual([
+      { unitPrice: 2_000, quantity: 4, salesAmount: 4_000 },
+      { unitPrice: 3_000, quantity: 6, salesAmount: 9_000 },
+    ]);
+    const legacyRow = { ...closing.casts[0], drinkSales: 13_000, drinkAllocations: undefined };
+    const summaryMarkup = renderToStaticMarkup(createElement(CastProductSummary, { row: legacyRow, pos }));
+    expect(summaryMarkup).toContain("ドリンク 10杯");
+    expect(summaryMarkup).not.toContain("ドリンク —");
+    const accountingMarkup = renderToStaticMarkup(createElement(ClosingCastProductDetails, { row: legacyRow, pos }));
+    expect(accountingMarkup).toContain("￥2,000");
+    expect(accountingMarkup).toContain("4杯");
+    expect(accountingMarkup).not.toContain("キャストドリンク ￥13,000");
+  });
+
+  it("店舗の日次プレビューからPOS全件明細を除外する", () => {
+    const groupedClosing: DailyClosing = {
+      ...closing,
+      casts: [{
+        ...closing.casts[0],
+        drinkSales: 26_000,
+        drinkAllocations: [
+          { itemId: "drink-a", name: "ドリンクA", quantity: 1, salesAmount: 2_000 },
+          { itemId: "drink-b", name: "ドリンクB", quantity: 3, salesAmount: 6_000 },
+          { itemId: "drink-c", name: "ドリンクC", quantity: 6, salesAmount: 18_000 },
+        ],
+      }],
+    };
+    const markup = renderToStaticMarkup(createElement(DailyPreview, { closing: groupedClosing }));
+    expect(markup).not.toContain("POSボトル・ドリンク注文明細");
+    expect(markup).toContain("キャスト別ボトル・ドリンク配賦明細");
+    expect(markup).toContain("￥2,000");
+    expect(markup).toContain("4杯");
+    expect(markup).toContain("￥3,000");
+    expect(markup).toContain("6杯");
+    expect(markup).not.toContain("ドリンクA");
+  });
+
   it("紹介者削除の警告へ紐づく在籍・体入・退店キャストを一覧表示する", () => {
     const message = introducerDeletionConfirmation("紹介者A", [
       { name: "花子", status: "active" },
