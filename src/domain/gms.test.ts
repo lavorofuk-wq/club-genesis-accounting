@@ -6,11 +6,14 @@ import {
   calculateCastRewards,
   calculateDriverPayroll,
   canMapAsDispatch,
+  dayAfterIsoDate,
   floorHundred,
   findUnclassifiedLegacyBottles,
   hoursBetweenQuarter,
   introducerSalesBase,
+  isStaffHireDateAfterTrial,
   isCastMappingComplete,
+  japanMonthFromTimestamp,
   legacyBottleSourceKey,
   normalizeDailyClosing,
   normalizeMonthlyAdjustments,
@@ -21,9 +24,11 @@ import {
   restoreDailyCastBackMetadata,
   rewardRateForSales,
   sha256Checksum,
+  staffCandidatesForBusinessDate,
   type DailyClosing,
   type CastRecord,
-  type PosClosingV3
+  type PosClosingV3,
+  type StaffRecord,
 } from "./gms";
 
 function pos(): PosClosingV3 {
@@ -62,6 +67,42 @@ async function signedPos(value: PosClosingV3) {
 }
 
 describe("GMS報酬・日次計算", () => {
+  it("UTC月末時刻をAsia/Tokyoの削除月へ変換する", () => {
+    expect(japanMonthFromTimestamp("2026-08-31T14:59:59.999Z")).toBe("2026-08");
+    expect(japanMonthFromTimestamp("2026-08-31T15:00:00.000Z")).toBe("2026-09");
+    expect(() => japanMonthFromTimestamp("invalid")).toThrow("日時が正しくありません");
+  });
+  it("体入スタッフの採用日は体入日の翌日以降だけを許可する", () => {
+    expect(isStaffHireDateAfterTrial("2026-09-01", "2026-09-01")).toBe(false);
+    expect(isStaffHireDateAfterTrial("2026-09-01", "2026-09-02")).toBe(true);
+    expect(isStaffHireDateAfterTrial("2026-09-01", "2026-08-31")).toBe(false);
+    expect(isStaffHireDateAfterTrial("2026-02-30", "2026-03-01")).toBe(false);
+    expect(dayAfterIsoDate("2028-02-29")).toBe("2028-03-01");
+    expect(dayAfterIsoDate("2026-12-31")).toBe("2027-01-01");
+  });
+
+  it("旧版の同日在籍化データでも体入日は体入スタッフだけを勤務候補にする", () => {
+    const base = { name: "体入スタッフ", note: "", createdAt: "", updatedAt: "" };
+    const trial: StaffRecord = {
+      ...base, id: "trial-staff", status: "trial", trialDate: "2026-09-01",
+      trialHourlyRate: 1_500, convertedToStaffId: "active-staff",
+    };
+    const legacyActive: StaffRecord = {
+      ...base, id: "active-staff", status: "active", hiredAt: "2026-09-01", trialDate: "2026-09-01",
+      hourlyRate: 2_000, convertedFromTrialId: trial.id,
+    };
+    const regular: StaffRecord = {
+      ...base, id: "regular-staff", name: "在籍スタッフ", status: "active", hiredAt: "2026-08-01", hourlyRate: 2_000,
+    };
+
+    expect(staffCandidatesForBusinessDate([trial, legacyActive, regular], [], "2026-09-01").map((row) => row.id))
+      .toEqual([trial.id, regular.id]);
+    expect(staffCandidatesForBusinessDate([trial, legacyActive, regular], [], "2026-09-02").map((row) => row.id))
+      .toEqual([legacyActive.id, regular.id]);
+    // 店舗権限で削除済み体入マスタを取得できなくても、在籍側に保持した体入日で同日候補化を防ぐ。
+    expect(staffCandidatesForBusinessDate([legacyActive], [], "2026-09-01")).toEqual([]);
+  });
+
   it("100円未満と15分未満を切り捨てる", () => {
     expect(floorHundred(1234)).toBe(1200);
     expect(floorHundred(99.999)).toBe(0);

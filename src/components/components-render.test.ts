@@ -4,8 +4,9 @@ import type { User } from "firebase/auth";
 import { describe, expect, it } from "vitest";
 import type { DailyClosing } from "@/domain/gms";
 import type { AccountingWorkspaceData } from "@/domain/month-accounting";
+import { introducerDeletionLinkedCastSignature } from "@/lib/firebase/repository";
 import { AccountingForms } from "./accounting-forms";
-import { CommonForms } from "./common-forms";
+import { CommonForms, introducerDeletionConfirmation } from "./common-forms";
 import { StoreWork } from "./store-work";
 import { Modal, currentMonth } from "./ui";
 
@@ -99,11 +100,41 @@ const data: AccountingWorkspaceData = {
   archivedCasts: [],
   archivedStaff: [],
   introducerEntryEvents: [],
+  introducerDeletionCommits: [],
+  introducerMonthEvents: [],
   monthStates: [],
   monthSnapshots: [],
 };
 
 describe("主要ページのSSRスモーク", () => {
+  it("紹介者削除の警告へ紐づく在籍・体入・退店キャストを一覧表示する", () => {
+    const message = introducerDeletionConfirmation("紹介者A", [
+      { name: "花子", status: "active" },
+      { name: "春子", status: "trial" },
+      { name: "夏子", status: "departed" },
+    ]);
+    expect(message).toContain("花子（在籍）");
+    expect(message).toContain("春子（体入）");
+    expect(message).toContain("夏子（退店）");
+    expect(message).toContain("削除した月の紹介者報酬");
+    expect(message).toContain("当月全体の算出対象");
+  });
+
+  it("紹介者削除前の紐づきキャスト版は順序に依存せず、追加・更新を検出する", () => {
+    const confirmed = introducerDeletionLinkedCastSignature([
+      { id: "cast-b", updatedAt: "2026-09-01T01:00:00.000Z" },
+      { id: "cast-a", updatedAt: "2026-09-01T01:00:00.000Z" },
+    ]);
+    expect(confirmed).toBe(introducerDeletionLinkedCastSignature([
+      { id: "cast-a", updatedAt: "2026-09-01T01:00:00.000Z" },
+      { id: "cast-b", updatedAt: "2026-09-01T01:00:00.000Z" },
+    ]));
+    expect(confirmed).not.toBe(introducerDeletionLinkedCastSignature([
+      { id: "cast-a", updatedAt: "2026-09-01T01:00:00.000Z" },
+      { id: "cast-b", updatedAt: "2026-09-02T01:00:00.000Z" },
+    ]));
+  });
+
   it.each(["casts", "staff", "drivers", "introducers", "liquor", "cash"] as const)(
     "共通フォーム %s を代表データで描画できる",
     (section) => {

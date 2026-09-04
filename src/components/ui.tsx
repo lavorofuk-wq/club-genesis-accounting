@@ -14,8 +14,8 @@ export function Table({ headers, children, empty = "データがありません�
   const rows = Array.isArray(children) ? children.filter(Boolean) : children ? [children] : [];
   return <div className="table-wrap"><table><thead><tr>{headers.map((header) => <th key={header}>{header}</th>)}</tr></thead><tbody>{rows.length ? children : <tr><td colSpan={headers.length}>{empty}</td></tr>}</tbody></table></div>;
 }
-export function MoneyInput({ value, onChange, step = 1, disabled = false }: { value: number; onChange: (value: number) => void; step?: number; disabled?: boolean }) {
-  return <input className="input money-input" type="number" min="0" step={step} disabled={disabled} value={value || ""} onChange={(event) => {
+export function MoneyInput({ value, onChange, step = 1, min = 0, disabled = false }: { value: number; onChange: (value: number) => void; step?: number; min?: number; disabled?: boolean }) {
+  return <input className="input money-input" type="number" min={min} step={step} disabled={disabled} value={value || ""} onChange={(event) => {
     const next = Number(event.target.value);
     onChange(Number.isFinite(next) ? Math.floor(Math.max(0, next)) : 0);
   }} />;

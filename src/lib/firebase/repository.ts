@@ -1,10 +1,13 @@
 "use client";
 
-import { get, runTransaction, set, update, ref } from "firebase/database";
+import { get, runTransaction, serverTimestamp, set, update, ref } from "firebase/database";
 import type { User } from "firebase/auth";
 import { database, rootRef } from "./client";
 import {
   bottleBackAmountFromPosItem,
+  compareIntroducerMonthEventEffectiveOrder,
+  isStaffHireDateAfterTrial,
+  japanMonthFromTimestamp,
   normalizeDailyClosing,
   normalizeMonthlyAdjustments,
   parsePosClosingV3,
@@ -16,12 +19,16 @@ import {
   calculateMonthlyAccounting,
   canFinalizeMonthlyAccounting,
   monthlySourceFingerprint,
+  normalizeIntroducerDeletionCommit,
+  normalizeIntroducerMonthEvent,
   normalizeMonthlyAccountingSnapshot,
 } from "@/domain/month-accounting";
 import type {
   CastRecord,
   DailyClosing,
   DriverRecord,
+  IntroducerDeletionCommit,
+  IntroducerMonthEvent,
   IntroducerRecord,
   LiquorRecord,
   MonthlyAdjustments,
@@ -35,13 +42,23 @@ import type {
   IntroducerEntryEvent,
   MonthlyAccountingSnapshot,
 } from "@/domain/month-accounting";
+import {
+  validateCastPaySetting,
+  validateDriverPaySetting,
+  validateStaffPaySetting,
+} from "@/domain/master-pay-validation";
 
 export type WorkspaceData = AccountingWorkspaceData;
 export type ClosingRevision = Pick<DailyClosing, "businessDate" | "updatedAt" | "checksum" | "submissionId">;
+export type IntroducerDeletionLinkedCastRevision = Pick<CastRecord, "id" | "updatedAt">;
+
+export function introducerDeletionLinkedCastSignature(rows: IntroducerDeletionLinkedCastRevision[]) {
+  return rows.map((cast) => `${cast.id}\u0000${cast.updatedAt}`).sort().join("\u0001");
+}
 
 const emptyData: AccountingWorkspaceData = {
   casts: [], staff: [], drivers: [], introducers: [], liquor: [], closings: [], adjustments: [], cashFloat: 200000,
-  archivedCasts: [], archivedStaff: [], introducerEntryEvents: [], monthStates: [], monthSnapshots: [],
+  archivedCasts: [], archivedStaff: [], introducerEntryEvents: [], introducerDeletionCommits: [], introducerMonthEvents: [], monthStates: [], monthSnapshots: [],
 };
 
 type AccountingFinalizeLock = {
@@ -52,6 +69,15 @@ type AccountingFinalizeLock = {
   expiresAt: number;
 };
 const ACCOUNTING_FINALIZE_LOCK_TTL_MS = 10 * 60 * 1000;
+
+type IntroducerDeletionLock = {
+  token: string;
+  owner: string;
+  /** Firebaseがロック確定時に採番した削除操作の基準時刻。 */
+  acquiredAtMs: number;
+  expiresAt: number;
+};
+const INTRODUCER_DELETION_LOCK_TTL_MS = 120_000;
 
 type ConversionLock = {
   operationId: string;
@@ -70,6 +96,33 @@ const asArray = <T extends { id: string }>(value: unknown): T[] => {
 };
 const clean = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const now = () => new Date().toISOString();
+const serverOrderTimestamp = () => serverTimestamp() as unknown as number;
+const JAPAN_UTC_OFFSET_MS = 9 * 60 * 60 * 1000;
+const INTRODUCER_MONTH_BOUNDARY_GUARD_MS = 5 * 60 * 1000;
+async function firebaseServerNow() {
+  const offsetSnapshot = await get(ref(database, ".info/serverTimeOffset"));
+  const rawOffset = offsetSnapshot.val();
+  if (typeof rawOffset !== "number" || !Number.isFinite(rawOffset)) {
+    throw new Error("Firebaseサーバー時刻を確認できませんでした。通信状態を確認してからやり直してください。");
+  }
+  const milliseconds = Date.now() + rawOffset;
+  return { milliseconds, timestamp: new Date(milliseconds).toISOString() };
+}
+function millisecondsUntilNextJapanMonth(milliseconds: number) {
+  const japan = new Date(milliseconds + JAPAN_UTC_OFFSET_MS);
+  const nextMonthUtc = Date.UTC(japan.getUTCFullYear(), japan.getUTCMonth() + 1, 1) - JAPAN_UTC_OFFSET_MS;
+  return nextMonthUtc - milliseconds;
+}
+function assertIntroducerMonthBoundarySafe(milliseconds: number, guardMs = INTRODUCER_MONTH_BOUNDARY_GUARD_MS) {
+  if (millisecondsUntilNextJapanMonth(milliseconds) <= guardMs) {
+    throw new Error("月末の境界時刻に近いため、紹介者条件を安全に保存できません。翌月になってからもう一度実行してください。");
+  }
+}
+const nextEventTimestamp = (candidate: string, previous?: string) => {
+  if (!previous || candidate > previous) return candidate;
+  const previousTime = Date.parse(previous);
+  return Number.isFinite(previousTime) ? new Date(previousTime + 1).toISOString() : candidate;
+};
 const entityId = (prefix: string) => `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`;
 const validDate = (value: unknown) => {
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -109,6 +162,36 @@ const claimKey = (...parts: unknown[]) => parts.map((part) =>
 type ClaimValue = string | { id: string; state: "pending" | "committed"; token?: string; expiresAt?: number };
 type ClaimHandle = { path: string; key: string; id: string; token: string; created: boolean };
 const CLAIM_PENDING_TTL_MS = 120_000;
+
+async function acquireIntroducerDeletionLock(introducerId: string, user: User): Promise<IntroducerDeletionLock> {
+  const serverClock = await firebaseServerNow();
+  const pendingLock: IntroducerDeletionLock = {
+    token: crypto.randomUUID(),
+    owner: user.uid,
+    acquiredAtMs: serverOrderTimestamp(),
+    expiresAt: serverClock.milliseconds + INTRODUCER_DELETION_LOCK_TTL_MS,
+  };
+  const result = await runTransaction(rootRef(`introducerDeletionLocks/${introducerId}`), (current) => {
+    const existing = current as IntroducerDeletionLock | null;
+    if (existing && Number(existing.expiresAt || 0) > serverClock.milliseconds) {
+      throw new Error("この紹介者は別の端末で削除確認中です。少し待ってから最新データを読み込んでください。");
+    }
+    return pendingLock;
+  }, { applyLocally: false });
+  const stored = result.snapshot.val() as IntroducerDeletionLock | null;
+  if (!result.committed || !stored || !Number.isSafeInteger(stored.acquiredAtMs)) {
+    throw new Error("紹介者削除のサーバー時刻を確定できませんでした。通信状態を確認してからやり直してください。");
+  }
+  return stored;
+}
+
+async function releaseIntroducerDeletionLock(introducerId: string, lock: IntroducerDeletionLock) {
+  await runTransaction(rootRef(`introducerDeletionLocks/${introducerId}`), (current) => {
+    const existing = current as IntroducerDeletionLock | null;
+    if (!existing || existing.owner !== lock.owner || existing.token !== lock.token) return;
+    return null;
+  }, { applyLocally: false });
+}
 
 function claimId(value: unknown) {
   if (typeof value === "string") return value;
@@ -426,6 +509,31 @@ function validateDailyClosingForSubmission(value: DailyClosing) {
 }
 
 type EntryEventPlan = Record<string, IntroducerEntryEvent | null>;
+type IntroducerMonthEventPlan = Record<string, IntroducerMonthEvent>;
+
+function serverTimestampAwareEqual(actual: unknown, expected: unknown): boolean {
+  if (expected && typeof expected === "object" && !Array.isArray(expected)
+    && (expected as Record<string, unknown>)[".sv"] === "timestamp") {
+    return Number.isSafeInteger(actual) && Number(actual) >= 0;
+  }
+  if (Array.isArray(expected)) {
+    return Array.isArray(actual) && actual.length === expected.length
+      && expected.every((child, index) => serverTimestampAwareEqual(actual[index], child));
+  }
+  if (expected && typeof expected === "object") {
+    if (!actual || typeof actual !== "object" || Array.isArray(actual)) return false;
+    const expectedEntries = Object.entries(expected as Record<string, unknown>)
+      .filter(([, child]) => child !== undefined);
+    const actualEntries = Object.entries(actual as Record<string, unknown>)
+      .filter(([, child]) => child !== undefined);
+    if (actualEntries.length !== expectedEntries.length) return false;
+    return expectedEntries.every(([key, child]) => serverTimestampAwareEqual(
+      (actual as Record<string, unknown>)[key],
+      child,
+    ));
+  }
+  return Object.is(actual, expected);
+}
 
 async function entryEventPlanApplied(plan: EntryEventPlan) {
   const checks = await Promise.all(Object.entries(plan).map(async ([path, expected]) => {
@@ -454,7 +562,65 @@ async function applyEntryEventPlanAfterCastSaved(plan: EntryEventPlan) {
   throw new Error("キャスト本体は保存されましたが、入店顧問料履歴を同期できませんでした。最新データを読み込み、同じキャストをもう一度保存してください。");
 }
 
+async function introducerMonthEventPlanApplied(plan: IntroducerMonthEventPlan) {
+  const checks = await Promise.all(Object.entries(plan).map(async ([path, expected]) => {
+    const actual = (await get(rootRef(path))).val();
+    return serverTimestampAwareEqual(actual, expected);
+  }));
+  return checks.every(Boolean);
+}
+
 class AmbiguousConversionWriteError extends Error {}
+class AmbiguousCastAndIntroducerWriteError extends Error {}
+
+async function castAndIntroducerPlansApplied(
+  castId: string,
+  expectedCast: Record<string, unknown>,
+  entryEventPlan: EntryEventPlan,
+  introducerMonthEventPlan: IntroducerMonthEventPlan,
+) {
+  const [castSnapshot, entriesApplied, monthEventsApplied] = await Promise.all([
+    get(rootRef(`casts/${castId}`)),
+    entryEventPlanApplied(entryEventPlan),
+    introducerMonthEventPlanApplied(introducerMonthEventPlan),
+  ]);
+  return Boolean(castSnapshot.exists()
+    && JSON.stringify(canonicalComparisonValue(castSnapshot.val())) === JSON.stringify(canonicalComparisonValue(expectedCast))
+    && entriesApplied
+    && monthEventsApplied);
+}
+
+async function applyCastAndIntroducerPlansAtomically(
+  castId: string,
+  expectedCast: Record<string, unknown>,
+  entryEventPlan: EntryEventPlan,
+  introducerMonthEventPlan: IntroducerMonthEventPlan,
+) {
+  const plan = clean({
+    [`casts/${castId}`]: expectedCast,
+    ...entryEventPlan,
+    ...introducerMonthEventPlan,
+  });
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await update(rootRef(), plan);
+      return;
+    } catch (error) {
+      lastError = error;
+      try {
+        if (await castAndIntroducerPlansApplied(castId, expectedCast, entryEventPlan, introducerMonthEventPlan)) return;
+      } catch {
+        if (attempt === 1) {
+          throw new AmbiguousCastAndIntroducerWriteError(
+            "キャストと紹介者履歴の保存結果を確認できませんでした。通信状態を確認し、最新データを読み込んでください。",
+          );
+        }
+      }
+    }
+  }
+  throw lastError;
+}
 
 async function applyConversionPlanWithVerification(
   plan: Record<string, unknown>,
@@ -488,11 +654,13 @@ async function conversionPlanApplied(
   convertedField: "convertedToCastId" | "convertedToStaffId",
   activeId: string,
   entryEventPlan: EntryEventPlan = {},
+  introducerMonthEventPlan: IntroducerMonthEventPlan = {},
 ) {
-  const [activeSnapshot, trialSnapshot, eventsApplied] = await Promise.all([
+  const [activeSnapshot, trialSnapshot, eventsApplied, monthEventsApplied] = await Promise.all([
     get(rootRef(activePath)),
     get(rootRef(trialPath)),
     entryEventPlanApplied(entryEventPlan),
+    introducerMonthEventPlanApplied(introducerMonthEventPlan),
   ]);
   const active = activeSnapshot.val();
   const trial = trialSnapshot.val() as (Record<string, unknown> & ConversionLockCarrier) | null;
@@ -501,7 +669,8 @@ async function conversionPlanApplied(
       && JSON.stringify(canonicalComparisonValue(active)) === JSON.stringify(canonicalComparisonValue(expectedActive))
       && trial?.[convertedField] === activeId
       && !trial.conversionLock
-      && eventsApplied,
+      && eventsApplied
+      && monthEventsApplied,
   );
 }
 
@@ -528,6 +697,9 @@ async function prepareEntryEventPlan(
     return event ? [{ month, event }] : [];
   });
   const desiredMonth = validDate(next.hiredAt) ? next.hiredAt!.slice(0, 7) : "";
+  const operationMonth = Number.isFinite(Date.parse(next.updatedAt || ""))
+    ? japanMonthFromTimestamp(next.updatedAt)
+    : "";
   const unchangedHistoricalFee = Boolean(before
     && before.hiredAt === next.hiredAt
     && before.introducerId === next.introducerId
@@ -537,6 +709,12 @@ async function prepareEntryEventPlan(
     desiredMonth && next.introducerId && introducer && (introducer.entryAdvisoryEnabled || unchangedHistoricalFee)
       && nonNegative(next.entryAdvisoryFee) && Number(next.entryAdvisoryFee) > 0,
   );
+  // 入店顧問料は採用月に一度だけ発生する履歴。後月の紹介者・顧問料変更で
+  // 採用月の保存済みスナップショットを遡って置換しない。
+  if (existing.length > 0
+    && desiredMonth
+    && operationMonth !== desiredMonth
+    && before?.hiredAt === next.hiredAt) return {};
   if (financialFieldsUnchanged) {
     const current = existing.find((row) => row.month === desiredMonth)?.event;
     const currentMatches = Boolean(current
@@ -597,11 +775,13 @@ export async function userRole(user: User): Promise<Role> {
 
 export async function loadWorkspaceData(role?: Role): Promise<AccountingWorkspaceData> {
   const accountingAccess = role === "accounting" || role === "op";
-  const [casts, staff, drivers, introducers, liquor, closings, cashFloat, adjustments, entryEvents, monthStates, monthSnapshots] = await Promise.all([
+  const [casts, staff, drivers, introducers, liquor, closings, cashFloat, adjustments, entryEvents, introducerDeletionCommits, introducerMonthEvents, monthStates, monthSnapshots] = await Promise.all([
     get(rootRef("casts")), get(rootRef("staff")), get(rootRef("drivers")), get(rootRef("introducers")),
     get(rootRef("liquorCosts")), get(rootRef("history")), get(rootRef("config/cashFloat")),
     accountingAccess ? get(rootRef("accountingAdjustments")) : Promise.resolve(null),
     accountingAccess ? get(rootRef("introducerEntryEvents")) : Promise.resolve(null),
+    accountingAccess ? get(rootRef("introducerDeletionCommits")) : Promise.resolve(null),
+    accountingAccess ? get(rootRef("introducerMonthEvents")) : Promise.resolve(null),
     get(rootRef("accountingMonthStates")),
     accountingAccess ? get(rootRef("accountingMonthSnapshots")) : Promise.resolve(null),
   ]);
@@ -609,6 +789,16 @@ export async function loadWorkspaceData(role?: Role): Promise<AccountingWorkspac
   const allStaffRows = asArray<StaffRecord & { deletedAt?: string }>(staff.val());
   const entryEventRows = Object.entries((entryEvents?.val() || {}) as Record<string, Record<string, IntroducerEntryEvent>>)
     .flatMap(([month, rows]) => Object.entries(rows || {}).map(([id, row]) => ({ ...row, id, month })));
+  const introducerDeletionCommitRows = Object.entries((introducerDeletionCommits?.val() || {}) as Record<string, IntroducerDeletionCommit>)
+    .flatMap(([id, row]) => {
+      const normalized = normalizeIntroducerDeletionCommit(row, id);
+      return normalized ? [normalized] : [];
+    });
+  const introducerMonthEventRows = Object.entries((introducerMonthEvents?.val() || {}) as Record<string, Record<string, IntroducerMonthEvent>>)
+    .flatMap(([month, rows]) => Object.entries(rows || {}).flatMap(([id, row]) => {
+      const normalized = normalizeIntroducerMonthEvent(row, month, id);
+      return normalized ? [normalized] : [];
+    }));
   const monthStateRows = Object.entries((monthStates?.val() || {}) as Record<string, Omit<AccountingMonthState, "month">>)
     .map(([month, row]) => ({ ...row, month }));
   const monthSnapshotRows = Object.entries((monthSnapshots?.val() || {}) as Record<string, Record<string, MonthlyAccountingSnapshot>>)
@@ -629,6 +819,8 @@ export async function loadWorkspaceData(role?: Role): Promise<AccountingWorkspac
     archivedCasts: accountingAccess ? allCastRows.filter((row) => Boolean(row.deletedAt)) : [],
     archivedStaff: accountingAccess ? allStaffRows.filter((row) => Boolean(row.deletedAt)) : [],
     introducerEntryEvents: entryEventRows,
+    introducerDeletionCommits: introducerDeletionCommitRows,
+    introducerMonthEvents: introducerMonthEventRows,
     monthStates: monthStateRows,
     monthSnapshots: monthSnapshotRows,
   };
@@ -682,10 +874,200 @@ function normalizeCastAdvisoryFees(
   };
 }
 
+function introducerTermsSnapshot(next: CastRecord, introducer: IntroducerRecord): NonNullable<IntroducerMonthEvent["introducer"]> {
+  return {
+    id: introducer.id,
+    name: introducer.name,
+    feeType: introducer.feeType,
+    attendanceAdvisoryEnabled: Boolean(introducer.attendanceAdvisoryEnabled),
+    entryAdvisoryEnabled: Boolean(introducer.entryAdvisoryEnabled),
+    attendanceAdvisoryFee: introducer.attendanceAdvisoryEnabled ? Number(next.attendanceAdvisoryFee || 0) : 0,
+    entryAdvisoryFee: introducer.entryAdvisoryEnabled ? Number(next.entryAdvisoryFee || 0) : 0,
+  };
+}
+
+async function requireOpenIntroducerMonthEventPlan(month: string, plan: IntroducerMonthEventPlan) {
+  if (Object.keys(plan).length) await assertMonthOpen(month);
+  return plan;
+}
+
+async function prepareIntroducerReassignmentPlan(
+  before: CastRecord | null,
+  next: CastRecord,
+  introducer: IntroducerRecord | null,
+  timestamp: string,
+  user: User,
+): Promise<IntroducerMonthEventPlan> {
+  const month = japanMonthFromTimestamp(timestamp);
+  const path = `introducerMonthEvents/${month}/${next.id}`;
+  const sourcePath = next.convertedFromTrialId
+    ? `introducerMonthEvents/${month}/${next.convertedFromTrialId}`
+    : undefined;
+  const [directSnapshot, sourceSnapshot] = await Promise.all([
+    get(rootRef(path)),
+    sourcePath ? get(rootRef(sourcePath)) : Promise.resolve(null),
+  ]);
+  const existingCandidates = [
+    ...(directSnapshot.exists() ? [{
+      event: normalizeIntroducerMonthEvent(directSnapshot.val(), month, next.id),
+      castId: next.id,
+      direct: true,
+    }] : []),
+    ...(sourceSnapshot?.exists() ? [{
+      event: normalizeIntroducerMonthEvent(sourceSnapshot.val(), month, next.convertedFromTrialId!),
+      castId: next.convertedFromTrialId!,
+      direct: false,
+    }] : []),
+  ];
+  if (!existingCandidates.length) return {};
+  if (existingCandidates.some((candidate) => !candidate.event)) {
+    throw new Error("紹介者の削除・再設定履歴が不正です。Firebaseデータを確認してください。");
+  }
+  // direct pathを固定優先すると、在籍化後に体入側へ保存された新しい履歴を
+  // 在籍レコードの再保存だけでは上書きできない。人物alias全体の実効順で選ぶ。
+  const rawExisting = existingCandidates
+    .map((candidate) => ({ ...candidate, event: candidate.event! }))
+    .sort((left, right) => compareIntroducerMonthEventEffectiveOrder(left.event, right.event))
+    .at(-1)!;
+  const existing = rawExisting.event;
+  // 条件の比較元はalias全体の最新イベントだが、書込先のrevision/created metadataは
+  // direct pathに既存行があれば必ずその行を引き継ぐ（Firebase rulesのCAS条件）。
+  const directExisting = existingCandidates.find((candidate) => candidate.direct)?.event;
+  const eventTimestamp = nextEventTimestamp(timestamp, directExisting?.updatedAt || existing.updatedAt);
+  if (!introducer || !next.introducerId) {
+    if (existing.state === "deleted") return {};
+    // 削除するのは書込先directの古い状態ではなく、人物alias全体で最後に
+    // 有効だった紹介者。revision/created metadataだけをdirectから引き継ぐ。
+    const deletedSource = { id: existing.introducer!.id, name: existing.introducer!.name };
+    return requireOpenIntroducerMonthEventPlan(month, {
+      [path]: {
+        id: next.id,
+        month,
+        castId: next.id,
+        castName: next.name,
+        state: "deleted",
+        deletedIntroducerId: deletedSource.id,
+        deletedIntroducerName: deletedSource.name,
+        deletedAt: eventTimestamp,
+        deletedBy: user.uid,
+        ...(!rawExisting.direct
+          ? { sourceCastId: existing.castId }
+          : directExisting?.sourceCastId ? { sourceCastId: directExisting.sourceCastId } : {}),
+        revision: directExisting ? directExisting.revision + 1 : 1,
+        createdAt: directExisting?.createdAt || timestamp,
+        createdBy: directExisting?.createdBy || user.uid,
+        updatedAt: eventTimestamp,
+        updatedAtMs: serverOrderTimestamp(),
+        updatedBy: user.uid,
+      },
+    });
+  }
+  const nextTerms = introducerTermsSnapshot(next, introducer);
+  const settingChanged = before?.introducerId !== next.introducerId;
+  const sameTerms = existing.state === "reassigned"
+    && JSON.stringify(canonicalComparisonValue(existing.introducer)) === JSON.stringify(canonicalComparisonValue(nextTerms));
+  if (rawExisting.direct && sameTerms && !settingChanged && existing.castName === next.name) return {};
+  const changesIntroducer = existing.state !== "reassigned"
+    || existing.introducer?.id !== next.introducerId
+    || settingChanged
+    || !rawExisting.direct;
+  return requireOpenIntroducerMonthEventPlan(month, {
+    [path]: {
+      ...(directExisting || {
+        id: next.id,
+        month,
+        castId: next.id,
+        deletedIntroducerId: existing.deletedIntroducerId,
+        deletedIntroducerName: existing.deletedIntroducerName,
+        deletedAt: existing.deletedAt,
+        deletedBy: existing.deletedBy,
+        sourceCastId: existing.castId,
+        createdAt: timestamp,
+        createdBy: user.uid,
+      }),
+      castName: next.name,
+      state: "reassigned",
+      introducer: nextTerms,
+      // 同一紹介者の顧問料だけを変更した場合、再設定日時は動かさない。
+      // これにより再設定後に保存された日次が引き続き優先される。
+      reassignedAt: changesIntroducer ? eventTimestamp : existing.reassignedAt,
+      reassignedAtMs: changesIntroducer ? serverOrderTimestamp() : existing.reassignedAtMs,
+      reassignedBy: changesIntroducer ? user.uid : existing.reassignedBy,
+      revision: directExisting ? directExisting.revision + 1 : 1,
+      updatedAt: eventTimestamp,
+      updatedAtMs: serverOrderTimestamp(),
+      updatedBy: user.uid,
+    },
+  });
+}
+
+async function prepareConvertedCastIntroducerMonthPlan(
+  trialId: string,
+  active: CastRecord,
+  introducer: IntroducerRecord | null,
+  timestamp: string,
+  user: User,
+): Promise<IntroducerMonthEventPlan> {
+  const month = japanMonthFromTimestamp(timestamp);
+  const sourceSnapshot = await get(rootRef(`introducerMonthEvents/${month}/${trialId}`));
+  if (!sourceSnapshot.exists()) return {};
+  const source = normalizeIntroducerMonthEvent(sourceSnapshot.val(), month, trialId);
+  if (!source) throw new Error("体入キャストの紹介者削除履歴が不正です。Firebaseデータを確認してください。");
+  // 紹介者なしで在籍化し、変換元が既にdeletedなら計算側がその履歴を辿れる。
+  // 変換元がreassignedの場合は、紹介者なしへの変更をactive側のdeleted履歴として残す。
+  if ((!introducer || !active.introducerId) && source.state === "deleted") return {};
+  if (!introducer || !active.introducerId) {
+    const deleted: IntroducerMonthEvent = {
+      id: active.id,
+      month,
+      castId: active.id,
+      castName: active.name,
+      state: "deleted",
+      deletedIntroducerId: source.introducer!.id,
+      deletedIntroducerName: source.introducer!.name,
+      deletedAt: timestamp,
+      deletedBy: user.uid,
+      sourceCastId: trialId,
+      revision: 1,
+      createdAt: timestamp,
+      createdBy: user.uid,
+      updatedAt: timestamp,
+      updatedAtMs: serverOrderTimestamp(),
+      updatedBy: user.uid,
+    };
+    return { [`introducerMonthEvents/${month}/${active.id}`]: deleted };
+  }
+  const base: IntroducerMonthEvent = {
+    id: active.id,
+    month,
+    castId: active.id,
+    castName: active.name,
+    state: "reassigned",
+    deletedIntroducerId: source.deletedIntroducerId,
+    deletedIntroducerName: source.deletedIntroducerName,
+    deletedAt: source.deletedAt,
+    deletedBy: source.deletedBy,
+    sourceCastId: trialId,
+    revision: 1,
+    createdAt: timestamp,
+    createdBy: user.uid,
+    updatedAt: timestamp,
+    updatedAtMs: serverOrderTimestamp(),
+    updatedBy: user.uid,
+  };
+  base.introducer = introducerTermsSnapshot(active, introducer);
+  base.reassignedAt = timestamp;
+  base.reassignedAtMs = serverOrderTimestamp();
+  base.reassignedBy = user.uid;
+  return { [`introducerMonthEvents/${month}/${active.id}`]: base };
+}
+
 export async function saveCast(value: Partial<CastRecord> & Pick<CastRecord, "name" | "legalName" | "status">, user: User) {
   await requireUser(user);
   const id = value.id || entityId("cast");
-  const timestamp = now();
+  // 紹介者の再設定月は端末時計ではなくFirebaseサーバー時計で決める。
+  const serverClock = await firebaseServerNow();
+  const timestamp = serverClock.timestamp;
   const [existingSnapshot, allSnapshot] = await Promise.all([get(rootRef(`casts/${id}`)), get(rootRef("casts"))]);
   const before = existingSnapshot.val() as CastRecord | null;
   if (value.id && !before) throw new Error("対象のキャストデータが見つかりません。最新データを読み込んでください。");
@@ -700,9 +1082,8 @@ export async function saveCast(value: Partial<CastRecord> & Pick<CastRecord, "na
   if (value.status === "departed" && (!validDate(value.hiredAt || before?.hiredAt) || !validDate(value.departedAt || before?.departedAt))) throw new Error("採用日または退店日が正しくありません。");
   if (value.status === "departed" && String(value.departedAt || before?.departedAt) < String(value.hiredAt || before?.hiredAt)) throw new Error("退店日は採用日以降にしてください。");
   const hourlyRates = value.hourlyRates || before?.hourlyRates || {};
-  if (!Object.entries(hourlyRates).every(([month, amount]) => /^\d{4}-(0[1-9]|1[0-2])$/.test(month) && nonNegative(amount))) throw new Error("月度時給が正しくありません。");
+  validateCastPaySetting(value.status, hourlyRates, value.trialHourlyRate ?? before?.trialHourlyRate, before);
   if (value.status !== "trial" && Object.keys(hourlyRates).some((month) => month < String(value.hiredAt || before?.hiredAt).slice(0, 7))) throw new Error("採用月より前の月度時給は登録できません。");
-  if (value.trialHourlyRate !== undefined && !nonNegative(value.trialHourlyRate)) throw new Error("体入時給が正しくありません。");
   const introducerId = String(Object.hasOwn(value, "introducerId") ? value.introducerId || "" : before?.introducerId || "").trim() || undefined;
   const introducer = await loadIntroducer(introducerId);
   const advisoryFees = normalizeCastAdvisoryFees(value, before, introducerId, introducer);
@@ -711,8 +1092,13 @@ export async function saveCast(value: Partial<CastRecord> & Pick<CastRecord, "na
     ...advisoryFees,
     note: value.note ?? "",
     createdAt: before?.createdAt || timestamp, updatedAt: timestamp,
+    previousUpdatedAt: before?.updatedAt,
   }) as CastRecord;
   const entryEventPlan = await prepareEntryEventPlan(before, proposed, introducer, user);
+  const introducerMonthEventPlan = await prepareIntroducerReassignmentPlan(before, proposed, introducer, timestamp, user);
+  if (Object.keys(introducerMonthEventPlan).length) assertIntroducerMonthBoundarySafe(serverClock.milliseconds);
+  const hasAtomicFinancialEventPlan = Object.keys(entryEventPlan).length > 0
+    || Object.keys(introducerMonthEventPlan).length > 0;
   const oldClaim = before?.status === "active" ? claimKey(before.name) : "";
   const newClaim = value.status === "active" ? claimKey(name) : "";
   let newClaimHandle: ClaimHandle | undefined;
@@ -725,21 +1111,43 @@ export async function saveCast(value: Partial<CastRecord> & Pick<CastRecord, "na
       throw claimAcquisitionError(error, "同じキャスト名の在籍キャストは登録できません。");
     }
   }
+  let castAndIntroducerSavedAtomically = false;
   try {
-    await runTransaction(rootRef(`casts/${id}`), (current) => {
-      const existing = current as CastRecord | null;
-      if (value.id && !existing) throw new Error("対象のキャストデータが見つかりません。最新データを読み込んでください。");
-      if ((existing as (CastRecord & { deletedAt?: string }) | null)?.deletedAt) throw new Error("このキャストデータは削除されています。最新データを読み込んでください。");
-      assertConversionUnlocked(existing as (CastRecord & ConversionLockCarrier) | null);
-      assertFresh(existing, value.updatedAt);
-      return clean(withoutInternalFields(proposed));
-    }, { applyLocally: false });
+    if (hasAtomicFinancialEventPlan) {
+      if (Object.keys(introducerMonthEventPlan).length) {
+        const writeClock = await firebaseServerNow();
+        if (japanMonthFromTimestamp(writeClock.timestamp) !== japanMonthFromTimestamp(timestamp)) {
+          throw new Error("紹介者条件の保存中に月が変わりました。最新データを読み込んでからもう一度保存してください。");
+        }
+        assertIntroducerMonthBoundarySafe(writeClock.milliseconds);
+      }
+      await applyCastAndIntroducerPlansAtomically(
+        id,
+        clean(withoutInternalFields(proposed)) as Record<string, unknown>,
+        entryEventPlan,
+        introducerMonthEventPlan,
+      );
+      castAndIntroducerSavedAtomically = true;
+    } else {
+      await runTransaction(rootRef(`casts/${id}`), (current) => {
+        const existing = current as CastRecord | null;
+        if (value.id && !existing) throw new Error("対象のキャストデータが見つかりません。最新データを読み込んでください。");
+        if ((existing as (CastRecord & { deletedAt?: string }) | null)?.deletedAt) throw new Error("このキャストデータは削除されています。最新データを読み込んでください。");
+        assertConversionUnlocked(existing as (CastRecord & ConversionLockCarrier) | null);
+        assertFresh(existing, value.updatedAt);
+        return clean(withoutInternalFields(proposed));
+      }, { applyLocally: false });
+    }
   } catch (error) {
-    if (newClaimHandle) await releasePendingClaim(newClaimHandle).catch(() => undefined);
+    if (!(error instanceof AmbiguousCastAndIntroducerWriteError) && newClaimHandle) {
+      await releasePendingClaim(newClaimHandle).catch(() => undefined);
+    }
     throw error;
   }
   if (newClaimHandle) await commitClaimAfterEntitySaved(newClaimHandle, "キャスト");
-  await applyEntryEventPlanAfterCastSaved(entryEventPlan);
+  if (!castAndIntroducerSavedAtomically) {
+    await applyEntryEventPlanAfterCastSaved(entryEventPlan);
+  }
   if (oldClaim && oldClaim !== newClaim) await releaseClaimAfterEntitySaved("castNameClaims", oldClaim, id, "キャスト");
   return id;
 }
@@ -747,7 +1155,9 @@ export async function saveCast(value: Partial<CastRecord> & Pick<CastRecord, "na
 export async function convertTrialCast(trialId: string, value: Partial<CastRecord> & Pick<CastRecord, "hiredAt">, user: User) {
   await requireUser(user);
   const activeId = entityId("cast");
-  const timestamp = now();
+  // 体入→在籍化に伴う紹介者履歴も、端末時計ずれで別月へ入れない。
+  const serverClock = await firebaseServerNow();
+  const timestamp = serverClock.timestamp;
   const [trialSnapshot, allSnapshot] = await Promise.all([get(rootRef(`casts/${trialId}`)), get(rootRef("casts"))]);
   const initialTrial = trialSnapshot.val() as (CastRecord & ConversionLockCarrier) | null;
   if (!initialTrial || initialTrial.status !== "trial") throw new Error("体入キャストが見つかりません。");
@@ -763,9 +1173,7 @@ export async function convertTrialCast(trialId: string, value: Partial<CastRecor
   const hiredAt = incoming.hiredAt || "";
   if (!validDate(hiredAt)) throw new Error("採用日が正しくありません。");
   if (validDate(initialTrial.trialDate) && hiredAt < initialTrial.trialDate!) throw new Error("採用日は体入日以降にしてください。");
-  if (!Object.entries(incoming.hourlyRates || {}).every(([month, amount]) => /^\d{4}-(0[1-9]|1[0-2])$/.test(month) && nonNegative(amount))) {
-    throw new Error("月度時給が正しくありません。");
-  }
+  validateCastPaySetting("active", incoming.hourlyRates || {}, incoming.trialHourlyRate);
   if (Object.keys(incoming.hourlyRates || {}).some((month) => month < hiredAt.slice(0, 7))) throw new Error("採用月より前の月度時給は登録できません。");
   if (asArray<CastRecord & { deletedAt?: string }>(allSnapshot.val()).some((row) => !row.deletedAt && row.status === "active" && String(row.name || "").trim() === name)) {
     throw new Error("同じキャスト名の在籍キャストは登録できません。");
@@ -789,15 +1197,24 @@ export async function convertTrialCast(trialId: string, value: Partial<CastRecor
       ...withoutInternalFields(trial), ...incoming, id: activeId, name, legalName, status: "active",
       hourlyRates: incoming.hourlyRates || {}, introducerId, ...advisoryFees,
       convertedFromTrialId: trialId, convertedToCastId: undefined, departedAt: undefined,
-      createdAt: timestamp, updatedAt: timestamp,
+      createdAt: timestamp, updatedAt: timestamp, previousUpdatedAt: undefined,
     }) as CastRecord;
     const entryEventPlan = await prepareEntryEventPlan(null, proposed, introducer, user);
+    const introducerMonthEventPlan = await prepareConvertedCastIntroducerMonthPlan(trialId, proposed, introducer, timestamp, user);
+    if (Object.keys(introducerMonthEventPlan).length) assertIntroducerMonthBoundarySafe(serverClock.milliseconds);
     try {
       nameClaimHandle = await acquireClaim("castNameClaims", claimKey(name), activeId);
     } catch (error) {
       throw claimAcquisitionError(error, "同じキャスト名の在籍キャストは登録できません。");
     }
     await assertConversionLockOwned(conversionLock);
+    if (Object.keys(introducerMonthEventPlan).length) {
+      const writeClock = await firebaseServerNow();
+      if (japanMonthFromTimestamp(writeClock.timestamp) !== japanMonthFromTimestamp(timestamp)) {
+        throw new Error("在籍化の保存中に月が変わりました。最新データを読み込んでからもう一度実行してください。");
+      }
+      assertIntroducerMonthBoundarySafe(writeClock.milliseconds);
+    }
     const storedActive = clean(withoutInternalFields(proposed)) as Record<string, unknown>;
     const conversionPlan = {
       [`casts/${activeId}`]: {
@@ -805,8 +1222,10 @@ export async function convertTrialCast(trialId: string, value: Partial<CastRecor
       },
       [`casts/${trialId}/convertedToCastId`]: activeId,
       [`casts/${trialId}/updatedAt`]: timestamp,
+      [`casts/${trialId}/previousUpdatedAt`]: trial.updatedAt,
       [`casts/${trialId}/conversionLock`]: null,
       ...entryEventPlan,
+      ...introducerMonthEventPlan,
     };
     await applyConversionPlanWithVerification(
       conversionPlan,
@@ -817,6 +1236,7 @@ export async function convertTrialCast(trialId: string, value: Partial<CastRecor
         "convertedToCastId",
         activeId,
         entryEventPlan,
+        introducerMonthEventPlan,
       ),
     );
   } catch (error) {
@@ -842,7 +1262,7 @@ export async function departCast(id: string, date: string, expectedUpdatedAt: st
     assertConversionUnlocked(existing);
     assertFresh(existing, expectedUpdatedAt);
     if (existing.hiredAt && date < existing.hiredAt) throw new Error("退店日は採用日以降にしてください。");
-    return clean({ ...withoutInternalFields(existing), status: "departed", departedAt: date, updatedAt: timestamp });
+    return clean({ ...withoutInternalFields(existing), status: "departed", departedAt: date, previousUpdatedAt: existing.updatedAt, updatedAt: timestamp });
   }, { applyLocally: false });
   const departed = result.snapshot.val() as CastRecord | null;
   if (!departed) throw new Error("退店登録を完了できませんでした。最新データを読み込んでください。");
@@ -871,7 +1291,7 @@ export async function restoreCast(id: string, expectedUpdatedAt: string, user: U
       if (!existing || existing.status !== "departed") throw new Error("退店キャストが更新されています。最新データを読み込んでください。");
       assertConversionUnlocked(existing as CastRecord & ConversionLockCarrier);
       assertFresh(existing, expectedUpdatedAt);
-      const restored = { ...withoutInternalFields(existing), status: "active" as const, updatedAt: timestamp };
+      const restored = { ...withoutInternalFields(existing), status: "active" as const, previousUpdatedAt: existing.updatedAt, updatedAt: timestamp };
       delete restored.departedAt;
       return restored;
     }, { applyLocally: false });
@@ -895,7 +1315,7 @@ export async function deleteCast(id: string, expectedUpdatedAt: string, user: Us
     if (row.deletedAt) return row;
     assertConversionUnlocked(row);
     assertFresh(row, expectedUpdatedAt);
-    return clean({ ...withoutInternalFields(row), deletedAt, deletedBy: user.uid, updatedAt: deletedAt });
+    return clean({ ...withoutInternalFields(row), deletedAt, deletedBy: user.uid, previousUpdatedAt: row.updatedAt, updatedAt: deletedAt });
   }, { applyLocally: false });
   if (existing.status === "active") await releaseClaimAfterEntitySaved("castNameClaims", claimKey(existing.name), id, "キャスト削除");
 }
@@ -916,8 +1336,23 @@ export async function saveStaff(value: Partial<StaffRecord> & Pick<StaffRecord, 
     if (value.status === "trial" && !validDate(value.trialDate || existing?.trialDate)) throw new Error("体入日が正しくありません。");
     if (value.status === "departed" && (!validDate(value.hiredAt || existing?.hiredAt) || !validDate(value.departedAt || existing?.departedAt))) throw new Error("採用日または退店日が正しくありません。");
     if (value.status === "departed" && String(value.departedAt || existing?.departedAt) < String(value.hiredAt || existing?.hiredAt)) throw new Error("退店日は採用日以降にしてください。");
-    if (value.hourlyRate !== undefined && !nonNegative(value.hourlyRate)) throw new Error("時給が正しくありません。");
-    if (value.trialHourlyRate !== undefined && !nonNegative(value.trialHourlyRate)) throw new Error("体入時給が正しくありません。");
+    const convertedFromTrialId = value.convertedFromTrialId ?? existing?.convertedFromTrialId;
+    const hiredAt = value.hiredAt ?? existing?.hiredAt;
+    const trialDate = value.trialDate ?? existing?.trialDate;
+    const conversionDatesChanged = !existing
+      || convertedFromTrialId !== existing.convertedFromTrialId
+      || hiredAt !== existing.hiredAt
+      || trialDate !== existing.trialDate;
+    if (value.status !== "trial" && convertedFromTrialId && conversionDatesChanged
+      && !isStaffHireDateAfterTrial(trialDate, hiredAt)) {
+      throw new Error("採用日は体入日の翌日以降にしてください。");
+    }
+    validateStaffPaySetting(
+      value.status,
+      value.hourlyRate ?? existing?.hourlyRate,
+      value.trialHourlyRate ?? existing?.trialHourlyRate,
+      existing,
+    );
     return clean({ ...withoutInternalFields(existing || {}), ...withoutInternalFields(value), name, note: value.note ?? "", createdAt: existing?.createdAt || timestamp, updatedAt: timestamp });
   }, { applyLocally: false });
   return id;
@@ -935,8 +1370,8 @@ export async function convertTrialStaff(trialId: string, value: Partial<StaffRec
   const incoming = withoutInternalFields(value);
   const hiredAt = incoming.hiredAt || "";
   if (!validDate(hiredAt)) throw new Error("採用日が正しくありません。");
-  if (validDate(initialTrial.trialDate) && hiredAt < initialTrial.trialDate!) throw new Error("採用日は体入日以降にしてください。");
-  if (!nonNegative(incoming.hourlyRate)) throw new Error("時給が正しくありません。");
+  if (!isStaffHireDateAfterTrial(initialTrial.trialDate, hiredAt)) throw new Error("採用日は体入日の翌日以降にしてください。");
+  validateStaffPaySetting("active", incoming.hourlyRate, incoming.trialHourlyRate);
   const name = String(incoming.name || initialTrial.name || "").trim();
   if (!name) throw new Error("スタッフ名を入力してください。");
   let conversionLock: ConversionLockHandle<StaffRecord> | undefined;
@@ -950,9 +1385,10 @@ export async function convertTrialStaff(trialId: string, value: Partial<StaffRec
     );
     const trial = conversionLock.record;
     if (trial.deletedAt) throw new Error("この体入スタッフは削除されています。");
+    if (!isStaffHireDateAfterTrial(trial.trialDate, hiredAt)) throw new Error("採用日は体入日の翌日以降にしてください。");
     await assertConversionLockOwned(conversionLock);
     const storedActive = clean({
-      ...withoutInternalFields(trial), ...incoming, name, status: "active", convertedFromTrialId: trialId,
+      ...withoutInternalFields(trial), ...incoming, name, status: "active", trialDate: trial.trialDate, convertedFromTrialId: trialId,
       convertedToStaffId: undefined, departedAt: undefined, createdAt: timestamp, updatedAt: timestamp,
     }) as Record<string, unknown>;
     const conversionPlan = {
@@ -1029,7 +1465,7 @@ export async function saveDriver(value: Partial<DriverRecord> & Pick<DriverRecor
     if (!validDate(value.hiredAt)) throw new Error("採用日が正しくありません。");
     if (value.departedAt !== undefined && !validDate(value.departedAt)) throw new Error("退店日が正しくありません。");
     if (value.departedAt && value.departedAt < value.hiredAt) throw new Error("退店日は採用日以降にしてください。");
-    if (!nonNegative(value.dailyRate)) throw new Error("日給が正しくありません。");
+    validateDriverPaySetting(value.dailyRate, existing);
     return clean({ ...existing, ...withoutId(value), name: value.name.trim(), note: value.note ?? "", createdAt: existing?.createdAt || timestamp, updatedAt: timestamp });
   }, { applyLocally: false });
   return id;
@@ -1057,71 +1493,152 @@ export async function saveIntroducer(value: Partial<IntroducerRecord> & Pick<Int
   }, { applyLocally: false });
   return id;
 }
-export async function deleteIntroducer(id: string, expectedUpdatedAt: string, user: User) {
+export async function deleteIntroducer(
+  id: string,
+  expectedUpdatedAt: string,
+  expectedLinkedCasts: IntroducerDeletionLinkedCastRevision[],
+  user: User,
+) {
   await requireUser(user);
-  const [introducerSnapshot, castsSnapshot, eventsSnapshot, statesSnapshot] = await Promise.all([
-    get(rootRef(`introducers/${id}`)),
-    get(rootRef("casts")),
-    get(rootRef("introducerEntryEvents")),
-    get(rootRef("accountingMonthStates")),
-  ]);
-  const existing = introducerSnapshot.val() as IntroducerRecord | null;
-  if (!existing) return;
-  assertFresh(existing, expectedUpdatedAt);
-  const events = (eventsSnapshot.val() || {}) as Record<string, Record<string, IntroducerEntryEvent>>;
-  const states = (statesSnapshot.val() || {}) as Record<string, AccountingMonthState>;
-  const eventPlan: EntryEventPlan = {};
-  const timestamp = now();
-  const referencedCasts = asArray<CastRecord>(castsSnapshot.val()).filter((cast) =>
-    cast.introducerId === id && validDate(cast.hiredAt) && Number(cast.entryAdvisoryFee || 0) > 0);
-  for (const cast of referencedCasts) {
-    const month = cast.hiredAt!.slice(0, 7);
-    const event = events[month]?.[cast.id];
-    const eventMatches = event
-      && event.id === cast.id
-      && event.castId === cast.id
-      && event.hiredAt === cast.hiredAt
-      && event.introducerId === id
-      && Number(event.amount) === Number(cast.entryAdvisoryFee)
-      && Boolean(String(event.castName || "").trim())
-      && Boolean(String(event.introducerName || "").trim());
-    if (eventMatches) continue;
-    const existsInAnotherMonth = Object.entries(events).some(([eventMonth, rows]) => eventMonth !== month && Boolean(rows?.[cast.id]));
-    if (existsInAnotherMonth) {
-      throw new Error(`${cast.name}の入店顧問料履歴が現在のマスタと一致しません。紹介者を削除する前に対象キャストを保存し直してください。`);
+  const deletionLock = await acquireIntroducerDeletionLock(id, user);
+  let lockReleasedWithDelete = false;
+  try {
+    // ロックをFirebaseが確定した時刻を削除イベント・削除月の共通基準にする。
+    const timestamp = new Date(deletionLock.acquiredAtMs).toISOString();
+    // ロックTTLより先に月が変わる場合は、イベントpathと実保存月が割れ得るため開始しない。
+    assertIntroducerMonthBoundarySafe(deletionLock.acquiredAtMs, INTRODUCER_DELETION_LOCK_TTL_MS);
+    const deletionMonth = japanMonthFromTimestamp(timestamp);
+    const [introducerSnapshot, castsSnapshot, eventsSnapshot, statesSnapshot, monthEventsSnapshot] = await Promise.all([
+      get(rootRef(`introducers/${id}`)),
+      get(rootRef("casts")),
+      get(rootRef("introducerEntryEvents")),
+      get(rootRef("accountingMonthStates")),
+      get(rootRef(`introducerMonthEvents/${deletionMonth}`)),
+    ]);
+    const existing = introducerSnapshot.val() as IntroducerRecord | null;
+    if (!existing) return;
+    assertFresh(existing, expectedUpdatedAt);
+    const allCasts = asArray<CastRecord>(castsSnapshot.val());
+    const linkedCasts = allCasts.filter((cast) => !cast.deletedAt && cast.introducerId === id);
+    if (introducerDeletionLinkedCastSignature(linkedCasts) !== introducerDeletionLinkedCastSignature(expectedLinkedCasts)) {
+      throw new Error("紐づくキャストが更新されています。最新データを読み込み、対象者を確認してから紹介者を削除してください。");
     }
-    if (states[month] && states[month].status !== "open") {
-      throw new Error(`${month}は月次確定処理中または確定済みで、${cast.name}の入店顧問料履歴を補完できません。先に月次確定を解除して対象キャストを保存してください。`);
+
+    const events = (eventsSnapshot.val() || {}) as Record<string, Record<string, IntroducerEntryEvent>>;
+    const states = (statesSnapshot.val() || {}) as Record<string, AccountingMonthState>;
+    const eventPlan: EntryEventPlan = {};
+    const referencedCasts = allCasts.filter((cast) => !cast.deletedAt && cast.introducerId === id
+      && validDate(cast.hiredAt) && Number(cast.entryAdvisoryFee || 0) > 0);
+    for (const cast of referencedCasts) {
+      const month = cast.hiredAt!.slice(0, 7);
+      const event = events[month]?.[cast.id];
+      let castUpdatedMonth = "";
+      try {
+        castUpdatedMonth = japanMonthFromTimestamp(cast.updatedAt);
+      } catch {
+        // マスタ読込時にも形式を検証するが、削除処理では不正値を現在月扱いして
+        // 過去の有効な入店顧問料履歴を上書きしない。
+      }
+      const historicalEventIsValid = Boolean(event
+        && event.id === cast.id
+        && event.castId === cast.id
+        && event.hiredAt === cast.hiredAt
+        && Number.isFinite(Number(event.amount))
+        && Number(event.amount) > 0
+        && Boolean(String(event.introducerId || "").trim())
+        && Boolean(String(event.castName || "").trim())
+        && Boolean(String(event.introducerName || "").trim()));
+      // 入店顧問料は採用月の一回限りの履歴。後月に現在の紹介者や顧問料を
+      // 変更していても、採用月に保存済みの有効なイベントを現在値で置換しない。
+      if (castUpdatedMonth > month && historicalEventIsValid) continue;
+      const eventMatches = event
+        && event.id === cast.id
+        && event.castId === cast.id
+        && event.hiredAt === cast.hiredAt
+        && event.introducerId === id
+        && Number(event.amount) === Number(cast.entryAdvisoryFee)
+        && Boolean(String(event.castName || "").trim())
+        && Boolean(String(event.introducerName || "").trim());
+      if (eventMatches) continue;
+      const existsInAnotherMonth = Object.entries(events)
+        .some(([eventMonth, rows]) => eventMonth !== month && Boolean(rows?.[cast.id]));
+      if (existsInAnotherMonth) {
+        throw new Error(`${cast.name}の入店顧問料履歴が現在のマスタと一致しません。紹介者を削除する前に対象キャストを保存し直してください。`);
+      }
+      if (states[month] && states[month].status !== "open") {
+        throw new Error(`${month}は月次確定処理中または確定済みで、${cast.name}の入店顧問料履歴を補完できません。先に月次確定を解除して対象キャストを保存してください。`);
+      }
+      const eventTimestamp = nextEventTimestamp(timestamp, event?.updatedAt);
+      eventPlan[`introducerEntryEvents/${month}/${cast.id}`] = {
+        id: cast.id,
+        month,
+        hiredAt: cast.hiredAt!,
+        castId: cast.id,
+        castName: cast.name,
+        introducerId: id,
+        introducerName: existing.name,
+        feeType: existing.feeType,
+        amount: Number(cast.entryAdvisoryFee),
+        createdAt: event?.createdAt || timestamp,
+        createdBy: event?.createdBy || user.uid,
+        updatedAt: eventTimestamp,
+        updatedBy: user.uid,
+      };
     }
-    eventPlan[`introducerEntryEvents/${month}/${cast.id}`] = {
-      id: cast.id,
-      month,
-      hiredAt: cast.hiredAt!,
-      castId: cast.id,
-      castName: cast.name,
-      introducerId: id,
-      introducerName: existing.name,
-      feeType: existing.feeType,
-      amount: Number(cast.entryAdvisoryFee),
-      createdAt: event?.createdAt || timestamp,
-      createdBy: event?.createdBy || user.uid,
-      updatedAt: timestamp,
-      updatedBy: user.uid,
-    };
+
+    const existingMonthEvents = (monthEventsSnapshot.val() || {}) as Record<string, IntroducerMonthEvent>;
+    const introducerMonthEventPlan: IntroducerMonthEventPlan = {};
+    for (const cast of linkedCasts) {
+      const rawPrevious = existingMonthEvents[cast.id];
+      const previous = rawPrevious ? normalizeIntroducerMonthEvent(rawPrevious, deletionMonth, cast.id) : undefined;
+      if (rawPrevious && !previous) {
+        throw new Error(`${cast.name}の紹介者削除履歴が不正です。Firebaseデータを確認してから削除してください。`);
+      }
+      const eventTimestamp = nextEventTimestamp(timestamp, previous?.updatedAt);
+      introducerMonthEventPlan[`introducerMonthEvents/${deletionMonth}/${cast.id}`] = {
+        id: cast.id,
+        month: deletionMonth,
+        castId: cast.id,
+        castName: cast.name,
+        state: "deleted",
+        deletedIntroducerId: id,
+        deletedIntroducerName: existing.name,
+        deletedAt: eventTimestamp,
+        deletedBy: user.uid,
+        revision: Number(previous?.revision || 0) + 1,
+        createdAt: previous?.createdAt || timestamp,
+        createdBy: previous?.createdBy || user.uid,
+        updatedAt: eventTimestamp,
+        updatedAtMs: serverOrderTimestamp(),
+        updatedBy: user.uid,
+      };
+    }
+    await update(rootRef(), clean({
+      ...eventPlan,
+      ...introducerMonthEventPlan,
+      [`introducerDeletionCommits/${id}`]: {
+        id,
+        introducerId: id,
+        introducerName: existing.name,
+        month: deletionMonth,
+        token: deletionLock.token,
+        owner: user.uid,
+        deletedAtMs: deletionLock.acquiredAtMs,
+        completedAt: timestamp,
+        completedAtMs: serverOrderTimestamp(),
+        ...(linkedCasts.length
+          ? { linkedCastIds: Object.fromEntries(linkedCasts.map((cast) => [cast.id, true])) }
+          : {}),
+      },
+      [`introducers/${id}`]: null,
+      [`introducerDeletionLocks/${id}`]: null,
+    }));
+    lockReleasedWithDelete = true;
+  } finally {
+    if (!lockReleasedWithDelete) {
+      await releaseIntroducerDeletionLock(id, deletionLock).catch(() => undefined);
+    }
   }
-  if (Object.keys(eventPlan).length) {
-    const latest = (await get(rootRef(`introducers/${id}`))).val() as IntroducerRecord | null;
-    if (!latest) return;
-    assertFresh(latest, expectedUpdatedAt);
-    await update(rootRef(), clean({ ...eventPlan, [`introducers/${id}`]: null }));
-    return;
-  }
-  await runTransaction(rootRef(`introducers/${id}`), (current) => {
-    const row = current as IntroducerRecord | null;
-    if (!row) return null;
-    assertFresh(row, expectedUpdatedAt);
-    return null;
-  }, { applyLocally: false });
 }
 
 export async function saveLiquor(value: Partial<LiquorRecord> & Pick<LiquorRecord, "name" | "kind" | "salePrice" | "costPrice">, user: User) {
@@ -1229,6 +1746,7 @@ export async function submitClosing(value: DailyClosing, user: User, expectedUpd
         returnedFromStatus: undefined,
         returnReason: undefined,
         submittedAt: timestamp,
+        submittedAtMs: serverOrderTimestamp(),
         submittedBy: user.uid,
         updatedAt: timestamp,
       });
@@ -1327,13 +1845,15 @@ export async function saveMonthlyAdjustments(value: MonthlyAdjustments, user: Us
 }
 
 async function currentMonthlySources(month: string) {
-  const [casts, staff, introducers, closings, adjustment, entryEvents] = await Promise.all([
+  const [casts, staff, introducers, closings, adjustment, entryEvents, introducerDeletionCommits, introducerMonthEvents] = await Promise.all([
     get(rootRef("casts")),
     get(rootRef("staff")),
     get(rootRef("introducers")),
     get(rootRef("history")),
     get(rootRef(`accountingAdjustments/${month}`)),
     get(rootRef(`introducerEntryEvents/${month}`)),
+    get(rootRef("introducerDeletionCommits")),
+    get(rootRef(`introducerMonthEvents/${month}`)),
   ]);
   const data: DomainWorkspaceData = {
     casts: asArray<CastRecord>(casts.val()),
@@ -1358,7 +1878,23 @@ async function currentMonthlySources(month: string) {
   } as MonthlyAdjustments);
   const events = Object.entries((entryEvents.val() || {}) as Record<string, IntroducerEntryEvent>)
     .map(([id, row]) => ({ ...row, id, month }));
-  return { data, adjustments, events };
+  const rawDeletionCommits = Object.entries((introducerDeletionCommits.val() || {}) as Record<string, IntroducerDeletionCommit>);
+  const deletionCommits = rawDeletionCommits.flatMap(([id, row]) => {
+    const normalized = normalizeIntroducerDeletionCommit(row, id);
+    return normalized ? [normalized] : [];
+  }).filter((row) => row.month === month);
+  if (deletionCommits.length !== rawDeletionCommits.filter(([, row]) => row?.month === month).length) {
+    throw new Error(`${month}の紹介者削除確定履歴が不正なため月次確定できません。Firebaseデータを確認してください。`);
+  }
+  const rawMonthEvents = Object.entries((introducerMonthEvents.val() || {}) as Record<string, IntroducerMonthEvent>);
+  const monthEvents = rawMonthEvents.flatMap(([id, row]) => {
+    const normalized = normalizeIntroducerMonthEvent(row, month, id);
+    return normalized ? [normalized] : [];
+  });
+  if (monthEvents.length !== rawMonthEvents.length) {
+    throw new Error(`${month}の紹介者削除・再設定履歴が不正なため月次確定できません。Firebaseデータを確認してください。`);
+  }
+  return { data, adjustments, events, deletionCommits, monthEvents };
 }
 
 function assertMonthlySourcesReady(
@@ -1371,6 +1907,8 @@ function assertMonthlySourcesReady(
     sources.adjustments,
     true,
     sources.events,
+    sources.monthEvents,
+    sources.deletionCommits,
   );
   if (check.allowed) return;
   if (check.unresolvedDaily.length > 0) {
@@ -1421,12 +1959,25 @@ async function assertMonthOpen(month: string) {
   if (state && state.status !== "open") throw new Error(`${month}は月次確定処理中または確定済みのため変更できません。先に月次確定を解除してください。`);
 }
 
+async function cleanupExpiredIntroducerDeletionLocks(serverNowMs: number) {
+  const snapshot = await get(rootRef("introducerDeletionLocks"));
+  const locks = (snapshot.val() || {}) as Record<string, IntroducerDeletionLock>;
+  await Promise.all(Object.entries(locks)
+    .filter(([, lock]) => Number(lock?.expiresAt || 0) <= serverNowMs)
+    .map(([introducerId]) => runTransaction(rootRef(`introducerDeletionLocks/${introducerId}`), (current) => {
+      const lock = current as IntroducerDeletionLock | null;
+      return lock && Number(lock.expiresAt || 0) <= serverNowMs ? null : current;
+    }, { applyLocally: false })));
+}
+
 async function acquireAccountingFinalizeLock(month: string, operationId: string, user: User) {
-  const acquiredAt = Date.now();
+  const serverClock = await firebaseServerNow();
+  await cleanupExpiredIntroducerDeletionLocks(serverClock.milliseconds);
+  const acquiredAt = serverClock.milliseconds;
   const expiresAt = acquiredAt + ACCOUNTING_FINALIZE_LOCK_TTL_MS;
   await runTransaction(rootRef("accountingFinalizeLock"), (current) => {
     const lock = current as AccountingFinalizeLock | null;
-    if (lock && Number(lock.expiresAt || 0) > Date.now() && lock.operationId !== operationId) {
+    if (lock && Number(lock.expiresAt || 0) > serverClock.milliseconds && lock.operationId !== operationId) {
       throw new Error(`${lock.month || "別の月"}の月次確定処理中です。完了後にやり直してください。`);
     }
     return { operationId, owner: user.uid, month, acquiredAt, expiresAt };
@@ -1434,7 +1985,7 @@ async function acquireAccountingFinalizeLock(month: string, operationId: string,
 }
 
 async function renewAccountingFinalizeLock(month: string, operationId: string, user: User) {
-  const renewedAt = Date.now();
+  const renewedAt = (await firebaseServerNow()).milliseconds;
   await runTransaction(rootRef("accountingFinalizeLock"), (current) => {
     const lock = current as AccountingFinalizeLock | null;
     if (!lock || lock.operationId !== operationId || lock.owner !== user.uid || lock.month !== month) {
@@ -1500,11 +2051,11 @@ export async function finalizeAccountingMonth(
 
     const current = await currentMonthlySources(month);
     assertMonthlySourcesReady(month, current);
-    const latestFingerprint = await monthlySourceFingerprint(current.data, month, current.adjustments, current.events);
+    const latestFingerprint = await monthlySourceFingerprint(current.data, month, current.adjustments, current.events, current.monthEvents, current.deletionCommits);
     if (latestFingerprint !== snapshot.sourceFingerprint) {
       throw new Error("月次データが更新されています。最新データを読み込み、全項目を再確認してください。");
     }
-    const currentResults = calculateMonthlyAccounting(current.data, month, current.adjustments, current.events);
+    const currentResults = calculateMonthlyAccounting(current.data, month, current.adjustments, current.events, current.monthEvents, current.deletionCommits);
     const recomputedSnapshot = buildMonthlySnapshot(
       month,
       snapshotRevision,
@@ -1526,11 +2077,11 @@ export async function finalizeAccountingMonth(
     await renewAccountingFinalizeLock(month, operationId, user);
     const finalSources = await currentMonthlySources(month);
     assertMonthlySourcesReady(month, finalSources);
-    const finalFingerprint = await monthlySourceFingerprint(finalSources.data, month, finalSources.adjustments, finalSources.events);
+    const finalFingerprint = await monthlySourceFingerprint(finalSources.data, month, finalSources.adjustments, finalSources.events, finalSources.monthEvents, finalSources.deletionCommits);
     if (finalFingerprint !== snapshot.sourceFingerprint) {
       throw new Error("月次確定中に元データが更新されました。最新データを読み込み、全項目を再確認してください。");
     }
-    const finalResults = calculateMonthlyAccounting(finalSources.data, month, finalSources.adjustments, finalSources.events);
+    const finalResults = calculateMonthlyAccounting(finalSources.data, month, finalSources.adjustments, finalSources.events, finalSources.monthEvents, finalSources.deletionCommits);
     const finalRecomputedSnapshot = buildMonthlySnapshot(
       month,
       snapshotRevision,

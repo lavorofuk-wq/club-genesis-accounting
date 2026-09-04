@@ -2,10 +2,17 @@ import {
   calculateCastRewards,
   calculateCastSalesReports,
   calculateDriverPayroll,
+  castIdentityForMonth,
+  castMasterIdentityForMonth,
+  compareDailyClosingSubmissionOrder,
+  compareIntroducerMonthEventEffectiveOrder,
+  dailyClosingSubmissionOrderValue,
   findUnclassifiedLegacyBottles,
   floorHundred,
-  introducerTermConflicts,
+  hasDailyClosingSubmissionOrder,
+  introducerMonthEventEffectiveOrderValue,
   introducerSalesBase,
+  japanMonthFromTimestamp,
 } from "./gms";
 import type {
   CastRecord,
@@ -13,13 +20,15 @@ import type {
   CastSalesReport,
   DailyClosing,
   DriverPayrollRow,
+  IntroducerDeletionCommit,
   IntroducerFeeType,
+  IntroducerMonthEvent,
   MonthlyAdjustments,
   StaffRecord,
   WorkspaceData,
 } from "./gms";
 
-export const MONTHLY_CALCULATION_VERSION = "2.8.1";
+export const MONTHLY_CALCULATION_VERSION = "2.9.0";
 
 export type IntroducerEntryEvent = {
   id: string;
@@ -138,6 +147,8 @@ export type AccountingWorkspaceData = WorkspaceData & {
   archivedCasts: CastRecord[];
   archivedStaff: StaffRecord[];
   introducerEntryEvents: IntroducerEntryEvent[];
+  introducerDeletionCommits: IntroducerDeletionCommit[];
+  introducerMonthEvents: IntroducerMonthEvent[];
   monthStates: AccountingMonthState[];
   monthSnapshots: MonthlyAccountingSnapshot[];
 };
@@ -152,7 +163,20 @@ const snapshotObject = (value: unknown): value is Record<string, unknown> => Boo
 const snapshotNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
 const snapshotNonNegative = (value: unknown): value is number => snapshotNumber(value) && value >= 0;
 const snapshotInteger = (value: unknown) => Number.isSafeInteger(value) && Number(value) >= 0;
+const snapshotMillisecondsInstant = (value: unknown) => {
+  if (!snapshotInteger(value)) return undefined;
+  const date = new Date(Number(value));
+  return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
+};
 const snapshotString = (value: unknown) => typeof value === "string" && value.length > 0;
+const snapshotIsoInstant = (value: unknown): value is string => typeof value === "string"
+  && /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T([01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{3}Z$/.test(value)
+  && !Number.isNaN(Date.parse(value))
+  && new Date(value).toISOString() === value;
+const instantValue = (value: string | undefined) => {
+  const parsed = value ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+};
 const snapshotDateInMonth = (value: unknown, month: string) => typeof value === "string"
   && /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(value)
   && value.startsWith(`${month}-`);
@@ -327,6 +351,89 @@ const validIntroducerFeeTypes = new Set<IntroducerFeeType>([
   "higherNetSalesGross10",
 ]);
 
+/** Firebaseのパス値を月次紹介者制御イベントとして安全に復元する。 */
+export function normalizeIntroducerMonthEvent(
+  value: unknown,
+  month: string,
+  castId: string,
+): IntroducerMonthEvent | undefined {
+  if (!snapshotObject(value) || !/^\d{4}-(0[1-9]|1[0-2])$/.test(month) || !castId) return undefined;
+  const row = value as Record<string, unknown>;
+  if (row.id !== castId || row.castId !== castId || row.month !== month
+    || (row.state !== "deleted" && row.state !== "reassigned")
+    || !snapshotString(row.castName)
+    || !snapshotString(row.deletedIntroducerId)
+    || !snapshotString(row.deletedIntroducerName)
+    || !snapshotIsoInstant(row.deletedAt)
+    || !snapshotString(row.deletedBy)
+    || !snapshotInteger(row.revision) || Number(row.revision) < 1
+    || !snapshotIsoInstant(row.createdAt)
+    || !snapshotString(row.createdBy)
+    || !snapshotIsoInstant(row.updatedAt)
+    || !snapshotString(row.updatedBy)) return undefined;
+  const updatedAtMsInstant = row.updatedAtMs === undefined ? undefined : snapshotMillisecondsInstant(row.updatedAtMs);
+  // updatedAtMsは実Firebase保存順専用。長い通信遅延で月を跨いでも、原子的に
+  // 保存済みのeventを破損扱いにしない。適用月は操作開始時のupdatedAtで固定する。
+  if ((row.updatedAtMs !== undefined && !updatedAtMsInstant)
+    || japanMonthFromTimestamp(row.updatedAt) !== month) return undefined;
+  if (row.createdAt > row.updatedAt || row.deletedAt > row.updatedAt) return undefined;
+  if (row.sourceCastId !== undefined && !snapshotString(row.sourceCastId)) return undefined;
+  if (row.state === "deleted") {
+    if (row.introducer !== undefined || row.reassignedAt !== undefined
+      || row.reassignedAtMs !== undefined || row.reassignedBy !== undefined) return undefined;
+  } else {
+    if (!snapshotIsoInstant(row.reassignedAt) || !snapshotString(row.reassignedBy) || !snapshotObject(row.introducer)
+      || row.deletedAt > row.reassignedAt || row.reassignedAt > row.updatedAt) return undefined;
+    const reassignedAtMsInstant = row.reassignedAtMs === undefined ? undefined : snapshotMillisecondsInstant(row.reassignedAtMs);
+    if ((row.reassignedAtMs !== undefined && !reassignedAtMsInstant)
+      || japanMonthFromTimestamp(row.reassignedAt) !== month) return undefined;
+    const introducer = row.introducer as Record<string, unknown>;
+    if (!snapshotString(introducer.id) || !snapshotString(introducer.name)
+      || !validIntroducerFeeTypes.has(introducer.feeType as IntroducerFeeType)
+      || typeof introducer.attendanceAdvisoryEnabled !== "boolean"
+      || typeof introducer.entryAdvisoryEnabled !== "boolean"
+      || !snapshotNonNegative(introducer.attendanceAdvisoryFee)
+      || !snapshotNonNegative(introducer.entryAdvisoryFee)) return undefined;
+  }
+  return row as IntroducerMonthEvent;
+}
+
+export function normalizeIntroducerDeletionCommit(
+  value: unknown,
+  introducerId: string,
+): IntroducerDeletionCommit | undefined {
+  if (!snapshotObject(value) || !introducerId) return undefined;
+  const row = value as Record<string, unknown>;
+  if (row.id !== introducerId || row.introducerId !== introducerId
+    || !snapshotString(row.introducerName)
+    || typeof row.month !== "string" || !/^\d{4}-(0[1-9]|1[0-2])$/.test(row.month)
+    || !snapshotString(row.token) || !snapshotString(row.owner)
+    || !snapshotInteger(row.deletedAtMs)
+    || !snapshotIsoInstant(row.completedAt)
+    || !snapshotInteger(row.completedAtMs)) return undefined;
+  const deletedAtMsInstant = snapshotMillisecondsInstant(row.deletedAtMs);
+  const completedAtMsInstant = snapshotMillisecondsInstant(row.completedAtMs);
+  if (!deletedAtMsInstant || !completedAtMsInstant
+    || Date.parse(row.completedAt) !== row.deletedAtMs
+    || Number(row.completedAtMs) < Number(row.deletedAtMs)
+    || japanMonthFromTimestamp(deletedAtMsInstant) !== row.month) return undefined;
+  const linked = row.linkedCastIds;
+  if (linked !== undefined && (!snapshotObject(linked)
+    || Object.values(linked).some((selected) => selected !== true))) return undefined;
+  return {
+    id: introducerId,
+    introducerId,
+    introducerName: row.introducerName,
+    month: row.month,
+    token: row.token,
+    owner: row.owner,
+    deletedAtMs: row.deletedAtMs,
+    completedAt: row.completedAt,
+    completedAtMs: row.completedAtMs,
+    linkedCastIds: linked ? Object.keys(linked).sort() : [],
+  } as IntroducerDeletionCommit;
+}
+
 export function calculateStaffPayroll(
   closings: DailyClosing[],
   adjustments: MonthlyAdjustments,
@@ -334,11 +441,22 @@ export function calculateStaffPayroll(
   month = "",
 ): StaffPayrollRow[] {
   const map = new Map<string, StaffPayrollRow>();
+  const staffById = new Map(staff.map((member) => [member.id, member]));
+  const monthWorkIds = new Set(closings.flatMap((closing) => (closing.staffWork ?? [])
+    .filter((work) => work.kind === "regular")
+    .map((work) => work.staffId)));
   closings.forEach((closing) => (closing.staffWork ?? []).forEach((work) => {
     const converted = work.kind === "trial"
       ? staff.find((member) => member.convertedFromTrialId === work.staffId && member.hiredAt?.startsWith(month))
       : undefined;
-    const staffId = converted?.id || work.staffId;
+    const source = work.kind === "trial" ? staffById.get(work.staffId) : undefined;
+    // 旧版の物理削除で在籍側だけ消えた場合も、体入側に残る変換先IDが
+    // 同月regular勤務に実在するときだけ同一人物として給与を統合する。
+    const missingConvertedTargetId = source?.convertedToStaffId
+      && monthWorkIds.has(source.convertedToStaffId)
+      ? source.convertedToStaffId
+      : undefined;
+    const staffId = converted?.id || missingConvertedTargetId || work.staffId;
     const row = map.get(staffId) || {
       id: staffId,
       name: converted?.name || work.name,
@@ -415,62 +533,60 @@ function withArchivedMasters(data: WorkspaceData & { archivedCasts?: CastRecord[
   return { ...data, casts: [...byId.values()], staff: [...staffById.values()] };
 }
 
-type EntryEventConflict = { castId: string; message: string };
-
-/**
- * 入店時に保存した紹介者と、現在マスタ・承認済み日次の紹介者が食い違う人物を検出する。
- * 誰へ支払うかを推測せず、月次確定を止めるための安全確認として扱う。
- */
-function entryEventConflictDetails(
-  rewards: CastReward[],
-  data: WorkspaceData,
-  month: string,
-  storedEvents: IntroducerEntryEvent[],
-): EntryEventConflict[] {
-  const castById = new Map(data.casts.map((cast) => [cast.id, cast]));
-  const rewardByCast = new Map(rewards.map((reward) => [reward.id, reward]));
-  const eventsByCast = new Map<string, IntroducerEntryEvent[]>();
-  storedEvents.filter((event) => event.month === month && event.amount > 0).forEach((event) => {
-    const cast = castById.get(event.castId);
-    // 現在マスタで入店顧問料自体が取り消された場合は、既存仕様どおり古いイベントを無効とする。
-    if (cast && (!cast.hiredAt?.startsWith(month) || !cast.introducerId || Number(cast.entryAdvisoryFee || 0) <= 0)) return;
-    eventsByCast.set(event.castId, [...(eventsByCast.get(event.castId) || []), event]);
-  });
-
-  const fallbackByCast = new Map(fallbackEntryEvents(data, month).map((event) => [event.castId, event]));
-  const castIds = new Set([...eventsByCast.keys(), ...fallbackByCast.keys()]);
-  return [...castIds].flatMap((castId): EntryEventConflict[] => {
-    const cast = castById.get(castId);
-    const reward = rewardByCast.get(castId);
-    const events = eventsByCast.get(castId) || [];
-    const recipientIds = new Set(events.map((event) => event.introducerId).filter(Boolean));
-    const fallback = fallbackByCast.get(castId);
-    if (fallback) {
-      recipientIds.add(fallback.introducerId);
-    } else if (events.length && cast?.introducerId && cast.hiredAt?.startsWith(month) && Number(cast.entryAdvisoryFee || 0) > 0) {
-      // 保存イベント後に支払先マスタだけが変わった場合も、同期漏れとして検出する。
-      recipientIds.add(cast.introducerId);
-    }
-    if (reward) recipientIds.add(reward.introducer?.id || "__none__");
-    const eventFeeTypes = new Set(events.map((event) => event.feeType).filter(Boolean));
-    const feeTypeMismatch = Boolean(reward?.introducer && eventFeeTypes.size > 0
-      && [...eventFeeTypes].some((feeType) => feeType !== reward.introducer?.feeType));
-    if (recipientIds.size <= 1 && !feeTypeMismatch) return [];
-    const castName = cast?.name || reward?.name || events[0]?.castName || castId;
-    return [{
-      castId,
-      message: `${castName}の入店時紹介者条件と月内の日次紹介者条件が一致しません。支払先・計算方法を確認するまで月次確定できません。`,
-    }];
-  });
-}
-
 export function introducerEntryEventConflicts(
   rewards: CastReward[],
   data: WorkspaceData,
   month: string,
   storedEvents: IntroducerEntryEvent[] = [],
+  introducerMonthEvents: IntroducerMonthEvent[] = [],
+  introducerDeletionCommits: IntroducerDeletionCommit[] = [],
 ) {
-  return entryEventConflictDetails(rewards, data, month, storedEvents).map((conflict) => conflict.message);
+  return rewards.flatMap((reward): string[] => {
+    const cast = data.casts.find((row) => row.id === reward.id);
+    if (!cast?.convertedFromTrialId || reward.advisoryDays !== 0 || !cast.hiredAt?.startsWith(month)) return [];
+    const entry = storedEvents.find((event) => event.month === month && event.castId === cast.id);
+    if (!entry || reward.introducer?.id === entry.introducerId) return [];
+    const aliases = new Set([cast.id, cast.convertedFromTrialId]);
+    const event = introducerMonthEvents.filter((candidate) => candidate.month === month && aliases.has(candidate.castId))
+      .sort(compareIntroducerMonthEventEffectiveOrder)
+      .at(-1);
+    const commit = deletionCommitForAliases(aliases, month, introducerDeletionCommits);
+    const latestSpecial = [
+      ...(event ? [{ state: event.state, order: introducerMonthEventEffectiveOrderValue(event) }] : []),
+      ...(commit ? [{ state: "deleted" as const, order: commit.completedAtMs }] : []),
+    ].sort((left, right) => left.order - right.order).at(-1);
+    // 削除が最後の明示操作なら当月0円が確定仕様なので、紹介者差は曖昧さにならない。
+    if (latestSpecial?.state === "deleted") return [];
+    const dailyIntroducer = reward.introducer?.name || "紹介者なし";
+    return [`${reward.name}は体入日の紹介者（${dailyIntroducer}）と入店時の紹介者（${entry.introducerName}）が異なるため、入店顧問料を確定できません。適用する紹介者を確認してください。`];
+  });
+}
+
+function monthEventForCast(
+  castId: string,
+  data: WorkspaceData,
+  month: string,
+  events: IntroducerMonthEvent[],
+) {
+  const cast = data.casts.find((row) => row.id === castId);
+  const aliases = new Set([
+    castId,
+    cast?.convertedFromTrialId,
+    ...data.casts.filter((row) => row.convertedToCastId === castId).map((row) => row.id),
+  ].filter((value): value is string => Boolean(value)));
+  const candidates = events.filter((event) => event.month === month && aliases.has(event.castId));
+  return [...candidates].sort(compareIntroducerMonthEventEffectiveOrder).at(-1);
+}
+
+function deletionCommitForAliases(
+  aliases: Set<string>,
+  month: string,
+  commits: IntroducerDeletionCommit[],
+) {
+  return commits.filter((commit) => commit.month === month
+    && commit.linkedCastIds.some((linkedId) => aliases.has(linkedId)))
+    .sort((left, right) => left.completedAtMs - right.completedAtMs || left.id.localeCompare(right.id))
+    .at(-1);
 }
 
 export function calculateIntroducerPayments(
@@ -478,9 +594,9 @@ export function calculateIntroducerPayments(
   data: WorkspaceData,
   month: string,
   storedEvents: IntroducerEntryEvent[] = [],
+  introducerMonthEvents: IntroducerMonthEvent[] = [],
+  introducerDeletionCommits: IntroducerDeletionCommit[] = [],
 ): IntroducerPaymentRow[] {
-  const conflictedCastIds = new Set(entryEventConflictDetails(rewards, data, month, storedEvents)
-    .map((conflict) => conflict.castId));
   const entries = new Map<string, IntroducerEntryEvent>();
   fallbackEntryEvents(data, month).forEach((event) => entries.set(event.castId, event));
   const castById = new Map(data.casts.map((cast) => [cast.id, cast]));
@@ -488,7 +604,9 @@ export function calculateIntroducerPayments(
     const cast = castById.get(event.castId);
     // 現在または論理削除済みのキャストマスタが残っている場合は、その値を正とする。
     // マスタ更新後にイベント側の同期だけ失敗しても、古い顧問料を過払いしない。
-    if (cast) {
+    const castUpdatedInTargetMonth = Boolean(cast && Number.isFinite(Date.parse(cast.updatedAt))
+      && japanMonthFromTimestamp(cast.updatedAt) === month);
+    if (cast && castUpdatedInTargetMonth) {
       const sameCurrentTerms = cast.hiredAt === event.hiredAt
         && cast.hiredAt?.startsWith(month)
         && cast.introducerId === event.introducerId
@@ -499,12 +617,42 @@ export function calculateIntroducerPayments(
     entries.set(event.castId, event);
   });
   const rewardByCast = new Map(rewards.map((reward) => [reward.id, reward]));
-  const castIds = new Set([...rewardByCast.keys(), ...entries.keys()]);
+  const castIds = new Set([
+    ...rewardByCast.keys(),
+    ...entries.keys(),
+    ...introducerMonthEvents.filter((event) => event.month === month && event.state === "reassigned").map((event) => event.castId),
+  ]);
   return [...castIds].flatMap((castId): IntroducerPaymentRow[] => {
-    if (conflictedCastIds.has(castId)) return [];
     const reward = rewardByCast.get(castId);
     const entry = entries.get(castId);
-    const intro = reward?.introducer;
+    const monthEvent = monthEventForCast(castId, data, month, introducerMonthEvents);
+    const cast = data.casts.find((row) => row.id === castId);
+    const aliases = new Set([
+      castId,
+      cast?.convertedFromTrialId,
+      ...data.casts.filter((row) => row.convertedToCastId === castId).map((row) => row.id),
+    ].filter((value): value is string => Boolean(value)));
+    const deletionCommit = [
+      ...introducerDeletionCommits.filter((commit) => commit.month === month
+        && commit.linkedCastIds.some((linkedId) => aliases.has(linkedId))),
+      ...introducerDeletionCommits.filter((commit) => commit.month === month
+        && cast !== undefined && !cast.deletedAt && cast.introducerId === commit.introducerId),
+    ].filter((commit, index, rows) => rows.findIndex((candidate) => candidate.id === commit.id) === index)
+      .sort((left, right) => left.completedAtMs - right.completedAtMs || left.id.localeCompare(right.id))
+      .at(-1);
+    const latestSpecial = [
+      ...(monthEvent ? [{ kind: "event" as const, order: introducerMonthEventEffectiveOrderValue(monthEvent), event: monthEvent }] : []),
+      ...(deletionCommit ? [{ kind: "commit" as const, order: deletionCommit.completedAtMs }] : []),
+    ].sort((left, right) => left.order - right.order || (left.kind === "commit" ? 1 : -1)).at(-1);
+    if (latestSpecial?.kind === "commit" || latestSpecial?.event.state === "deleted") return [];
+    const effectiveMonthEvent = latestSpecial?.kind === "event" ? latestSpecial.event : undefined;
+    const intro = reward
+      ? reward.introducer
+      : effectiveMonthEvent?.state === "reassigned"
+        ? effectiveMonthEvent.introducer
+        : undefined;
+    // 出勤済みで最後の日次が「紹介者なし」なら、入店時イベントだけを旧紹介者へ支払わない。
+    if (reward && !intro) return [];
     if (!intro && !entry) return [];
     const feeType = typeof intro?.feeType === "string" ? intro.feeType : entry?.feeType || "";
     const basis = paymentBasis(reward, feeType);
@@ -514,12 +662,34 @@ export function calculateIntroducerPayments(
     const attendanceAdvisory = attendanceEnabled
       ? (reward?.advisoryDays || 0) * (intro?.attendanceAdvisoryFee || 0)
       : 0;
-    const entryAdvisory = entry?.amount || 0;
+    // 旧版の物理削除でキャストマスタが残っていなくても、保存済み入店イベントの
+    // 採用日を使って当時発生した一回分を維持する。
+    const hiredThisMonth = Boolean(cast?.hiredAt?.startsWith(month) || entry?.hiredAt?.startsWith(month));
+    // 体入後に同月在籍化し、在籍後は一度も出勤していない場合、最後の日次は
+    // 体入日のため入店顧問料が0のままになる。入店時に保存したイベントと紹介者が
+    // 同一なら、その一回分だけは採用日基準で計上する（異なる紹介者は推測しない）。
+    const sameIntroducerEntryWithoutRegularAttendance = Boolean(
+      reward
+        && reward.advisoryDays === 0
+        && cast?.convertedFromTrialId
+        && intro
+        && entry
+        && entry.introducerId === intro.id
+        && entry.amount > 0,
+    );
+    // 日次がある人物は、入店顧問料も含めて最後に保存された日次（または再設定イベント）の
+    // snapshotを月全体へ適用する。保存イベントは月内に日次が一度もない入店キャスト専用。
+    const entryAdvisory = intro
+      ? (hiredThisMonth && sameIntroducerEntryWithoutRegularAttendance
+        ? entry!.amount
+        : hiredThisMonth && intro.entryAdvisoryEnabled !== false ? intro.entryAdvisoryFee || 0 : 0)
+      : entry?.amount || 0;
+    if (!reward && entryAdvisory <= 0) return [];
     const advisory = attendanceAdvisory + entryAdvisory;
     return [{
       id: `${intro?.id || entry!.introducerId}_${castId}`,
       introducer: intro?.name || entry!.introducerName,
-      cast: reward?.name || entry!.castName,
+      cast: reward?.name || entry?.castName || cast?.name || effectiveMonthEvent?.castName || "名称未設定",
       feeType,
       honShimeiLiquorCost: reward?.honShimeiLiquorCost || 0,
       salesBase: basis.salesBase,
@@ -543,27 +713,313 @@ export function monthlyAccountingWarnings(rows: DailyClosing[], casts: CastRecor
     if (closing.cash.difference !== 0) warnings.push(`${closing.businessDate}の現金照合に${yen.format(closing.cash.difference)}の差額があります。`);
     (closing.casts ?? []).filter((row) => row.kind === "regular" && row.hourlyRate <= 0)
       .forEach((row) => warnings.push(`${closing.businessDate}・${row.name}の時給が未設定です。`));
-    (closing.casts ?? []).filter((row) => row.introducer && !validIntroducerFeeTypes.has(String(row.introducer.feeType || "") as IntroducerFeeType))
-      .forEach((row) => warnings.push(`${closing.businessDate}・${row.name}の紹介者報酬形態が未設定です。`));
   });
-  if (month) warnings.push(...introducerTermConflicts(rows, casts, month));
+  // 紹介者条件の月途中変更は、最後に保存された日次条件へ統一して算出する。
+  void casts;
+  void month;
   return [...new Set(warnings)];
 }
 
+function effectiveIntroducerIssues(rewards: CastReward[]) {
+  return rewards
+    .filter((reward) => reward.introducer && !validIntroducerFeeTypes.has(String(reward.introducer.feeType || "") as IntroducerFeeType))
+    .map((reward) => `${reward.name}の当月適用対象となる紹介者報酬形態が未設定です。`);
+}
+
+function introducerConditionKey(value: DailyClosing["casts"][number]["introducer"] | undefined) {
+  return JSON.stringify(canonicalize(value || null));
+}
+
+/**
+ * 保存順が復元できない旧日次、またはFirebaseサーバー時刻が同一の競合を検出する。
+ * 表示計算は決定的に継続するが、条件を推測した月次確定は許可しない。
+ */
+function introducerSaveOrderIssues(
+  data: WorkspaceData,
+  month: string,
+  events: IntroducerMonthEvent[],
+  commits: IntroducerDeletionCommit[],
+) {
+  const approved = data.closings.filter((closing) => closing.status === "approved"
+    && closing.businessDate.startsWith(month));
+  const castById = new Map(data.casts.map((cast) => [cast.id, cast]));
+  const groups = new Map<string, Array<{ closing: DailyClosing; row: DailyClosing["casts"][number] }>>();
+  const monthDailyMasterIds = new Set(approved.flatMap((closing) => (closing.casts || [])
+    .filter((row) => row.kind === "regular")
+    .map((row) => row.masterId)));
+  // 出勤がなくても入店顧問料は発生し得るため、イベントだけを持つ人物も検査する。
+  data.casts.forEach((cast) => {
+    const id = castMasterIdentityForMonth(cast.id, castById, data.casts, month, monthDailyMasterIds);
+    if (!groups.has(id)) groups.set(id, []);
+  });
+  events.filter((event) => event.month === month).forEach((event) => {
+    const id = castMasterIdentityForMonth(event.castId, castById, data.casts, month, monthDailyMasterIds);
+    if (!groups.has(id)) groups.set(id, []);
+  });
+  commits.filter((commit) => commit.month === month).forEach((commit) => {
+    commit.linkedCastIds.forEach((linkedId) => {
+      const id = castMasterIdentityForMonth(linkedId, castById, data.casts, month, monthDailyMasterIds);
+      if (!groups.has(id)) groups.set(id, []);
+    });
+  });
+  approved.forEach((closing) => (closing.casts || []).forEach((row) => {
+    if (row.kind === "dispatch") return;
+    const id = castIdentityForMonth(row, castById, data.casts, month, monthDailyMasterIds);
+    groups.set(id, [...(groups.get(id) || []), { closing, row }]);
+  }));
+
+  return [...groups.entries()].flatMap(([castId, entries]): string[] => {
+    const name = castById.get(castId)?.name || entries[0]?.row.name
+      || events.find((event) => event.month === month && event.castId === castId)?.castName
+      || castId;
+    const distinctDailyTerms = new Set(entries.map(({ row }) => introducerConditionKey(row.introducer)));
+    const issues: string[] = [];
+    if (distinctDailyTerms.size > 1 && entries.some(({ closing }) => !hasDailyClosingSubmissionOrder(closing))) {
+      issues.push(`${name}の旧日次に店舗保存順がないため、当月の紹介者条件を確定できません。該当日次を差し戻して再送してください。`);
+    }
+    const dailyByOrder = new Map<number, Set<string>>();
+    entries.filter(({ closing }) => hasDailyClosingSubmissionOrder(closing)).forEach(({ closing, row }) => {
+      const order = dailyClosingSubmissionOrderValue(closing);
+      dailyByOrder.set(order, new Set([...(dailyByOrder.get(order) || []), introducerConditionKey(row.introducer)]));
+    });
+    if ([...dailyByOrder.values()].some((terms) => terms.size > 1)) {
+      issues.push(`${name}の紹介者条件が同じ店舗保存時刻で競合しています。該当日次を差し戻して再送してください。`);
+    }
+
+    const cast = castById.get(castId);
+    const aliases = new Set([
+      castId,
+      cast?.convertedFromTrialId,
+      ...data.casts.filter((candidate) => candidate.convertedToCastId === castId).map((candidate) => candidate.id),
+      ...entries.map(({ row }) => row.masterId),
+    ].filter((value): value is string => Boolean(value)));
+    const candidateEvents = events.filter((event) => event.month === month && aliases.has(event.castId));
+    const candidateCommits = commits.filter((commit) => commit.month === month
+      && commit.linkedCastIds.some((linkedId) => aliases.has(linkedId)));
+    const eventResolution = (event: IntroducerMonthEvent) => JSON.stringify(canonicalize({
+      state: event.state,
+      terms: event.state === "deleted" ? undefined : event.introducer,
+      // deletedは月全体0で保存順に影響しない。reassignedは日次との前後判定に
+      // 再設定時刻を使うため、条件が同じでもこの値の差を曖昧なままにしない。
+      effectiveOrder: event.state === "reassigned"
+        ? introducerMonthEventEffectiveOrderValue(event)
+        : undefined,
+    }));
+    const distinctEventResolutions = new Set(candidateEvents.map(eventResolution));
+    if (distinctEventResolutions.size > 1
+      && candidateEvents.some((event) => !Number.isSafeInteger(event.updatedAtMs))) {
+      issues.push(`${name}の旧紹介者変更履歴にサーバー保存順がないため、当月の条件を確定できません。キャストデータを保存し直してください。`);
+    }
+    const eventByServerOrder = new Map<number, Set<string>>();
+    candidateEvents.filter((event) => Number.isSafeInteger(event.updatedAtMs) && Number(event.updatedAtMs) >= 0)
+      .forEach((event) => {
+        const resolution = eventResolution(event);
+        eventByServerOrder.set(event.updatedAtMs!, new Set([...(eventByServerOrder.get(event.updatedAtMs!) || []), resolution]));
+      });
+    if ([...eventByServerOrder.values()].some((terms) => terms.size > 1)) {
+      issues.push(`${name}の紹介者変更履歴が同じサーバー保存時刻で競合しています。キャストデータを保存し直してください。`);
+    }
+
+    const specialByServerOrder = new Map<number, Set<string>>();
+    candidateEvents.forEach((event) => {
+      const order = event.state === "reassigned" ? event.reassignedAtMs : event.updatedAtMs;
+      if (!Number.isSafeInteger(order)) return;
+      const resolution = introducerConditionKey(event.state === "reassigned" ? event.introducer : undefined);
+      specialByServerOrder.set(order!, new Set([...(specialByServerOrder.get(order!) || []), resolution]));
+    });
+    candidateCommits.forEach((commit) => {
+      const resolution = introducerConditionKey(undefined);
+      specialByServerOrder.set(commit.completedAtMs, new Set([...(specialByServerOrder.get(commit.completedAtMs) || []), resolution]));
+    });
+    if ([...specialByServerOrder.values()].some((terms) => terms.size > 1)) {
+      issues.push(`${name}の紹介者削除・再設定が同じサーバー時刻で競合しています。キャストデータを保存し直してください。`);
+    }
+
+    const latestDaily = [...entries].sort((left, right) =>
+      compareDailyClosingSubmissionOrder(left.closing, right.closing)
+      || left.closing.businessDate.localeCompare(right.closing.businessDate)
+      || left.closing.id.localeCompare(right.closing.id)
+      || left.row.posCastId.localeCompare(right.row.posCastId)).at(-1);
+    const latestEvent = [...candidateEvents].sort(compareIntroducerMonthEventEffectiveOrder).at(-1);
+    const latestCommit = deletionCommitForAliases(aliases, month, candidateCommits);
+    const latestSpecial = [
+      ...(latestEvent ? [{ kind: "event" as const, order: introducerMonthEventEffectiveOrderValue(latestEvent), event: latestEvent }] : []),
+      ...(latestCommit ? [{ kind: "commit" as const, order: latestCommit.completedAtMs }] : []),
+    ].sort((left, right) => left.order - right.order || (left.kind === "commit" ? 1 : -1)).at(-1);
+    if (latestEvent?.state === "reassigned") {
+      const eventTerms = introducerConditionKey(latestEvent.introducer);
+      if (entries.some(({ closing, row }) =>
+        !hasDailyClosingSubmissionOrder(closing) && introducerConditionKey(row.introducer) !== eventTerms)) {
+        issues.push(`${name}の旧日次と紹介者再設定の前後関係を復元できません。該当日次を差し戻して再送してください。`);
+      }
+      if (latestDaily
+        && Number.isSafeInteger(latestDaily.closing.submittedAtMs)
+        && !Number.isSafeInteger(latestEvent.reassignedAtMs)
+        && introducerConditionKey(latestDaily.row.introducer) !== eventTerms) {
+        issues.push(`${name}の日次保存と旧紹介者再設定の前後関係を復元できません。キャストデータまたは日次を保存し直してください。`);
+      }
+    }
+    const eventEffectiveServerOrder = latestEvent?.state === "reassigned"
+      ? latestEvent.reassignedAtMs
+      : latestEvent?.updatedAtMs;
+    if (latestDaily && latestEvent
+      && Number.isSafeInteger(latestDaily.closing.submittedAtMs)
+      && Number.isSafeInteger(eventEffectiveServerOrder)
+      && latestDaily.closing.submittedAtMs === eventEffectiveServerOrder) {
+      const dailyTerms = introducerConditionKey(latestDaily.row.introducer);
+      const eventTerms = latestEvent.state === "deleted"
+        ? introducerConditionKey(undefined)
+        : introducerConditionKey(latestEvent.introducer);
+      if (dailyTerms !== eventTerms) {
+        issues.push(`${name}の日次保存と紹介者変更が同じサーバー時刻で競合しています。キャストデータまたは日次を保存し直してください。`);
+      }
+    }
+    if (latestDaily && latestSpecial
+      && Number.isSafeInteger(latestDaily.closing.submittedAtMs)
+      && Number.isSafeInteger(latestSpecial.order)
+      && latestDaily.closing.submittedAtMs === latestSpecial.order) {
+      const dailyTerms = introducerConditionKey(latestDaily.row.introducer);
+      const specialTerms = latestSpecial.kind === "event" && latestSpecial.event.state === "reassigned"
+        ? introducerConditionKey(latestSpecial.event.introducer)
+        : introducerConditionKey(undefined);
+      if (dailyTerms !== specialTerms) {
+        issues.push(`${name}の日次保存と紹介者削除・再設定が同じサーバー時刻で競合しています。キャストデータまたは日次を保存し直してください。`);
+      }
+    }
+    return [...new Set(issues)];
+  });
+}
+
+/**
+ * キャスト保存と月次イベント同期の間に通信断・月次確定ロックが入った場合も、
+ * 不整合な状態のまま確定スナップショットを作らないための検査。
+ */
+function introducerMonthEventConsistencyIssues(
+  data: WorkspaceData,
+  month: string,
+  events: IntroducerMonthEvent[],
+  commits: IntroducerDeletionCommit[],
+) {
+  const currentCasts = data.casts.filter((cast) => !(cast as CastRecord & { deletedAt?: string }).deletedAt);
+  const castById = new Map(currentCasts.map((cast) => [cast.id, cast]));
+  const canonicalCasts = new Map<string, CastRecord>();
+  currentCasts.forEach((cast) => {
+    const converted = cast.convertedToCastId ? castById.get(cast.convertedToCastId) : undefined;
+    const canonical = converted || cast;
+    canonicalCasts.set(canonical.id, canonical);
+  });
+  const scopedData = { ...data, casts: currentCasts };
+  return [...canonicalCasts.values()].flatMap((cast): string[] => {
+    const event = monthEventForCast(cast.id, scopedData, month, events);
+    if (!event) return [];
+    const aliasIds = new Set([
+      cast.id,
+      cast.convertedFromTrialId,
+      ...currentCasts.filter((candidate) => candidate.convertedToCastId === cast.id).map((candidate) => candidate.id),
+    ].filter((value): value is string => Boolean(value)));
+    const deletionCommit = deletionCommitForAliases(aliasIds, month, commits);
+    if (deletionCommit && deletionCommit.completedAtMs >= introducerMonthEventEffectiveOrderValue(event)) return [];
+    const laterDailyExists = event.state === "reassigned" && data.closings.some((closing) => closing.status === "approved"
+      && closing.businessDate.startsWith(month)
+      && dailyClosingSubmissionOrderValue(closing) > introducerMonthEventEffectiveOrderValue(event)
+      && (closing.casts || []).some((dailyCast) => aliasIds.has(dailyCast.masterId)));
+    // 再設定イベントより後の店舗保存があれば、その日次snapshotが正となる。
+    // 現在マスタとの差は、古いイベント同期不良として扱わない。
+    if (laterDailyExists) return [];
+    // 現在マスタは後月にも正当に変更される。対象月内に保存された変更だけを
+    // event同期検査の対象とし、過去月snapshotを現在値で上書きしない。
+    if (!Number.isFinite(Date.parse(cast.updatedAt)) || japanMonthFromTimestamp(cast.updatedAt) !== month) return [];
+    const selectedIntroducer = cast.introducerId
+      ? data.introducers.find((introducer) => introducer.id === cast.introducerId)
+      : undefined;
+    if (event.state === "deleted") {
+      if (selectedIntroducer && selectedIntroducer.id !== event.deletedIntroducerId) {
+        return [`${cast.name}は紹介者を再設定済みですが、当月の再設定履歴が同期されていません。キャストデータをもう一度保存してください。`];
+      }
+      return [];
+    }
+    if (!event.introducer || cast.introducerId !== event.introducer.id || !selectedIntroducer) {
+      return [`${cast.name}の紹介者再設定履歴と現在のキャストデータが一致しません。キャストデータをもう一度保存してください。`];
+    }
+    if (instantValue(cast.updatedAt) > instantValue(event.updatedAt)) {
+      const expectedSnapshot: NonNullable<IntroducerMonthEvent["introducer"]> = {
+        id: selectedIntroducer.id,
+        name: selectedIntroducer.name,
+        feeType: selectedIntroducer.feeType,
+        attendanceAdvisoryEnabled: Boolean(selectedIntroducer.attendanceAdvisoryEnabled),
+        entryAdvisoryEnabled: Boolean(selectedIntroducer.entryAdvisoryEnabled),
+        attendanceAdvisoryFee: selectedIntroducer.attendanceAdvisoryEnabled
+          ? Number(cast.attendanceAdvisoryFee || 0)
+          : 0,
+        entryAdvisoryFee: selectedIntroducer.entryAdvisoryEnabled
+          ? Number(cast.entryAdvisoryFee || 0)
+          : 0,
+      };
+      if (event.castName !== cast.name
+        || JSON.stringify(canonicalize(event.introducer)) !== JSON.stringify(canonicalize(expectedSnapshot))) {
+        return [`${cast.name}の紹介者条件変更が当月の再設定履歴へ同期されていません。キャストデータをもう一度保存してください。`];
+      }
+    }
+    return [];
+  });
+}
+
+function introducerDeletionCommitConsistencyIssues(
+  data: WorkspaceData,
+  month: string,
+  events: IntroducerMonthEvent[],
+  commits: IntroducerDeletionCommit[],
+) {
+  const currentCasts = data.casts.filter((cast) => !(cast as CastRecord & { deletedAt?: string }).deletedAt);
+  const monthCommits = commits.filter((commit) => commit.month === month);
+  const omittedIssues = monthCommits.flatMap((commit) => currentCasts
+    .filter((cast) => cast.introducerId === commit.introducerId && !commit.linkedCastIds.includes(cast.id))
+    .map((cast) => `${cast.name}が紹介者削除確定履歴の対象者一覧から欠落しています。紹介者削除履歴を確認してください。`));
+  const synchronizationIssues = currentCasts.flatMap((cast): string[] => {
+    const aliases = new Set([
+      cast.id,
+      cast.convertedFromTrialId,
+      ...currentCasts.filter((candidate) => candidate.convertedToCastId === cast.id).map((candidate) => candidate.id),
+    ].filter((value): value is string => Boolean(value)));
+    const linkedCommits = monthCommits.filter((commit) =>
+      commit.linkedCastIds.some((linkedId) => aliases.has(linkedId)));
+    if (!linkedCommits.length) return [];
+    // 後月に別紹介者へ変更した現在値で、削除月の確定履歴を再設定漏れと誤判定しない。
+    if (!Number.isFinite(Date.parse(cast.updatedAt)) || japanMonthFromTimestamp(cast.updatedAt) !== month) return [];
+    const latestCommit = deletionCommitForAliases(aliases, month, linkedCommits)!;
+    const event = monthEventForCast(cast.id, data, month, events);
+    const latestSpecial = [
+      { kind: "commit" as const, order: latestCommit.completedAtMs, introducerId: latestCommit.introducerId },
+      ...(event ? [{
+        kind: "event" as const,
+        order: introducerMonthEventEffectiveOrderValue(event),
+        introducerId: event.state === "reassigned" ? event.introducer!.id : event.deletedIntroducerId,
+        event,
+      }] : []),
+    ].sort((left, right) => left.order - right.order || (left.kind === "commit" ? 1 : -1)).at(-1)!;
+    if (!cast.introducerId || cast.introducerId === latestSpecial.introducerId) return [];
+    if (latestSpecial.kind === "event" && latestSpecial.event.state === "reassigned"
+      && latestSpecial.event.introducer?.id === cast.introducerId) return [];
+    return [`${cast.name}は削除済み紹介者から変更されていますが、当月の再設定履歴が同期されていません。キャストデータをもう一度保存してください。`];
+  });
+  return [...new Set([...omittedIssues, ...synchronizationIssues])];
+}
+
 export function calculateMonthlyAccounting(
-  data: WorkspaceData & { archivedCasts?: CastRecord[]; archivedStaff?: StaffRecord[] },
+  data: WorkspaceData & { archivedCasts?: CastRecord[]; archivedStaff?: StaffRecord[]; introducerMonthEvents?: IntroducerMonthEvent[]; introducerDeletionCommits?: IntroducerDeletionCommit[] },
   month: string,
   adjustments: MonthlyAdjustments,
   entryEvents: IntroducerEntryEvent[] = [],
+  monthEvents: IntroducerMonthEvent[] = data.introducerMonthEvents ?? [],
+  deletionCommits: IntroducerDeletionCommit[] = data.introducerDeletionCommits ?? [],
 ): MonthlyAccountingResults {
   const calculationData = withArchivedMasters(data);
   const approved = calculationData.closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(month));
   const castSalesReports = calculateCastSalesReports(calculationData.closings, calculationData.casts, month, adjustments);
-  const castRewards = calculateCastRewards(calculationData.closings, calculationData.casts, month, adjustments);
+  const castRewards = calculateCastRewards(calculationData.closings, calculationData.casts, month, adjustments, monthEvents, deletionCommits);
   const staffPayroll = calculateStaffPayroll(approved, adjustments, calculationData.staff, month);
   const driverPayroll = calculateDriverPayroll(approved, adjustments.driverRemoteAllowance);
-  const entryEventConflicts = introducerEntryEventConflicts(castRewards, calculationData, month, entryEvents);
-  const introducerPayments = calculateIntroducerPayments(castRewards, calculationData, month, entryEvents);
+  const introducerPayments = calculateIntroducerPayments(castRewards, calculationData, month, entryEvents, monthEvents, deletionCommits);
   const byCategory: Record<string, number> = {};
   approved.forEach((closing) => (closing.expenses ?? []).forEach((row) => {
     byCategory[row.category] = (byCategory[row.category] || 0) + row.amount;
@@ -613,7 +1069,7 @@ export function calculateMonthlyAccounting(
     balance: { ...balanceWithoutProfit, totalCosts, profit: sales.total - totalCosts },
     warnings: [...new Set([
       ...monthlyAccountingWarnings(approved, calculationData.casts, month),
-      ...entryEventConflicts,
+      ...effectiveIntroducerIssues(castRewards),
     ])],
   };
 }
@@ -630,10 +1086,12 @@ function canonicalize(value: unknown): unknown {
 }
 
 export async function monthlySourceFingerprint(
-  data: WorkspaceData & { archivedCasts?: CastRecord[]; archivedStaff?: StaffRecord[] },
+  data: WorkspaceData & { archivedCasts?: CastRecord[]; archivedStaff?: StaffRecord[]; introducerMonthEvents?: IntroducerMonthEvent[]; introducerDeletionCommits?: IntroducerDeletionCommit[] },
   month: string,
   adjustments: MonthlyAdjustments,
   entryEvents: IntroducerEntryEvent[] = [],
+  monthEvents: IntroducerMonthEvent[] = data.introducerMonthEvents ?? [],
+  deletionCommits: IntroducerDeletionCommit[] = data.introducerDeletionCommits ?? [],
 ) {
   const calculationData = withArchivedMasters(data);
   const source = canonicalize({
@@ -647,6 +1105,10 @@ export async function monthlySourceFingerprint(
     adjustments,
     entryEvents: entryEvents.filter((row) => row.month === month)
       .sort((left, right) => left.id.localeCompare(right.id)),
+    introducerMonthEvents: monthEvents.filter((row) => row.month === month)
+      .sort((left, right) => left.id.localeCompare(right.id)),
+    introducerDeletionCommits: deletionCommits.filter((row) => row.month === month)
+      .sort((left, right) => left.id.localeCompare(right.id)),
   });
   const bytes = new TextEncoder().encode(JSON.stringify(source));
   const digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -658,18 +1120,32 @@ export function canFinalizeMonthlyAccounting(
     archivedCasts?: CastRecord[];
     archivedStaff?: StaffRecord[];
     introducerEntryEvents?: IntroducerEntryEvent[];
+    introducerMonthEvents?: IntroducerMonthEvent[];
+    introducerDeletionCommits?: IntroducerDeletionCommit[];
   },
   month: string,
   adjustments: MonthlyAdjustments,
   blockUnresolvedDaily: boolean,
   entryEvents?: IntroducerEntryEvent[],
+  monthEvents?: IntroducerMonthEvent[],
+  deletionCommits?: IntroducerDeletionCommit[],
 ) {
   const calculationData = withArchivedMasters(data);
   const resolvedEntryEvents = entryEvents ?? data.introducerEntryEvents ?? [];
+  const resolvedMonthEvents = monthEvents ?? data.introducerMonthEvents ?? [];
+  const resolvedDeletionCommits = deletionCommits ?? data.introducerDeletionCommits ?? [];
   const unclassified = findUnclassifiedLegacyBottles(data.closings, month, adjustments);
   const unresolvedDaily = data.closings.filter((row) => row.businessDate.startsWith(month)
     && (row.status === "submitted" || row.status === "returned" || row.status === "withdrawn"));
   const approved = data.closings.filter((row) => row.businessDate.startsWith(month) && row.status === "approved");
+  const castRewards = calculateCastRewards(
+    calculationData.closings,
+    calculationData.casts,
+    month,
+    adjustments,
+    resolvedMonthEvents,
+    resolvedDeletionCommits,
+  );
   const businessDateCounts = new Map<string, number>();
   approved.forEach((row) => businessDateCounts.set(row.businessDate, (businessDateCounts.get(row.businessDate) || 0) + 1));
   const duplicateBusinessDates = [...businessDateCounts.entries()]
@@ -678,12 +1154,17 @@ export function canFinalizeMonthlyAccounting(
   const integrityIssues = [
     ...approved.flatMap((row) => row.integrityIssues || []),
     ...duplicateBusinessDates,
-    ...introducerTermConflicts(approved, calculationData.casts, month),
+    ...effectiveIntroducerIssues(castRewards),
+    ...introducerSaveOrderIssues(calculationData, month, resolvedMonthEvents, resolvedDeletionCommits),
+    ...introducerMonthEventConsistencyIssues(calculationData, month, resolvedMonthEvents, resolvedDeletionCommits),
+    ...introducerDeletionCommitConsistencyIssues(calculationData, month, resolvedMonthEvents, resolvedDeletionCommits),
     ...introducerEntryEventConflicts(
-      calculateCastRewards(calculationData.closings, calculationData.casts, month, adjustments),
+      castRewards,
       calculationData,
       month,
       resolvedEntryEvents,
+      resolvedMonthEvents,
+      resolvedDeletionCommits,
     ),
   ];
   return {

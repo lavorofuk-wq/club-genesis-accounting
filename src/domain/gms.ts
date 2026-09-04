@@ -23,6 +23,8 @@ export type CastRecord = {
   note: string;
   createdAt: string;
   updatedAt: string;
+  /** 直前版との原子的な更新競合検査に使う保存済みCAS値。 */
+  previousUpdatedAt?: string;
   /** 完全削除後も過去集計の同一人物対応を保持する論理削除情報。 */
   deletedAt?: string;
   deletedBy?: string;
@@ -46,6 +48,40 @@ export type StaffRecord = {
   deletedAt?: string;
   deletedBy?: string;
 };
+
+/** 体入スタッフの採用日は、体入日と同日ではなく翌日以降に限る。 */
+export function isStaffHireDateAfterTrial(trialDate: string | undefined, hiredAt: string | undefined) {
+  return realBusinessDate(trialDate) && realBusinessDate(hiredAt) && hiredAt > trialDate;
+}
+
+/** 日付入力のmin属性に使用する、体入日の翌日。 */
+export function dayAfterIsoDate(value: string | undefined) {
+  if (!realBusinessDate(value)) return "";
+  const [year, month, day] = value.split("-").map(Number);
+  const next = new Date(Date.UTC(year, month - 1, day + 1));
+  return next.toISOString().slice(0, 10);
+}
+
+/**
+ * 営業日に勤務登録できるスタッフを返す。
+ * 旧版で体入日と採用日が同日になっている変換データも、体入当日は体入側だけを候補にする。
+ */
+export function staffCandidatesForBusinessDate(
+  staff: StaffRecord[],
+  archivedStaff: StaffRecord[],
+  businessDate: string,
+) {
+  if (!realBusinessDate(businessDate)) return [];
+  const staffById = new Map([...archivedStaff, ...staff].map((row) => [row.id, row]));
+  return staff.filter((row) => {
+    if (row.deletedAt) return false;
+    if (row.status === "trial") return row.trialDate === businessDate;
+    if (!row.hiredAt || row.hiredAt > businessDate || (row.departedAt && row.departedAt < businessDate)) return false;
+    if (row.convertedFromTrialId && row.trialDate === businessDate) return false;
+    const sourceTrial = row.convertedFromTrialId ? staffById.get(row.convertedFromTrialId) : undefined;
+    return sourceTrial?.trialDate !== businessDate;
+  });
+}
 
 export type DriverRecord = {
   id: string;
@@ -234,6 +270,52 @@ export type DailyCast = {
   };
 };
 
+/**
+ * 紹介者マスタを削除した月だけに適用する、キャスト単位の月次制御履歴。
+ * `deleted` は当月の紹介者支払を全額停止し、`reassigned` は削除後に
+ * キャストへ設定し直した紹介者条件を当月全体へ遡及適用する。
+ */
+export type IntroducerMonthEvent = {
+  id: string;
+  month: string;
+  castId: string;
+  castName: string;
+  state: "deleted" | "reassigned";
+  deletedIntroducerId: string;
+  deletedIntroducerName: string;
+  deletedAt: string;
+  deletedBy: string;
+  introducer?: NonNullable<DailyCast["introducer"]>;
+  reassignedAt?: string;
+  /** Firebaseサーバーが確定した再設定時刻（ミリ秒）。旧データでは未設定。 */
+  reassignedAtMs?: number;
+  reassignedBy?: string;
+  /** 体入から在籍化した際に、削除履歴を引き継いだ元キャストID。 */
+  sourceCastId?: string;
+  revision: number;
+  createdAt: string;
+  createdBy: string;
+  updatedAt: string;
+  /** Firebaseサーバーが確定した最終イベント保存時刻（ミリ秒）。旧データでは未設定。 */
+  updatedAtMs?: number;
+  updatedBy: string;
+};
+
+/** 紹介者マスタ削除を原子的に証明する月次tombstone。 */
+export type IntroducerDeletionCommit = {
+  id: string;
+  introducerId: string;
+  introducerName: string;
+  month: string;
+  token: string;
+  owner: string;
+  /** 削除ロックをFirebaseが確定した時刻。削除月の正本。 */
+  deletedAtMs: number;
+  completedAt: string;
+  completedAtMs: number;
+  linkedCastIds: string[];
+};
+
 export type DailyStaffWork = {
   staffId: string;
   name: string;
@@ -303,6 +385,8 @@ export type DailyClosing = {
   cash: CashReconciliation;
   posSnapshot: PosClosingV3;
   submittedAt?: string;
+  /** Firebaseサーバーが確定した店舗送信時刻（ミリ秒）。旧データでは未設定。 */
+  submittedAtMs?: number;
   submittedBy?: string;
   withdrawnAt?: string;
   returnedAt?: string;
@@ -418,6 +502,10 @@ export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
   }
   if (!/^[0-9a-f]{64}$/.test(String(value.checksum || ""))) {
     integrityIssues.push("POSチェックサムがないか形式が不正です。店舗から再送してください。");
+  }
+  if (value.submittedAtMs !== undefined
+    && (!Number.isSafeInteger(value.submittedAtMs) || value.submittedAtMs < 0)) {
+    integrityIssues.push("店舗送信のサーバー保存時刻が不正です。店舗から再送してください。");
   }
   if (!hasFiniteNumbers(value.sales, ["totalSales", "cashSales", "cardSales"])) {
     integrityIssues.push("売上データが不完全です。店舗送信データを確認してください。");
@@ -826,6 +914,56 @@ const asNumber = (value: unknown) => {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : 0;
 };
+const instantOrderValue = (value: string | undefined) => {
+  const parsed = value ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+};
+const validServerOrder = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
+
+/** 店舗保存順。新規データはFirebaseサーバー時刻、旧データだけsubmittedAtへフォールバックする。 */
+export function dailyClosingSubmissionOrderValue(closing: Pick<DailyClosing, "submittedAt" | "submittedAtMs">) {
+  return validServerOrder(closing.submittedAtMs)
+    ? closing.submittedAtMs
+    : instantOrderValue(closing.submittedAt);
+}
+
+export function hasDailyClosingSubmissionOrder(closing: Pick<DailyClosing, "submittedAt" | "submittedAtMs">) {
+  return Number.isFinite(dailyClosingSubmissionOrderValue(closing));
+}
+
+export function compareDailyClosingSubmissionOrder(
+  left: Pick<DailyClosing, "submittedAt" | "submittedAtMs">,
+  right: Pick<DailyClosing, "submittedAt" | "submittedAtMs">,
+) {
+  const leftValue = dailyClosingSubmissionOrderValue(left);
+  const rightValue = dailyClosingSubmissionOrderValue(right);
+  return leftValue === rightValue ? 0 : leftValue - rightValue;
+}
+
+/** 異なる体入・在籍IDに残ったイベントも、Firebaseで最後に保存されたものを選ぶ。 */
+export function compareIntroducerMonthEventSaveOrder(left: IntroducerMonthEvent, right: IntroducerMonthEvent) {
+  const leftValue = validServerOrder(left.updatedAtMs) ? left.updatedAtMs : instantOrderValue(left.updatedAt);
+  const rightValue = validServerOrder(right.updatedAtMs) ? right.updatedAtMs : instantOrderValue(right.updatedAt);
+  return leftValue === rightValue
+    ? left.updatedAt.localeCompare(right.updatedAt)
+      || left.castId.localeCompare(right.castId)
+      || left.revision - right.revision
+    : leftValue - rightValue;
+}
+
+export function introducerMonthEventEffectiveOrderValue(event: IntroducerMonthEvent) {
+  if (event.state === "reassigned" && validServerOrder(event.reassignedAtMs)) return event.reassignedAtMs;
+  if (event.state === "deleted" && validServerOrder(event.updatedAtMs)) return event.updatedAtMs;
+  return instantOrderValue(event.reassignedAt || event.updatedAt);
+}
+
+export function compareIntroducerMonthEventEffectiveOrder(left: IntroducerMonthEvent, right: IntroducerMonthEvent) {
+  const leftValue = introducerMonthEventEffectiveOrderValue(left);
+  const rightValue = introducerMonthEventEffectiveOrderValue(right);
+  return leftValue === rightValue
+    ? compareIntroducerMonthEventSaveOrder(left, right)
+    : leftValue - rightValue;
+}
 
 /**
  * 100円未満を切り捨てる。
@@ -903,6 +1041,21 @@ export async function sha256Checksum(value: Record<string, unknown>) {
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
+}
+
+/** ISO日時を営業拠点（Asia/Tokyo）のYYYY-MMへ変換する。月初のUTC/JST差を残さない。 */
+export function japanMonthFromTimestamp(timestamp: string) {
+  const date = new Date(timestamp);
+  if (!Number.isFinite(date.getTime())) throw new Error("日時が正しくありません。");
+  const parts = new Intl.DateTimeFormat("ja-JP", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+  }).formatToParts(date);
+  const year = parts.find((part) => part.type === "year")?.value;
+  const month = parts.find((part) => part.type === "month")?.value;
+  if (!year || !month) throw new Error("日時を対象月へ変換できません。");
+  return `${year}-${month.padStart(2, "0")}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1657,14 +1810,33 @@ function convertedCastForMonth(
   return undefined;
 }
 
-function castIdentityForMonth(
+export function castMasterIdentityForMonth(
+  masterId: string,
+  castById: Map<string, CastRecord>,
+  casts: CastRecord[],
+  month: string,
+  monthDailyMasterIds?: ReadonlySet<string>,
+) {
+  const source = castById.get(masterId);
+  // 旧版の物理削除で在籍側マスタだけが消えていても、残存する体入側の変換先IDと
+  // 同月regular日次のIDが一致する場合に限り、同一人物として復元する。
+  const missingConvertedTargetId = source?.convertedToCastId
+    && monthDailyMasterIds?.has(source.convertedToCastId)
+    ? source.convertedToCastId
+    : undefined;
+  return convertedCastForMonth(masterId, castById, casts, month)?.id
+    || missingConvertedTargetId
+    || masterId;
+}
+
+export function castIdentityForMonth(
   row: DailyCast,
   castById: Map<string, CastRecord>,
   casts: CastRecord[],
   month: string,
+  monthDailyMasterIds?: ReadonlySet<string>,
 ) {
-  return convertedCastForMonth(row.masterId, castById, casts, month)?.id
-    || row.masterId
+  return castMasterIdentityForMonth(row.masterId, castById, casts, month, monthDailyMasterIds)
     || row.posCastId;
 }
 
@@ -1676,10 +1848,12 @@ export function calculateCastSalesReports(
 ): CastSalesReport[] {
   const castById = new Map(casts.map((row) => [row.id, row]));
   const grouped = new Map<string, { closing: DailyClosing; row: DailyCast }[]>();
-  closings
-    .filter((closing) => closing.status === "approved" && closing.businessDate.startsWith(month))
-    .forEach((closing) => (closing.casts || []).forEach((row) => {
-      const id = castIdentityForMonth(row, castById, casts, month);
+  const approved = closings.filter((closing) => closing.status === "approved" && closing.businessDate.startsWith(month));
+  const monthDailyMasterIds = new Set(approved.flatMap((closing) => (closing.casts || [])
+    .filter((row) => row.kind === "regular")
+    .map((row) => row.masterId)));
+  approved.forEach((closing) => (closing.casts || []).forEach((row) => {
+      const id = castIdentityForMonth(row, castById, casts, month, monthDailyMasterIds);
       grouped.set(id, [...(grouped.get(id) || []), { closing, row }]);
     }));
 
@@ -1757,13 +1931,18 @@ export function calculateCastRewards(
   closings: DailyClosing[],
   casts: CastRecord[],
   month: string,
-  adjustments?: MonthlyAdjustments
+  adjustments?: MonthlyAdjustments,
+  introducerMonthEvents: IntroducerMonthEvent[] = [],
+  introducerDeletionCommits: IntroducerDeletionCommit[] = [],
 ): CastReward[] {
   const approved = closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(month));
   const castById = new Map(casts.map((row) => [row.id, row]));
   const grouped = new Map<string, { businessDate: string; row: DailyCast; closing: DailyClosing }[]>();
+  const monthDailyMasterIds = new Set(approved.flatMap((closing) => (closing.casts || [])
+    .filter((row) => row.kind === "regular")
+    .map((row) => row.masterId)));
   approved.forEach((closing) => (closing.casts ?? []).forEach((row) => {
-    const key = castIdentityForMonth(row, castById, casts, month);
+    const key = castIdentityForMonth(row, castById, casts, month, monthDailyMasterIds);
     grouped.set(key, [...(grouped.get(key) || []), { businessDate: closing.businessDate, row, closing }]);
   }));
   return [...grouped.entries()].map(([id, entries]): CastReward => {
@@ -1802,18 +1981,57 @@ export function calculateCastRewards(
     const advancePayment = sum("advancePayment");
     const transportFee = sum("transportFee");
     const withholding = asNumber(adjustments?.withholdingByCast?.[id]);
-    // 体入日は出勤顧問料が発生せず、スナップショット上の金額が在籍日と異なる。
-    // 紹介者条件の安定性は在籍日だけで比較し、入店月に体入日しかない場合だけ
-    // 体入日の紹介者を通常報酬の計算基礎として引き継ぐ。
-    const regularRows = rows.filter((row) => row.kind === "regular");
-    const introducerSourceRows = regularRows.length > 0 ? regularRows : rows;
-    const introducers = new Map<string, DailyCast["introducer"]>(introducerSourceRows.map((row) => [JSON.stringify(row.introducer ? {
-      id: row.introducer.id,
-      feeType: row.introducer.feeType,
-      attendanceAdvisoryEnabled: row.introducer.attendanceAdvisoryEnabled !== false,
-      attendanceAdvisoryFee: asNumber(row.introducer.attendanceAdvisoryFee),
-    } : null), row.introducer] as const));
-    const stableIntroducer = introducers.size === 1 ? [...introducers.values()][0] : undefined;
+    // 月途中で条件が変わった場合は営業日・在籍区分ではなく、体入日も含めて
+    // 「最後に店舗保存された日次」に実際に入っている条件を正とする。
+    const latestIntroducerEntry = [...entries].sort((left, right) => {
+      return compareDailyClosingSubmissionOrder(left.closing, right.closing)
+        || left.businessDate.localeCompare(right.businessDate)
+        || left.closing.id.localeCompare(right.closing.id)
+        || left.row.posCastId.localeCompare(right.row.posCastId);
+    }).at(-1);
+    const latestIntroducer = latestIntroducerEntry?.row.introducer;
+    const latestDailySavedOrder = latestIntroducerEntry
+      ? dailyClosingSubmissionOrderValue(latestIntroducerEntry.closing)
+      : Number.NEGATIVE_INFINITY;
+    // 体入・在籍IDのどちらに履歴が残っていても、人物全体で最後に保存された
+    // イベントを採る。異なるパスのrevisionは大小比較できないため順序には使わない。
+    const aliasIds = new Set([
+      id,
+      member?.convertedFromTrialId,
+      ...rows.map((row) => row.masterId),
+    ].filter((value): value is string => Boolean(value)));
+    const monthEvent = introducerMonthEvents
+      .filter((event) => event.month === month && aliasIds.has(event.castId))
+      .sort(compareIntroducerMonthEventEffectiveOrder)
+      .at(-1);
+    const deletionCommit = introducerDeletionCommits
+      // linkedCastIdsは削除時に警告表示し、削除ロック下で固定した対象者の正本。
+      // 旧・破損commitで一覧が欠けても、現存キャストの当月最新日次が削除紹介者を
+      // 指している場合だけ安全側で0にする。archived/物理削除済み履歴は巻き込まない。
+      .filter((commit) => commit.month === month && (
+        commit.linkedCastIds.some((castId) => aliasIds.has(castId))
+        || (member !== undefined && !member.deletedAt && (
+          member.introducerId === commit.introducerId
+          || latestIntroducer?.id === commit.introducerId
+        ))
+      ))
+      .sort((left, right) => left.completedAtMs - right.completedAtMs || left.id.localeCompare(right.id))
+      .at(-1);
+    const latestSpecial = [
+      ...(monthEvent ? [{ kind: "event" as const, order: introducerMonthEventEffectiveOrderValue(monthEvent), event: monthEvent }] : []),
+      ...(deletionCommit ? [{ kind: "commit" as const, order: deletionCommit.completedAtMs, commit: deletionCommit }] : []),
+    ].sort((left, right) => left.order - right.order || (left.kind === "commit" ? 1 : -1)).at(-1);
+    const effectiveIntroducer = latestSpecial?.kind === "commit"
+      ? undefined
+      : latestSpecial?.event.state === "deleted"
+        ? undefined
+        : latestSpecial?.event.state === "reassigned"
+        // 再設定より後に日次が保存された場合は、その保存内容（紹介者なしを含む）を
+        // 新しい月内条件とする。同一時刻なら明示操作である再設定イベントを優先する。
+        ? latestDailySavedOrder > introducerMonthEventEffectiveOrderValue(latestSpecial.event)
+          ? latestIntroducer
+          : latestSpecial.event.introducer
+        : latestIntroducer;
     return {
       id,
       name: member?.name || rows[0]?.name || "名称未設定",
@@ -1844,33 +2062,20 @@ export function calculateCastRewards(
       transportFee,
       withholding,
       netPay: grossPay - dailyPayment - advancePayment - transportFee - withholding,
-      introducer: trialOnly ? undefined : stableIntroducer
+      introducer: trialOnly ? undefined : effectiveIntroducer
     };
   }).sort((left, right) => right.honShimeiSales + right.jonaiExtensionSales - (left.honShimeiSales + left.jonaiExtensionSales));
 }
 
-/** 月内で紹介者条件が変わった人物を検出する。計算方針が確定するまでは月次確定を止めるために使う。 */
+/**
+ * 旧版互換の公開関数。現在は最後に保存された日次条件を月全体へ適用する仕様のため、
+ * 月途中の条件差は確定阻害要因ではない。
+ */
 export function introducerTermConflicts(closings: DailyClosing[], casts: CastRecord[], month: string) {
-  const approved = closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(month));
-  const castById = new Map(casts.map((row) => [row.id, row]));
-  const groups = new Map<string, { name: string; signatures: Set<string> }>();
-  approved.forEach((closing) => (closing.casts || []).forEach((row) => {
-    // 出勤顧問料を持たない体入日のスナップショットは、在籍後の紹介者条件との
-    // 比較対象にしない。在籍日同士で条件が変わった場合だけ確定を止める。
-    if (row.kind !== "regular") return;
-    const id = castIdentityForMonth(row, castById, casts, month);
-    const group = groups.get(id) || { name: castById.get(id)?.name || row.name || id, signatures: new Set<string>() };
-    group.signatures.add(JSON.stringify(row.introducer ? {
-      id: row.introducer.id,
-      feeType: row.introducer.feeType,
-      attendanceAdvisoryEnabled: row.introducer.attendanceAdvisoryEnabled !== false,
-      attendanceAdvisoryFee: asNumber(row.introducer.attendanceAdvisoryFee),
-    } : null));
-    groups.set(id, group);
-  }));
-  return [...groups.values()]
-    .filter((group) => group.signatures.size > 1)
-    .map((group) => `${group.name}の紹介者・報酬形態・出勤顧問料が月途中で変更されています。計算方法を確認するまで月次確定できません。`);
+  void closings;
+  void casts;
+  void month;
+  return [] as string[];
 }
 
 export type DriverPayrollRow = {
