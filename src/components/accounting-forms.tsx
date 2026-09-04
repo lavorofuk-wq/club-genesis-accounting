@@ -10,7 +10,7 @@ import {
 } from "@/domain/month-accounting";
 import { approveClosing, cancelAccountingMonthClosing, finalizeAccountingMonth, reopenAccountingMonth, returnClosing, saveMonthlyAdjustments } from "@/lib/firebase/repository";
 import { Card, Field, MoneyInput, StatusPill, Table, currentMonth, yen } from "./ui";
-import { PosProductDetails } from "./store-work";
+import { PosProductDetails, summarizeCastDrinksByPrice } from "./store-work";
 
 type Props = { data: AccountingWorkspaceData; user: User; busy: boolean; run: (action: () => Promise<unknown>, message: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void };
 type Section = "approval" | "castSales" | "castRewards" | "introducers" | "staffPayroll" | "driverPayroll" | "expenses" | "balance";
@@ -82,11 +82,7 @@ function ClosingDetail({ closing, reviewed, disabled, onReviewed }: { closing: D
     <div className="summary-strip"><span><small>総売上</small><strong>{yen.format(closing.sales.totalSales)}</strong></span><span><small>現金売上</small><strong>{yen.format(closing.sales.cashSales)}</strong></span><span><small>カード売上</small><strong>{yen.format(closing.sales.cardSales)}</strong></span><span><small>現金差額</small><strong className={closing.cash.difference ? "text-danger" : "text-good"}>{yen.format(closing.cash.difference)}</strong></span></div>
     <h3>店舗データプレビュー</h3>
     <Table headers={["キャスト", "出退勤・時間", "本指名/場内/同伴", "本指名売上", "場内延長売上", "ボトル・ドリンク明細", "手当・控除"]}>
-      {closing.casts.map((row) => <tr key={row.posCastId}><td><strong>{row.name}</strong><br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td><td>{row.startTime}–{row.endTime}<br />{row.hours}時間</td><td>{row.honShimeiCount} / {row.banaiShimeiCount} / {row.dohanCount}</td><td>{yen.format(row.honShimeiSales)}</td><td>{yen.format(row.jonaiExtensionSales)}</td><td className="wrap-cell">
-        {row.bottles.map((bottle, index) => <div key={`${bottle.sourceKey || bottle.itemId}-${index}`}><strong>{bottle.name} ×{bottle.quantity}</strong><br /><small>売上 {yen.format(bottle.salesAmount)} / 原価 {yen.format(bottle.costAmount)}{bottle.specialCost ? "（特別原価）" : ""}</small></div>)}
-        {(row.drinkAllocations || []).map((drink, index) => <div key={`${drink.itemId}-${index}`}><strong>{drink.name} ×{drink.quantity}</strong><br /><small>売上 {yen.format(drink.salesAmount)}</small></div>)}
-        {!row.bottles.length && !(row.drinkAllocations || []).length && (row.drinkSales ? <>キャストドリンク {yen.format(row.drinkSales)}</> : "—")}
-      </td><td className="wrap-cell">美容室 {yen.format(row.beautyAllowance)}<br />日払い {yen.format(row.dailyPayment)}<br />立替 {yen.format(row.advancePayment)}<br />送迎 {yen.format(row.transportFee)}</td></tr>)}
+      {closing.casts.map((row) => <tr key={row.posCastId}><td><strong>{row.name}</strong><br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td><td>{row.startTime}–{row.endTime}<br />{row.hours}時間</td><td>{row.honShimeiCount} / {row.banaiShimeiCount} / {row.dohanCount}</td><td>{yen.format(row.honShimeiSales)}</td><td>{yen.format(row.jonaiExtensionSales)}</td><td className="wrap-cell"><ClosingCastProductDetails row={row} pos={closing.posSnapshot} /></td><td className="wrap-cell">美容室 {yen.format(row.beautyAllowance)}<br />日払い {yen.format(row.dailyPayment)}<br />立替 {yen.format(row.advancePayment)}<br />送迎 {yen.format(row.transportFee)}</td></tr>)}
     </Table>
     <h3>POSボトル・ドリンク注文明細（対象外を含む全件）</h3>
     <PosProductDetails pos={closing.posSnapshot} casts={closing.casts} />
@@ -102,6 +98,21 @@ function ClosingDetail({ closing, reviewed, disabled, onReviewed }: { closing: D
     <Table headers={["現金照合計算", "金額"]}><tr><td>現金売上 ＋ つり銭</td><td>{yen.format(closing.cash.cashSales + closing.cash.cashFloat)}</td></tr><tr><td>経費・支払控除後（営業終了時の計算上現金残額）</td><td>{yen.format(closing.cash.expectedClosingCash)}</td></tr><tr><td>つり銭控除後の現金利益</td><td>{yen.format(closing.cash.cashProfit)}</td></tr><tr><td>営業終了時の現金実在高</td><td>{yen.format(closing.cash.actualClosingCash)}</td></tr><tr className="total-row"><td>現金差額</td><td className={closing.cash.difference ? "text-danger" : "text-good"}><strong>{yen.format(closing.cash.difference)}</strong></td></tr><tr><td>酒代納品書分（当日現金控除外）</td><td>{yen.format(closing.liquorDeliveryAmount)}</td></tr></Table>
     {closing.status === "submitted" && <div className="actions top-gap"><button className="button" disabled={disabled || reviewed || (closing.integrityIssues?.length || 0) > 0} onClick={onReviewed}>{reviewed ? "全項目を確認済み" : "店舗・現金プレビューの全項目を確認済みにする"}</button></div>}
   </div>;
+}
+
+export function ClosingCastProductDetails({
+  row,
+  pos,
+}: {
+  row: DailyClosing["casts"][number];
+  pos: DailyClosing["posSnapshot"];
+}) {
+  const drinks = summarizeCastDrinksByPrice(row, pos);
+  return <>
+    {row.bottles.map((bottle, index) => <div key={`${bottle.sourceKey || bottle.itemId}-${index}`}><strong>{bottle.name} ×{bottle.quantity}</strong><br /><small>売上 {yen.format(bottle.salesAmount)} / 原価 {yen.format(bottle.costAmount)}{bottle.specialCost ? "（特別原価）" : ""}</small></div>)}
+    {drinks.map((drink) => <div key={`drink-price-${drink.unitPrice}`}><strong>{yen.format(drink.unitPrice)}　{drink.quantity}杯</strong><br /><small>配賦売上 {yen.format(drink.salesAmount)}</small></div>)}
+    {!row.bottles.length && drinks.length === 0 && (row.drinkSales ? <>キャストドリンク {yen.format(row.drinkSales)}</> : "—")}
+  </>;
 }
 
 function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Props & { section: Exclude<Section, "approval"> }) {
