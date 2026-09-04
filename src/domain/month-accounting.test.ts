@@ -812,7 +812,7 @@ describe("月次会計ドメイン", () => {
       "accounting-user",
       "2026-09-30T23:59:59.000Z",
     );
-    expect(snapshot.calculationVersion).toBe("2.11.1");
+    expect(snapshot.calculationVersion).toBe("2.11.2");
     const corrupted = structuredClone(snapshot) as unknown as { castSalesReports: Array<{ days: Array<Record<string, unknown>> }> };
     delete corrupted.castSalesReports[0].days[0].businessDate;
 
