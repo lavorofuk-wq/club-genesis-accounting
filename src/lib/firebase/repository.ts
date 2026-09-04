@@ -12,6 +12,7 @@ import {
   normalizeDailyClosing,
   normalizeMonthlyAdjustments,
   parsePosClosingV3,
+  posSubmissionClaimKey,
   posItemOccurrenceKey,
   splitItemBackPerTarget,
 } from "@/domain/gms";
@@ -311,7 +312,7 @@ async function acquireDailyClosingDeletionLock(
     id,
     ...expected,
     month: expected.businessDate.slice(0, 7),
-    claimKey: claimKey(expected.submissionId, expected.checksum),
+    claimKey: posSubmissionClaimKey(expected.checksum),
     token: crypto.randomUUID(),
     owner: user.uid,
     acquiredAtMs: serverOrderTimestamp(),
@@ -341,23 +342,27 @@ async function releaseDailyClosingDeletionLock(lock: DailyClosingDeletionLock) {
 }
 
 async function dailyClosingDeletionPlanApplied(lock: DailyClosingDeletionLock) {
-  const [historySnapshot, claimSnapshot, lockSnapshot] = await Promise.all([
+  const legacyClaimKey = claimKey(lock.submissionId, lock.checksum);
+  const claimKeys = [...new Set([lock.claimKey, legacyClaimKey])];
+  const [historySnapshot, lockSnapshot, ...claimSnapshots] = await Promise.all([
     get(rootRef(`history/${lock.id}`)),
-    get(rootRef(`posSubmissionClaims/${lock.claimKey}`)),
     get(rootRef("dailyClosingDeletionLock")),
+    ...claimKeys.map((key) => get(rootRef(`posSubmissionClaims/${key}`))),
   ]);
   const storedLock = lockSnapshot.val() as DailyClosingDeletionLock | null;
   return !historySnapshot.exists()
-    && claimId(claimSnapshot.val()) !== lock.id
+    && claimSnapshots.every((snapshot) => claimId(snapshot.val()) !== lock.id)
     && (!storedLock || storedLock.id !== lock.id || storedLock.token !== lock.token);
 }
 
 async function applyDailyClosingDeletionPlan(lock: DailyClosingDeletionLock) {
-  const plan = {
+  const legacyClaimKey = claimKey(lock.submissionId, lock.checksum);
+  const plan: Record<string, null> = {
     [`history/${lock.id}`]: null,
     [`posSubmissionClaims/${lock.claimKey}`]: null,
     dailyClosingDeletionLock: null,
   };
+  if (legacyClaimKey !== lock.claimKey) plan[`posSubmissionClaims/${legacyClaimKey}`] = null;
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
@@ -1802,8 +1807,9 @@ export async function submitClosing(value: DailyClosing, user: User, expectedUpd
   }
   const duplicate = asArray<DailyClosing>(allSnapshot.val()).find((row) => row.id !== value.id && row.submissionId === value.submissionId && row.checksum === value.checksum);
   if (duplicate) throw new Error(`${duplicate.businessDate}に同じPOS JSONが送信済みです。`);
-  const oldClaim = before ? claimKey(before.submissionId, before.checksum) : "";
-  const newClaim = claimKey(value.submissionId, value.checksum);
+  const oldClaim = before ? posSubmissionClaimKey(before.checksum) : "";
+  const oldLegacyClaim = before ? claimKey(before.submissionId, before.checksum) : "";
+  const newClaim = posSubmissionClaimKey(value.checksum);
   let newClaimHandle: ClaimHandle | undefined;
   try {
     newClaimHandle = await acquireClaim("posSubmissionClaims", newClaim, value.id);
@@ -1813,6 +1819,7 @@ export async function submitClosing(value: DailyClosing, user: User, expectedUpd
   try {
     await runTransaction(rootRef(`history/${value.id}`), (current) => {
       const existing = current as DailyClosing | null;
+      if (before && !existing) throw new Error("再編集元データは完全削除されています。最新データを読み込んでください。");
       if (existing && !expectedUpdatedAt) throw new Error("再編集元データが確認できません。最新データを読み込んでやり直してください。");
       assertFresh(existing, expectedUpdatedAt);
       if (existing && !["returned", "withdrawn"].includes(existing.status)) throw new Error("差戻しまたは取下げ済みのデータだけ再送できます。");
@@ -1839,6 +1846,9 @@ export async function submitClosing(value: DailyClosing, user: User, expectedUpd
   }
   if (newClaimHandle) await commitClaimAfterEntitySaved(newClaimHandle, "店舗送信データ");
   if (oldClaim && oldClaim !== newClaim) await releaseClaimAfterEntitySaved("posSubmissionClaims", oldClaim, value.id, "店舗送信データ");
+  if (oldLegacyClaim && oldLegacyClaim !== newClaim && oldLegacyClaim !== oldClaim) {
+    await releaseClaimAfterEntitySaved("posSubmissionClaims", oldLegacyClaim, value.id, "店舗送信データ");
+  }
 }
 export async function withdrawClosing(id: string, expected: ClosingRevision, user: User) {
   await requireUser(user, ["shop", "op"]);
@@ -1873,9 +1883,13 @@ export async function deleteUnapprovedClosing(id: string, expected: ClosingRevis
   if (!isUnapprovedClosingStatus(current.status)) {
     throw new Error("承認済みデータは完全削除できません。経理またはOPが差し戻してから削除してください。");
   }
-  const currentClaimKey = claimKey(current.submissionId, current.checksum);
-  const currentClaimOwner = claimId((await get(rootRef(`posSubmissionClaims/${currentClaimKey}`))).val());
-  if (currentClaimOwner && currentClaimOwner !== id) {
+  const currentClaimKeys = [...new Set([
+    posSubmissionClaimKey(current.checksum),
+    claimKey(current.submissionId, current.checksum),
+  ])];
+  const currentClaimOwners = await Promise.all(currentClaimKeys.map(async (key) =>
+    claimId((await get(rootRef(`posSubmissionClaims/${key}`))).val())));
+  if (currentClaimOwners.some((owner) => owner && owner !== id)) {
     throw new Error("POS重複防止情報が別の営業日データを参照しています。削除せず管理者へ連絡してください。");
   }
 

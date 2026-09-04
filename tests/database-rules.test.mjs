@@ -125,11 +125,16 @@ test("紹介者削除ロック・commit・キャスト更新は同じ原子的�
 });
 
 test("未承認日次の完全削除は権限・状態・版・月次状態を削除ロックで固定する", () => {
+  const claimRules = databaseRules.posSubmissionClaims.$key;
   const lockRules = databaseRules.dailyClosingDeletionLock;
+  const claimWriteRule = claimRules[".write"];
+  const claimValidateRule = claimRules[".validate"];
   const readRule = lockRules[".read"];
   const writeRule = lockRules[".write"];
   const validateRule = lockRules[".validate"];
 
+  assert.match(claimWriteRule, /!newData\.exists\(\) \|\| \$key\.matches\(\/\^\[0-9a-f\]\{64\}\$\//);
+  assert.match(claimValidateRule, /!newData\.exists\(\) \|\| \(\$key\.matches\(\/\^\[0-9a-f\]\{64\}\$\//);
   assert.match(readRule, /role'\)\.val\(\) === 'shop'/);
   assert.match(readRule, /role'\)\.val\(\) === 'op'/);
   assert.match(writeRule, /role'\)\.val\(\) === 'shop'.*role'\)\.val\(\) === 'op'/);
@@ -144,6 +149,8 @@ test("未承認日次の完全削除は権限・状態・版・月次状態を�
   assert.match(writeRule, /accountingMonthStates.*status'\)\.val\(\) === 'open'/);
   assert.match(writeRule, /posSubmissionClaims.*claimKey.*id'\)\.val\(\) === newData\.child\('id'/);
   assert.match(validateRule, /owner'\)\.val\(\) === auth\.uid/);
+  assert.match(validateRule, /claimKey'\)\.val\(\)\.matches\(\/\^\[0-9a-f\]\{64\}\$\//);
+  assert.match(validateRule, /claimKey'\)\.val\(\) === newData\.child\('checksum'/);
   assert.match(validateRule, /acquiredAtMs'\)\.val\(\) === now/);
   assert.match(validateRule, /expiresAt'\)\.val\(\) > now/);
 });
@@ -166,7 +173,11 @@ test("日次本体・POS重複防止情報・削除ロックを同じ原子的�
   assert.match(finalizeWrite, /!newData\.exists\(\) \|\| !root.*dailyClosingDeletionLock.*expiresAt'\)\.val\(\) <= now/);
 
   assert.match(repositorySource, /export async function deleteUnapprovedClosing[\s\S]*requireUser\(user, \["shop", "op"\]\)/);
-  assert.match(repositorySource, /const plan = \{[\s\S]*\[`history\/\$\{lock\.id\}`\]: null,[\s\S]*\[`posSubmissionClaims\/\$\{lock\.claimKey\}`\]: null,[\s\S]*dailyClosingDeletionLock: null/);
+  assert.match(repositorySource, /claimKey:\s*posSubmissionClaimKey\(expected\.checksum\)/);
+  assert.match(repositorySource, /legacyClaimKey = claimKey\(lock\.submissionId, lock\.checksum\)/);
+  assert.match(repositorySource, /const plan: Record<string, null> = \{[\s\S]*\[`history\/\$\{lock\.id\}`\]: null,[\s\S]*\[`posSubmissionClaims\/\$\{lock\.claimKey\}`\]: null,[\s\S]*dailyClosingDeletionLock: null/);
+  assert.match(repositorySource, /plan\[`posSubmissionClaims\/\$\{legacyClaimKey\}`\] = null/);
+  assert.match(repositorySource, /if \(before && !existing\) throw new Error\("再編集元データは完全削除されています/);
   assert.match(repositorySource, /await update\(rootRef\(\), plan\)/);
 });
 

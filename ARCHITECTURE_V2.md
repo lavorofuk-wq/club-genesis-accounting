@@ -1,4 +1,4 @@
-# GMS Ver2.11.0 アーキテクチャ
+# GMS Ver2.11.1 アーキテクチャ
 
 ## 実行環境
 
@@ -32,7 +32,7 @@ Realtime Databaseルールでも同じ値を検査し、古い権限が残らな
 - `config/cashFloat`: つり銭（初期値200,000円）
 - `history`: POS原本、店舗入力、計算結果、承認履歴を含む日次スナップショット
 - `history/{id}/submittedAtMs`: Firebaseサーバーが確定した店舗送信順
-- `posSubmissionClaims`: POS提出IDとチェックサムの重複登録を防ぐ所有情報
+- `posSubmissionClaims`: POSチェックサムを安全な64桁hexキーとして使い、同じPOS JSONの重複登録を防ぐ所有情報
 - `dailyClosingDeletionLock`: 未承認日次の削除と月次確定・状態更新を排他する一時ロック
 - `introducerEntryEvents`: 入店顧問料を採用月に一度だけ計上する履歴
 - `introducerMonthEvents`: 紹介者削除・同月再設定を人物単位で保持する月次履歴
@@ -56,7 +56,7 @@ Realtime Databaseルールでも同じ値を検査し、古い権限が残らな
 店舗は承認前または差戻し後のデータを `withdrawn` にして再編集できる。
 `submitted`・`returned`・`withdrawn` は店舗またはOPが完全削除できる。`approved` は直接削除できず、
 経理またはOPによる差戻しが先に必要となる。削除時は `history` 本体、対応する
-`posSubmissionClaims`、削除ロックを一括更新し、復元不能な物理削除とする。
+`posSubmissionClaims`（旧形式キーも含む）、削除ロックを一括更新し、復元不能な物理削除とする。
 対象月が月次確定中または確定済みの場合は削除できない。
 
 紹介者報酬は営業日順ではなく、月内で最後に店舗保存された日次の紹介者条件

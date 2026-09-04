@@ -28,7 +28,7 @@ import type {
   WorkspaceData,
 } from "./gms";
 
-export const MONTHLY_CALCULATION_VERSION = "2.11.0";
+export const MONTHLY_CALCULATION_VERSION = "2.11.1";
 
 export type IntroducerEntryEvent = {
   id: string;
