@@ -289,6 +289,7 @@ describe("GMS報酬・日次計算", () => {
     expect(report.attendanceDays).toBe(2);
     expect(report.days.map((day) => day.businessDate)).toEqual(["2026-09-02", "2026-09-03"]);
     expect(report.days[0]).toMatchObject({
+      startTime: "20:00", endTime: "00:07", hours: 4,
       honShimeiSales: 1300000, jonaiExtensionSales: 0,
       honShimeiLiquorCost: 5000, jonaiExtensionLiquorCost: 0,
       beautyAllowance: 500
@@ -299,6 +300,7 @@ describe("GMS報酬・日次計算", () => {
       beautyAllowance: 0
     });
     expect(report.totals).toMatchObject({
+      attendanceDays: 2, hours: 8,
       honShimeiSales: 1300000, jonaiExtensionSales: 400000, totalSales: 1700000,
       honShimeiLiquorCost: 5000, jonaiExtensionLiquorCost: 5000, totalLiquorCost: 10000,
       beautyAllowance: 500
