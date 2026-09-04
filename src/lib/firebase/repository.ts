@@ -1,8 +1,9 @@
 "use client";
 
-import { get, runTransaction, serverTimestamp, set, update, ref } from "firebase/database";
+import { get, onValue, runTransaction, serverTimestamp, set, update, ref } from "firebase/database";
 import type { User } from "firebase/auth";
 import { database, rootRef } from "./client";
+import { readOneShotValue } from "./one-shot-value";
 import {
   bottleBackAmountFromPosItem,
   compareIntroducerMonthEventEffectiveOrder,
@@ -113,8 +114,14 @@ const serverOrderTimestamp = () => serverTimestamp() as unknown as number;
 const JAPAN_UTC_OFFSET_MS = 9 * 60 * 60 * 1000;
 const INTRODUCER_MONTH_BOUNDARY_GUARD_MS = 5 * 60 * 1000;
 async function firebaseServerNow() {
-  const offsetSnapshot = await get(ref(database, ".info/serverTimeOffset"));
-  const rawOffset = offsetSnapshot.val();
+  // `.info` はRealtime Databaseのストリーミング専用パスで、SDKの get() は
+  // RESTフォールバック時に "Invalid token in path" となる。one-shot listenerで読む。
+  const rawOffset = await readOneShotValue<unknown>((resolve, reject) => onValue(
+    ref(database, ".info/serverTimeOffset"),
+    (snapshot) => resolve(snapshot.val()),
+    reject,
+    { onlyOnce: true },
+  ));
   if (typeof rawOffset !== "number" || !Number.isFinite(rawOffset)) {
     throw new Error("Firebaseサーバー時刻を確認できませんでした。通信状態を確認してからやり直してください。");
   }

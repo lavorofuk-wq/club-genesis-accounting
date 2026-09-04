@@ -194,7 +194,9 @@ test("日次と紹介者イベントのサーバー保存時刻をdevで必須�
   assert.match(eventParentValidate, /data\.child\('reassignedAtMs'\).*newData\.child\('reassignedAtMs'\)/);
   assert.match(repositorySource, /submittedAtMs:\s*serverOrderTimestamp\(\)/);
   assert.match(repositorySource, /updatedAtMs:\s*serverOrderTimestamp\(\)/);
-  assert.match(repositorySource, /ref\(database, "\.info\/serverTimeOffset"\)/);
+  assert.match(repositorySource, /onValue\([\s\S]*ref\(database, "\.info\/serverTimeOffset"\)[\s\S]*\{ onlyOnce: true \}/);
+  assert.doesNotMatch(repositorySource, /get\(ref\(database, "\.info\/serverTimeOffset"\)\)/);
+  assert.match(repositorySource, /readOneShotValue<unknown>/);
   assert.match(repositorySource, /new Date\(deletionLock\.acquiredAtMs\)\.toISOString\(\)/);
   assert.match(repositorySource, /cleanupExpiredIntroducerDeletionLocks/);
 });
