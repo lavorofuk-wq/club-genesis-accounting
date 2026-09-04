@@ -124,6 +124,52 @@ test("紹介者削除ロック・commit・キャスト更新は同じ原子的�
   assert.match(databaseRules.accountingFinalizeLock[".write"], /introducerDeletionLocks'\)\.hasChildren/);
 });
 
+test("未承認日次の完全削除は権限・状態・版・月次状態を削除ロックで固定する", () => {
+  const lockRules = databaseRules.dailyClosingDeletionLock;
+  const readRule = lockRules[".read"];
+  const writeRule = lockRules[".write"];
+  const validateRule = lockRules[".validate"];
+
+  assert.match(readRule, /role'\)\.val\(\) === 'shop'/);
+  assert.match(readRule, /role'\)\.val\(\) === 'op'/);
+  assert.match(writeRule, /role'\)\.val\(\) === 'shop'.*role'\)\.val\(\) === 'op'/);
+  assert.match(writeRule, /accountingFinalizeLock/);
+  assert.match(writeRule, /history.*status'\)\.val\(\) === 'submitted'/);
+  assert.match(writeRule, /history.*status'\)\.val\(\) === 'returned'/);
+  assert.match(writeRule, /history.*status'\)\.val\(\) === 'withdrawn'/);
+  assert.match(writeRule, /businessDate'\)\.val\(\) === root.*history.*businessDate/);
+  assert.match(writeRule, /updatedAt'\)\.val\(\) === root.*history.*updatedAt/);
+  assert.match(writeRule, /submissionId'\)\.val\(\) === root.*history.*submissionId/);
+  assert.match(writeRule, /checksum'\)\.val\(\) === root.*history.*checksum/);
+  assert.match(writeRule, /accountingMonthStates.*status'\)\.val\(\) === 'open'/);
+  assert.match(writeRule, /posSubmissionClaims.*claimKey.*id'\)\.val\(\) === newData\.child\('id'/);
+  assert.match(validateRule, /owner'\)\.val\(\) === auth\.uid/);
+  assert.match(validateRule, /acquiredAtMs'\)\.val\(\) === now/);
+  assert.match(validateRule, /expiresAt'\)\.val\(\) > now/);
+});
+
+test("日次本体・POS重複防止情報・削除ロックを同じ原子的更新で除去する", () => {
+  const historyWrite = databaseRules.history.$id[".write"];
+  const finalizeWrite = databaseRules.accountingFinalizeLock[".write"];
+
+  assert.match(historyWrite, /data\.exists\(\) && !newData\.exists\(\)/);
+  assert.match(historyWrite, /data\.child\('status'\)\.val\(\) === 'submitted'/);
+  assert.match(historyWrite, /data\.child\('status'\)\.val\(\) === 'returned'/);
+  assert.match(historyWrite, /data\.child\('status'\)\.val\(\) === 'withdrawn'/);
+  assert.match(historyWrite, /dailyClosingDeletionLock.*owner'\)\.val\(\) === auth\.uid/);
+  assert.match(historyWrite, /dailyClosingDeletionLock.*updatedAt'\)\.val\(\) === data\.child\('updatedAt'/);
+  assert.match(historyWrite, /dailyClosingDeletionLock.*submissionId'\)\.val\(\) === data\.child\('submissionId'/);
+  assert.match(historyWrite, /dailyClosingDeletionLock.*checksum'\)\.val\(\) === data\.child\('checksum'/);
+  assert.match(historyWrite, /posSubmissionClaims.*claimKey.*val\(\) === \$id/);
+  assert.match(historyWrite, /!newData\.parent\(\)\.parent\(\)\.child\('dailyClosingDeletionLock'\)\.exists\(\)/);
+  assert.match(historyWrite, /!newData\.parent\(\)\.parent\(\)\.child\('posSubmissionClaims'\).*claimKey/);
+  assert.match(finalizeWrite, /!newData\.exists\(\) \|\| !root.*dailyClosingDeletionLock.*expiresAt'\)\.val\(\) <= now/);
+
+  assert.match(repositorySource, /export async function deleteUnapprovedClosing[\s\S]*requireUser\(user, \["shop", "op"\]\)/);
+  assert.match(repositorySource, /const plan = \{[\s\S]*\[`history\/\$\{lock\.id\}`\]: null,[\s\S]*\[`posSubmissionClaims\/\$\{lock\.claimKey\}`\]: null,[\s\S]*dailyClosingDeletionLock: null/);
+  assert.match(repositorySource, /await update\(rootRef\(\), plan\)/);
+});
+
 test("日次と紹介者イベントのサーバー保存時刻をdevで必須化し本番旧データを互換にする", () => {
   const statusTimestampRule = databaseRules.history.$id.$field[".validate"];
   const eventParentValidate = databaseRules.introducerMonthEvents.$month.$castId[".validate"];

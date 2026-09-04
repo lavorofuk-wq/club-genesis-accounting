@@ -6,9 +6,9 @@ import type {
   BottleAllocation, CastKind, DailyCast, DailyClosing, DailyDriverWork, DailyExpense, DailyStaffWork, ExpenseCategory,
   PosClosingV3, PosItem, PosTransaction
 } from "@/domain/gms";
-import { buildDailyCasts, calculateCash, canMapAsDispatch, floorHundred, hoursBetweenQuarter, isCastMappingComplete, parsePosClosingV3, posCastReferences, posItemOccurrenceKey, rateForMonth, requiresBottleCost, restoreDailyCastBackMetadata, staffCandidatesForBusinessDate } from "@/domain/gms";
+import { buildDailyCasts, calculateCash, canMapAsDispatch, floorHundred, hoursBetweenQuarter, isCastMappingComplete, isUnapprovedClosingStatus, parsePosClosingV3, posCastReferences, posItemOccurrenceKey, rateForMonth, requiresBottleCost, restoreDailyCastBackMetadata, staffCandidatesForBusinessDate } from "@/domain/gms";
 import type { AccountingWorkspaceData } from "@/domain/month-accounting";
-import { submitClosing, withdrawClosing } from "@/lib/firebase/repository";
+import { deleteUnapprovedClosing, submitClosing, withdrawClosing } from "@/lib/firebase/repository";
 import { Card, Field, MoneyInput, StatusPill, Table, yen } from "./ui";
 
 type Props = { data: AccountingWorkspaceData; user: User; busy: boolean; run: (action: () => Promise<unknown>, message: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void };
@@ -31,9 +31,13 @@ const closingLabels: Record<DailyClosing["status"], string> = {
 
 function lockedMonthMessage(data: AccountingWorkspaceData, businessDate: string) {
   const state = data.monthStates.find((row) => row.month === businessDate.slice(0, 7));
-  if (state?.status === "closed") return "月次確定済みのため、再編集・取下げはできません。経理またはOPが月次確定を解除してください。";
-  if (state?.status === "closing") return "月次確定処理中のため、再編集・取下げはできません。処理完了後に最新データを読み込んでください。";
+  if (state?.status === "closed") return "月次確定済みのため、再編集・取下げ・完全削除はできません。経理またはOPが月次確定を解除してください。";
+  if (state?.status === "closing") return "月次確定処理中のため、再編集・取下げ・完全削除はできません。処理完了後に最新データを読み込んでください。";
   return "";
+}
+
+export function closingDeletionConfirmation(row: Pick<DailyClosing, "businessDate" | "status">) {
+  return `${row.businessDate}の送信済みデータ（${closingLabels[row.status]}）を完全削除しますか？\n\nPOS原本・店舗入力・現金照合・差戻し履歴を含む、この営業日の日次データがすべて削除されます。\n削除後は復元できません。`;
 }
 
 export function StoreWork(props: Props) {
@@ -44,16 +48,55 @@ export function StoreWork(props: Props) {
     if (workflowDirty && !window.confirm("現在入力中の営業日データは保存されていません。破棄して別の送信済みデータを再編集しますか？")) return;
     setEditing(row);
   };
+  const deleteClosing = async (row: DailyClosing) => {
+    if (!window.confirm(closingDeletionConfirmation(row))) return;
+    let deletionCommitted = false;
+    await props.run(
+      async () => {
+        await deleteUnapprovedClosing(row.id, {
+          businessDate: row.businessDate,
+          updatedAt: row.updatedAt,
+          checksum: row.checksum,
+          submissionId: row.submissionId,
+        }, props.user);
+        deletionCommitted = true;
+      },
+      `${row.businessDate}の送信済みデータを完全削除しました。`,
+    );
+    if (deletionCommitted && editing?.id === row.id) {
+      setEditing(null);
+      setWorkflowDirty(false);
+    }
+  };
   useEffect(() => {
     props.onDirtyChange?.(workflowDirty);
     return () => props.onDirtyChange?.(false);
   }, [props.onDirtyChange, workflowDirty]);
-  return <div className="grid"><DailyWorkflow key={editing?.id || "new"} {...props} initial={editing} onFinished={() => setEditing(null)} onDirtyChange={setWorkflowDirty} />
-    <Card title="送信済みデータ" description="店舗データと現金照合プレビューを営業日ごとに保管します。"><Table headers={["営業日", "状態", "売上", "現金残額", "差額", "差戻し理由", "操作"]}>{props.data.closings.map((row) => {
-      const monthLock = lockedMonthMessage(props.data, row.businessDate);
-      const updateDisabled = props.busy || Boolean(monthLock);
-      return <tr key={row.id}><td>{row.businessDate}</td><td><StatusPill tone={row.status === "approved" ? "good" : row.status === "returned" ? "danger" : row.status === "submitted" ? "warn" : "neutral"}>{closingLabels[row.status]}</StatusPill></td><td>{yen.format(row.sales.totalSales)}</td><td>{yen.format(row.cash.actualClosingCash)}</td><td className={row.cash.difference ? "text-danger" : "text-good"}>{yen.format(row.cash.difference)}</td><td className="wrap-cell">{row.returnReason || "—"}</td><td><div className="row-actions">{["returned", "withdrawn"].includes(row.status) && <button className="button secondary mini" disabled={updateDisabled} title={monthLock || undefined} onClick={() => beginEditing(row)}>再編集</button>}{["submitted", "returned"].includes(row.status) && <button className="button secondary mini" disabled={updateDisabled} title={monthLock || undefined} onClick={() => { if (window.confirm(`${row.businessDate}の送信を取り下げますか？`)) void props.run(() => withdrawClosing(row.id, { businessDate: row.businessDate, updatedAt: row.updatedAt, checksum: row.checksum, submissionId: row.submissionId }, props.user), "送信を取り下げました。再編集できます。"); }}>取下げ</button>}<details><summary className="text-button">プレビュー</summary><div className="popover-preview"><DailyPreview closing={row} /></div></details>{monthLock && <small className="text-danger">{monthLock}</small>}</div></td></tr>;
-    })}</Table></Card>
+  return <div className="grid">
+    <DailyWorkflow key={editing?.id || "new"} {...props} initial={editing} onFinished={() => setEditing(null)} onDirtyChange={setWorkflowDirty} />
+    <Card title="送信済みデータ" description="店舗データと現金照合プレビューを営業日ごとに保管します。経理未承認のデータは完全削除できます。">
+      <Table headers={["営業日", "状態", "売上", "現金残額", "差額", "差戻し理由", "操作"]}>
+        {props.data.closings.map((row) => {
+          const monthLock = lockedMonthMessage(props.data, row.businessDate);
+          const updateDisabled = props.busy || Boolean(monthLock);
+          return <tr key={row.id}>
+            <td>{row.businessDate}</td>
+            <td><StatusPill tone={row.status === "approved" ? "good" : row.status === "returned" ? "danger" : row.status === "submitted" ? "warn" : "neutral"}>{closingLabels[row.status]}</StatusPill></td>
+            <td>{yen.format(row.sales.totalSales)}</td>
+            <td>{yen.format(row.cash.actualClosingCash)}</td>
+            <td className={row.cash.difference ? "text-danger" : "text-good"}>{yen.format(row.cash.difference)}</td>
+            <td className="wrap-cell">{row.returnReason || "—"}</td>
+            <td><div className="row-actions">
+              {["returned", "withdrawn"].includes(row.status) && <button className="button secondary mini" disabled={updateDisabled} title={monthLock || undefined} onClick={() => beginEditing(row)}>再編集</button>}
+              {["submitted", "returned"].includes(row.status) && <button className="button secondary mini" disabled={updateDisabled} title={monthLock || undefined} onClick={() => { if (window.confirm(`${row.businessDate}の送信を取り下げますか？`)) void props.run(() => withdrawClosing(row.id, { businessDate: row.businessDate, updatedAt: row.updatedAt, checksum: row.checksum, submissionId: row.submissionId }, props.user), "送信を取り下げました。再編集できます。"); }}>取下げ</button>}
+              {isUnapprovedClosingStatus(row.status) && <button className="button danger mini" disabled={updateDisabled} title={monthLock || undefined} onClick={() => void deleteClosing(row)}>完全削除</button>}
+              <details><summary className="text-button">プレビュー</summary><div className="popover-preview"><DailyPreview closing={row} /></div></details>
+              {monthLock && <small className="text-danger">{monthLock}</small>}
+            </div></td>
+          </tr>;
+        })}
+      </Table>
+    </Card>
   </div>;
 }
 

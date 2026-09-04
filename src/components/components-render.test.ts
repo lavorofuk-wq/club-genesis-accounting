@@ -7,7 +7,7 @@ import type { AccountingWorkspaceData } from "@/domain/month-accounting";
 import { introducerDeletionLinkedCastSignature } from "@/lib/firebase/repository";
 import { AccountingForms, ClosingCastProductDetails } from "./accounting-forms";
 import { CommonForms, introducerDeletionConfirmation } from "./common-forms";
-import { CastProductSummary, DailyPreview, StoreWork, summarizeCastDrinksByPrice } from "./store-work";
+import { CastProductSummary, closingDeletionConfirmation, DailyPreview, StoreWork, summarizeCastDrinksByPrice } from "./store-work";
 import { Modal, currentMonth } from "./ui";
 
 const month = currentMonth();
@@ -107,6 +107,63 @@ const data: AccountingWorkspaceData = {
 };
 
 describe("主要ページのSSRスモーク", () => {
+  it("経理未承認の3状態だけに完全削除操作を表示する", () => {
+    const statusRows = (["submitted", "returned", "withdrawn", "approved"] as const).map((status, index) => ({
+      ...closing,
+      id: `render-closing-${status}`,
+      businessDate: `${month}-${String(index + 2).padStart(2, "0")}`,
+      status,
+    }));
+    const markup = renderToStaticMarkup(createElement(StoreWork, {
+      data: { ...data, closings: statusRows }, user, busy: false, run,
+    }));
+    const renderedRows = markup.split("<tr>").slice(1);
+
+    for (const label of ["経理確認待ち", "差戻し", "取下げ"]) {
+      const row = renderedRows.find((candidate) => candidate.includes(`>${label}</span>`));
+      expect(row).toContain(">完全削除</button>");
+    }
+    const approvedRow = renderedRows.find((candidate) => candidate.includes(">承認済み</span>"));
+    expect(approvedRow).not.toContain(">完全削除</button>");
+    expect(markup.match(/>完全削除<\/button>/g)).toHaveLength(3);
+  });
+
+  it("完全削除の確認文で対象日と不可逆な削除範囲を明示する", () => {
+    const message = closingDeletionConfirmation({ businessDate: "2026-09-02", status: "returned" });
+    expect(message).toContain("2026-09-02");
+    expect(message).toContain("差戻し");
+    expect(message).toContain("POS原本・店舗入力・現金照合・差戻し履歴");
+    expect(message).toContain("復元できません");
+  });
+
+  it.each([
+    ["closing", "月次確定処理中"],
+    ["closed", "月次確定済み"],
+  ] as const)("月次が%sなら完全削除操作を無効化する", (status, message) => {
+    const unlockedClosing = { ...closing, id: `render-closing-${status}`, status: "returned" as const };
+    const markup = renderToStaticMarkup(createElement(StoreWork, {
+      data: {
+        ...data,
+        closings: [unlockedClosing],
+        monthStates: [{
+          month,
+          status,
+          revision: 1,
+          updatedAt: `${businessDate}T03:00:00.000Z`,
+          updatedBy: "accounting-user",
+        }],
+      },
+      user,
+      busy: false,
+      run,
+    }));
+    const deleteButton = markup.match(/<button class="button danger mini"[^>]*>完全削除<\/button>/)?.[0];
+
+    expect(deleteButton).toBeDefined();
+    expect(deleteButton).toContain('disabled=""');
+    expect(deleteButton).toContain(message);
+  });
+
   it("キャストドリンクを販売単価ごとの杯数に集約する", () => {
     const rows = summarizeCastDrinksByPrice({
       posCastId: "pos-cast-1",

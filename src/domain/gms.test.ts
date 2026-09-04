@@ -11,6 +11,7 @@ import {
   findUnclassifiedLegacyBottles,
   hoursBetweenQuarter,
   introducerSalesBase,
+  isUnapprovedClosingStatus,
   isStaffHireDateAfterTrial,
   isCastMappingComplete,
   japanMonthFromTimestamp,
@@ -67,6 +68,13 @@ async function signedPos(value: PosClosingV3) {
 }
 
 describe("GMS報酬・日次計算", () => {
+  it("経理未承認の日次状態だけを完全削除対象にする", () => {
+    expect(isUnapprovedClosingStatus("submitted")).toBe(true);
+    expect(isUnapprovedClosingStatus("returned")).toBe(true);
+    expect(isUnapprovedClosingStatus("withdrawn")).toBe(true);
+    expect(isUnapprovedClosingStatus("approved")).toBe(false);
+  });
+
   it("UTC月末時刻をAsia/Tokyoの削除月へ変換する", () => {
     expect(japanMonthFromTimestamp("2026-08-31T14:59:59.999Z")).toBe("2026-08");
     expect(japanMonthFromTimestamp("2026-08-31T15:00:00.000Z")).toBe("2026-09");
