@@ -33,6 +33,7 @@ type View =
   | "home"
   | "store"
   | "approval"
+  | "castSales"
   | "castRewards"
   | "introducersPay"
   | "staffPayroll"
@@ -127,6 +128,13 @@ const viewInfo: Record<
     label: "受信・承認",
     title: "店舗データ確認",
     description: "店舗から送信された日次データを承認または差し戻します。",
+    roles: ["accounting", "op"],
+  },
+  castSales: {
+    group: "経理作業",
+    label: "キャスト売上",
+    title: "キャスト売上データ",
+    description: "キャスト別・出勤日別の売上、酒代原価、バックを月次で確認します。",
     roles: ["accounting", "op"],
   },
   castRewards: {
@@ -326,6 +334,7 @@ export function AccountingApp() {
   const accountingSection = (
     [
       "approval",
+      "castSales",
       "castRewards",
       "introducersPay",
       "staffPayroll",
@@ -381,7 +390,7 @@ export function AccountingApp() {
           </StatusPill>
           <small>{user.email}</small>
           <small>
-            Ver2.5.0 ·{" "}
+            Ver2.6.0 ·{" "}
             {role === "shop" ? "店舗" : role === "accounting" ? "経理" : "OP"}
           </small>
           <button className="button secondary" onClick={() => signOut(auth)}>
@@ -451,6 +460,7 @@ export function AccountingApp() {
                   section={
                     (view === "introducersPay" ? "introducers" : view) as
                       | "approval"
+                      | "castSales"
                       | "castRewards"
                       | "introducers"
                       | "staffPayroll"
@@ -498,7 +508,7 @@ function Login() {
           <span>CLUB GENESIS</span>
           <strong>GMS</strong>
           <p>GENESIS Management System</p>
-          <small>Ver2.5.0</small>
+          <small>Ver2.6.0</small>
         </div>
         <div className="stack">
           <label className="field">
