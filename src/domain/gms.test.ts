@@ -3,6 +3,7 @@ import {
   buildDailyCasts,
   calculateCash,
   calculateCastRewards,
+  calculateDriverPayroll,
   canMapAsDispatch,
   floorHundred,
   hoursBetweenQuarter,
@@ -148,6 +149,17 @@ describe("GMS報酬・日次計算", () => {
     expect(() => calculateCastRewards([normalized], [], "2026-09")).not.toThrow();
   });
 
+  it("過去データの送迎ドライバー日払い未設定を0円で復元する", () => {
+    const stored = {
+      businessDate: "2026-09-02",
+      sales: { totalSales: 0, cashSales: 0, cardSales: 0 },
+      cash: { cashSales: 0, cardSales: 0, totalSales: 0, cashFloat: 200000, expenseAndPaymentTotal: 0, expectedClosingCash: 200000, cashProfit: 0, actualClosingCash: 200000, difference: 0 },
+      drivers: [{ driverId: "driver-1", name: "太郎", dailyRate: 10000 }]
+    } as DailyClosing;
+
+    expect(normalizeDailyClosing(stored).drivers[0].dailyPayment).toBe(0);
+  });
+
   it("Firebaseの月次調整オブジェクトを安全な配列と金額マップへ復元する", () => {
     const normalized = normalizeMonthlyAdjustments({
       month: "2026-09",
@@ -246,10 +258,18 @@ describe("GMS報酬・日次計算", () => {
   });
 
   it("営業終了時点の現金残額を算出する", () => {
-    const result = calculateCash({ sales: { totalSales: 100000, cashSales: 60000, cardSales: 40000 }, cashFloat: 200000, expenses: 10000, regularDailyPayments: 5000, trialDailyPayments: 5000, staffDailyPayments: 0, dispatchCastPayment: 0, dispatchStaffPayment: 0, dispatchFee: 0, actualClosingCash: 240000 });
-    expect(result.expectedClosingCash).toBe(240000);
-    expect(result.cashProfit).toBe(40000);
+    const result = calculateCash({ sales: { totalSales: 100000, cashSales: 60000, cardSales: 40000 }, cashFloat: 200000, expenses: 10000, regularDailyPayments: 5000, trialDailyPayments: 5000, staffDailyPayments: 0, driverDailyPayments: 5000, dispatchCastPayment: 0, dispatchStaffPayment: 0, dispatchFee: 0, actualClosingCash: 235000 });
+    expect(result.expectedClosingCash).toBe(235000);
+    expect(result.cashProfit).toBe(35000);
     expect(result.difference).toBe(0);
+  });
+
+  it("送迎ドライバー給与から日払いを控除する", () => {
+    const closings = [{ drivers: [{ driverId: "driver-1", name: "太郎", dailyRate: 10000, dailyPayment: 6000 }] }] as DailyClosing[];
+    expect(calculateDriverPayroll(closings, { "driver-1": 2000 })).toEqual([{
+      id: "driver-1", name: "太郎", days: 1, basic: 10000, remote: 2000,
+      gross: 12000, dailyPayment: 6000, net: 6000
+    }]);
   });
 });
 
