@@ -15,7 +15,7 @@ import { PosProductDetails } from "./store-work";
 type Props = { data: AccountingWorkspaceData; user: User; busy: boolean; run: (action: () => Promise<unknown>, message: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void };
 type Section = "approval" | "castSales" | "castRewards" | "introducers" | "staffPayroll" | "driverPayroll" | "expenses" | "balance";
 
-const statusLabel = { submitted: "確認待ち", returned: "差戻し", approved: "承認済み", withdrawn: "取下げ" } as const;
+const statusLabel = { submitted: "確認待ち", returned: "差戻し中", approved: "承認済み", withdrawn: "店舗編集中（取下げ）" } as const;
 const expenseLabels: Record<string, string> = { beautyTrial: "美容室手当", introduction: "紹介料", advertising: "広告等", supplies: "備品・消耗品他", entertainment: "交際費・プレゼント等", liquor: "酒代", transportOther: "交通費・その他" };
 const classificationLabels: Record<LegacyBottleClassification, string> = { honShimei: "本指名", jonaiExtension: "場内延長", excluded: "対象外" };
 
@@ -154,7 +154,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
   return <div className="grid">
     <Card><div className="month-toolbar"><Field label="対象月"><input className="input" type="month" value={month} onChange={(event) => changeMonth(event.target.value)} /></Field><span>承認済み営業日 <strong>{results?.approvedDays ?? approved.length}日</strong></span>{state?.status === "closed" ? <StatusPill tone="good">月次確定済み 第{state.currentSnapshotRevision}版</StatusPill> : state?.status === "closing" ? <StatusPill tone="warn">月次確定処理中</StatusPill> : <StatusPill>未確定</StatusPill>}{!closed && state?.status !== "closing" && (section !== "castSales" || adjustmentsDirty) && <button className="button" disabled={busy || !adjustmentsDirty} onClick={() => void save()}>経理入力を保存</button>}{!closed && state?.status !== "closing" && <button className="button secondary" disabled={busy || adjustmentsDirty || calculationsBlocked || !finalizeCheck.allowed} onClick={finalize}>月次確定</button>}{state?.status === "closing" && <button className="button danger" disabled={busy} onClick={cancelClosing}>確定処理を中止</button>}{closed && <button className="button danger" disabled={busy} onClick={reopen}>確定解除</button>}</div></Card>
     {state?.status === "closing" && <div className="notice error">月次確定処理中です。画面を更新しても解消しない場合は、処理を行った担当者と通信状態を確認してください。</div>}
-    {!closed && finalizeCheck.unresolvedDaily.length > 0 && <div className="notice error"><strong>未処理の日次データがあるため月次確定できません。</strong><ul>{finalizeCheck.unresolvedDaily.map((row) => <li key={row.id}>{row.businessDate}：{statusLabel[row.status]}</li>)}</ul></div>}
+    {!closed && finalizeCheck.unresolvedDaily.length > 0 && <div className="notice error"><strong>未承認・差戻し中・店舗編集中の日次データがあるため月次確定できません。</strong><ul>{finalizeCheck.unresolvedDaily.map((row) => <li key={row.id}>{row.businessDate}：{statusLabel[row.status]}</li>)}</ul></div>}
     {!closed && adjustmentsDirty && !calculationsBlocked && <div className="notice">未保存の経理入力があります。保存すると月次確定できます。</div>}
     {closed && !currentSnapshot && <div className="notice error">確定時の月次データを読み込めません。確定解除は可能ですが、先にFirebaseデータと通信状態を確認してください。</div>}
     {!closed && allLegacyBottles.length > 0 && <LegacyBottleClassifications rows={allLegacyBottles} adjustments={adjustments} setAdjustments={setAdjustments} disabled={busy || locked} onSave={save} />}

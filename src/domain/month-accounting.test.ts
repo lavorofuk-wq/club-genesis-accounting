@@ -600,6 +600,29 @@ describe("月次会計ドメイン", () => {
     );
   });
 
+  it("POS商品行のバック対象人数が変われば同じupdatedAtでもfingerprintが変わる", async () => {
+    const originalClosing = approvedClosing({
+      posSnapshot: {
+        transactions: [{
+          transactionId: "tx-1",
+          items: [{
+            itemId: "drink-1",
+            category: "castDrink",
+            price: 10_000,
+            quantity: 1,
+            backTargetCastIds: ["p1", "p2", "p3"],
+          }],
+        }],
+      } as unknown as DailyClosing["posSnapshot"],
+    });
+    const changedClosing = structuredClone(originalClosing);
+    changedClosing.posSnapshot.transactions[0].items[0].backTargetCastIds = ["p1", "p2"];
+
+    expect(await monthlySourceFingerprint(workspace({ closings: [originalClosing] }), month, adjustments())).not.toBe(
+      await monthlySourceFingerprint(workspace({ closings: [changedClosing] }), month, adjustments()),
+    );
+  });
+
   it("欠落した空配列を復元し、不正なsummaryを拒否する", () => {
     const storedWithoutEmptyArrays: Record<string, unknown> = {
       schemaVersion: 1,
@@ -659,8 +682,31 @@ describe("月次会計ドメイン", () => {
       "accounting-user",
       "2026-09-30T23:59:59.000Z",
     );
+    expect(snapshot.calculationVersion).toBe("2.8.1");
     const corrupted = structuredClone(snapshot) as unknown as { castSalesReports: Array<{ days: Array<Record<string, unknown>> }> };
     delete corrupted.castSalesReports[0].days[0].businessDate;
+
+    expect(normalizeMonthlyAccountingSnapshot(corrupted, month, 1)).toBeUndefined();
+  });
+
+  it("1円単位で保存する商品バックに小数がある破損スナップショットを拒否する", async () => {
+    const closing = approvedClosing({ casts: [dailyCast()] });
+    const source = workspace({ casts: [cast()], closings: [closing] });
+    const input = adjustments();
+    const results = calculateMonthlyAccounting(source, month, input);
+    const snapshot = buildMonthlySnapshot(
+      month,
+      1,
+      await monthlySourceFingerprint(source, month, input),
+      input,
+      results,
+      source.closings,
+      "accounting-user",
+      "2026-09-30T23:59:59.000Z",
+    );
+    const corrupted = structuredClone(snapshot);
+    corrupted.castSalesReports[0].days[0].backs.find((row) => row.key === "bottle")!.amount = 0.5;
+    corrupted.castSalesReports[0].days[0].backTotal = 0.5;
 
     expect(normalizeMonthlyAccountingSnapshot(corrupted, month, 1)).toBeUndefined();
   });
@@ -726,6 +772,24 @@ describe("月次会計ドメイン", () => {
     expect(result.allowed).toBe(false);
     expect(result.integrityIssues).toContain("2026-09-02の承認済み日次データが複数あります。重複データを差し戻してから確定してください。");
     expect(calculateMonthlyAccounting(workspace({ closings: [first, duplicate] }), month, adjustments()).approvedDays).toBe(1);
+  });
+
+  it.each([
+    ["確認待ち", "submitted"],
+    ["差戻し中", "returned"],
+    ["店舗編集中（取下げ）", "withdrawn"],
+  ] as const)("%sの日次が1件でもあれば月次確定を拒否する", (_label, status) => {
+    const unresolved = approvedClosing({ status });
+    const result = canFinalizeMonthlyAccounting(
+      workspace({ closings: [unresolved] }),
+      month,
+      adjustments(),
+      true,
+    );
+
+    expect(result.allowed).toBe(false);
+    expect(result.unresolvedDaily).toHaveLength(1);
+    expect(result.unresolvedDaily[0].status).toBe(status);
   });
 
   it("同月の体入日と在籍日で出勤顧問料が異なっても在籍条件を採用し体入日の売上・バックを統合する", () => {

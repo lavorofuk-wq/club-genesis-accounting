@@ -525,7 +525,7 @@ export function AccountingApp() {
           </StatusPill>
           <small>{user.email}</small>
           <small>
-            Ver2.8.0 ·{" "}
+            Ver2.8.1 ·{" "}
             {role === "shop" ? "店舗" : role === "accounting" ? "経理" : "OP"}
           </small>
           <button className="button secondary" disabled={busy} onClick={logout}>
@@ -647,7 +647,7 @@ function Login({ notice = "" }: { notice?: string }) {
           <span>CLUB GENESIS</span>
           <strong>GMS</strong>
           <p>GENESIS Management System</p>
-          <small>Ver2.8.0</small>
+          <small>Ver2.8.1</small>
         </div>
         <div className="stack">
           <label className="field">

@@ -6,7 +6,7 @@ import type {
   BottleAllocation, CastKind, DailyCast, DailyClosing, DailyDriverWork, DailyExpense, DailyStaffWork, ExpenseCategory,
   PosClosingV3, PosItem, PosTransaction
 } from "@/domain/gms";
-import { buildDailyCasts, calculateCash, canMapAsDispatch, floorHundred, hoursBetweenQuarter, isCastMappingComplete, parsePosClosingV3, posCastReferences, posItemOccurrenceKey, rateForMonth, requiresBottleCost } from "@/domain/gms";
+import { buildDailyCasts, calculateCash, canMapAsDispatch, floorHundred, hoursBetweenQuarter, isCastMappingComplete, parsePosClosingV3, posCastReferences, posItemOccurrenceKey, rateForMonth, requiresBottleCost, restoreDailyCastBackMetadata } from "@/domain/gms";
 import type { AccountingWorkspaceData } from "@/domain/month-accounting";
 import { submitClosing, withdrawClosing } from "@/lib/firebase/repository";
 import { Card, Field, MoneyInput, StatusPill, Table, yen } from "./ui";
@@ -63,7 +63,9 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
   const [mapping, setMapping] = useState<Record<string, string>>(() => initial ? Object.fromEntries(initial.casts.map((row) => [row.posCastId, row.masterId || "dispatch"])) : {});
   const [allowInitialSnapshotMapping, setAllowInitialSnapshotMapping] = useState(Boolean(initial?.posSnapshot));
   const [specialCosts, setSpecialCosts] = useState<Record<string, number>>(() => initialStoredBottleCosts(initial));
-  const [castRows, setCastRows] = useState<DailyCast[]>(initial?.casts || []);
+  const [castRows, setCastRows] = useState<DailyCast[]>(() => initial?.posSnapshot
+    ? restoreDailyCastBackMetadata(initial.posSnapshot, initial.casts || [])
+    : initial?.casts || []);
   const [staffWork, setStaffWork] = useState<DailyStaffWork[]>(() => (initial?.staffWork || []).map((row) => row.kind === "trial"
     ? { ...row, dailyPayment: floorHundred(row.hourlyRate * row.hours) }
     : row));
@@ -245,10 +247,12 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     if (!pos || !cash) return;
     if (workflowLock) return setError(workflowLock);
     if (!ensureCurrentReferences()) return;
+    // 旧版で保存された再編集データも、手当・控除等を保持したまま商品バック明細だけ最新形式へ揃える。
+    const submissionCastRows = restoreDailyCastBackMetadata(pos, castRows);
     const value: DailyClosing = {
       id: initial?.id || `daily_${pos.businessDate.replaceAll("-", "")}`,
       businessDate: pos.businessDate, status: "submitted", submissionId: pos.submissionId, checksum: pos.checksum,
-      sales: pos.sales, customers: pos.customers, nominations: pos.nominations, casts: castRows, staffWork, drivers: driverRows, expenses,
+      sales: pos.sales, customers: pos.customers, nominations: pos.nominations, casts: submissionCastRows, staffWork, drivers: driverRows, expenses,
       staffDailyPaymentTotal: staffWork.reduce((sum, row) => sum + row.dailyPayment, 0), dispatchStaffPayment, dispatchCastPayment, dispatchFee,
       liquorDeliveryAmount, cash, posSnapshot: pos, updatedAt: new Date().toISOString()
     };

@@ -18,6 +18,7 @@ import {
   posItemOccurrenceKey,
   posCastReferences,
   requiresBottleCost,
+  restoreDailyCastBackMetadata,
   rewardRateForSales,
   sha256Checksum,
   type DailyClosing,
@@ -400,6 +401,96 @@ describe("GMS報酬・日次計算", () => {
     expect(reward.drinkBack).toBe(200); // 155円→100円を2商品分
   });
 
+  it("商品1行のバック総額を先に切り捨て、3人へ333円ずつ均等分配する", () => {
+    const value = pos();
+    const transaction = value.transactions[0];
+    transaction.items.push({
+      ...transaction.items.find((item) => item.itemId === "hon-2")!,
+      itemId: "hon-3",
+      castId: "p3",
+      castName: "夏子",
+    });
+    const bottle = transaction.items.find((item) => item.itemId === "bottle")!;
+    Object.assign(bottle, {
+      price: 2_000,
+      quantity: 2,
+      backTargetCastIds: ["p1", "p2", "p3"],
+      backTargetCastNames: ["花子", "春子", "夏子"],
+      backAllocation: "equal",
+    });
+    const drink = transaction.items.find((item) => item.itemId === "drink")!;
+    Object.assign(drink, {
+      price: 5_000,
+      quantity: 2,
+      backTargetCastIds: ["p1", "p2", "p3"],
+      backTargetCastNames: ["花子", "春子", "夏子"],
+      backAllocation: "equal",
+    });
+    value.castWork.push({
+      castId: "p3", castName: "夏子", castType: "regular", isTrial: false,
+      startTime: "20:00", endTime: "00:00", breakMinutes: 0, hours: 4,
+    });
+    value.castSales.push({
+      castId: "p3", castName: "夏子", honShimeiSales: 0,
+      jonaiExtensionSales: 0, drinkSales: 0, totalAttributedSales: 0,
+    });
+    const mapping = {
+      p1: { masterId: "c1", name: "花子", kind: "regular" as const, hourlyRate: 3_000 },
+      p2: { masterId: "c2", name: "春子", kind: "regular" as const, hourlyRate: 3_000 },
+      p3: { masterId: "c3", name: "夏子", kind: "regular" as const, hourlyRate: 3_000 },
+    };
+    const rows = buildDailyCasts(value, mapping, [{
+      id: "l1", kind: "champagneWine", name: "テストシャンパン",
+      salePrice: 2_000, costPrice: 0, createdAt: "", updatedAt: "",
+    }], {});
+    const closing = {
+      id: "three-way", businessDate: value.businessDate, status: "approved",
+      casts: rows, posSnapshot: value,
+    } as DailyClosing;
+    const rewards = calculateCastRewards([closing], [], "2026-09");
+    const reports = calculateCastSalesReports([closing], [], "2026-09");
+
+    expect(rows).toHaveLength(3);
+    expect(rows.map((row) => row.bottles[0].backAmount)).toEqual([333, 333, 333]);
+    expect(rows.map((row) => row.drinkAllocations?.[0].backAmount)).toEqual([333, 333, 333]);
+    expect(rewards.map((row) => row.bottleBack)).toEqual([333, 333, 333]);
+    expect(rewards.map((row) => row.drinkBack)).toEqual([333, 333, 333]);
+    expect(rewards.reduce((sum, row) => sum + row.bottleBack, 0)).toBe(999);
+    expect(rewards.reduce((sum, row) => sum + row.drinkBack, 0)).toBe(999);
+    expect(reports.map((report) => report.days[0].backs.find((back) => back.key === "bottle")?.amount)).toEqual([333, 333, 333]);
+    expect(reports.map((report) => report.days[0].backs.find((back) => back.key === "drink")?.amount)).toEqual([333, 333, 333]);
+    rewards.forEach((reward) => expect(reward.hourlyAndBack).toBe(
+      reward.hourlyPay + reward.honShimeiBack + reward.banaiShimeiBack
+      + reward.dohanBack + reward.bottleBack + reward.drinkBack,
+    ));
+
+    // backAmountをまだ保存していない既存日次も、posSnapshotの原本から同じ結果へ再計算する。
+    const existingRows = rows.map((row) => ({
+      ...row,
+      bottles: row.bottles.map(({ backAmount: _backAmount, ...stored }) => stored),
+      drinkAllocations: row.drinkAllocations?.map(({
+        backAmount: _backAmount,
+        sourceKey: _sourceKey,
+        ...stored
+      }) => stored),
+    }));
+    const recalculated = calculateCastRewards([{
+      id: "existing-pos-snapshot", businessDate: value.businessDate, status: "approved",
+      casts: existingRows, posSnapshot: value,
+    } as DailyClosing], [], "2026-09");
+    expect(recalculated.map((row) => row.bottleBack)).toEqual([333, 333, 333]);
+    expect(recalculated.map((row) => row.drinkBack)).toEqual([333, 333, 333]);
+
+    const restored = restoreDailyCastBackMetadata(value, existingRows.map((row, index) => ({
+      ...row,
+      beautyAllowance: index === 0 ? 500 : 0,
+      dailyPayment: index === 0 ? 2_000 : 0,
+    })));
+    expect(restored.map((row) => row.bottles[0].backAmount)).toEqual([333, 333, 333]);
+    expect(restored.map((row) => row.drinkAllocations?.[0].backAmount)).toEqual([333, 333, 333]);
+    expect(restored[0]).toMatchObject({ beautyAllowance: 500, dailyPayment: 2_000 });
+  });
+
   it("体入扱いで出力された派遣キャストを日次キャストデータから除外する", () => {
     const value = pos();
     value.castWork[0] = { ...value.castWork[0], castType: "trial", isTrial: true };
@@ -408,7 +499,13 @@ describe("GMS報酬・日次計算", () => {
       p2: { masterId: "c2", name: "春子", kind: "regular", hourlyRate: 3000 }
     }, [{ id: "l1", kind: "champagneWine", name: "テストシャンパン", salePrice: 30000, costPrice: 10000, createdAt: "", updatedAt: "" }], {});
     expect(rows.map((row) => row.posCastId)).toEqual(["p2"]);
-    expect(rows[0].bottles[0]).toMatchObject({ salesAmount: 15000, costAmount: 5000 });
+    expect(rows[0].bottles[0]).toMatchObject({ salesAmount: 15000, costAmount: 5000, backAmount: 2500 });
+    const reward = calculateCastRewards([{
+      id: "dispatch-target", businessDate: value.businessDate, status: "approved",
+      casts: rows, posSnapshot: value,
+    } as DailyClosing], [], "2026-09")[0];
+    // 派遣分の給与データは作らないが、商品バックの分母にはPOS上の全対象者を使う。
+    expect(reward.bottleBack).toBe(2500);
   });
 
   it("体入行は派遣を選ぶと照合完了になり、在籍行では派遣を選べない", () => {

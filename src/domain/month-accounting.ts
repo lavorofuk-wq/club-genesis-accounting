@@ -19,7 +19,7 @@ import type {
   WorkspaceData,
 } from "./gms";
 
-export const MONTHLY_CALCULATION_VERSION = "2.8.0";
+export const MONTHLY_CALCULATION_VERSION = "2.8.1";
 
 export type IntroducerEntryEvent = {
   id: string;
@@ -169,7 +169,7 @@ function normalizeSnapshotBacks(value: unknown) {
   const keys = new Set(["honShimei", "banaiShimei", "dohan", "bottle", "drink"]);
   const rows = snapshotList<unknown>(value);
   if (rows.some((item) => !snapshotObject(item) || !keys.has(String(item.key || ""))
-    || !snapshotString(item.label) || !snapshotNonNegative(item.amount))) return undefined;
+    || !snapshotString(item.label) || !snapshotInteger(item.amount))) return undefined;
   return rows as CastSalesReport["days"][number]["backs"];
 }
 
@@ -260,7 +260,11 @@ export function normalizeMonthlyAccountingSnapshot(
     "honShimeiBack", "banaiShimeiBack", "dohanBack", "bottleBack", "drinkBack", "hourlyAndBack",
     "rewardRate", "salesRewardBase", "salesReward", "adoptedReward", "beautyAllowance", "grossPay",
     "dailyPayment", "advancePayment", "transportFee", "withholding",
-  ], { integerKeys: ["days", "advisoryDays"], booleanKeys: ["trialOnly"], allowNegativeKeys: ["netPay"] });
+  ], {
+    integerKeys: ["days", "advisoryDays", "bottleBack", "drinkBack", "hourlyAndBack"],
+    booleanKeys: ["trialOnly"],
+    allowNegativeKeys: ["netPay"],
+  });
   const introducerPayments = validSnapshotRows(row.introducerPayments,
     ["id", "introducer", "cast", "feeType", "adopted"],
     ["honShimeiLiquorCost", "salesBase", "salesFee", "grossBase", "grossFee", "attendanceAdvisory", "entryAdvisory", "advisory", "total"]);
@@ -664,7 +668,7 @@ export function canFinalizeMonthlyAccounting(
   const resolvedEntryEvents = entryEvents ?? data.introducerEntryEvents ?? [];
   const unclassified = findUnclassifiedLegacyBottles(data.closings, month, adjustments);
   const unresolvedDaily = data.closings.filter((row) => row.businessDate.startsWith(month)
-    && (row.status === "submitted" || row.status === "returned"));
+    && (row.status === "submitted" || row.status === "returned" || row.status === "withdrawn"));
   const approved = data.closings.filter((row) => row.businessDate.startsWith(month) && row.status === "approved");
   const businessDateCounts = new Map<string, number>();
   approved.forEach((row) => businessDateCounts.set(row.businessDate, (businessDateCounts.get(row.businessDate) || 0) + 1));

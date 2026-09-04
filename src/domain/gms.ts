@@ -182,15 +182,21 @@ export type BottleAllocation = {
   quantity: number;
   salesAmount: number;
   costAmount: number;
+  /** 商品1行全体の％バックを100円未満切捨て後、対象人数で均等割りした1人分（1円未満切捨て）。 */
+  backAmount?: number;
   specialCost: boolean;
 };
 
 /** POSの商品明細1行を、バック対象キャストへ配賦したドリンク売上。 */
 export type DrinkAllocation = {
   itemId: string;
+  /** POS会計内の商品出現位置。商品IDが別会計で再利用されても一意になる。 */
+  sourceKey?: string;
   name: string;
   quantity: number;
   salesAmount: number;
+  /** 商品1行全体の10%を100円未満切捨て後、対象人数で均等割りした1人分（1円未満切捨て）。 */
+  backAmount?: number;
 };
 
 export type DailyCast = {
@@ -458,6 +464,10 @@ export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
         ["quantity", "salesAmount", "costAmount"],
         `${label}のボトル「${String(bottle.name || bottleIndex + 1)}」`,
       );
+      const parsedBackAmount = bottle.backAmount === undefined ? undefined : parsedStoredNumber(bottle.backAmount);
+      if (bottle.backAmount !== undefined && (parsedBackAmount === undefined || parsedBackAmount < 0 || !Number.isSafeInteger(parsedBackAmount))) {
+        integrityIssues.push(`${label}のボトル「${String(bottle.name || bottleIndex + 1)}」のバック額を1円単位へ補正しました。`);
+      }
       return [{
         ...bottle,
         itemId: String(bottle.itemId || ""),
@@ -466,6 +476,7 @@ export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
         quantity: bottleNumeric.quantity,
         salesAmount: bottleNumeric.salesAmount,
         costAmount: bottleNumeric.costAmount,
+        ...(bottle.backAmount === undefined ? {} : { backAmount: Math.max(0, Math.floor(parsedBackAmount || 0)) }),
         specialCost: Boolean(bottle.specialCost),
       }];
     });
@@ -483,11 +494,17 @@ export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
           ["quantity", "salesAmount"],
           `${label}のドリンク「${String(drink.name || drinkIndex + 1)}」`,
         );
+        const parsedBackAmount = drink.backAmount === undefined ? undefined : parsedStoredNumber(drink.backAmount);
+        if (drink.backAmount !== undefined && (parsedBackAmount === undefined || parsedBackAmount < 0 || !Number.isSafeInteger(parsedBackAmount))) {
+          integrityIssues.push(`${label}のドリンク「${String(drink.name || drinkIndex + 1)}」のバック額を1円単位へ補正しました。`);
+        }
         return [{
           itemId: String(drink.itemId || ""),
+          ...(drink.sourceKey === undefined ? {} : { sourceKey: String(drink.sourceKey || "") }),
           name: String(drink.name || ""),
           quantity: drinkNumeric.quantity,
           salesAmount: drinkNumeric.salesAmount,
+          ...(drink.backAmount === undefined ? {} : { backAmount: Math.max(0, Math.floor(parsedBackAmount || 0)) }),
         }];
       });
     const introducer = row.introducer && typeof row.introducer === "object"
@@ -826,6 +843,15 @@ export const floorHundred = (value: number) => {
     : hundredUnits;
   return Math.floor(stableUnits) * 100;
 };
+
+/**
+ * 商品1行全体の％バックを先に100円単位へ切り捨ててから均等割りする。
+ * 割り切れない1円未満は各人で切り捨て、余りは誰にも上乗せしない。
+ */
+export function splitItemBackPerTarget(totalEligibleAmount: number, rate: number, targetCount: number) {
+  if (!Number.isSafeInteger(targetCount) || targetCount <= 0) return 0;
+  return Math.floor(floorHundred(Math.max(0, totalEligibleAmount) * rate) / targetCount);
+}
 
 export function hoursBetweenQuarter(startTime: string, endTime: string, breakMinutes = 0) {
   const parse = (value: string) => {
@@ -1245,23 +1271,35 @@ export function buildDailyCasts(
         dohanAmount += dohanBack(transaction) * quantity;
       }
       if (item.category === "castDrink" && targets.includes(source.id)) {
-        const salesAmount = asNumber(item.price) * quantity / Math.max(1, targets.length);
+        const divisor = Math.max(1, targets.length);
+        const salesAmount = asNumber(item.price) * quantity / divisor;
         drinkSales += salesAmount;
-        drinkAllocations.push({ itemId: item.itemId, name: item.label, quantity, salesAmount });
+        drinkAllocations.push({
+          itemId: item.itemId,
+          sourceKey: posItemOccurrenceKey(transaction, itemIndex),
+          name: item.label,
+          quantity,
+          salesAmount,
+          backAmount: splitItemBackPerTarget(asNumber(item.price) * quantity, 0.1, divisor),
+        });
       }
       if (["champagneWine", "keepBottle"].includes(item.category) && asNumber(item.price) * quantity > 0 && targets.includes(source.id)) {
         const master = liquor.find((row) => row.kind === item.category && row.name === item.label && row.salePrice === asNumber(item.price));
         const sourceKey = posItemOccurrenceKey(transaction, itemIndex);
         const costPrice = master?.costPrice ?? specialCosts[sourceKey];
         const divisor = Math.max(1, targets.length);
+        const totalSalesAmount = asNumber(item.price) * quantity;
+        const totalCostAmount = asNumber(costPrice) * quantity;
+        const rate = item.category === "champagneWine" ? 0.25 : 0.15;
         bottles.push({
           itemId: item.itemId,
           sourceKey,
           name: item.label,
           kind: item.category as BottleAllocation["kind"],
           quantity,
-          salesAmount: asNumber(item.price) * quantity / divisor,
-          costAmount: asNumber(costPrice) * quantity / divisor,
+          salesAmount: totalSalesAmount / divisor,
+          costAmount: totalCostAmount / divisor,
+          backAmount: splitItemBackPerTarget(totalSalesAmount - totalCostAmount, rate, divisor),
           specialCost: !master
         });
       }
@@ -1298,6 +1336,7 @@ export function buildDailyCasts(
 
 function bottleBack(rows: BottleAllocation[]) {
   return rows.reduce((sum, row) => {
+    if (row.backAmount !== undefined) return sum + Math.max(0, Math.floor(asNumber(row.backAmount)));
     const rate = row.kind === "champagneWine" ? 0.25 : 0.15;
     return sum + floorHundred(Math.max(0, row.salesAmount - row.costAmount) * rate);
   }, 0);
@@ -1313,7 +1352,9 @@ function drinkBack(rows: DailyCast[]) {
   rows.forEach((row) => {
     if (Array.isArray(row.drinkAllocations) && row.drinkAllocations.length > 0) {
       itemizedBack += row.drinkAllocations.reduce(
-        (sum, allocation) => sum + floorHundred(asNumber(allocation.salesAmount) * 0.1),
+        (sum, allocation) => sum + (allocation.backAmount === undefined
+          ? floorHundred(asNumber(allocation.salesAmount) * 0.1)
+          : Math.max(0, Math.floor(asNumber(allocation.backAmount)))),
         0,
       );
     } else {
@@ -1355,6 +1396,80 @@ function firebaseKeyPart(value: unknown) {
 export function posItemOccurrenceKey(transaction: Pick<PosTransaction, "transactionId" | "items">, itemIndex: number) {
   const itemId = transaction.items[itemIndex]?.itemId || "";
   return [transaction.transactionId, itemIndex, itemId].map(firebaseKeyPart).join("|");
+}
+
+/** 保存済みの1人分原価から商品単価を復元し、POS商品行の正しい1人分バックを返す。 */
+export function bottleBackAmountFromPosItem(
+  item: Pick<PosItem, "category" | "price" | "quantity">,
+  allocation: Pick<BottleAllocation, "quantity" | "costAmount">,
+  targetCount: number,
+) {
+  const allocationQuantity = asNumber(allocation.quantity);
+  const unitCost = allocationQuantity > 0
+    ? Math.round(asNumber(allocation.costAmount) * targetCount / allocationQuantity)
+    : 0;
+  const totalCostAmount = unitCost * asNumber(item.quantity);
+  const rate = item.category === "champagneWine" ? 0.25 : 0.15;
+  return splitItemBackPerTarget(
+    asNumber(item.price) * asNumber(item.quantity) - totalCostAmount,
+    rate,
+    targetCount,
+  );
+}
+
+/**
+ * 旧保存形式の再編集時に、保存済みの手当・控除等は維持したまま、
+ * POS原本から商品出現キーと新しい1人分バック額だけを復元する。
+ */
+export function restoreDailyCastBackMetadata(closing: PosClosingV3, rows: DailyCast[]) {
+  return rows.map((row): DailyCast => {
+    const bottleOccurrences = closing.transactions.flatMap((transaction) =>
+      transaction.items.flatMap((item, itemIndex) => {
+        if (!["champagneWine", "keepBottle"].includes(item.category)
+          || asNumber(item.price) * asNumber(item.quantity) <= 0) return [];
+        const targets = effectiveBottleBackTargets(transaction, item);
+        if (!targets.includes(row.posCastId)) return [];
+        return [{ item, sourceKey: posItemOccurrenceKey(transaction, itemIndex), targetCount: targets.length }];
+      }));
+    const claimed = new Set<string>();
+    const bottles = (row.bottles || []).map((bottle) => {
+      const occurrence = (bottle.sourceKey
+        ? bottleOccurrences.find((candidate) => candidate.sourceKey === bottle.sourceKey)
+        : undefined)
+        || bottleOccurrences.find((candidate) => !claimed.has(candidate.sourceKey)
+          && candidate.item.itemId === bottle.itemId
+          && candidate.item.label === bottle.name
+          && candidate.item.category === bottle.kind);
+      if (!occurrence) return bottle;
+      claimed.add(occurrence.sourceKey);
+      return {
+        ...bottle,
+        sourceKey: occurrence.sourceKey,
+        backAmount: bottleBackAmountFromPosItem(occurrence.item, bottle, occurrence.targetCount),
+      };
+    });
+    const drinkAllocations = closing.transactions.flatMap((transaction) =>
+      transaction.items.flatMap((item, itemIndex): DrinkAllocation[] => {
+        const targets = item.backTargetCastIds || [];
+        if (item.category !== "castDrink" || !targets.includes(row.posCastId)) return [];
+        const divisor = Math.max(1, targets.length);
+        const salesAmount = asNumber(item.price) * asNumber(item.quantity) / divisor;
+        return [{
+          itemId: item.itemId,
+          sourceKey: posItemOccurrenceKey(transaction, itemIndex),
+          name: item.label,
+          quantity: asNumber(item.quantity),
+          salesAmount,
+          backAmount: splitItemBackPerTarget(asNumber(item.price) * asNumber(item.quantity), 0.1, divisor),
+        }];
+      }));
+    return {
+      ...row,
+      bottles,
+      drinkSales: drinkAllocations.reduce((sum, drink) => sum + drink.salesAmount, 0),
+      drinkAllocations,
+    };
+  });
 }
 
 function hasAttributablePosSnapshot(closing: DailyClosing) {
@@ -1407,6 +1522,8 @@ function bottleAllocationsBySalesType(
   type BottleAttribution = {
     sourceKey: string;
     attribution: "honShimei" | "jonaiExtension" | undefined;
+    item: PosItem;
+    targetCount: number;
     claimed: boolean;
   };
   const attributionBySourceKey = new Map<string, BottleAttribution>();
@@ -1422,7 +1539,13 @@ function bottleAllocationsBySalesType(
         ? (honShimei ? "honShimei" : "jonaiExtension")
         : undefined;
       const sourceKey = posItemOccurrenceKey(transaction, itemIndex);
-      const record: BottleAttribution = { sourceKey, attribution, claimed: false };
+      const record: BottleAttribution = {
+        sourceKey,
+        attribution,
+        item,
+        targetCount: effectiveBottleBackTargets(transaction, item).length,
+        claimed: false,
+      };
       attributionBySourceKey.set(sourceKey, record);
       attributionByItemId.set(item.itemId, [...(attributionByItemId.get(item.itemId) || []), record]);
     });
@@ -1433,9 +1556,41 @@ function bottleAllocationsBySalesType(
       : attributionByItemId.get(bottle.itemId)?.find((candidate) => !candidate.claimed);
     if (record) record.claimed = true;
     const attribution = record?.attribution;
-    if (attribution) result[attribution].push(bottle);
+    if (attribution && record) {
+      result[attribution].push({
+        ...bottle,
+        // posSnapshot付きの既存データは、保存当時の配賦売上ではなく
+        // POSの商品1行全体と対象人数から新しい分配規則で再計算する。
+        backAmount: bottleBackAmountFromPosItem(record.item, bottle, record.targetCount),
+      });
+    }
     return result;
   }, { honShimei: [] as BottleAllocation[], jonaiExtension: [] as BottleAllocation[] });
+}
+
+function drinkBackFromPosSnapshot(closing: DailyClosing, row: DailyCast) {
+  if (!hasAttributablePosSnapshot(closing)) return undefined;
+  return closing.posSnapshot.transactions.reduce((transactionTotal, transaction) =>
+    transactionTotal + (transaction.items || []).reduce((itemTotal, item) => {
+      if (item.category !== "castDrink" || !(item.backTargetCastIds || []).includes(row.posCastId)) return itemTotal;
+      const targetCount = (item.backTargetCastIds || []).length;
+      return itemTotal + splitItemBackPerTarget(asNumber(item.price) * asNumber(item.quantity), 0.1, targetCount);
+    }, 0), 0);
+}
+
+/**
+ * posSnapshot付きの日次はPOSの商品行と対象人数を正とする。
+ * POS原本のない旧日次だけは、保存済み明細／集約値による従来計算を維持する。
+ */
+function drinkBackForEntries(entries: Array<{ closing: DailyClosing; row: DailyCast }>) {
+  let posItemBack = 0;
+  const legacyRows: DailyCast[] = [];
+  entries.forEach(({ closing, row }) => {
+    const back = drinkBackFromPosSnapshot(closing, row);
+    if (back === undefined) legacyRows.push(row);
+    else posItemBack += back;
+  });
+  return posItemBack + drinkBack(legacyRows);
 }
 
 function liquorCostBySalesType(closing: DailyClosing, row: DailyCast, adjustments?: MonthlyAdjustments) {
@@ -1465,7 +1620,7 @@ const castSalesBackLabels: Record<CastSalesBackBreakdown["key"], string> = {
   drink: "ドリンクバック",
 };
 
-function castSalesBacks(row: DailyCast, disabled: boolean, bottles: BottleAllocation[]): CastSalesBackBreakdown[] {
+function castSalesBacks(closing: DailyClosing, row: DailyCast, disabled: boolean, bottles: BottleAllocation[]): CastSalesBackBreakdown[] {
   const amounts: Record<CastSalesBackBreakdown["key"], number> = disabled ? {
     honShimei: 0, banaiShimei: 0, dohan: 0, bottle: 0, drink: 0,
   } : {
@@ -1473,7 +1628,7 @@ function castSalesBacks(row: DailyCast, disabled: boolean, bottles: BottleAlloca
     banaiShimei: floorHundred(asNumber(row.banaiShimeiCount) * 500),
     dohan: floorHundred(asNumber(row.dohanBack)),
     bottle: bottleBack(bottles),
-    drink: drinkBack([row]),
+    drink: drinkBackForEntries([{ closing, row }]),
   };
   return (Object.keys(castSalesBackLabels) as CastSalesBackBreakdown["key"][])
     .map((key) => ({ key, label: castSalesBackLabels[key], amount: amounts[key] }));
@@ -1541,7 +1696,7 @@ export function calculateCastSalesReports(
         jonaiExtension: allocationCost(bottleAllocations.jonaiExtension),
       };
       const totalLiquorCost = liquorCosts.honShimei + liquorCosts.jonaiExtension;
-      const backs = castSalesBacks(row, trialOnly, eligibleBottles);
+      const backs = castSalesBacks(closing, row, trialOnly, eligibleBottles);
       return {
         businessDate: closing.businessDate,
         startTime: row.startTime,
@@ -1632,8 +1787,10 @@ export function calculateCastRewards(
     const banaiShimeiBack = trialOnly ? 0 : floorHundred(sum("banaiShimeiCount") * 500);
     const totalDohanBack = trialOnly ? 0 : floorHundred(sum("dohanBack"));
     const totalBottleBack = trialOnly ? 0 : bottleBack(eligibleBottles);
-    const totalDrinkBack = trialOnly ? 0 : drinkBack(rows);
-    const hourlyAndBack = floorHundred(hourlyPay + honShimeiBack + banaiShimeiBack + totalDohanBack + totalBottleBack + totalDrinkBack);
+    const totalDrinkBack = trialOnly ? 0 : drinkBackForEntries(entries);
+    // 各商品バックは商品全体で100円単位へ切捨て後、1円単位で人数割り済み。
+    // ここで再び100円単位へ落とすと333円等の正しい個人配分が失われるため、単純合計する。
+    const hourlyAndBack = hourlyPay + honShimeiBack + banaiShimeiBack + totalDohanBack + totalBottleBack + totalDrinkBack;
     const salesRewardBase = trialOnly ? 0 : floorHundred(Math.max(0, honShimeiSales + jonaiExtensionSales - liquorCost * 0.5));
     const rewardRate = trialOnly ? 0 : rewardRateForSales(salesRewardBase);
     const salesReward = floorHundred(salesRewardBase * rewardRate);

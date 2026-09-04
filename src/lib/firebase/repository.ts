@@ -3,10 +3,18 @@
 import { get, runTransaction, set, update, ref } from "firebase/database";
 import type { User } from "firebase/auth";
 import { database, rootRef } from "./client";
-import { normalizeDailyClosing, normalizeMonthlyAdjustments, parsePosClosingV3 } from "@/domain/gms";
+import {
+  bottleBackAmountFromPosItem,
+  normalizeDailyClosing,
+  normalizeMonthlyAdjustments,
+  parsePosClosingV3,
+  posItemOccurrenceKey,
+  splitItemBackPerTarget,
+} from "@/domain/gms";
 import {
   buildMonthlySnapshot,
   calculateMonthlyAccounting,
+  canFinalizeMonthlyAccounting,
   monthlySourceFingerprint,
   normalizeMonthlyAccountingSnapshot,
 } from "@/domain/month-accounting";
@@ -264,6 +272,7 @@ function validateDailyClosingForSubmission(value: DailyClosing) {
     if (!condition) throw new Error(message);
   };
   const money = (amount: unknown) => typeof amount === "number" && Number.isFinite(amount) && amount >= 0;
+  const safeBackAmount = (amount: unknown) => Number.isSafeInteger(amount) && Number(amount) >= 0;
   const unique = (values: string[]) => new Set(values).size === values.length;
   require(validDate(value.businessDate), "営業日が正しくありません。");
   require(value.posSnapshot && value.posSnapshot.businessDate === value.businessDate, "POS原本と営業日が一致しません。");
@@ -284,8 +293,40 @@ function validateDailyClosingForSubmission(value: DailyClosing) {
   require(value.nominations.honShimeiCount === value.posSnapshot.nominations.honShimeiCount
     && value.nominations.jonaiCount === value.posSnapshot.nominations.jonaiCount,
   "指名本数がPOS原本と一致しません。JSONを再取込してください。");
+  const posItems = new Map(value.posSnapshot.transactions.flatMap((transaction) =>
+    transaction.items.map((item, itemIndex) => [
+      posItemOccurrenceKey(transaction, itemIndex),
+      { item },
+    ] as const)));
+  const castPosIds = new Set(value.casts.map((row) => row.posCastId));
+  const pairKey = (posCastId: string, sourceKey: string) => JSON.stringify([posCastId, sourceKey]);
+  const expectedBottlePairs = new Set<string>();
+  const expectedDrinkPairs = new Set<string>();
+  value.posSnapshot.transactions.forEach((transaction) => transaction.items.forEach((item, itemIndex) => {
+    const sourceKey = posItemOccurrenceKey(transaction, itemIndex);
+    const expected = item.category === "castDrink"
+      ? expectedDrinkPairs
+      : (item.category === "champagneWine" || item.category === "keepBottle") && item.price * item.quantity > 0
+        ? expectedBottlePairs
+        : undefined;
+    if (!expected) return;
+    item.backTargetCastIds
+      .filter((posCastId) => castPosIds.has(posCastId))
+      .forEach((posCastId) => expected.add(pairKey(posCastId, sourceKey)));
+  }));
+  const actualBottlePairs = new Set<string>();
+  const actualDrinkPairs = new Set<string>();
+  const bottleAllocationBySource = new Map<string, { salesAmount: number; costAmount: number; backAmount: number }>();
+  const drinkAllocationBySource = new Map<string, { salesAmount: number; backAmount: number }>();
+  const workByPosId = new Map(value.posSnapshot.castWork.map((work) => [work.castId, work]));
+  // regularは派遣指定できないため必ず日次キャスト行が必要。trialの行なしは正規の派遣指定になり得る。
+  require(value.posSnapshot.castWork
+    .filter((work) => work.castType === "regular")
+    .every((work) => castPosIds.has(work.castId)), "POS原本の在籍キャスト勤務が店舗データから欠落しています。JSONを再取込してください。");
   value.casts.forEach((row) => {
     require((row.kind === "regular" || row.kind === "trial") && Boolean(row.masterId) && Boolean(row.posCastId) && Boolean(row.name), "キャストデータの識別情報が正しくありません。");
+    const sourceWork = workByPosId.get(row.posCastId);
+    require(Boolean(sourceWork) && sourceWork!.castType === row.kind && sourceWork!.castName === row.name, `${row.name}の勤務区分がPOS原本と一致しません。JSONを再取込してください。`);
     require(money(row.hours) && row.hours > 0 && Number.isInteger(row.hours * 4), `${row.name}の勤務時間が15分単位ではありません。`);
     [row.hourlyRate, row.honShimeiCount, row.banaiShimeiCount, row.dohanCount, row.dohanBack,
       row.honShimeiSales, row.jonaiExtensionSales, row.drinkSales, row.liquorCost, row.beautyAllowance,
@@ -294,13 +335,69 @@ function validateDailyClosingForSubmission(value: DailyClosing) {
     require(row.transportFee % 500 === 0, `${row.name}の送迎代は500円単位で入力してください。`);
     require(row.beautyAllowance === 0 || (row.kind === "regular" && row.beautyAllowance === 500), `${row.name}の美容室手当が正しくありません。`);
     require(Array.isArray(row.bottles), `${row.name}のボトル明細が不完全です。`);
+    require(unique(row.bottles.map((bottle) => bottle.sourceKey || "")), `${row.name}のボトル明細に同じPOS商品が重複しています。JSONを再取込してください。`);
     row.bottles.forEach((bottle) => {
       require(Boolean(bottle.itemId) && Boolean(bottle.name) && money(bottle.quantity) && bottle.quantity > 0, `${row.name}のボトル明細が正しくありません。`);
       require(money(bottle.salesAmount) && money(bottle.costAmount), `${row.name}のボトル金額が正しくありません。`);
+      require(Boolean(bottle.sourceKey) && safeBackAmount(bottle.backAmount), `${row.name}のボトルバック額が1円単位の安全な整数ではありません。JSONを再取込してください。`);
+      actualBottlePairs.add(pairKey(row.posCastId, bottle.sourceKey || ""));
+      const source = posItems.get(bottle.sourceKey || "");
+      require(Boolean(source) && (source!.item.category === "champagneWine" || source!.item.category === "keepBottle")
+        && source!.item.category === bottle.kind
+        && source!.item.itemId === bottle.itemId
+        && source!.item.label === bottle.name
+        && source!.item.quantity === bottle.quantity
+        && source!.item.backTargetCastIds.includes(row.posCastId), `${row.name}のボトル明細がPOS原本と一致しません。JSONを再取込してください。`);
+      const targetCount = source!.item.backTargetCastIds.length;
+      require(Math.abs(bottle.salesAmount - source!.item.price * source!.item.quantity / targetCount) < 0.001, `${row.name}のボトル売上配賦がPOS原本と一致しません。JSONを再取込してください。`);
+      const expectedBack = bottleBackAmountFromPosItem(source!.item, bottle, targetCount);
+      require(bottle.backAmount === expectedBack, `${row.name}のボトルバック額がPOS原本と一致しません。JSONを再取込してください。`);
+      const prior = bottleAllocationBySource.get(bottle.sourceKey!);
+      require(!prior || (Math.abs(prior.salesAmount - bottle.salesAmount) < 0.001
+        && Math.abs(prior.costAmount - bottle.costAmount) < 0.001
+        && prior.backAmount === bottle.backAmount), `${bottle.name}の売上・原価・バックが対象キャストへ均等分配されていません。JSONを再取込してください。`);
+      bottleAllocationBySource.set(bottle.sourceKey!, {
+        salesAmount: bottle.salesAmount,
+        costAmount: bottle.costAmount,
+        backAmount: bottle.backAmount!,
+      });
     });
+    require(Array.isArray(row.drinkAllocations), `${row.name}のドリンク明細が不完全です。JSONを再取込してください。`);
+    require(unique(row.drinkAllocations!.map((drink) => drink.sourceKey || "")), `${row.name}のドリンク明細に同じPOS商品が重複しています。JSONを再取込してください。`);
+    row.drinkAllocations!.forEach((drink) => {
+      require(Boolean(drink.itemId) && Boolean(drink.name) && money(drink.quantity) && drink.quantity > 0
+        && money(drink.salesAmount), `${row.name}のドリンク明細が正しくありません。`);
+      require(Boolean(drink.sourceKey) && safeBackAmount(drink.backAmount), `${row.name}のドリンクバック額が1円単位の安全な整数ではありません。JSONを再取込してください。`);
+      actualDrinkPairs.add(pairKey(row.posCastId, drink.sourceKey || ""));
+      const source = posItems.get(drink.sourceKey || "");
+      require(Boolean(source) && source!.item.category === "castDrink"
+        && source!.item.itemId === drink.itemId
+        && source!.item.label === drink.name
+        && source!.item.quantity === drink.quantity
+        && source!.item.backTargetCastIds.includes(row.posCastId), `${row.name}のドリンク明細がPOS原本と一致しません。JSONを再取込してください。`);
+      require(Math.abs(drink.salesAmount - source!.item.price * source!.item.quantity / source!.item.backTargetCastIds.length) < 0.001, `${row.name}のドリンク売上配賦がPOS原本と一致しません。JSONを再取込してください。`);
+      const expectedBack = splitItemBackPerTarget(
+        source!.item.price * source!.item.quantity,
+        0.1,
+        source!.item.backTargetCastIds.length,
+      );
+      require(drink.backAmount === expectedBack, `${row.name}のドリンクバック額がPOS原本と一致しません。JSONを再取込してください。`);
+      const prior = drinkAllocationBySource.get(drink.sourceKey!);
+      require(!prior || (Math.abs(prior.salesAmount - drink.salesAmount) < 0.001
+        && prior.backAmount === drink.backAmount), `${drink.name}の売上・バックが対象キャストへ均等分配されていません。JSONを再取込してください。`);
+      drinkAllocationBySource.set(drink.sourceKey!, {
+        salesAmount: drink.salesAmount,
+        backAmount: drink.backAmount!,
+      });
+    });
+    require(Math.abs(row.drinkSales - row.drinkAllocations!.reduce((sum, drink) => sum + drink.salesAmount, 0)) < 0.001, `${row.name}のドリンク売上合計が明細と一致しません。JSONを再取込してください。`);
     const bottleCost = row.bottles.reduce((sum, bottle) => sum + bottle.costAmount, 0);
     require(Math.abs(bottleCost - row.liquorCost) < 0.001, `${row.name}の酒代原価合計が明細と一致しません。`);
   });
+  require(actualBottlePairs.size === expectedBottlePairs.size
+    && [...expectedBottlePairs].every((key) => actualBottlePairs.has(key)), "POS原本のボトル対象明細が不足または重複しています。JSONを再取込してください。");
+  require(actualDrinkPairs.size === expectedDrinkPairs.size
+    && [...expectedDrinkPairs].every((key) => actualDrinkPairs.has(key)), "POS原本のドリンク対象明細が不足または重複しています。JSONを再取込してください。");
   value.staffWork.forEach((row) => {
     require((row.kind === "regular" || row.kind === "trial") && Boolean(row.staffId) && Boolean(row.name) && money(row.hours) && row.hours > 0 && Number.isInteger(row.hours * 4), `${row.name}のスタッフ勤務が正しくありません。`);
     require(money(row.hourlyRate) && money(row.dailyPayment), `${row.name}のスタッフ給与金額が正しくありません。`);
@@ -1264,6 +1361,36 @@ async function currentMonthlySources(month: string) {
   return { data, adjustments, events };
 }
 
+function assertMonthlySourcesReady(
+  month: string,
+  sources: Awaited<ReturnType<typeof currentMonthlySources>>,
+) {
+  const check = canFinalizeMonthlyAccounting(
+    sources.data,
+    month,
+    sources.adjustments,
+    true,
+    sources.events,
+  );
+  if (check.allowed) return;
+  if (check.unresolvedDaily.length > 0) {
+    const labels: Record<DailyClosing["status"], string> = {
+      submitted: "確認待ち",
+      returned: "差戻し中",
+      withdrawn: "店舗編集中（取下げ）",
+      approved: "承認済み",
+    };
+    const details = check.unresolvedDaily
+      .map((row) => `${row.businessDate}：${labels[row.status]}`)
+      .join("、");
+    throw new Error(`未承認・差戻し中・店舗編集中の日次データがあるため月次確定できません（${details}）。`);
+  }
+  if (check.unclassified.length > 0) {
+    throw new Error("旧日次データのボトル区分に未指定があるため月次確定できません。");
+  }
+  throw new Error(check.integrityIssues[0] || "月次データに未解決の問題があるため確定できません。");
+}
+
 function canonicalComparisonValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalComparisonValue);
   if (value && typeof value === "object") {
@@ -1372,6 +1499,7 @@ export async function finalizeAccountingMonth(
     if (!started.committed) throw new Error("月次確定を開始できませんでした。");
 
     const current = await currentMonthlySources(month);
+    assertMonthlySourcesReady(month, current);
     const latestFingerprint = await monthlySourceFingerprint(current.data, month, current.adjustments, current.events);
     if (latestFingerprint !== snapshot.sourceFingerprint) {
       throw new Error("月次データが更新されています。最新データを読み込み、全項目を再確認してください。");
@@ -1397,6 +1525,7 @@ export async function finalizeAccountingMonth(
     }, { applyLocally: false });
     await renewAccountingFinalizeLock(month, operationId, user);
     const finalSources = await currentMonthlySources(month);
+    assertMonthlySourcesReady(month, finalSources);
     const finalFingerprint = await monthlySourceFingerprint(finalSources.data, month, finalSources.adjustments, finalSources.events);
     if (finalFingerprint !== snapshot.sourceFingerprint) {
       throw new Error("月次確定中に元データが更新されました。最新データを読み込み、全項目を再確認してください。");
