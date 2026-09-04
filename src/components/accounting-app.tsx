@@ -17,7 +17,8 @@ import {
   signOut,
   type User,
 } from "firebase/auth";
-import type { Role, WorkspaceData } from "@/domain/gms";
+import type { Role } from "@/domain/gms";
+import type { AccountingWorkspaceData } from "@/domain/month-accounting";
 import {
   auth,
   environmentRoot,
@@ -89,7 +90,7 @@ class PageErrorBoundary extends Component<
   }
 }
 
-const emptyData: WorkspaceData = {
+const emptyData: AccountingWorkspaceData = {
   casts: [],
   staff: [],
   drivers: [],
@@ -98,6 +99,11 @@ const emptyData: WorkspaceData = {
   closings: [],
   adjustments: [],
   cashFloat: 200000,
+  archivedCasts: [],
+  archivedStaff: [],
+  introducerEntryEvents: [],
+  monthStates: [],
+  monthSnapshots: [],
 };
 const viewInfo: Record<
   View,
@@ -227,49 +233,143 @@ export function AccountingApp() {
   const [user, setUser] = useState<User | null>(null);
   const [role, setRole] = useState<Role | null>(null);
   const [authReady, setAuthReady] = useState(false);
-  const [data, setData] = useState<WorkspaceData>(emptyData);
+  const [data, setData] = useState<AccountingWorkspaceData>(emptyData);
   const [view, setView] = useState<View>("home");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
   const [pageRevision, setPageRevision] = useState(0);
+  const [pageDirty, setPageDirty] = useState(false);
   const roleRef = useRef<Role | null>(null);
+  const authEpochRef = useRef(0);
+  const reloadRequestRef = useRef(0);
+  const runLockRef = useRef(false);
 
-  const reload = useCallback(async () => {
+  const reload = useCallback(async (
+    knownRole?: Role,
+    knownUser?: User,
+    knownAuthEpoch?: number,
+    resetPage = false,
+  ) => {
+    const requestId = ++reloadRequestRef.current;
+    const authEpoch = knownAuthEpoch ?? authEpochRef.current;
+    const currentUser = knownUser || auth.currentUser;
+    const isCurrentRequest = () => (
+      reloadRequestRef.current === requestId
+      && authEpochRef.current === authEpoch
+      && auth.currentUser?.uid === currentUser?.uid
+    );
     setBusy(true);
+    setNotice(null);
     try {
-      setData(await loadWorkspaceData(roleRef.current || undefined));
-      setPageRevision((revision) => revision + 1);
+      if (!currentUser) throw new Error("ログイン状態を確認できません。再度ログインしてください。");
+
+      let nextRole: Role;
+      try {
+        nextRole = knownRole || await userRole(currentUser);
+      } catch (error) {
+        if (!isCurrentRequest()) return false;
+        roleRef.current = null;
+        setRole(null);
+        setData(emptyData);
+        setView("home");
+        setPageRevision((revision) => revision + 1);
+        setNotice({
+          kind: "error",
+          text: `Firebase上の権限を確認できませんでした。権限の削除・不正値、または権限情報の読込失敗が考えられます。${message(error)}`,
+        });
+        return false;
+      }
+
+      const nextData = await loadWorkspaceData(nextRole);
+      if (!isCurrentRequest()) return false;
+      const roleChanged = roleRef.current !== nextRole;
+      roleRef.current = nextRole;
+      setRole(nextRole);
+      if (roleChanged) setData(emptyData);
+      setView((currentView) => viewInfo[currentView].roles.includes(nextRole) ? currentView : "home");
+      setData(nextData);
+      if (roleChanged || resetPage) setPageRevision((revision) => revision + 1);
+      return true;
     } catch (error) {
+      if (!isCurrentRequest()) return false;
       setNotice({
         kind: "error",
         text: `データを読み込めませんでした。${message(error)}`,
       });
+      return false;
     } finally {
-      setBusy(false);
+      if (isCurrentRequest()) setBusy(false);
     }
   }, []);
 
   useEffect(() => {
-    void setPersistence(auth, browserLocalPersistence);
-    return onAuthStateChanged(auth, async (next) => {
+    let cancelled = false;
+    let observerResponded = false;
+    const applyAuthState = async (next: User | null) => {
+      if (cancelled) return;
+      observerResponded = true;
+      window.clearTimeout(initializationWatchdog);
+      const authEpoch = ++authEpochRef.current;
       setUser(next);
       setAuthReady(true);
       if (!next) {
         roleRef.current = null;
         setRole(null);
         setData(emptyData);
+        setView("home");
+        setNotice(null);
         return;
       }
-      try {
-        const nextRole = await userRole(next);
-        roleRef.current = nextRole;
-        setRole(nextRole);
+      roleRef.current = null;
+      setRole(null);
+      setData(emptyData);
+      setView("home");
+      setNotice(null);
+      await reload(undefined, next, authEpoch, true);
+    };
+    const initializationWatchdog = window.setTimeout(() => {
+      if (cancelled || observerResponded) return;
+      const next = auth.currentUser;
+      ++authEpochRef.current;
+      setUser(next);
+      setAuthReady(true);
+      roleRef.current = null;
+      setRole(null);
+      setData(emptyData);
+      setView("home");
+      setNotice({
+        kind: "error",
+        text: "Firebaseの認証確認に時間がかかっています。通信状態を確認してページを再読み込みしてください。認証応答が届いた場合は自動的に復帰します。",
+      });
+    }, 10_000);
+    const unsubscribe = onAuthStateChanged(
+      auth,
+      (next) => { void applyAuthState(next); },
+      (error) => {
+        if (cancelled) return;
+        observerResponded = true;
+        window.clearTimeout(initializationWatchdog);
+        ++authEpochRef.current;
+        setUser(auth.currentUser);
+        setAuthReady(true);
+        roleRef.current = null;
+        setRole(null);
+        setData(emptyData);
         setView("home");
-        await reload();
-      } catch (error) {
-        setNotice({ kind: "error", text: message(error) });
-      }
+        setNotice({
+          kind: "error",
+          text: `Firebaseの認証状態を確認できませんでした。通信状態を確認してページを再読み込みしてください。${message(error)}`,
+        });
+      },
+    );
+    void setPersistence(auth, browserLocalPersistence).catch((error) => {
+      console.warn("Firebase auth persistence setup failed", error);
     });
+    return () => {
+      cancelled = true;
+      window.clearTimeout(initializationWatchdog);
+      unsubscribe();
+    };
   }, [reload]);
 
   useEffect(() => {
@@ -288,34 +388,68 @@ export function AccountingApp() {
     }
   }, []);
 
+  useEffect(() => {
+    if (!pageDirty) return;
+    const preventUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", preventUnload);
+    return () => window.removeEventListener("beforeunload", preventUnload);
+  }, [pageDirty]);
+
   if (!authReady)
     return (
       <main className="login">
         <p>認証状態を確認しています…</p>
       </main>
     );
-  if (!user) return <Login />;
+  if (!user) return <Login notice={notice?.kind === "error" ? notice.text : ""} />;
   if (!role)
     return (
       <main className="login">
         <Card title="権限を確認できません">
+          {notice && <div className={`notice ${notice.kind}`}>{notice.text}</div>}
           <p>
             Firebaseにshop、accounting、opのいずれかの権限を設定してください。
           </p>
-          <button className="button secondary" onClick={() => signOut(auth)}>
-            ログアウト
-          </button>
+          <div className="actions">
+            <button className="button secondary" disabled={busy} onClick={() => void reload()}>
+              {busy ? "確認中…" : "権限を再確認"}
+            </button>
+            <button className="button secondary" disabled={busy} onClick={() => signOut(auth)}>
+              ログアウト
+            </button>
+          </div>
         </Card>
       </main>
     );
   const permitted = viewInfo[view].roles.includes(role);
   const info = permitted ? viewInfo[view] : viewInfo.home;
+  const navigateTo = (nextView: View) => {
+    if (nextView === view) return;
+    if (pageDirty && !window.confirm("未保存の入力があります。破棄して別のページへ移動しますか？")) return;
+    setView(nextView);
+  };
+  const logout = () => {
+    if (pageDirty && !window.confirm("未保存の入力があります。破棄してログアウトしますか？")) return;
+    void signOut(auth);
+  };
+  const reloadWithGuard = () => {
+    if (pageDirty && !window.confirm("未保存の入力があります。最新データを読み込みますか？")) return;
+    void reload(undefined, undefined, undefined, true);
+  };
   const run = async (action: () => Promise<unknown>, success: string) => {
+    if (runLockRef.current) {
+      setNotice({ kind: "error", text: "別の処理を実行中です。完了してからもう一度操作してください。" });
+      return false;
+    }
+    runLockRef.current = true;
     setBusy(true);
     setNotice(null);
     try {
       await action();
-      await reload();
+      if (!await reload()) return false;
       setNotice({ kind: "success", text: success });
       return true;
     } catch (error) {
@@ -325,6 +459,7 @@ export function AccountingApp() {
       });
       return false;
     } finally {
+      runLockRef.current = false;
       setBusy(false);
     }
   };
@@ -358,7 +493,7 @@ export function AccountingApp() {
         <nav>
           <button
             className={view === "home" ? "active" : ""}
-            onClick={() => setView("home")}
+            onClick={() => navigateTo("home")}
           >
             ホーム
           </button>
@@ -375,7 +510,7 @@ export function AccountingApp() {
                   <button
                     key={key}
                     className={view === key ? "active" : ""}
-                    onClick={() => setView(key)}
+                    onClick={() => navigateTo(key)}
                   >
                     {viewInfo[key].label}
                   </button>
@@ -390,10 +525,10 @@ export function AccountingApp() {
           </StatusPill>
           <small>{user.email}</small>
           <small>
-            Ver2.7.0 ·{" "}
+            Ver2.8.0 ·{" "}
             {role === "shop" ? "店舗" : role === "accounting" ? "経理" : "OP"}
           </small>
-          <button className="button secondary" onClick={() => signOut(auth)}>
+          <button className="button secondary" disabled={busy} onClick={logout}>
             ログアウト
           </button>
         </div>
@@ -410,7 +545,7 @@ export function AccountingApp() {
             <button
               className="button secondary"
               disabled={busy}
-              onClick={() => void reload()}
+              onClick={reloadWithGuard}
             >
               {busy ? "読込中…" : "最新データを読込"}
             </button>
@@ -424,7 +559,7 @@ export function AccountingApp() {
         )}
         <PageErrorBoundary
           resetKey={`${view}:${pageRevision}`}
-          onRetry={() => void reload()}
+          onRetry={reloadWithGuard}
         >
           {!permitted ? (
             <div className="notice error">
@@ -433,13 +568,14 @@ export function AccountingApp() {
           ) : (
             <>
               {view === "home" && (
-                <Dashboard data={data} role={role} onNavigate={setView} />
+                <Dashboard data={data} role={role} onNavigate={navigateTo} />
               )}
               {view === "store" && (
-                <StoreWork data={data} user={user} busy={busy} run={run} />
+                <StoreWork key={`store:${pageRevision}`} data={data} user={user} busy={busy} run={run} onDirtyChange={setPageDirty} />
               )}
               {commonSection && (
                 <CommonForms
+                  key={`common:${pageRevision}`}
                   section={
                     view as
                       | "casts"
@@ -453,10 +589,12 @@ export function AccountingApp() {
                   user={user}
                   busy={busy}
                   run={run}
+                  onDirtyChange={setPageDirty}
                 />
               )}
               {accountingSection && (
                 <AccountingForms
+                  key={`accounting:${pageRevision}`}
                   section={
                     (view === "introducersPay" ? "introducers" : view) as
                       | "approval"
@@ -472,6 +610,7 @@ export function AccountingApp() {
                   user={user}
                   busy={busy}
                   run={run}
+                  onDirtyChange={setPageDirty}
                 />
               )}
             </>
@@ -482,7 +621,7 @@ export function AccountingApp() {
   );
 }
 
-function Login() {
+function Login({ notice = "" }: { notice?: string }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -508,7 +647,7 @@ function Login() {
           <span>CLUB GENESIS</span>
           <strong>GMS</strong>
           <p>GENESIS Management System</p>
-          <small>Ver2.7.0</small>
+          <small>Ver2.8.0</small>
         </div>
         <div className="stack">
           <label className="field">
@@ -534,6 +673,7 @@ function Login() {
             />
           </label>
           {error && <div className="notice error">{error}</div>}
+          {!error && notice && <div className="notice error">{notice}</div>}
           <button className="button login-button" disabled={busy}>
             {busy ? "ログイン中…" : "ログイン"}
           </button>
@@ -548,7 +688,7 @@ function Dashboard({
   role,
   onNavigate,
 }: {
-  data: WorkspaceData;
+  data: AccountingWorkspaceData;
   role: Role;
   onNavigate: (view: View) => void;
 }) {
