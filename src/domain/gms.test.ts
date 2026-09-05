@@ -678,7 +678,35 @@ describe("GMS報酬・日次計算", () => {
       beautyAllowance: 500
     });
     expect(report.totals.bottles).toEqual([{ name: "テストシャンパン", quantity: 2 }]);
+    expect(report.days.map((day) => day.bottleBackByKind)).toEqual([
+      { keepBottle: 0, champagneWine: 2500 },
+      { keepBottle: 0, champagneWine: 2500 },
+    ]);
+    expect(report.totals.bottleBackByKind).toEqual({ keepBottle: 0, champagneWine: 5000 });
     expect(report.totals.backTotal).toBe(report.totals.backs.reduce((sum, back) => sum + back.amount, 0));
+  });
+
+  it("通常ボトルとシャンパンのバックを分離し、体入のみでは両方0にする", () => {
+    const source = pos();
+    const bottle = source.transactions[0].items.find((item) => item.itemId === "bottle")!;
+    source.transactions[0].items.push({ ...bottle, itemId: "keep", label: "テスト通常ボトル", category: "keepBottle", backType: "keepBottle", price: 11000 });
+    const mapping = {
+      p1: { masterId: "c1", name: "花子", kind: "regular" as const, hourlyRate: 3000 },
+      p2: { masterId: "c2", name: "春子", kind: "regular" as const, hourlyRate: 3000 },
+    };
+    const bottles = [
+      { id: "l1", kind: "champagneWine" as const, name: "テストシャンパン", salePrice: 30000, costPrice: 10000, createdAt: "", updatedAt: "" },
+      { id: "l2", kind: "keepBottle" as const, name: "テスト通常ボトル", salePrice: 11000, costPrice: 3300, createdAt: "", updatedAt: "" },
+    ];
+    const rows = buildDailyCasts(source, mapping, bottles, {});
+    const closing = { id: "mixed", businessDate: source.businessDate, status: "approved", casts: rows, posSnapshot: source } as DailyClosing;
+    const result = calculateCastSalesReports([closing], [], "2026-09")[0];
+    // (11,000 - 3,300) × 15% = 1,155 → 1,100 → 2人で550円。
+    expect(result.days[0].bottleBackByKind).toEqual({ keepBottle: 550, champagneWine: 2500 });
+    expect(result.totals.bottleBackByKind).toEqual({ keepBottle: 550, champagneWine: 2500 });
+    expect(result.totals.backs.find((back) => back.key === "bottle")?.amount).toBe(3050);
+    const trialResult = calculateCastSalesReports([{ ...closing, casts: rows.map((row) => ({ ...row, kind: "trial" })) }], [], "2026-09")[0];
+    expect(trialResult.totals.bottleBackByKind).toEqual({ keepBottle: 0, champagneWine: 0 });
   });
 
   it("過去データに残るフリー卓ボトルをキャスト売上の原価へ含めない", () => {

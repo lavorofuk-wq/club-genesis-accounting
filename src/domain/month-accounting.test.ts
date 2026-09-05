@@ -812,7 +812,7 @@ describe("月次会計ドメイン", () => {
       "accounting-user",
       "2026-09-30T23:59:59.000Z",
     );
-    expect(snapshot.calculationVersion).toBe("2.11.2");
+    expect(snapshot.calculationVersion).toBe("2.12.0");
     const corrupted = structuredClone(snapshot) as unknown as { castSalesReports: Array<{ days: Array<Record<string, unknown>> }> };
     delete corrupted.castSalesReports[0].days[0].businessDate;
 
@@ -839,6 +839,30 @@ describe("月次会計ドメイン", () => {
     corrupted.castSalesReports[0].days[0].backTotal = 0.5;
 
     expect(normalizeMonthlyAccountingSnapshot(corrupted, month, 1)).toBeUndefined();
+  });
+
+  it("種類別ボトルバックを確定保存し、旧確定データと金額不正を区別する", () => {
+    const source = workspace({ casts: [cast()], closings: [approvedClosing({ casts: [dailyCast()] })] });
+    const input = adjustments();
+    const snapshot = buildMonthlySnapshot(month, 1, "a".repeat(64), input,
+      calculateMonthlyAccounting(source, month, input), source.closings,
+      "accounting-user", "2026-09-30T23:59:59.000Z");
+    const restored = normalizeMonthlyAccountingSnapshot(snapshot, month, 1)!;
+    expect(restored.castSalesReports[0].days[0].bottleBackByKind).toEqual({ keepBottle: 0, champagneWine: 0 });
+    expect(restored.castSalesReports[0].totals.bottleBackByKind).toEqual({ keepBottle: 0, champagneWine: 0 });
+
+    const legacy = structuredClone(snapshot);
+    delete legacy.castSalesReports[0].days[0].bottleBackByKind;
+    delete legacy.castSalesReports[0].totals.bottleBackByKind;
+    expect(normalizeMonthlyAccountingSnapshot(legacy, month, 1)?.castSalesReports[0].totals.bottleBackByKind).toBeUndefined();
+    for (const badValue of [-1, 0.5, 100, NaN]) {
+      for (const target of ["day", "total"]) {
+        const broken = structuredClone(snapshot);
+        const row = target === "day" ? broken.castSalesReports[0].days[0] : broken.castSalesReports[0].totals;
+        row.bottleBackByKind!.keepBottle = badValue;
+        expect(normalizeMonthlyAccountingSnapshot(broken, month, 1)).toBeUndefined();
+      }
+    }
   });
 
   it("体入キャストへ即日支給した美容室手当をキャスト売上の日次表示へ反映する", () => {
