@@ -5,7 +5,7 @@ import type { CastReward, CastSalesDay, CastSalesReport } from "@/domain/gms";
 import type { MonthlyAccountingResults } from "@/domain/month-accounting";
 
 const amountFormat = '#,##0;[Red]-#,##0;0';
-const font = { name: "BIZ UDPGothic", size: 10 };
+const font = { name: "Yu Gothic", size: 10 };
 const border: Partial<ExcelJS.Borders> = {
   top: { style: "thin", color: { argb: "FFD0D5DC" } },
   bottom: { style: "thin", color: { argb: "FFD0D5DC" } },
@@ -155,7 +155,7 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error("対象月を選択してください。");
   if (!results.castSalesReports.length) throw new Error("対象月の承認済みキャスト売上がありません。");
   const book = new ExcelJS.Workbook();
-  book.creator = "GENESIS Management System Ver2.13.1";
+  book.creator = "GENESIS Management System Ver2.13.2";
   book.created = new Date();
   book.calcProperties.fullCalcOnLoad = true;
   const used = new Set<string>();
@@ -179,14 +179,14 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
       byDate.set(day.businessDate, day);
     }
     const sheet = book.addWorksheet(safeSheetName(report.name, used));
-    sheet.columns = [3, 5, 8, 8, 9, 6, 12, 13, 6, 12, 13, 6, 12, 12, 12, 14, 14, 29, 13, 14, 12, 11].map((width) => ({ width }));
+    sheet.columns = [3, 5, 8, 8, 9, 6, 12, 13, 6, 12, 13, 6, 12, 12, 12, 25, 25, 29, 13, 14, 12, 11].map((width) => ({ width }));
     sheet.views = [{ state: "frozen", xSplit: 2, ySplit: 2, showGridLines: false }];
     sheet.pageSetup = {
       paperSize: 9, orientation: "landscape", fitToPage: true, fitToWidth: 1, fitToHeight: 0,
       horizontalCentered: true, printArea: "B1:V45", printTitlesRow: "1:2",
       margins: { left: .25, right: .25, top: .35, bottom: .35, header: .15, footer: .15 },
     };
-    sheet.headerFooter.oddFooter = `${sourceLabel.replace(/&/g, "&&")} &R&P / &N`;
+    sheet.headerFooter.oddFooter = `&"${font.name},Regular"${sourceLabel.replace(/&/g, "&&")} &R&P / &N`;
     for (let row = 1; row <= 34; row += 1) {
       sheet.getRow(row).height = row === 2 ? 32 : row === 1 ? 27 : 21;
       for (let col = 2; col <= 22; col += 1) {
@@ -203,15 +203,15 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
     mergeValue(sheet, "L1:M1", "出勤日数");
     mergeValue(sheet, "N1:O1", report.attendanceDays);
     sheet.getCell("N1").numFmt = '0"日"';
-    mergeValue(sheet, "P1:P2", "通常ボトルバック\n（15%）");
-    mergeValue(sheet, "Q1:Q2", "シャンパン・ワイン\nバック（25%）");
+    mergeValue(sheet, "P1:P2", "B\n（料金ー原価）×１５％");
+    mergeValue(sheet, "Q1:Q2", "C/W\n（料金ー原価）×２５％");
     mergeValue(sheet, "R1:S1", "勤務時間");
     mergeValue(sheet, "T1:V1", { formula: "E34", result: report.totals.hours / 24 });
     sheet.getCell("T1").numFmt = '[h]"時間"mm"分"';
     const headings: Record<string, string> = {
-      B: "日", C: "出勤", D: "退勤", E: "勤務時間", F: "本指", G: "本指名バック", H: "本指売上",
-      I: "場内", J: "場内指名バック", K: "場延売上", L: "同伴", M: "同伴バック",
-      N: "本指酒代", O: "場内酒代", R: "ボトル名", S: "酒代計", T: "日売上", U: "ドリンクバック", V: "美容室",
+      B: "日", C: "出勤", D: "退勤", E: "勤務時間", F: "本指", G: "バック", H: "本指売上",
+      I: "場内", J: "バック", K: "場延売上", L: "同伴", M: "バック",
+      N: "本指酒代", O: "場内酒代", R: "ボトル名", S: "酒代計", T: "日売上", U: "ドリンク10%", V: "美容室",
     };
     Object.entries(headings).forEach(([column, value]) => { sheet.getCell(`${column}2`).value = value; });
     sheet.getRow(2).alignment = { horizontal: "center", vertical: "middle", wrapText: true };
