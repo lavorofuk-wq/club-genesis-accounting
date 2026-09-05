@@ -449,7 +449,7 @@ function validateDailyClosingForSubmission(value: DailyClosing) {
     if (!condition) throw new Error(message);
   };
   const money = (amount: unknown) => typeof amount === "number" && Number.isFinite(amount) && amount >= 0;
-  const safeBackAmount = (amount: unknown) => Number.isSafeInteger(amount) && Number(amount) >= 0;
+  const safeBackAmount = (amount: unknown) => Number.isSafeInteger(amount) && Number(amount) >= 0 && Number(amount) % 10 === 0;
   const unique = (values: string[]) => new Set(values).size === values.length;
   require(validDate(value.businessDate), "営業日が正しくありません。");
   require(value.posSnapshot && value.posSnapshot.businessDate === value.businessDate, "POS原本と営業日が一致しません。");
@@ -508,7 +508,9 @@ function validateDailyClosingForSubmission(value: DailyClosing) {
     [row.hourlyRate, row.honShimeiCount, row.banaiShimeiCount, row.dohanCount, row.dohanBack,
       row.honShimeiSales, row.jonaiExtensionSales, row.drinkSales, row.liquorCost, row.beautyAllowance,
       row.dailyPayment, row.advancePayment, row.transportFee].forEach((amount) => require(money(amount), `${row.name}に不正な金額または本数があります。`));
-    require(row.honShimeiSales % 100 === 0 && row.jonaiExtensionSales % 100 === 0, `${row.name}の売上は100円単位で入力してください。`);
+    require(row.honShimeiSales % 10 === 0 && row.jonaiExtensionSales % 10 === 0, `${row.name}の売上は10円単位で入力してください。`);
+    require(row.dohanBack % 10 === 0, `${row.name}の同伴バックは10円単位で処理してください。`);
+    if (row.kind === "trial") require(row.dailyPayment % 10 === 0, `${row.name}の体入即日支払いは10円単位で入力してください。`);
     require(row.transportFee % 500 === 0, `${row.name}の送迎代は500円単位で入力してください。`);
     require(row.beautyAllowance === 0 || (row.kind === "regular" && row.beautyAllowance === 500), `${row.name}の美容室手当が正しくありません。`);
     require(Array.isArray(row.bottles), `${row.name}のボトル明細が不完全です。`);
@@ -516,7 +518,7 @@ function validateDailyClosingForSubmission(value: DailyClosing) {
     row.bottles.forEach((bottle) => {
       require(Boolean(bottle.itemId) && Boolean(bottle.name) && money(bottle.quantity) && bottle.quantity > 0, `${row.name}のボトル明細が正しくありません。`);
       require(money(bottle.salesAmount) && money(bottle.costAmount), `${row.name}のボトル金額が正しくありません。`);
-      require(Boolean(bottle.sourceKey) && safeBackAmount(bottle.backAmount), `${row.name}のボトルバック額が1円単位の安全な整数ではありません。JSONを再取込してください。`);
+      require(Boolean(bottle.sourceKey) && safeBackAmount(bottle.backAmount), `${row.name}のボトルバック額が10円単位ではありません。JSONを再取込してください。`);
       actualBottlePairs.add(pairKey(row.posCastId, bottle.sourceKey || ""));
       const source = posItems.get(bottle.sourceKey || "");
       require(Boolean(source) && (source!.item.category === "champagneWine" || source!.item.category === "keepBottle")
@@ -544,7 +546,7 @@ function validateDailyClosingForSubmission(value: DailyClosing) {
     row.drinkAllocations!.forEach((drink) => {
       require(Boolean(drink.itemId) && Boolean(drink.name) && money(drink.quantity) && drink.quantity > 0
         && money(drink.salesAmount), `${row.name}のドリンク明細が正しくありません。`);
-      require(Boolean(drink.sourceKey) && safeBackAmount(drink.backAmount), `${row.name}のドリンクバック額が1円単位の安全な整数ではありません。JSONを再取込してください。`);
+      require(Boolean(drink.sourceKey) && safeBackAmount(drink.backAmount), `${row.name}のドリンクバック額が10円単位ではありません。JSONを再取込してください。`);
       actualDrinkPairs.add(pairKey(row.posCastId, drink.sourceKey || ""));
       const source = posItems.get(drink.sourceKey || "");
       require(Boolean(source) && source!.item.category === "castDrink"

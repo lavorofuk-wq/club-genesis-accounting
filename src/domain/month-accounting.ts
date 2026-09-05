@@ -28,7 +28,8 @@ import type {
   WorkspaceData,
 } from "./gms";
 
-export const MONTHLY_CALCULATION_VERSION = "2.12.0";
+export const MONTHLY_CALCULATION_VERSION = "2.13.0";
+export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 2 as const;
 
 export type IntroducerEntryEvent = {
   id: string;
@@ -132,7 +133,8 @@ export type AccountingMonthState = {
 };
 
 export type MonthlyAccountingSnapshot = MonthlyAccountingResults & {
-  schemaVersion: 1;
+  /** schema 1はVer2.12以前、schema 2はキャスト売上・報酬を10円単位で保存する。 */
+  schemaVersion: 1 | 2;
   calculationVersion: string;
   month: string;
   revision: number;
@@ -163,6 +165,13 @@ const snapshotObject = (value: unknown): value is Record<string, unknown> => Boo
 const snapshotNumber = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
 const snapshotNonNegative = (value: unknown): value is number => snapshotNumber(value) && value >= 0;
 const snapshotInteger = (value: unknown) => Number.isSafeInteger(value) && Number(value) >= 0;
+const snapshotTenYen = (value: unknown) => snapshotInteger(value) && Number(value) % 10 === 0;
+const supportsTenYenSnapshot = (value: string) => {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(value);
+  if (!match) return false;
+  const [major, minor] = match.slice(1).map(Number);
+  return major > 2 || (major === 2 && minor >= 13);
+};
 const snapshotMillisecondsInstant = (value: unknown) => {
   if (!snapshotInteger(value)) return undefined;
   const date = new Date(Number(value));
@@ -189,11 +198,12 @@ const castSalesNumberKeys = [
   "nominationCount", "dohanCount", "backTotal", "beautyAllowance",
 ];
 
-function normalizeSnapshotBacks(value: unknown) {
+function normalizeSnapshotBacks(value: unknown, requireTenYen: boolean) {
   const keys = new Set(["honShimei", "banaiShimei", "dohan", "bottle", "drink"]);
   const rows = snapshotList<unknown>(value);
   if (rows.some((item) => !snapshotObject(item) || !keys.has(String(item.key || ""))
-    || !snapshotString(item.label) || !snapshotInteger(item.amount))) return undefined;
+    || !snapshotString(item.label) || !snapshotInteger(item.amount)
+    || (requireTenYen && !snapshotTenYen(item.amount)))) return undefined;
   return rows as CastSalesReport["days"][number]["backs"];
 }
 
@@ -204,15 +214,21 @@ function normalizeSnapshotBottles(value: unknown) {
   return rows as CastSalesReport["days"][number]["bottles"];
 }
 
-function validSnapshotBottleBackByKind(value: unknown, backs: CastSalesReport["totals"]["backs"]) {
+function validSnapshotBottleBackByKind(
+  value: unknown,
+  backs: CastSalesReport["totals"]["backs"],
+  requireTenYen: boolean,
+) {
   // 過去の確定データは合計のみ。読込時に種類別金額を推定しない。
   if (value === undefined) return true;
   return snapshotObject(value) && snapshotInteger(value.keepBottle) && snapshotInteger(value.champagneWine)
+    && (!requireTenYen || (snapshotTenYen(value.keepBottle) && snapshotTenYen(value.champagneWine)))
     && Number(value.keepBottle) + Number(value.champagneWine)
       === backs.filter((back) => back.key === "bottle").reduce((sum, back) => sum + back.amount, 0);
 }
 
-function normalizeSnapshotCastSales(value: unknown, month: string): CastSalesReport[] | undefined {
+function normalizeSnapshotCastSales(value: unknown, month: string, requireTenYen: boolean): CastSalesReport[] | undefined {
+  const tenYenKeys = ["honShimeiSales", "jonaiExtensionSales", "totalSales", "backTotal"];
   const reports = snapshotList<unknown>(value);
   const normalized: CastSalesReport[] = [];
   for (const item of reports) {
@@ -223,23 +239,25 @@ function normalizeSnapshotCastSales(value: unknown, month: string): CastSalesRep
       if (!snapshotObject(day) || !snapshotDateInMonth(day.businessDate, month)
         || !snapshotString(day.startTime) || !snapshotString(day.endTime)
         || !allSnapshotNumbers(day, castSalesNumberKeys)) return undefined;
-      const backs = normalizeSnapshotBacks(day.backs);
+      const backs = normalizeSnapshotBacks(day.backs, requireTenYen);
       const bottles = normalizeSnapshotBottles(day.bottles);
       if (!backs || !bottles || day.totalSales !== Number(day.honShimeiSales) + Number(day.jonaiExtensionSales)
+        || (requireTenYen && !tenYenKeys.every((key) => snapshotTenYen(day[key])))
         || day.totalLiquorCost !== Number(day.honShimeiLiquorCost) + Number(day.jonaiExtensionLiquorCost)
         || day.backTotal !== backs.reduce((sum, back) => sum + back.amount, 0)
-        || !validSnapshotBottleBackByKind(day.bottleBackByKind, backs)) return undefined;
+        || !validSnapshotBottleBackByKind(day.bottleBackByKind, backs, requireTenYen)) return undefined;
       days.push({ ...(day as unknown as CastSalesReport["days"][number]), backs, bottles });
     }
     const totals = item.totals;
-    const backs = normalizeSnapshotBacks(totals.backs);
+    const backs = normalizeSnapshotBacks(totals.backs, requireTenYen);
     const bottles = normalizeSnapshotBottles(totals.bottles);
     if (!backs || !bottles || !snapshotInteger(totals.attendanceDays) || Number(totals.attendanceDays) <= 0 || days.length === 0
       || !allSnapshotNumbers(totals, castSalesNumberKeys)
+      || (requireTenYen && !tenYenKeys.every((key) => snapshotTenYen(totals[key])))
       || totals.totalSales !== Number(totals.honShimeiSales) + Number(totals.jonaiExtensionSales)
       || totals.totalLiquorCost !== Number(totals.honShimeiLiquorCost) + Number(totals.jonaiExtensionLiquorCost)
       || totals.backTotal !== backs.reduce((sum, back) => sum + back.amount, 0)
-      || !validSnapshotBottleBackByKind(totals.bottleBackByKind, backs)
+      || !validSnapshotBottleBackByKind(totals.bottleBackByKind, backs, requireTenYen)
       || item.attendanceDays !== totals.attendanceDays
       || item.attendanceDays !== new Set(days.map((day) => day.businessDate)).size) return undefined;
     normalized.push({
@@ -274,9 +292,10 @@ export function normalizeMonthlyAccountingSnapshot(
 ): MonthlyAccountingSnapshot | undefined {
   if (!snapshotObject(value)) return undefined;
   const row = value as unknown as MonthlyAccountingSnapshot;
-  if (row.schemaVersion !== 1 || row.month !== pathMonth || row.revision !== pathRevision
+  if ((row.schemaVersion !== 1 && row.schemaVersion !== 2) || row.month !== pathMonth || row.revision !== pathRevision
     || !Number.isSafeInteger(pathRevision) || pathRevision <= 0
     || typeof row.calculationVersion !== "string" || !row.calculationVersion
+    || (row.schemaVersion === 2 && !supportsTenYenSnapshot(row.calculationVersion))
     || !/^[0-9a-f]{64}$/.test(String(row.sourceFingerprint || ""))
     || !Number.isSafeInteger(row.adjustmentsRevision) || row.adjustmentsRevision < 0
     || typeof row.createdAt !== "string" || typeof row.createdBy !== "string") return undefined;
@@ -288,7 +307,8 @@ export function normalizeMonthlyAccountingSnapshot(
     row.balance.cast, row.balance.introducer, row.balance.staff, row.balance.driver,
     row.balance.expenses, row.balance.totalCosts, row.balance.profit].every(snapshotNumber)) return undefined;
 
-  const castSalesReports = normalizeSnapshotCastSales(row.castSalesReports, pathMonth);
+  const requireTenYen = row.schemaVersion === 2;
+  const castSalesReports = normalizeSnapshotCastSales(row.castSalesReports, pathMonth, requireTenYen);
   const castRewards = validSnapshotRows(row.castRewards, ["id", "name", "adoptedSystem"], [
     "hours", "hourlyPay", "honShimeiSales", "jonaiExtensionSales", "liquorCost", "honShimeiLiquorCost",
     "honShimeiBack", "banaiShimeiBack", "dohanBack", "bottleBack", "drinkBack", "hourlyAndBack",
@@ -311,6 +331,11 @@ export function normalizeMonthlyAccountingSnapshot(
     if (!snapshotObject(item)) return false;
     return (item.adoptedSystem === "hourlyAndBack" || item.adoptedSystem === "salesReward")
       && Number(item.rewardRate) <= 1
+      && (!requireTenYen || [
+        "hourlyPay", "honShimeiSales", "jonaiExtensionSales", "honShimeiBack", "banaiShimeiBack",
+        "dohanBack", "bottleBack", "drinkBack", "hourlyAndBack", "salesRewardBase", "salesReward",
+        "adoptedReward",
+      ].every((key) => snapshotTenYen(item[key])))
       && item.hourlyAndBack === Number(item.hourlyPay) + Number(item.honShimeiBack) + Number(item.banaiShimeiBack)
         + Number(item.dohanBack) + Number(item.bottleBack) + Number(item.drinkBack)
       && item.adoptedReward === Math.max(Number(item.hourlyAndBack), Number(item.salesReward))
@@ -1106,6 +1131,9 @@ export async function monthlySourceFingerprint(
   const calculationData = withArchivedMasters(data);
   const source = canonicalize({
     month,
+    // 計算方式だけが変わった場合も、旧画面のfingerprintと一致させない。
+    snapshotSchemaVersion: MONTHLY_SNAPSHOT_SCHEMA_VERSION,
+    calculationVersion: MONTHLY_CALCULATION_VERSION,
     // updatedAtだけでなく計算へ入力される実値を含め、同一ミリ秒の更新や直接書込みも検出する。
     closings: calculationData.closings.filter((row) => row.businessDate.startsWith(month))
       .sort((left, right) => left.id.localeCompare(right.id)),
@@ -1197,7 +1225,7 @@ export function buildMonthlySnapshot(
 ): MonthlyAccountingSnapshot {
   return {
     ...results,
-    schemaVersion: 1,
+    schemaVersion: MONTHLY_SNAPSHOT_SCHEMA_VERSION,
     calculationVersion: MONTHLY_CALCULATION_VERSION,
     month,
     revision,

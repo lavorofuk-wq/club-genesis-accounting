@@ -200,3 +200,30 @@ test("日次と紹介者イベントのサーバー保存時刻をdevで必須�
   assert.match(repositorySource, /new Date\(deletionLock\.acquiredAtMs\)\.toISOString\(\)/);
   assert.match(repositorySource, /cleanupExpiredIntroducerDeletionLocks/);
 });
+
+test("月次snapshotはschema 2だけを新規保存し、キャスト売上・報酬を10円単位に限定する", () => {
+  const snapshot = databaseRules.accountingMonthSnapshots.$month.$revision;
+  const day = snapshot.castSalesReports.$index.days.$dayIndex;
+  const totals = snapshot.castSalesReports.$index.totals;
+  const reward = snapshot.castRewards.$index;
+
+  assert.match(snapshot[".validate"], /schemaVersion'\)\.val\(\) === 2/);
+  assert.equal(snapshot.schemaVersion[".validate"], "newData.val() === 2");
+  assert.match(snapshot.calculationVersion[".validate"], /2\\\.\(1\[3-9\]/);
+  for (const row of [day, totals]) {
+    for (const key of ["honShimeiSales", "jonaiExtensionSales", "totalSales", "backTotal"]) {
+      assert.match(row[key][".validate"], /val\(\) % 10 === 0/);
+    }
+    assert.match(row.bottleBackByKind.keepBottle[".validate"], /val\(\) % 10 === 0/);
+    assert.match(row.bottleBackByKind.champagneWine[".validate"], /val\(\) % 10 === 0/);
+  }
+  assert.match(day.backs.$backIndex[".validate"], /amount'\)\.val\(\) % 10 === 0/);
+  for (const key of [
+    "hourlyPay", "honShimeiSales", "jonaiExtensionSales", "honShimeiBack", "banaiShimeiBack",
+    "dohanBack", "bottleBack", "drinkBack", "hourlyAndBack", "salesRewardBase", "salesReward",
+    "adoptedReward",
+  ]) assert.match(reward[key][".validate"], /val\(\) % 10 === 0/);
+
+  // POSの実売上は現金・カードを含め1円単位の実額を保持する。
+  assert.doesNotMatch(snapshot.sales[".validate"], /% 10/);
+});

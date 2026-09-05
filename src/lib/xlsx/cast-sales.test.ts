@@ -36,7 +36,7 @@ const reward: CastReward = {
 const input = () => structuredClone({ castSalesReports: [report], castRewards: [reward] });
 
 describe("キャスト売上XLSX", () => {
-  it("指定の列・勤務時間・月合計・左右両方の給与を1円単位で出力する", () => {
+  it("指定の列・勤務時間・月合計・左右両方の給与を保存値どおり出力する", () => {
     const sheet = createCastSalesWorkbook(input(), "2026-09", "承認済みデータ（未確定）").worksheets[0];
     expect(sheet.getCell("G4").value).toBe(2000);
     expect(sheet.getCell("J4").value).toBe(500);
@@ -65,6 +65,44 @@ describe("キャスト売上XLSX", () => {
     expect(sheet.getCell("U44").value).toBe(17532);
     expect(sheet.getCell("D35").value).toContain("採用");
     expect(sheet.getCell("R35").value).toContain("対象外");
+  });
+
+  it("新規計算の10円単位の時給・バック・報酬合計を丸め直さず出力する", () => {
+    const data = input();
+    for (const row of [data.castSalesReports[0].days[0], data.castSalesReports[0].totals]) {
+      row.backs.find((back) => back.key === "bottle")!.amount = 1990;
+      row.backs.find((back) => back.key === "drink")!.amount = 330;
+      row.bottleBackByKind = { keepBottle: 330, champagneWine: 1660 };
+      row.backTotal = 8820;
+    }
+    Object.assign(data.castRewards[0], {
+      hourlyPay: 12750,
+      bottleBack: 1990,
+      drinkBack: 330,
+      hourlyAndBack: 21570,
+      adoptedReward: 21570,
+      grossPay: 22070,
+      netPay: 17570,
+    });
+
+    const sheet = createCastSalesWorkbook(data, "2026-09", "承認済みデータ（未確定）").worksheets[0];
+    expect(sheet.getCell("P4").value).toBe(330);
+    expect(sheet.getCell("Q4").value).toBe(1660);
+    expect(sheet.getCell("U4").value).toBe(330);
+    expect(sheet.getCell("I36").value).toBe(12750);
+    expect(sheet.getCell("I37").value).toBe(8820);
+    expect(sheet.getCell("I42").value).toEqual({ formula: "I39-I40-I41", result: 17570 });
+    expect(sheet.getCell("U44").value).toBe(17570);
+  });
+
+  it("旧確定スナップショットの333円配賦を10円単位へ丸め直さず出力する", () => {
+    const sheet = createCastSalesWorkbook(input(), "2026-09", "月次確定済み 第2版").worksheets[0];
+    expect(sheet.getCell("P4").value).toBe(333);
+    expect(sheet.getCell("Q4").value).toBe(1666);
+    expect(sheet.getCell("U4").value).toBe(333);
+    expect(sheet.getCell("I37").value).toBe(8832);
+    expect(sheet.getCell("I42").value).toEqual({ formula: "I39-I40-I41", result: 17532 });
+    expect(sheet.getCell("U44").value).toBe(17532);
   });
 
   it("保存された売上報酬率・金額を再計算せず使い、採用方式を明示する", () => {

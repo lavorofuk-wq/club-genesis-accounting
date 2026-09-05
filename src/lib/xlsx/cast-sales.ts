@@ -26,6 +26,8 @@ function back(row: ReportNumbers, key: CastSalesDay["backs"][number]["key"]) {
 
 function validateReport(report: CastSalesReport, reward: CastReward) {
   const fail = () => { throw new Error(`${report.name}の売上・報酬データに欠損または合計の不一致があります。元データを確認してください。`); };
+  // 新規計算は10円単位だが、確定済みスナップショットには旧仕様の333円等が残る。
+  // 帳票では保存済み結果を再計算しないため、金額は安全な整数と合計整合だけを検証する。
   for (const row of [...report.days, report.totals]) {
     if (dailyNumberKeys.some((key) => !Number.isFinite(row[key]) || row[key] < 0)
       || row.backs.some((item) => !Number.isSafeInteger(item.amount) || item.amount < 0)
@@ -153,7 +155,7 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error("対象月を選択してください。");
   if (!results.castSalesReports.length) throw new Error("対象月の承認済みキャスト売上がありません。");
   const book = new ExcelJS.Workbook();
-  book.creator = "GENESIS Management System Ver2.12.0";
+  book.creator = "GENESIS Management System Ver2.13.0";
   book.created = new Date();
   book.calcProperties.fullCalcOnLoad = true;
   const used = new Set<string>();

@@ -231,7 +231,7 @@ export type BottleAllocation = {
   quantity: number;
   salesAmount: number;
   costAmount: number;
-  /** 商品1行全体の％バックを100円未満切捨て後、対象人数で均等割りした1人分（1円未満切捨て）。 */
+  /** 商品1行全体の％バックを100円未満切捨て後、対象人数で均等割りした1人分（10円未満切捨て）。旧保存値は1円単位の場合がある。 */
   backAmount?: number;
   specialCost: boolean;
 };
@@ -244,7 +244,7 @@ export type DrinkAllocation = {
   name: string;
   quantity: number;
   salesAmount: number;
-  /** 商品1行全体の10%を100円未満切捨て後、対象人数で均等割りした1人分（1円未満切捨て）。 */
+  /** 商品1行全体の10%を100円未満切捨て後、対象人数で均等割りした1人分（10円未満切捨て）。旧保存値は1円単位の場合がある。 */
   backAmount?: number;
 };
 
@@ -567,7 +567,7 @@ export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
       );
       const parsedBackAmount = bottle.backAmount === undefined ? undefined : parsedStoredNumber(bottle.backAmount);
       if (bottle.backAmount !== undefined && (parsedBackAmount === undefined || parsedBackAmount < 0 || !Number.isSafeInteger(parsedBackAmount))) {
-        integrityIssues.push(`${label}のボトル「${String(bottle.name || bottleIndex + 1)}」のバック額を1円単位へ補正しました。`);
+        integrityIssues.push(`${label}のボトル「${String(bottle.name || bottleIndex + 1)}」の不正なバック額を整数へ補正しました。`);
       }
       return [{
         ...bottle,
@@ -597,7 +597,7 @@ export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
         );
         const parsedBackAmount = drink.backAmount === undefined ? undefined : parsedStoredNumber(drink.backAmount);
         if (drink.backAmount !== undefined && (parsedBackAmount === undefined || parsedBackAmount < 0 || !Number.isSafeInteger(parsedBackAmount))) {
-          integrityIssues.push(`${label}のドリンク「${String(drink.name || drinkIndex + 1)}」のバック額を1円単位へ補正しました。`);
+          integrityIssues.push(`${label}のドリンク「${String(drink.name || drinkIndex + 1)}」の不正なバック額を整数へ補正しました。`);
         }
         return [{
           itemId: String(drink.itemId || ""),
@@ -999,13 +999,24 @@ export const floorHundred = (value: number) => {
   return Math.floor(stableUnits) * 100;
 };
 
+/** floorHundredと同じ浮動小数誤差対策を行い、10円未満を切り捨てる。 */
+export const floorTen = (value: number) => {
+  const tenUnits = Math.max(0, value) / 10;
+  const nearestInteger = Math.round(tenUnits);
+  const floatingPointTolerance = Number.EPSILON * Math.max(1, Math.abs(tenUnits)) * 8;
+  const stableUnits = Math.abs(tenUnits - nearestInteger) <= floatingPointTolerance
+    ? nearestInteger
+    : tenUnits;
+  return Math.floor(stableUnits) * 10;
+};
+
 /**
  * 商品1行全体の％バックを先に100円単位へ切り捨ててから均等割りする。
- * 割り切れない1円未満は各人で切り捨て、余りは誰にも上乗せしない。
+ * 個人の支給額は10円未満を切り捨て、余りは誰にも上乗せしない。
  */
 export function splitItemBackPerTarget(totalEligibleAmount: number, rate: number, targetCount: number) {
   if (!Number.isSafeInteger(targetCount) || targetCount <= 0) return 0;
-  return Math.floor(floorHundred(Math.max(0, totalEligibleAmount) * rate) / targetCount);
+  return floorTen(floorHundred(Math.max(0, totalEligibleAmount) * rate) / targetCount);
 }
 
 export function hoursBetweenQuarter(startTime: string, endTime: string, breakMinutes = 0) {
@@ -1489,14 +1500,14 @@ export function buildDailyCasts(
       banaiShimeiCount: banaiCount,
       dohanCount,
       dohanBack: dohanAmount,
-      honShimeiSales: floorHundred(asNumber(sale?.honShimeiSales)),
-      jonaiExtensionSales: floorHundred(asNumber(sale?.jonaiExtensionSales)),
+      honShimeiSales: floorTen(asNumber(sale?.honShimeiSales)),
+      jonaiExtensionSales: floorTen(asNumber(sale?.jonaiExtensionSales)),
       drinkSales,
       drinkAllocations,
       bottles,
       liquorCost,
       beautyAllowance: 0,
-      dailyPayment: source.kind === "trial" ? floorHundred((target?.hourlyRate || 0) * roundedHours) : 0,
+      dailyPayment: source.kind === "trial" ? floorTen((target?.hourlyRate || 0) * roundedHours) : 0,
       advancePayment: 0,
       transportFee: 0,
       introducer: target?.introducer
@@ -1506,7 +1517,7 @@ export function buildDailyCasts(
 
 function bottleBack(rows: BottleAllocation[]) {
   return rows.reduce((sum, row) => {
-    if (row.backAmount !== undefined) return sum + Math.max(0, Math.floor(asNumber(row.backAmount)));
+    if (row.backAmount !== undefined) return sum + floorTen(asNumber(row.backAmount));
     const rate = row.kind === "champagneWine" ? 0.25 : 0.15;
     return sum + floorHundred(Math.max(0, row.salesAmount - row.costAmount) * rate);
   }, 0);
@@ -1524,7 +1535,7 @@ function drinkBack(rows: DailyCast[]) {
       itemizedBack += row.drinkAllocations.reduce(
         (sum, allocation) => sum + (allocation.backAmount === undefined
           ? floorHundred(asNumber(allocation.salesAmount) * 0.1)
-          : Math.max(0, Math.floor(asNumber(allocation.backAmount)))),
+          : floorTen(asNumber(allocation.backAmount))),
         0,
       );
     } else {
@@ -1794,9 +1805,9 @@ function castSalesBacks(closing: DailyClosing, row: DailyCast, disabled: boolean
   const amounts: Record<CastSalesBackBreakdown["key"], number> = disabled ? {
     honShimei: 0, banaiShimei: 0, dohan: 0, bottle: 0, drink: 0,
   } : {
-    honShimei: floorHundred(asNumber(row.honShimeiCount) * 1000),
-    banaiShimei: floorHundred(asNumber(row.banaiShimeiCount) * 500),
-    dohan: floorHundred(asNumber(row.dohanBack)),
+    honShimei: floorTen(asNumber(row.honShimeiCount) * 1000),
+    banaiShimei: floorTen(asNumber(row.banaiShimeiCount) * 500),
+    dohan: floorTen(asNumber(row.dohanBack)),
     bottle: bottleBack(bottles),
     drink: drinkBackForEntries([{ closing, row }]),
   };
@@ -1893,9 +1904,9 @@ export function calculateCastSalesReports(
         startTime: row.startTime,
         endTime: row.endTime,
         hours: asNumber(row.hours),
-        honShimeiSales: asNumber(row.honShimeiSales),
-        jonaiExtensionSales: asNumber(row.jonaiExtensionSales),
-        totalSales: asNumber(row.honShimeiSales) + asNumber(row.jonaiExtensionSales),
+        honShimeiSales: floorTen(asNumber(row.honShimeiSales)),
+        jonaiExtensionSales: floorTen(asNumber(row.jonaiExtensionSales)),
+        totalSales: floorTen(asNumber(row.honShimeiSales)) + floorTen(asNumber(row.jonaiExtensionSales)),
         honShimeiLiquorCost: liquorCosts.honShimei,
         jonaiExtensionLiquorCost: liquorCosts.jonaiExtension,
         totalLiquorCost,
@@ -1977,9 +1988,9 @@ export function calculateCastRewards(
     const trialOnly = rows.every((row) => row.kind === "trial") && !convertedMember;
     const sum = (key: keyof DailyCast) => rows.reduce((total, row) => total + asNumber(row[key]), 0);
     const monthlyRate = rateForMonth(member?.hourlyRates || {}, month);
-    const hourlyPay = floorHundred(rows.reduce((total, row) => total + (row.kind === "regular" && monthlyRate > 0 ? monthlyRate : row.hourlyRate) * row.hours, 0));
-    const honShimeiSales = sum("honShimeiSales");
-    const jonaiExtensionSales = sum("jonaiExtensionSales");
+    const hourlyPay = floorTen(rows.reduce((total, row) => total + (row.kind === "regular" && monthlyRate > 0 ? monthlyRate : row.hourlyRate) * row.hours, 0));
+    const honShimeiSales = rows.reduce((total, row) => total + floorTen(asNumber(row.honShimeiSales)), 0);
+    const jonaiExtensionSales = rows.reduce((total, row) => total + floorTen(asNumber(row.jonaiExtensionSales)), 0);
     const eligibleBottles = entries.flatMap((entry) => {
       const allocations = bottleAllocationsBySalesType(entry.closing, entry.row, adjustments);
       return [...allocations.honShimei, ...allocations.jonaiExtension];
@@ -1987,17 +1998,17 @@ export function calculateCastRewards(
     const liquorCost = eligibleBottles.reduce((total, bottle) => total + asNumber(bottle.costAmount), 0);
     const honShimeiLiquorCost = entries.reduce((total, entry) =>
       total + honShimeiLiquorCostForClosing(entry.closing, entry.row, adjustments), 0);
-    const honShimeiBack = trialOnly ? 0 : floorHundred(sum("honShimeiCount") * 1000);
-    const banaiShimeiBack = trialOnly ? 0 : floorHundred(sum("banaiShimeiCount") * 500);
-    const totalDohanBack = trialOnly ? 0 : floorHundred(sum("dohanBack"));
+    const honShimeiBack = trialOnly ? 0 : floorTen(sum("honShimeiCount") * 1000);
+    const banaiShimeiBack = trialOnly ? 0 : floorTen(sum("banaiShimeiCount") * 500);
+    const totalDohanBack = trialOnly ? 0 : floorTen(sum("dohanBack"));
     const totalBottleBack = trialOnly ? 0 : bottleBack(eligibleBottles);
     const totalDrinkBack = trialOnly ? 0 : drinkBackForEntries(entries);
-    // 各商品バックは商品全体で100円単位へ切捨て後、1円単位で人数割り済み。
-    // ここで再び100円単位へ落とすと333円等の正しい個人配分が失われるため、単純合計する。
+    // 各商品バックは商品全体で100円単位へ切捨て後、個人額を10円単位へ切捨て済み。
+    // 月次では保存済みの各商品分を単純合計する。
     const hourlyAndBack = hourlyPay + honShimeiBack + banaiShimeiBack + totalDohanBack + totalBottleBack + totalDrinkBack;
-    const salesRewardBase = trialOnly ? 0 : floorHundred(Math.max(0, honShimeiSales + jonaiExtensionSales - liquorCost * 0.5));
+    const salesRewardBase = trialOnly ? 0 : floorTen(Math.max(0, honShimeiSales + jonaiExtensionSales - liquorCost * 0.5));
     const rewardRate = trialOnly ? 0 : rewardRateForSales(salesRewardBase);
-    const salesReward = floorHundred(salesRewardBase * rewardRate);
+    const salesReward = floorTen(salesRewardBase * rewardRate);
     const adoptedSystem = salesReward > hourlyAndBack ? "salesReward" as const : "hourlyAndBack" as const;
     const adoptedReward = Math.max(hourlyAndBack, salesReward);
     const beautyAllowance = sum("beautyAllowance");

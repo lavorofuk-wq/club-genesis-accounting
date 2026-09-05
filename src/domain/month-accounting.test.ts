@@ -16,6 +16,8 @@ import {
   calculateIntroducerPayments,
   calculateMonthlyAccounting,
   canFinalizeMonthlyAccounting,
+  MONTHLY_CALCULATION_VERSION,
+  MONTHLY_SNAPSHOT_SCHEMA_VERSION,
   monthlySourceFingerprint,
   normalizeIntroducerDeletionCommit,
   normalizeIntroducerMonthEvent,
@@ -461,6 +463,28 @@ describe("月次会計ドメイン", () => {
     expect(result.balance.profit).toBe(result.sales.total - result.balance.totalCosts);
   });
 
+  it("POS決済売上は月次集計でも1円単位の実額を保持する", () => {
+    const closing = approvedClosing({
+      sales: { cashSales: 60_003, cardSales: 40_004, totalSales: 100_007 },
+      cash: {
+        cashSales: 60_003,
+        cardSales: 40_004,
+        totalSales: 100_007,
+        cashFloat: 200_000,
+        expenseAndPaymentTotal: 0,
+        expectedClosingCash: 260_003,
+        cashProfit: 60_003,
+        actualClosingCash: 260_003,
+        difference: 0,
+      },
+    });
+
+    const result = calculateMonthlyAccounting(workspace({ closings: [closing] }), month, adjustments());
+
+    expect(result.sales).toEqual({ cash: 60_003, card: 40_004, total: 100_007 });
+    expect(result.balance.profit).toBe(100_007);
+  });
+
   it("酒代納品書の月締め修正・固定経費・カード手数料を収支へ一度ずつ反映する", () => {
     const closing = approvedClosing({
       sales: { cashSales: 60_000, cardSales: 40_000, totalSales: 100_000 },
@@ -812,14 +836,15 @@ describe("月次会計ドメイン", () => {
       "accounting-user",
       "2026-09-30T23:59:59.000Z",
     );
-    expect(snapshot.calculationVersion).toBe("2.12.0");
+    expect(snapshot.schemaVersion).toBe(MONTHLY_SNAPSHOT_SCHEMA_VERSION);
+    expect(snapshot.calculationVersion).toBe(MONTHLY_CALCULATION_VERSION);
     const corrupted = structuredClone(snapshot) as unknown as { castSalesReports: Array<{ days: Array<Record<string, unknown>> }> };
     delete corrupted.castSalesReports[0].days[0].businessDate;
 
     expect(normalizeMonthlyAccountingSnapshot(corrupted, month, 1)).toBeUndefined();
   });
 
-  it("1円単位で保存する商品バックに小数がある破損スナップショットを拒否する", async () => {
+  it("保存済み商品バックに小数がある破損スナップショットを拒否する", async () => {
     const closing = approvedClosing({ casts: [dailyCast()] });
     const source = workspace({ casts: [cast()], closings: [closing] });
     const input = adjustments();
@@ -839,6 +864,53 @@ describe("月次会計ドメイン", () => {
     corrupted.castSalesReports[0].days[0].backTotal = 0.5;
 
     expect(normalizeMonthlyAccountingSnapshot(corrupted, month, 1)).toBeUndefined();
+  });
+
+  it("schema 2はキャスト売上・バック・報酬の10円未満を拒否し、schema 1の旧確定値は保持する", async () => {
+    const closing = approvedClosing({ casts: [dailyCast()] });
+    const source = workspace({ casts: [cast()], closings: [closing] });
+    const input = adjustments();
+    const base = buildMonthlySnapshot(month, 1, await monthlySourceFingerprint(source, month, input), input,
+      calculateMonthlyAccounting(source, month, input), source.closings,
+      "accounting-user", "2026-09-30T23:59:59.000Z");
+
+    const oneYenSales = structuredClone(base);
+    const salesDay = oneYenSales.castSalesReports[0].days[0];
+    const salesTotals = oneYenSales.castSalesReports[0].totals;
+    salesDay.honShimeiSales += 1;
+    salesDay.totalSales += 1;
+    salesTotals.honShimeiSales += 1;
+    salesTotals.totalSales += 1;
+    oneYenSales.castRewards[0].honShimeiSales += 1;
+    expect(normalizeMonthlyAccountingSnapshot(oneYenSales, month, 1)).toBeUndefined();
+
+    const oneYenBack = structuredClone(base);
+    for (const report of [oneYenBack.castSalesReports[0].days[0], oneYenBack.castSalesReports[0].totals]) {
+      report.backs.find((row) => row.key === "bottle")!.amount += 1;
+      report.backTotal += 1;
+      report.bottleBackByKind!.keepBottle += 1;
+    }
+    expect(normalizeMonthlyAccountingSnapshot(oneYenBack, month, 1)).toBeUndefined();
+
+    const oneYenReward = structuredClone(base);
+    oneYenReward.castRewards[0].salesRewardBase += 1;
+    expect(normalizeMonthlyAccountingSnapshot(oneYenReward, month, 1)).toBeUndefined();
+
+    const legacy = structuredClone(oneYenBack);
+    legacy.schemaVersion = 1;
+    legacy.calculationVersion = "2.12.0";
+    expect(normalizeMonthlyAccountingSnapshot(legacy, month, 1)).toBeDefined();
+  });
+
+  it("schema 2を旧計算versionと組み合わせた不整合snapshotを拒否する", async () => {
+    const source = workspace();
+    const input = adjustments();
+    const snapshot = buildMonthlySnapshot(month, 1, await monthlySourceFingerprint(source, month, input), input,
+      calculateMonthlyAccounting(source, month, input), source.closings,
+      "accounting-user", "2026-09-30T23:59:59.000Z");
+
+    expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "2.12.9" }, month, 1)).toBeUndefined();
+    expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "2.13.1" }, month, 1)).toBeDefined();
   });
 
   it("種類別ボトルバックを確定保存し、旧確定データと金額不正を区別する", () => {
