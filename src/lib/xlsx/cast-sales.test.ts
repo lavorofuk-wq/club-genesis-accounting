@@ -39,7 +39,7 @@ describe("キャスト売上XLSX", () => {
   it("指定の列・勤務時間・月合計・左右両方の給与を保存値どおり出力する", () => {
     const book = createCastSalesWorkbook(input(), "2026-09", "承認済みデータ（未確定）");
     const sheet = book.worksheets[0];
-    expect(book.creator).toBe("GENESIS Management System Ver2.13.1");
+    expect(book.creator).toBe("GENESIS Management System Ver2.13.2");
     expect(sheet.getCell("G4").value).toBe(2000);
     expect(sheet.getCell("J4").value).toBe(500);
     expect(sheet.getCell("M4").value).toBe(4000);
@@ -167,7 +167,7 @@ describe("キャスト売上XLSX", () => {
       expect(sheet.name).not.toMatch(/[\\/*?:[\]]/);
       expect(sheet.getCell("F1").value).toBe(`【キャスト名】${names[index]}`);
       expect(sheet.getCell("U44").value).toBe(17532);
-      expect(sheet.getCell("G4").font.name).toBe("BIZ UDPGothic");
+      expect(sheet.getCell("G4").font.name).toBe("Yu Gothic");
       expect(sheet.views[0]).toMatchObject({ xSplit: 2, ySplit: 2 });
       expect(sheet.pageSetup.printArea).toBe("B1:V45");
     });
