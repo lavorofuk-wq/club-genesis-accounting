@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { User } from "firebase/auth";
 import type { CastReward, CastSalesBackBreakdown, CastSalesBottleSummary, CastSalesReport, DailyClosing, LegacyBottleClassification, MonthlyAdjustments } from "@/domain/gms";
 import { findUnclassifiedLegacyBottles, normalizeMonthlyAdjustments } from "@/domain/gms";
@@ -171,6 +171,16 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
     {!closed && allLegacyBottles.length > 0 && <LegacyBottleClassifications rows={allLegacyBottles} adjustments={adjustments} setAdjustments={setAdjustments} disabled={busy || locked} onSave={save} />}
     {!closed && calculationsBlocked && <div className="notice error"><strong>旧データのボトル区分が未確定または未保存のため、自動計算を停止しています。</strong><br />すべての商品を「本指名・場内延長・対象外」から手動指定し、保存してください。</div>}
     {results?.warnings.length ? <div className="notice error"><strong>正しく算出できない項目があります。</strong><ul>{results.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></div> : null}
+    {section === "castSales" && <CastSalesExport
+      results={results} month={month}
+      sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
+      disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"
+        : adjustmentsDirty ? "未保存の経理入力を保存してください。"
+        : calculationsBlocked ? "ボトル区分を確認して保存してください。"
+        : !results ? "出力する月次データを読み込めません。"
+        : results.warnings.length || (!closed && finalizeCheck.integrityIssues.length) ? "データの警告を解消してから出力してください。"
+        : !results.castSalesReports.length ? "対象月の承認済みキャスト売上がありません。" : ""}
+    />}
     {results && section === "castSales" && <CastSalesReports rows={results.castSalesReports} month={month} />}
     {results && section === "castRewards" && <CastRewards rows={results.castRewards} disabled={busy || locked} onWithholding={(id, value) => setMap("withholdingByCast", id, value)} />}
     {results && section === "introducers" && <IntroducerPayments rows={results.introducerPayments} />}
@@ -179,6 +189,40 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
     {results && section === "expenses" && <Expenses results={results} adjustments={adjustments} setAdjustments={setAdjustments} disabled={busy || locked} />}
     {results && section === "balance" && <Balance results={results} />}
   </div>;
+}
+
+export function CastSalesExport({ results, month, sourceLabel, disabledReason }: {
+  results?: Pick<MonthlyAccountingResults, "castSalesReports" | "castRewards">;
+  month: string;
+  sourceLabel: string;
+  disabledReason: string;
+}) {
+  const exportingRef = useRef(false);
+  const [exporting, setExporting] = useState(false);
+  const [notice, setNotice] = useState<{ month: string; error: boolean; text: string }>();
+  const exportAll = async () => {
+    if (disabledReason || !results || exportingRef.current) return;
+    exportingRef.current = true;
+    setExporting(true);
+    setNotice(undefined);
+    try {
+      const { createCastSalesWorkbook } = await import("@/lib/xlsx/cast-sales");
+      const { downloadWorkbook } = await import("@/lib/xlsx/workbooks");
+      const book = createCastSalesWorkbook(results, month, sourceLabel);
+      await downloadWorkbook(book, `GENESISキャスト売上_${month}.xlsx`);
+      setNotice({ month, error: false, text: `${month}のキャスト売上XLSXを出力しました。` });
+    } catch (error) {
+      setNotice({ month, error: true, text: `XLSXを出力できませんでした。${error instanceof Error ? error.message : "もう一度お試しください。"}` });
+    } finally {
+      exportingRef.current = false;
+      setExporting(false);
+    }
+  };
+  return <Card title="キャスト売上XLSX" description={`${month}・${sourceLabel}。全員をキャスト別シートにまとめ、左右両方の給与欄を出力します。`}
+    action={<button className="button" disabled={Boolean(disabledReason) || exporting || !results} title={disabledReason || undefined} onClick={() => void exportAll()}>{exporting ? "XLSX出力中…" : "全員分をXLSX出力"}</button>}>
+    {disabledReason && <p className="muted compact-text">{disabledReason}</p>}
+    {notice?.month === month && <div role="status" className={`notice${notice.error ? " error" : ""}`}>{notice.text}</div>}
+  </Card>;
 }
 
 function LegacyBottleClassifications({ rows, adjustments, setAdjustments, disabled, onSave }: { rows: ReturnType<typeof findUnclassifiedLegacyBottles>; adjustments: MonthlyAdjustments; setAdjustments: (value: MonthlyAdjustments | ((row: MonthlyAdjustments) => MonthlyAdjustments)) => void; disabled: boolean; onSave: () => Promise<boolean> }) {

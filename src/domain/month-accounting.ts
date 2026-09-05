@@ -28,7 +28,7 @@ import type {
   WorkspaceData,
 } from "./gms";
 
-export const MONTHLY_CALCULATION_VERSION = "2.11.2";
+export const MONTHLY_CALCULATION_VERSION = "2.12.0";
 
 export type IntroducerEntryEvent = {
   id: string;
@@ -204,6 +204,14 @@ function normalizeSnapshotBottles(value: unknown) {
   return rows as CastSalesReport["days"][number]["bottles"];
 }
 
+function validSnapshotBottleBackByKind(value: unknown, backs: CastSalesReport["totals"]["backs"]) {
+  // 過去の確定データは合計のみ。読込時に種類別金額を推定しない。
+  if (value === undefined) return true;
+  return snapshotObject(value) && snapshotInteger(value.keepBottle) && snapshotInteger(value.champagneWine)
+    && Number(value.keepBottle) + Number(value.champagneWine)
+      === backs.filter((back) => back.key === "bottle").reduce((sum, back) => sum + back.amount, 0);
+}
+
 function normalizeSnapshotCastSales(value: unknown, month: string): CastSalesReport[] | undefined {
   const reports = snapshotList<unknown>(value);
   const normalized: CastSalesReport[] = [];
@@ -219,7 +227,8 @@ function normalizeSnapshotCastSales(value: unknown, month: string): CastSalesRep
       const bottles = normalizeSnapshotBottles(day.bottles);
       if (!backs || !bottles || day.totalSales !== Number(day.honShimeiSales) + Number(day.jonaiExtensionSales)
         || day.totalLiquorCost !== Number(day.honShimeiLiquorCost) + Number(day.jonaiExtensionLiquorCost)
-        || day.backTotal !== backs.reduce((sum, back) => sum + back.amount, 0)) return undefined;
+        || day.backTotal !== backs.reduce((sum, back) => sum + back.amount, 0)
+        || !validSnapshotBottleBackByKind(day.bottleBackByKind, backs)) return undefined;
       days.push({ ...(day as unknown as CastSalesReport["days"][number]), backs, bottles });
     }
     const totals = item.totals;
@@ -230,6 +239,7 @@ function normalizeSnapshotCastSales(value: unknown, month: string): CastSalesRep
       || totals.totalSales !== Number(totals.honShimeiSales) + Number(totals.jonaiExtensionSales)
       || totals.totalLiquorCost !== Number(totals.honShimeiLiquorCost) + Number(totals.jonaiExtensionLiquorCost)
       || totals.backTotal !== backs.reduce((sum, back) => sum + back.amount, 0)
+      || !validSnapshotBottleBackByKind(totals.bottleBackByKind, backs)
       || item.attendanceDays !== totals.attendanceDays
       || item.attendanceDays !== new Set(days.map((day) => day.businessDate)).size) return undefined;
     normalized.push({

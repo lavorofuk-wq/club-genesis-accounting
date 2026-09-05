@@ -4,6 +4,7 @@ import type { User } from "firebase/auth";
 import { describe, expect, it } from "vitest";
 import type { DailyClosing } from "@/domain/gms";
 import type { AccountingWorkspaceData } from "@/domain/month-accounting";
+import { buildMonthlySnapshot, calculateMonthlyAccounting } from "@/domain/month-accounting";
 import { introducerDeletionLinkedCastSignature } from "@/lib/firebase/repository";
 import { AccountingForms, ClosingCastProductDetails } from "./accounting-forms";
 import { CommonForms, introducerDeletionConfirmation } from "./common-forms";
@@ -107,6 +108,37 @@ const data: AccountingWorkspaceData = {
 };
 
 describe("主要ページのSSRスモーク", () => {
+  it("キャスト売上の全員一括XLSXを表示し、対象データなしなら無効にする", () => {
+    const render = (source: AccountingWorkspaceData) => renderToStaticMarkup(createElement(AccountingForms, {
+      section: "castSales", data: source, user, busy: false, run,
+    }));
+    const markup = render(data);
+    expect(markup).toContain("全員分をXLSX出力");
+    expect(markup).not.toMatch(/<button[^>]*disabled[^>]*>全員分をXLSX出力/);
+    const empty = render({ ...data, closings: [] });
+    expect(empty).toMatch(/<button[^>]*disabled[^>]*>全員分をXLSX出力/);
+    const unapproved = render({ ...data, closings: [{ ...closing, status: "submitted" }] });
+    expect(unapproved).toMatch(/<button[^>]*disabled[^>]*>全員分をXLSX出力/);
+  });
+
+  it("確定月は保存結果を表示して出力でき、確定結果が欠損していれば出力を止める", () => {
+    const result = calculateMonthlyAccounting(data, month, data.adjustments[0]);
+    result.castSalesReports[0].name = "確定時のキャスト名";
+    const snapshot = buildMonthlySnapshot(month, 3, "a".repeat(64), data.adjustments[0], result, data.closings, user.uid, new Date().toISOString());
+    const closed: AccountingWorkspaceData = {
+      ...data, closings: [], casts: [], monthSnapshots: [snapshot],
+      monthStates: [{ month, status: "closed", revision: 1, currentSnapshotRevision: 3, updatedAt: "", updatedBy: user.uid }],
+    };
+    const render = (source: AccountingWorkspaceData) => renderToStaticMarkup(createElement(AccountingForms, {
+      section: "castSales", data: source, user, busy: false, run,
+    }));
+    expect(render(closed)).toContain("確定時のキャスト名");
+    expect(render(closed)).not.toMatch(/<button[^>]*disabled[^>]*>全員分をXLSX出力/);
+    expect(render({ ...closed, monthSnapshots: [] })).toMatch(/<button[^>]*disabled[^>]*>全員分をXLSX出力/);
+    expect(render({ ...closed, monthStates: [{ ...closed.monthStates[0], status: "closing" }] }))
+      .toMatch(/<button[^>]*disabled[^>]*>全員分をXLSX出力/);
+  });
+
   it("経理未承認の3状態だけに完全削除操作を表示する", () => {
     const statusRows = (["submitted", "returned", "withdrawn", "approved"] as const).map((status, index) => ({
       ...closing,

@@ -890,6 +890,8 @@ export type CastSalesBottleSummary = {
   quantity: number;
 };
 
+export type BottleBackByKind = { keepBottle: number; champagneWine: number };
+
 export type CastSalesDay = {
   businessDate: string;
   startTime: string;
@@ -907,6 +909,8 @@ export type CastSalesDay = {
   dohanCount: number;
   backs: CastSalesBackBreakdown[];
   backTotal: number;
+  /** Ver2.12以降の確定結果。旧スナップショットの未保存内訳を0円扱いしない。 */
+  bottleBackByKind?: BottleBackByKind;
   bottles: CastSalesBottleSummary[];
   beautyAllowance: number;
 };
@@ -1901,6 +1905,10 @@ export function calculateCastSalesReports(
         dohanCount: asNumber(row.dohanCount),
         backs,
         backTotal: backs.reduce((sum, back) => sum + back.amount, 0),
+        bottleBackByKind: {
+          keepBottle: trialOnly ? 0 : bottleBack(eligibleBottles.filter((bottle) => bottle.kind === "keepBottle")),
+          champagneWine: trialOnly ? 0 : bottleBack(eligibleBottles.filter((bottle) => bottle.kind === "champagneWine")),
+        },
         bottles: summarizeBottles(eligibleBottles),
         beautyAllowance: asNumber(row.beautyAllowance) + (closing.expenses || [])
           .filter((expense) => expense.category === "beautyTrial" && expense.personId === row.masterId)
@@ -1933,6 +1941,10 @@ export function calculateCastSalesReports(
         dohanCount: total("dohanCount"),
         backs,
         backTotal: backs.reduce((sum, back) => sum + back.amount, 0),
+        bottleBackByKind: {
+          keepBottle: days.reduce((sum, day) => sum + day.bottleBackByKind!.keepBottle, 0),
+          champagneWine: days.reduce((sum, day) => sum + day.bottleBackByKind!.champagneWine, 0),
+        },
         bottles: summarizeBottles(days.flatMap((day) => day.bottles)),
         beautyAllowance: total("beautyAllowance"),
       },
