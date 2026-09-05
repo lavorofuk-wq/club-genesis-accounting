@@ -231,7 +231,7 @@ export type BottleAllocation = {
   quantity: number;
   salesAmount: number;
   costAmount: number;
-  /** 商品1行全体の％バックを100円未満切捨て後、対象人数で均等割りした1人分（10円未満切捨て）。旧保存値は1円単位の場合がある。 */
+  /** 商品1行全体の％バックを10円未満切捨て後、対象人数で均等割りした1人分（10円未満切捨て）。旧保存値は1円単位の場合がある。 */
   backAmount?: number;
   specialCost: boolean;
 };
@@ -244,7 +244,7 @@ export type DrinkAllocation = {
   name: string;
   quantity: number;
   salesAmount: number;
-  /** 商品1行全体の10%を100円未満切捨て後、対象人数で均等割りした1人分（10円未満切捨て）。旧保存値は1円単位の場合がある。 */
+  /** 商品1行全体の10%を10円未満切捨て後、対象人数で均等割りした1人分（10円未満切捨て）。旧保存値は1円単位の場合がある。 */
   backAmount?: number;
 };
 
@@ -1011,12 +1011,12 @@ export const floorTen = (value: number) => {
 };
 
 /**
- * 商品1行全体の％バックを先に100円単位へ切り捨ててから均等割りする。
+ * 商品1行全体の％バックを先に10円単位へ切り捨ててから均等割りする。
  * 個人の支給額は10円未満を切り捨て、余りは誰にも上乗せしない。
  */
 export function splitItemBackPerTarget(totalEligibleAmount: number, rate: number, targetCount: number) {
   if (!Number.isSafeInteger(targetCount) || targetCount <= 0) return 0;
-  return floorTen(floorHundred(Math.max(0, totalEligibleAmount) * rate) / targetCount);
+  return floorTen(floorTen(Math.max(0, totalEligibleAmount) * rate) / targetCount);
 }
 
 export function hoursBetweenQuarter(startTime: string, endTime: string, breakMinutes = 0) {
@@ -1519,7 +1519,7 @@ function bottleBack(rows: BottleAllocation[]) {
   return rows.reduce((sum, row) => {
     if (row.backAmount !== undefined) return sum + floorTen(asNumber(row.backAmount));
     const rate = row.kind === "champagneWine" ? 0.25 : 0.15;
-    return sum + floorHundred(Math.max(0, row.salesAmount - row.costAmount) * rate);
+    return sum + floorTen(Math.max(0, row.salesAmount - row.costAmount) * rate);
   }, 0);
 }
 
@@ -1534,7 +1534,7 @@ function drinkBack(rows: DailyCast[]) {
     if (Array.isArray(row.drinkAllocations) && row.drinkAllocations.length > 0) {
       itemizedBack += row.drinkAllocations.reduce(
         (sum, allocation) => sum + (allocation.backAmount === undefined
-          ? floorHundred(asNumber(allocation.salesAmount) * 0.1)
+          ? floorTen(asNumber(allocation.salesAmount) * 0.1)
           : floorTen(asNumber(allocation.backAmount))),
         0,
       );
@@ -1542,7 +1542,7 @@ function drinkBack(rows: DailyCast[]) {
       legacyDrinkSales += asNumber(row.drinkSales);
     }
   });
-  return itemizedBack + floorHundred(legacyDrinkSales * 0.1);
+  return itemizedBack + floorTen(legacyDrinkSales * 0.1);
 }
 
 export type UnclassifiedLegacyBottle = {
@@ -2003,7 +2003,7 @@ export function calculateCastRewards(
     const totalDohanBack = trialOnly ? 0 : floorTen(sum("dohanBack"));
     const totalBottleBack = trialOnly ? 0 : bottleBack(eligibleBottles);
     const totalDrinkBack = trialOnly ? 0 : drinkBackForEntries(entries);
-    // 各商品バックは商品全体で100円単位へ切捨て後、個人額を10円単位へ切捨て済み。
+    // 各商品バックは商品全体で10円単位へ切捨て後、個人額も10円単位へ切捨て済み。
     // 月次では保存済みの各商品分を単純合計する。
     const hourlyAndBack = hourlyPay + honShimeiBack + banaiShimeiBack + totalDohanBack + totalBottleBack + totalDrinkBack;
     const salesRewardBase = trialOnly ? 0 : floorTen(Math.max(0, honShimeiSales + jonaiExtensionSales - liquorCost * 0.5));

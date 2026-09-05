@@ -119,7 +119,7 @@ describe("GMS報酬・日次計算", () => {
     expect(staffCandidatesForBusinessDate([legacyActive], [], "2026-09-01")).toEqual([]);
   });
 
-  it("報酬は10円未満、商品バック全体は100円未満、勤務は15分未満を切り捨てる", () => {
+  it("報酬と商品バックは10円未満、勤務は15分未満を切り捨てる", () => {
     expect(floorTen(1234)).toBe(1230);
     expect(floorTen(9.999)).toBe(0);
     expect(floorHundred(1234)).toBe(1200);
@@ -465,7 +465,7 @@ describe("GMS報酬・日次計算", () => {
     expect(report.totals.backs.find((back) => back.key === "honShimei")?.amount).toBe(1000);
   });
 
-  it("ボトル・ドリンクの％バックをPOS商品1行ごとに100円未満切捨てする", () => {
+  it("ボトル・ドリンクの％バックをPOS商品1行ごとに10円未満切捨てする", () => {
     const value = pos();
     const bottle = value.transactions[0].items.find((item) => item.itemId === "bottle")!;
     Object.assign(bottle, { price: 11000, backTargetCastIds: ["p1"], backTargetCastNames: ["花子"], backAllocation: "single" });
@@ -482,11 +482,87 @@ describe("GMS報酬・日次計算", () => {
     ], [], "2026-09").find((row) => row.id === "c1")!;
 
     expect(rows[0].drinkAllocations).toHaveLength(2);
-    expect(reward.bottleBack).toBe(5400); // 2,750円→2,700円を2商品分
-    expect(reward.drinkBack).toBe(200); // 155円→100円を2商品分
+    expect(reward.bottleBack).toBe(5500); // 2,750円を2商品分
+    expect(reward.drinkBack).toBe(300); // 155円→150円を2商品分
   });
 
-  it("商品1行のバック総額を100円単位へ切り捨て、3人へ330円ずつ均等分配する", () => {
+  it("35,000円・原価12,500円のシャンパンを本指名2人へ各2,810円で分配する", () => {
+    const value = pos();
+    const bottle = value.transactions[0].items.find((item) => item.itemId === "bottle")!;
+    bottle.price = 35_000;
+    const rows = buildDailyCasts(value, {
+      p1: { masterId: "c1", name: "花子", kind: "regular", hourlyRate: 3_000 },
+      p2: { masterId: "c2", name: "春子", kind: "regular", hourlyRate: 3_000 },
+    }, [{
+      id: "l1", kind: "champagneWine", name: "テストシャンパン",
+      salePrice: 35_000, costPrice: 12_500, createdAt: "", updatedAt: "",
+    }], {});
+    const closing = {
+      id: "two-way-champagne", businessDate: value.businessDate, status: "approved",
+      casts: rows, posSnapshot: value,
+    } as DailyClosing;
+    const rewards = calculateCastRewards([closing], [], "2026-09");
+
+    // 商品全体: (35,000 - 12,500) × 25% = 5,625 → 5,620円。
+    // 5,620 ÷ 2人 = 2,810円のため、分配後の追加端数はない。
+    expect(rows.map((row) => row.bottles[0])).toEqual([
+      expect.objectContaining({ salesAmount: 17_500, costAmount: 6_250, backAmount: 2_810 }),
+      expect.objectContaining({ salesAmount: 17_500, costAmount: 6_250, backAmount: 2_810 }),
+    ]);
+    expect(rewards.map((row) => row.bottleBack)).toEqual([2_810, 2_810]);
+    expect(rewards.reduce((sum, row) => sum + row.bottleBack, 0)).toBe(5_620);
+  });
+
+  it("POS原本のない旧日次もボトル・明細ドリンク・集約ドリンクを10円単位で算出する", () => {
+    const source = pos();
+    const base = buildDailyCasts(source, {
+      p1: { masterId: "c1", name: "花子", kind: "regular", hourlyRate: 3_000 },
+      p2: { masterId: "c2", name: "春子", kind: "regular", hourlyRate: 3_000 },
+    }, [{
+      id: "l1", kind: "champagneWine", name: "テストシャンパン",
+      salePrice: 30_000, costPrice: 10_000, createdAt: "", updatedAt: "",
+    }], {})[0];
+    const itemizedRow = {
+      ...base,
+      bottles: [{
+        itemId: "legacy-bottle", name: "旧シャンパン", kind: "champagneWine" as const,
+        quantity: 1, salesAmount: 17_500, costAmount: 6_250, specialCost: false,
+      }],
+      drinkSales: 1_565,
+      drinkAllocations: [{
+        itemId: "legacy-drink", name: "旧ドリンク", quantity: 1, salesAmount: 1_565,
+      }],
+    };
+    const aggregateRow = {
+      ...base,
+      bottles: [],
+      drinkSales: 1_565,
+      drinkAllocations: undefined,
+    };
+    const itemizedClosing = {
+      id: "legacy-itemized", businessDate: "2026-09-02", status: "approved",
+      updatedAt: "revision-1", checksum: "checksum-1", casts: [itemizedRow],
+    } as unknown as DailyClosing;
+    const aggregateClosing = {
+      id: "legacy-aggregate", businessDate: "2026-09-03", status: "approved",
+      updatedAt: "revision-1", checksum: "checksum-2", casts: [aggregateRow],
+    } as unknown as DailyClosing;
+    const adjustments = {
+      legacyBottleClassifications: {
+        [legacyBottleSourceKey(itemizedClosing, itemizedRow, 0)]: "honShimei",
+      },
+    } as Parameters<typeof calculateCastRewards>[3];
+    const reward = calculateCastRewards(
+      [itemizedClosing, aggregateClosing], [], "2026-09", adjustments,
+    )[0];
+
+    // ボトル: (17,500 - 6,250) × 25% = 2,812.5 → 2,810円。
+    expect(reward.bottleBack).toBe(2_810);
+    // 明細・集約の各日とも 1,565 × 10% = 156.5 → 150円。
+    expect(reward.drinkBack).toBe(300);
+  });
+
+  it("商品1行のバック総額を10円単位へ切り捨て、3人へ330円ずつ均等分配する", () => {
     const value = pos();
     const transaction = value.transactions[0];
     transaction.items.push({
@@ -817,10 +893,10 @@ describe("GMS報酬・日次計算", () => {
     const rows = buildDailyCasts(source, mapping, bottles, {});
     const closing = { id: "mixed", businessDate: source.businessDate, status: "approved", casts: rows, posSnapshot: source } as DailyClosing;
     const result = calculateCastSalesReports([closing], [], "2026-09")[0];
-    // (11,000 - 3,300) × 15% = 1,155 → 1,100 → 2人で550円。
-    expect(result.days[0].bottleBackByKind).toEqual({ keepBottle: 550, champagneWine: 2500 });
-    expect(result.totals.bottleBackByKind).toEqual({ keepBottle: 550, champagneWine: 2500 });
-    expect(result.totals.backs.find((back) => back.key === "bottle")?.amount).toBe(3050);
+    // (11,000 - 3,300) × 15% = 1,155 → 1,150 → 2人で575円 → 570円。
+    expect(result.days[0].bottleBackByKind).toEqual({ keepBottle: 570, champagneWine: 2500 });
+    expect(result.totals.bottleBackByKind).toEqual({ keepBottle: 570, champagneWine: 2500 });
+    expect(result.totals.backs.find((back) => back.key === "bottle")?.amount).toBe(3070);
     const trialResult = calculateCastSalesReports([{ ...closing, casts: rows.map((row) => ({ ...row, kind: "trial" })) }], [], "2026-09")[0];
     expect(trialResult.totals.bottleBackByKind).toEqual({ keepBottle: 0, champagneWine: 0 });
   });

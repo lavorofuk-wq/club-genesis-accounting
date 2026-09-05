@@ -910,7 +910,11 @@ describe("月次会計ドメイン", () => {
       "accounting-user", "2026-09-30T23:59:59.000Z");
 
     expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "2.12.9" }, month, 1)).toBeUndefined();
+    // Ver2.13.0で確定済みのschema 2は、過去金額を保持して互換読込する。
+    expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "2.13.0" }, month, 1)).toBeDefined();
     expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "2.13.1" }, month, 1)).toBeDefined();
+    expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "2.14.0" }, month, 1)).toBeDefined();
+    expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "3.0.0" }, month, 1)).toBeDefined();
   });
 
   it("種類別ボトルバックを確定保存し、旧確定データと金額不正を区別する", () => {

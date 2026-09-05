@@ -28,7 +28,7 @@ import type {
   WorkspaceData,
 } from "./gms";
 
-export const MONTHLY_CALCULATION_VERSION = "2.13.0";
+export const MONTHLY_CALCULATION_VERSION = "2.13.1";
 export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 2 as const;
 
 export type IntroducerEntryEvent = {
@@ -170,6 +170,8 @@ const supportsTenYenSnapshot = (value: string) => {
   const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(value);
   if (!match) return false;
   const [major, minor] = match.slice(1).map(Number);
+  // Ver2.13.0で確定済みのschema 2も、当時の金額を変えずに互換読込する。
+  // 新規保存の最低versionはFirebase Rules側で別途2.13.1へ限定する。
   return major > 2 || (major === 2 && minor >= 13);
 };
 const snapshotMillisecondsInstant = (value: unknown) => {

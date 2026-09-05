@@ -209,7 +209,18 @@ test("月次snapshotはschema 2だけを新規保存し、キャスト売上・�
 
   assert.match(snapshot[".validate"], /schemaVersion'\)\.val\(\) === 2/);
   assert.equal(snapshot.schemaVersion[".validate"], "newData.val() === 2");
-  assert.match(snapshot.calculationVersion[".validate"], /2\\\.\(1\[3-9\]/);
+  const calculationVersionRule = snapshot.calculationVersion[".validate"];
+  assert.equal(
+    calculationVersionRule,
+    "newData.isString() && newData.val().matches(/^(2\\.13\\.[1-9][0-9]*|2\\.(1[4-9]|[2-9][0-9]|[1-9][0-9]{2,})\\.[0-9]+|([3-9]|[1-9][0-9]+)\\.[0-9]+\\.[0-9]+)$/)",
+  );
+  const versionPattern = calculationVersionRule.match(/\.matches\(\/(.+)\/\)$/)?.[1];
+  assert.ok(versionPattern);
+  const permittedCalculationVersion = new RegExp(versionPattern);
+  assert.equal(permittedCalculationVersion.test("2.13.0"), false);
+  assert.equal(permittedCalculationVersion.test("2.13.1"), true);
+  assert.equal(permittedCalculationVersion.test("2.14.0"), true);
+  assert.equal(permittedCalculationVersion.test("3.0.0"), true);
   for (const row of [day, totals]) {
     for (const key of ["honShimeiSales", "jonaiExtensionSales", "totalSales", "backTotal"]) {
       assert.match(row[key][".validate"], /val\(\) % 10 === 0/);
