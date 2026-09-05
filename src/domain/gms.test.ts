@@ -8,6 +8,7 @@ import {
   canMapAsDispatch,
   dayAfterIsoDate,
   floorHundred,
+  floorTen,
   findUnclassifiedLegacyBottles,
   hoursBetweenQuarter,
   introducerSalesBase,
@@ -118,13 +119,41 @@ describe("GMS報酬・日次計算", () => {
     expect(staffCandidatesForBusinessDate([legacyActive], [], "2026-09-01")).toEqual([]);
   });
 
-  it("100円未満と15分未満を切り捨てる", () => {
+  it("報酬は10円未満、商品バック全体は100円未満、勤務は15分未満を切り捨てる", () => {
+    expect(floorTen(1234)).toBe(1230);
+    expect(floorTen(9.999)).toBe(0);
     expect(floorHundred(1234)).toBe(1200);
     expect(floorHundred(99.999)).toBe(0);
-    // 15%・70%計算で生じるIEEE 754の微小誤差により100円過少にならない。
+    // 15%・70%計算で生じるIEEE 754の微小誤差により10円／100円過少にならない。
     expect(floorHundred((2000 / 3) * 0.15)).toBe(100);
     expect(floorHundred(5_243_000 * 0.7)).toBe(3_670_100);
+    expect(floorTen(5_243_000 * 0.7)).toBe(3_670_100);
     expect(hoursBetweenQuarter("20:00", "02:07")).toBe(6);
+  });
+
+  it("POSの現金売上・カード売上・当日合計売上は10円単位へ丸めない", () => {
+    const result = calculateCash({
+      sales: { cashSales: 60_003, cardSales: 40_004, totalSales: 100_007 },
+      cashFloat: 200_000,
+      expenses: 0,
+      regularDailyPayments: 0,
+      trialDailyPayments: 0,
+      staffDailyPayments: 0,
+      driverDailyPayments: 0,
+      dispatchCastPayment: 0,
+      dispatchStaffPayment: 0,
+      dispatchFee: 0,
+      actualClosingCash: 260_003,
+    });
+
+    expect(result).toMatchObject({
+      cashSales: 60_003,
+      cardSales: 40_004,
+      totalSales: 100_007,
+      expectedClosingCash: 260_003,
+      actualClosingCash: 260_003,
+      difference: 0,
+    });
   });
 
   it("売上報酬率の境界を正しく判定する", () => {
@@ -409,7 +438,7 @@ describe("GMS報酬・日次計算", () => {
     const trial = rows.find((row) => row.posCastId === "p1")!;
 
     expect(trial.hours).toBe(4);
-    expect(trial.dailyPayment).toBe(4900);
+    expect(trial.dailyPayment).toBe(4930);
   });
 
   it("完全削除された体入を在籍側の逆参照で同月報酬・売上へ統合する", () => {
@@ -457,7 +486,7 @@ describe("GMS報酬・日次計算", () => {
     expect(reward.drinkBack).toBe(200); // 155円→100円を2商品分
   });
 
-  it("商品1行のバック総額を先に切り捨て、3人へ333円ずつ均等分配する", () => {
+  it("商品1行のバック総額を100円単位へ切り捨て、3人へ330円ずつ均等分配する", () => {
     const value = pos();
     const transaction = value.transactions[0];
     transaction.items.push({
@@ -507,14 +536,14 @@ describe("GMS報酬・日次計算", () => {
     const reports = calculateCastSalesReports([closing], [], "2026-09");
 
     expect(rows).toHaveLength(3);
-    expect(rows.map((row) => row.bottles[0].backAmount)).toEqual([333, 333, 333]);
-    expect(rows.map((row) => row.drinkAllocations?.[0].backAmount)).toEqual([333, 333, 333]);
-    expect(rewards.map((row) => row.bottleBack)).toEqual([333, 333, 333]);
-    expect(rewards.map((row) => row.drinkBack)).toEqual([333, 333, 333]);
-    expect(rewards.reduce((sum, row) => sum + row.bottleBack, 0)).toBe(999);
-    expect(rewards.reduce((sum, row) => sum + row.drinkBack, 0)).toBe(999);
-    expect(reports.map((report) => report.days[0].backs.find((back) => back.key === "bottle")?.amount)).toEqual([333, 333, 333]);
-    expect(reports.map((report) => report.days[0].backs.find((back) => back.key === "drink")?.amount)).toEqual([333, 333, 333]);
+    expect(rows.map((row) => row.bottles[0].backAmount)).toEqual([330, 330, 330]);
+    expect(rows.map((row) => row.drinkAllocations?.[0].backAmount)).toEqual([330, 330, 330]);
+    expect(rewards.map((row) => row.bottleBack)).toEqual([330, 330, 330]);
+    expect(rewards.map((row) => row.drinkBack)).toEqual([330, 330, 330]);
+    expect(rewards.reduce((sum, row) => sum + row.bottleBack, 0)).toBe(990);
+    expect(rewards.reduce((sum, row) => sum + row.drinkBack, 0)).toBe(990);
+    expect(reports.map((report) => report.days[0].backs.find((back) => back.key === "bottle")?.amount)).toEqual([330, 330, 330]);
+    expect(reports.map((report) => report.days[0].backs.find((back) => back.key === "drink")?.amount)).toEqual([330, 330, 330]);
     rewards.forEach((reward) => expect(reward.hourlyAndBack).toBe(
       reward.hourlyPay + reward.honShimeiBack + reward.banaiShimeiBack
       + reward.dohanBack + reward.bottleBack + reward.drinkBack,
@@ -534,16 +563,16 @@ describe("GMS報酬・日次計算", () => {
       id: "existing-pos-snapshot", businessDate: value.businessDate, status: "approved",
       casts: existingRows, posSnapshot: value,
     } as DailyClosing], [], "2026-09");
-    expect(recalculated.map((row) => row.bottleBack)).toEqual([333, 333, 333]);
-    expect(recalculated.map((row) => row.drinkBack)).toEqual([333, 333, 333]);
+    expect(recalculated.map((row) => row.bottleBack)).toEqual([330, 330, 330]);
+    expect(recalculated.map((row) => row.drinkBack)).toEqual([330, 330, 330]);
 
     const restored = restoreDailyCastBackMetadata(value, existingRows.map((row, index) => ({
       ...row,
       beautyAllowance: index === 0 ? 500 : 0,
       dailyPayment: index === 0 ? 2_000 : 0,
     })));
-    expect(restored.map((row) => row.bottles[0].backAmount)).toEqual([333, 333, 333]);
-    expect(restored.map((row) => row.drinkAllocations?.[0].backAmount)).toEqual([333, 333, 333]);
+    expect(restored.map((row) => row.bottles[0].backAmount)).toEqual([330, 330, 330]);
+    expect(restored.map((row) => row.drinkAllocations?.[0].backAmount)).toEqual([330, 330, 330]);
     expect(restored[0]).toMatchObject({ beautyAllowance: 500, dailyPayment: 2_000 });
   });
 
@@ -577,6 +606,93 @@ describe("GMS報酬・日次計算", () => {
     const bottle = transaction.items.find((item) => item.itemId === "bottle")!;
     expect(requiresBottleCost(transaction, bottle, { p1: "dispatch", p2: "dispatch" })).toBe(false);
     expect(requiresBottleCost(transaction, bottle, { p1: "dispatch", p2: "cast-2" })).toBe(true);
+  });
+
+  it("POS原本のない旧日次も売上・時給・バック・売上報酬を10円単位へ切り捨てる", () => {
+    const source = pos();
+    const base = buildDailyCasts(source, {
+      p1: { masterId: "c1", name: "花子", kind: "regular", hourlyRate: 1_234 },
+      p2: { masterId: "c2", name: "春子", kind: "regular", hourlyRate: 3_000 },
+    }, [{
+      id: "l1", kind: "champagneWine", name: "テストシャンパン",
+      salePrice: 30_000, costPrice: 10_000, createdAt: "", updatedAt: "",
+    }], {}).find((row) => row.masterId === "c1")!;
+    const legacyRow = {
+      ...base,
+      hours: 4,
+      hourlyRate: 1_234,
+      honShimeiCount: 0,
+      banaiShimeiCount: 0,
+      dohanBack: 1_234,
+      honShimeiSales: 1_210_019,
+      jonaiExtensionSales: 29,
+      bottles: [],
+      liquorCost: 0,
+      drinkSales: 3_330,
+      drinkAllocations: [{
+        itemId: "legacy-drink", name: "旧ドリンク", quantity: 1,
+        salesAmount: 3_330, backAmount: 333,
+      }],
+    };
+    const closing = {
+      id: "legacy-rounding", businessDate: "2026-09-02", status: "approved", casts: [legacyRow],
+    } as unknown as DailyClosing;
+
+    const reward = calculateCastRewards([closing], [], "2026-09")[0];
+    const report = calculateCastSalesReports([closing], [], "2026-09")[0];
+
+    expect(reward).toMatchObject({
+      hourlyPay: 4_930,
+      honShimeiSales: 1_210_010,
+      jonaiExtensionSales: 20,
+      dohanBack: 1_230,
+      drinkBack: 330,
+      hourlyAndBack: 6_490,
+      salesRewardBase: 1_210_030,
+      salesReward: 726_010,
+      adoptedSystem: "salesReward",
+      adoptedReward: 726_010,
+    });
+    expect(report.days[0]).toMatchObject({
+      honShimeiSales: 1_210_010,
+      jonaiExtensionSales: 20,
+      totalSales: 1_210_030,
+      backTotal: 1_560,
+    });
+    expect(report.days[0].backs.every((back) => back.amount % 10 === 0)).toBe(true);
+  });
+
+  it("時給報酬は日別ではなく月間の未丸め合計から10円未満を切り捨てる", () => {
+    const source = pos();
+    const base = buildDailyCasts(source, {
+      p1: { masterId: "c1", name: "花子", kind: "regular", hourlyRate: 1_230 },
+      p2: { masterId: "c2", name: "春子", kind: "regular", hourlyRate: 3_000 },
+    }, [{
+      id: "l1", kind: "champagneWine", name: "テストシャンパン",
+      salePrice: 30_000, costPrice: 10_000, createdAt: "", updatedAt: "",
+    }], {}).find((row) => row.masterId === "c1")!;
+    const row = {
+      ...base,
+      hours: 0.25,
+      hourlyRate: 1_230,
+      honShimeiCount: 0,
+      banaiShimeiCount: 0,
+      dohanBack: 0,
+      honShimeiSales: 0,
+      jonaiExtensionSales: 0,
+      bottles: [],
+      drinkSales: 0,
+      drinkAllocations: [],
+    };
+    const closings = ["02", "03"].map((day) => ({
+      id: `hourly-${day}`,
+      businessDate: `2026-09-${day}`,
+      status: "approved",
+      casts: [{ ...row }],
+    } as unknown as DailyClosing));
+
+    // 1,230円×0.25時間×2日＝615円。日別なら300円×2だが、月合計後なので610円。
+    expect(calculateCastRewards(closings, [], "2026-09")[0].hourlyPay).toBe(610);
   });
 
   it("時給＋バックと売上報酬を比較する", () => {
