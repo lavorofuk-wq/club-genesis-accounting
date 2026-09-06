@@ -78,7 +78,7 @@ function input(): ExpenseExportInput {
   const results: MonthlyAccountingResults = {
     approvedDays: 0, castSalesReports: [],
     castRewards: [reward("時給キャスト", "hourlyAndBack", 13500, 500), reward("売上キャスト", "salesReward", 70000, 1000)],
-    introducerPayments: [{ id: "intro-1", introducer: "紹介者A", cast: "時給キャスト", feeType: "sales10", honShimeiLiquorCost: 0, salesBase: 44000, salesFee: 4400, grossBase: 14000, grossFee: 1400, adopted: "売上10%", attendanceAdvisory: 11, entryAdvisory: 33, advisory: 44, total: 4444 }],
+    introducerPayments: [{ id: "intro-1_cast-1", introducerId: "intro-1", castId: "cast-1", introducer: "紹介者A", cast: "時給キャスト", feeType: "sales10", honShimeiLiquorCost: 0, salesBase: 44000, salesFee: 4400, grossBase: 14000, grossFee: 1400, adopted: "売上10%", attendanceAdvisory: 11, entryAdvisory: 33, advisory: 44, total: 4444 }],
     staffPayroll: [{ id: "staff-1", name: "スタッフA", hours: 1, hourly: 2000, sales: 100, bottle: 100, gross: 2200, daily: 1000, net: 1200 }],
     driverPayroll: [{ id: "driver-1", name: "ドライバーA", days: 1, basic: 3000, remote: 300, gross: 3300, dailyPayment: 1000, net: 2300 }],
     expenses: { byCategory: {}, dailyExpenseTotal: 0, dispatchCast: 0, dispatchStaff: 0, dispatchFee: 0, dispatchTotal: 0, liquorDelivery: 0, fixed: 0, cardFee: 0, total: 0 },
@@ -151,8 +151,7 @@ describe("見本形式の月次経費XLSX", () => {
     data.closings[0].expenses.push({ id: "liquor-2", category: "liquor", payee: "別の酒屋", amount: 789 });
     refresh(data);
     const sheet = createMonthlyExpenseWorkbook(data, "未確定").worksheets[0];
-    expect(sheet.getCell("B4").value).toContain("liquor支払先");
-    expect(sheet.getCell("B4").value).toContain("別の酒屋");
+    expect(sheet.getCell("B4").value).toBe("liquor支払先\n別の酒屋");
     expect(value(sheet, "C4")).toBe(890);
     expect(value(sheet, "C34")).toBe(890);
     expect(value(sheet, "P45")).toBe(data.results.balance.totalCosts);
@@ -163,6 +162,60 @@ describe("見本形式の月次経費XLSX", () => {
     data.closings[0].expenses[0].personName = "経費とは別の人物";
     const sheet = createMonthlyExpenseWorkbook(data, "未確定").worksheets[0];
     expect(sheet.getCell("B4").value).toBe("liquor支払先");
+  });
+
+  it("全経費名目は支払先だけを併記し金額は隣列だけに表示する", () => {
+    const data = input();
+    for (const expense of [...data.closings[0].expenses]) {
+      data.closings[0].expenses.push({ ...expense, id: `${expense.id}-second`, payee: "第二支払先", amount: 500 });
+      data.closings[0].expenses.push({ ...expense, id: `${expense.id}-repeat`, amount: 100 });
+    }
+    refresh(data);
+    const sheet = createMonthlyExpenseWorkbook(data, "未確定").worksheets[0];
+    for (const [index, column] of ["B", "D", "F", "H", "J", "L", "P"].entries()) {
+      expect(sheet.getCell(`${column}4`).value).toBe(`${data.closings[0].expenses[index].payee}\n第二支払先`);
+      expect(value(sheet, `${["C", "E", "G", "I", "K", "M", "Q"][index]}4`)).toBe(101 * (index + 1) + 600);
+    }
+    expect(value(sheet, "P45")).toBe(data.results.balance.totalCosts);
+  });
+
+  it("同じ紹介者の全キャスト分を合計し紹介者名だけで表示する", () => {
+    const data = input();
+    const first = data.results.introducerPayments[0];
+    data.results.introducerPayments.push({ ...first, id: "intro-1_cast-2", castId: "cast-2", cast: "売上キャスト", salesFee: 3000, total: 3044 });
+    refresh(data);
+    const sheet = createMonthlyExpenseWorkbook(data, "未確定").worksheets[0];
+    expect(sheet.getCell("L37").value).toBe("紹介者A");
+    expect(value(sheet, "M37")).toBe(7488);
+    expect(sheet.getCell("N37").value).toBeNull();
+    expect(value(sheet, "M36")).toBe(7400);
+    expect(value(sheet, "O36")).toBe(88);
+    expect(value(sheet, "P45")).toBe(data.results.balance.totalCosts);
+    expect(unmergedCells(sheet).some((cell) => String(cell.value || "").includes("キャスト"))).toBe(false);
+  });
+
+  it("同名でも紹介者IDが異なる登録は混ぜない", () => {
+    const data = input();
+    const first = data.results.introducerPayments[0];
+    data.results.introducerPayments.push({ ...first, id: "intro-2_cast-2", introducerId: "intro-2", castId: "cast-2", salesFee: 3000, total: 3044 });
+    refresh(data);
+    const sheet = createMonthlyExpenseWorkbook(data, "未確定").worksheets[0];
+    expect(sheet.getCell("L37").value).toBe("紹介者A");
+    expect(sheet.getCell("N37").value).toBe("紹介者A");
+    expect([value(sheet, "M37"), value(sheet, "O37")]).toEqual([4444, 3044]);
+    expect(value(sheet, "P45")).toBe(data.results.balance.totalCosts);
+  });
+
+  it("キャスト数が多くても紹介者別にまとめた行数で配置する", () => {
+    const data = input();
+    const first = data.results.introducerPayments[0];
+    data.results.introducerPayments = Array.from({ length: 40 }, (_, i) => ({ ...first, id: `intro-1_cast-${i}`, castId: `cast-${i}`, cast: `キャスト${i}` }));
+    refresh(data);
+    const sheet = createMonthlyExpenseWorkbook(data, "未確定").worksheets[0];
+    expect(sheet.rowCount).toBe(45);
+    expect(value(sheet, "M37")).toBe(4444 * 40);
+    expect(sheet.getCell("L41").value).toBe("送迎給与");
+    expect(value(sheet, "P45")).toBe(data.results.balance.totalCosts);
   });
 
   it("同名の固定酒代・カード手数料を保持して納品書調整・決済手数料へ加算する", () => {
@@ -182,7 +235,7 @@ describe("見本形式の月次経費XLSX", () => {
     data.results.staffPayroll = Array.from({ length: 21 }, (_, i) => ({ id: `s${i}`, name: `従業員${i + 1}`, hours: 1, hourly: 6000 + i, sales: 0, bottle: 0, gross: 6000 + i, daily: 0, net: 6000 + i }));
     data.results.driverPayroll = Array.from({ length: 9 }, (_, i) => ({ id: `d${i}`, name: `運転者${i + 1}`, days: 1, basic: 7000 + i, remote: 0, gross: 7000 + i, dailyPayment: 0, net: 7000 + i }));
     const sourceIntroducer = data.results.introducerPayments[0];
-    data.results.introducerPayments = Array.from({ length: 16 }, (_, i) => ({ ...sourceIntroducer, id: `i${i}`, introducer: `紹介者${i + 1}`, cast: `対象キャスト${i + 1}`, salesFee: 8000 + i, total: 8044 + i }));
+    data.results.introducerPayments = Array.from({ length: 16 }, (_, i) => ({ ...sourceIntroducer, id: `i${i}_c${i}`, introducerId: `i${i}`, castId: `c${i}`, introducer: `紹介者${i + 1}`, cast: `対象キャスト${i + 1}`, salesFee: 8000 + i, total: 8044 + i }));
     refresh(data);
     const sheet = createMonthlyExpenseWorkbook(data, "未確定").worksheets[0];
     expect(sheet.rowCount).toBeGreaterThan(45);
@@ -191,7 +244,8 @@ describe("見本形式の月次経費XLSX", () => {
     for (const item of data.adjustments.fixedExpenses) expect(texts.some((text) => text === item.account)).toBe(true);
     for (const item of [...data.results.staffPayroll, ...data.results.driverPayroll]) expect(texts).toContain(item.name);
     for (const item of data.results.introducerPayments) {
-      expect(texts.some((text) => text.includes(item.introducer) && text.includes(item.cast))).toBe(true);
+      expect(texts).toContain(item.introducer);
+      expect(texts.some((text) => text.includes(item.cast))).toBe(false);
     }
     const grandTotal = sheet.getCell(`P${sheet.rowCount}`);
     expect(value(sheet, grandTotal.address)).toBe(data.results.balance.totalCosts);

@@ -49,6 +49,9 @@ export type IntroducerEntryEvent = {
 
 export type IntroducerPaymentRow = {
   id: string;
+  /** 旧確定データには未保存。新規計算では集約用の人物IDを明示する。 */
+  introducerId?: string;
+  castId?: string;
   introducer: string;
   cast: string;
   feeType: string;
@@ -346,6 +349,9 @@ export function normalizeMonthlyAccountingSnapshot(
         - Number(item.transportFee) - Number(item.withholding);
   }));
   const introducerPaymentsValid = Boolean(introducerPayments?.every((item) => snapshotObject(item)
+    && ((item.introducerId === undefined && item.castId === undefined)
+      || (snapshotString(item.introducerId) && snapshotString(item.castId)
+        && item.id === `${item.introducerId}_${item.castId}`))
     && item.advisory === Number(item.attendanceAdvisory) + Number(item.entryAdvisory)
     && Number(item.total) >= Number(item.advisory)));
   const staffPayrollValid = Boolean(staffPayroll?.every((item) => snapshotObject(item)
@@ -723,8 +729,11 @@ export function calculateIntroducerPayments(
       : entry?.amount || 0;
     if (!reward && entryAdvisory <= 0) return [];
     const advisory = attendanceAdvisory + entryAdvisory;
+    const introducerId = intro?.id || entry!.introducerId;
     return [{
-      id: `${intro?.id || entry!.introducerId}_${castId}`,
+      id: `${introducerId}_${castId}`,
+      introducerId,
+      castId,
       introducer: intro?.name || entry!.introducerName,
       cast: reward?.name || entry?.castName || cast?.name || effectiveMonthEvent?.castName || "名称未設定",
       feeType,

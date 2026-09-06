@@ -65,6 +65,53 @@ function canonical(value: unknown): unknown {
   return value;
 }
 
+/** 保存済み支払額を紹介者ID別に集約する。現在マスタや名前から人物を推測しない。 */
+export function summarizeExpenseIntroducers(
+  results: Pick<MonthlyAccountingResults, "castRewards" | "introducerPayments">,
+): Array<{ id: string; name: string; total: number }> {
+  const rewards = array(results.castRewards, "キャスト報酬");
+  const payments = array(results.introducerPayments, "紹介者支払");
+  const paymentIds = new Set<string>();
+  const groups = new Map<string, { names: Set<string>; total: number }>();
+  for (const payment of payments) {
+    requireValue(payment, "紹介者支払を読み込めません。");
+    uniqueId(payment.id, paymentIds, "紹介者支払");
+    text(payment.introducer, "紹介者名");
+    const candidates = new Map<string, string>();
+    if (payment.introducerId !== undefined || payment.castId !== undefined) {
+      text(payment.introducerId, "紹介者支払の紹介者ID");
+      text(payment.castId, "紹介者支払のキャストID");
+      requireValue(payment.id === `${payment.introducerId}_${payment.castId}`,
+        "紹介者支払の人物IDが保存済み支払IDと一致しません。");
+      candidates.set(JSON.stringify([payment.introducerId, payment.castId]), payment.introducerId);
+    } else {
+      // 旧確定データは保存済みのキャスト報酬内の紹介者IDと完全一致する組だけを採用する。
+      for (const reward of rewards) {
+        if (typeof reward?.id !== "string" || !reward.id
+          || typeof reward.introducer?.id !== "string" || !reward.introducer.id) continue;
+        if (payment.id === `${reward.introducer.id}_${reward.id}`) {
+          candidates.set(JSON.stringify([reward.introducer.id, reward.id]), reward.introducer.id);
+        }
+      }
+      // 出勤なしの入店顧問料にはキャスト報酬がない。GMSの生成形式に完全一致するIDのみ復元する。
+      const generatedId = /^(introducer_[0-9a-f]{32})_(cast_[0-9a-f]{32})$/.exec(payment.id);
+      if (generatedId) candidates.set(JSON.stringify(generatedId.slice(1)), generatedId[1]);
+    }
+    requireValue(candidates.size === 1,
+      `${payment.introducer}の紹介者IDを一意に確認できません。保存済み紹介者支払データの確認が必要です。`);
+    const introducerId = candidates.values().next().value!;
+    const group = groups.get(introducerId) || { names: new Set<string>(), total: 0 };
+    group.names.add(payment.introducer.trim());
+    group.total = amount(group.total + amount(payment.total, "紹介者支払計"), "紹介者別支払合計");
+    groups.set(introducerId, group);
+  }
+  return [...groups.entries()].map(([id, group]) => ({
+    id,
+    name: [...group.names].sort((left, right) => left.localeCompare(right, "ja") || (left < right ? -1 : left > right ? 1 : 0)).join("／"),
+    total: group.total,
+  })).sort((left, right) => left.name.localeCompare(right.name, "ja") || left.id.localeCompare(right.id));
+}
+
 /** 経費帳票を生成する前に、明細・月計・確定時の保存世代が一致することを検査する。 */
 export function validateExpenseExport({ results, closings, adjustments, month, snapshot }: ExpenseExportInput): void {
   requireValue(/^\d{4}-(0[1-9]|1[0-2])$/.test(month), "対象月が正しくありません。");
@@ -221,4 +268,5 @@ export function validateExpenseExport({ results, closings, adjustments, month, s
     snapshotFields.forEach((key) => requireValue(JSON.stringify(canonical(results[key])) === JSON.stringify(canonical(snapshot[key])),
       "出力する月次データが確定時の金額と一致しません。"));
   }
+  summarizeExpenseIntroducers(results);
 }

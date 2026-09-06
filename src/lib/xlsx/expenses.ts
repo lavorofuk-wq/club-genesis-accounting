@@ -1,7 +1,7 @@
 "use client";
 
 import ExcelJS from "exceljs/dist/exceljs.min.js";
-import { validateExpenseExport, type ExpenseExportInput } from "@/domain/expense-export";
+import { summarizeExpenseIntroducers, validateExpenseExport, type ExpenseExportInput } from "@/domain/expense-export";
 import type { ExpenseCategory } from "@/domain/gms";
 
 const font = { name: "Yu Gothic", size: 10 };
@@ -42,6 +42,7 @@ function label(sheet: ExcelJS.Worksheet, address: string, value: string) {
 export function createMonthlyExpenseWorkbook(input: ExpenseExportInput, sourceLabel: string) {
   validateExpenseExport(input);
   const { results, month, adjustments } = input;
+  const introducers = summarizeExpenseIntroducers(results);
   const approved = input.closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(`${month}-`));
   const byDate = new Map(approved.map((row) => [row.businessDate, row]));
   const [year, monthNumber] = month.split("-").map(Number);
@@ -58,12 +59,12 @@ export function createMonthlyExpenseWorkbook(input: ExpenseExportInput, sourceLa
   fixed[8].amount += results.expenses.cardFee;
 
   // 見本の定員を超える場合は下段を伸ばし、金額・氏名の切捨てを避ける。
-  const driverHeader = 37 + Math.max(4, Math.ceil(results.introducerPayments.length / 3));
+  const driverHeader = 37 + Math.max(4, Math.ceil(introducers.length / 3));
   const driverStart = driverHeader + 1;
   const totalRow = Math.max(45, 36 + fixed.length, 37 + Math.ceil(results.staffPayroll.length / 2),
     driverStart + Math.max(3, Math.ceil(results.driverPayroll.length / 2)));
   const book = new ExcelJS.Workbook();
-  book.creator = "GENESIS Management System Ver2.16.1";
+  book.creator = "GENESIS Management System Ver2.16.2";
   book.created = new Date();
   book.calcProperties.fullCalcOnLoad = true;
   const sheet = book.addWorksheet("ジェネシス経費表");
@@ -123,7 +124,7 @@ export function createMonthlyExpenseWorkbook(input: ExpenseExportInput, sourceLa
         }
       }
       const amount = sum([...payments.values()], (value) => value);
-      const names = [...payments].map(([name, value]) => payments.size > 1 ? `${name}（${value.toLocaleString("ja-JP")}円）` : name);
+      const names = [...payments.keys()];
       if (names.length) label(sheet, `${category.column}${row}`, names.join("\n"));
       sheet.getCell(`${category.amount}${row}`).value = amount;
       categoryTotals.set(category.amount, (categoryTotals.get(category.amount) || 0) + amount);
@@ -167,12 +168,11 @@ export function createMonthlyExpenseWorkbook(input: ExpenseExportInput, sourceLa
     label(sheet, `${index % 2 ? "J" : "H"}${row}`, person.name);
     sheet.getCell(`${index % 2 ? "K" : "I"}${row}`).value = person.gross;
   });
-  // 保存済み行に紹介者IDが独立して残らないため、同名紹介者を推測で統合しない。
-  results.introducerPayments.forEach((person, index) => {
+  introducers.forEach((person, index) => {
     const row = 37 + Math.floor(index / 3);
     const column = ["L", "N", "P"][index % 3];
     const amount = `${["M", "O", "Q"][index % 3]}${row}`;
-    label(sheet, `${column}${row}`, `${person.introducer}\n（${person.cast}）`);
+    label(sheet, `${column}${row}`, person.name);
     sheet.getCell(amount).value = person.total;
   });
   // 明細全件の合計から顧問料を引き、紹介料計の式と表示済みキャッシュを一致させる。

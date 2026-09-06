@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CastReward, DailyClosing, MonthlyAdjustments, WorkspaceData } from "./gms";
 import { buildMonthlySnapshot, calculateMonthlyAccounting } from "./month-accounting";
-import { validateExpenseExport, type ExpenseExportInput } from "./expense-export";
+import { summarizeExpenseIntroducers, validateExpenseExport, type ExpenseExportInput } from "./expense-export";
 
 function fixture(): ExpenseExportInput {
   const month = "2026-09";
@@ -47,7 +47,7 @@ function addPayroll(input: ExpenseExportInput) {
   input.results.castRewards = [cast];
   input.results.staffPayroll = [{ id: "staff-1", name: "スタッフ", hours: 4, hourly: 6_000, sales: 1_000, bottle: 500, gross: 7_500, daily: 1_000, net: 6_500 }];
   input.results.driverPayroll = [{ id: "driver-1", name: "ドライバー", days: 1, basic: 5_000, remote: 1_000, gross: 6_000, dailyPayment: 1_000, net: 5_000 }];
-  input.results.introducerPayments = [{ id: "intro-1", introducer: "紹介者", cast: "花子", feeType: "gross10", honShimeiLiquorCost: 0,
+  input.results.introducerPayments = [{ id: "intro-1_cast-1", introducerId: "intro-1", castId: "cast-1", introducer: "紹介者", cast: "花子", feeType: "gross10", honShimeiLiquorCost: 0,
     salesBase: 0, salesFee: 0, grossBase: 12_837, grossFee: 1_283, adopted: "総支給額10%", attendanceAdvisory: 100,
     entryAdvisory: 3_000, advisory: 3_100, total: 4_383 }];
   input.results.balance.cast = cast.grossPay;
@@ -93,12 +93,23 @@ describe("経費XLSXの出力元検査", () => {
   it("旧確定済みの1円単位バック・総支給額・負の差引支給を再計算しない", () => {
     const input = fixture();
     addPayroll(input);
+    delete input.results.introducerPayments[0].introducerId;
+    delete input.results.introducerPayments[0].castId;
+    input.results.castRewards[0].introducer = { id: "intro-1", name: "紹介者", feeType: "gross10", attendanceAdvisoryFee: 100, entryAdvisoryFee: 3_000 };
     finalize(input);
     input.snapshot!.schemaVersion = 1;
     input.snapshot!.calculationVersion = "2.12.0";
     const before = structuredClone(input);
     expect(() => validateExpenseExport(input)).not.toThrow();
     expect(input).toEqual(before);
+  });
+
+  it("紹介者IDを復元できない場合は画面側の出力前検査でも停止する", () => {
+    const input = fixture();
+    addPayroll(input);
+    delete input.results.introducerPayments[0].introducerId;
+    delete input.results.introducerPayments[0].castId;
+    expect(() => validateExpenseExport(input)).toThrow("紹介者IDを一意に確認できません");
   });
 
   it.each([
@@ -151,5 +162,103 @@ describe("経費XLSXの出力元検査", () => {
     finalize(input);
     mutate(input);
     expect(() => validateExpenseExport(input)).toThrow(/確定|保存世代/);
+  });
+});
+
+describe("経費XLSXの紹介者別集約", () => {
+  function source() {
+    const input = fixture();
+    addPayroll(input);
+    return input.results;
+  }
+
+  it("同じ紹介者の全キャスト分と顧問料を保存額のまま合計する", () => {
+    const results = source();
+    const first = results.introducerPayments[0];
+    results.introducerPayments.push({ ...first, id: "intro-1_cast-2", castId: "cast-2", cast: "次郎", total: 10_001 });
+    const before = structuredClone(results);
+    expect(summarizeExpenseIntroducers(results)).toEqual([{ id: "intro-1", name: "紹介者", total: 14_384 }]);
+    expect(results).toEqual(before);
+  });
+
+  it("同名の別紹介者は合算しない", () => {
+    const results = source();
+    const first = results.introducerPayments[0];
+    results.introducerPayments.push({ ...first, id: "intro-2_cast-2", introducerId: "intro-2", castId: "cast-2", total: 2_001 });
+    expect(summarizeExpenseIntroducers(results)).toEqual([
+      { id: "intro-1", name: "紹介者", total: 4_383 },
+      { id: "intro-2", name: "紹介者", total: 2_001 },
+    ]);
+  });
+
+  it("同一IDの保存名は重複を除いて併記し、入力順を変えても出力順が変わらない", () => {
+    const results = source();
+    const first = results.introducerPayments[0];
+    first.introducer = "A紹介者";
+    results.introducerPayments.push(
+      { ...first, id: "intro-1_cast-2", castId: "cast-2", introducer: "B紹介者", total: 1 },
+      { ...first, id: "intro-1_cast-3", castId: "cast-3", introducer: "A紹介者", total: 2 },
+    );
+    const expected = [{ id: "intro-1", name: "A紹介者／B紹介者", total: 4_386 }];
+    expect(summarizeExpenseIntroducers(results)).toEqual(expected);
+    expect(summarizeExpenseIntroducers({ ...results, introducerPayments: [...results.introducerPayments].reverse() })).toEqual(expected);
+  });
+
+  it("旧支払IDと保存済みキャスト報酬の紹介者ID・キャストIDの完全一致から復元する", () => {
+    const results = source();
+    const payment = results.introducerPayments[0];
+    delete payment.introducerId;
+    delete payment.castId;
+    results.castRewards[0].introducer = { id: "intro-1", name: "保存名が異なる紹介者", feeType: "gross10", attendanceAdvisoryFee: 100, entryAdvisoryFee: 3_000 };
+    const before = structuredClone(results);
+    expect(summarizeExpenseIntroducers(results)).toEqual([{ id: "intro-1", name: "紹介者", total: 4_383 }]);
+    expect(results).toEqual(before);
+  });
+
+  it("出勤なし旧入店顧問料を厳密なGMS生成ID形式から復元する", () => {
+    const results = source();
+    const payment = results.introducerPayments[0];
+    const introducerId = `introducer_${"a".repeat(32)}`;
+    payment.id = `${introducerId}_cast_${"b".repeat(32)}`;
+    delete payment.introducerId;
+    delete payment.castId;
+    results.castRewards = [];
+    expect(summarizeExpenseIntroducers(results)).toEqual([{ id: introducerId, name: "紹介者", total: 4_383 }]);
+  });
+
+  it.each([
+    ["紹介者IDのみ", (results: ReturnType<typeof source>) => { delete results.introducerPayments[0].castId; }],
+    ["キャストIDのみ", (results: ReturnType<typeof source>) => { delete results.introducerPayments[0].introducerId; }],
+    ["複合ID不一致", (results: ReturnType<typeof source>) => { results.introducerPayments[0].castId = "other"; }],
+    ["明示ID空欄", (results: ReturnType<typeof source>) => { results.introducerPayments[0].introducerId = " "; }],
+    ["IDなしで名前だけ一致", (results: ReturnType<typeof source>) => {
+      delete results.introducerPayments[0].introducerId;
+      delete results.introducerPayments[0].castId;
+      results.castRewards[0].introducer = { id: "other", name: "紹介者", feeType: "gross10", attendanceAdvisoryFee: 100, entryAdvisoryFee: 3_000 };
+    }],
+    ["生成IDに似た不正形式", (results: ReturnType<typeof source>) => {
+      delete results.introducerPayments[0].introducerId;
+      delete results.introducerPayments[0].castId;
+      results.introducerPayments[0].id = `introducer_${"a".repeat(31)}_cast_${"b".repeat(32)}`;
+    }],
+    ["重複支払行", (results: ReturnType<typeof source>) => { results.introducerPayments.push({ ...results.introducerPayments[0] }); }],
+  ])("%sは推測せず出力を止める", (_label, mutate) => {
+    const results = source();
+    mutate(results);
+    expect(() => summarizeExpenseIntroducers(results)).toThrow();
+  });
+
+  it("複合IDを複数の保存済み人物の組に分解できる場合は停止する", () => {
+    const results = source();
+    const payment = results.introducerPayments[0];
+    delete payment.introducerId;
+    delete payment.castId;
+    payment.id = "intro_a_cast-1";
+    const reward = results.castRewards[0];
+    results.castRewards = [
+      { ...reward, id: "cast-1", introducer: { id: "intro_a", name: "紹介者", feeType: "gross10", attendanceAdvisoryFee: 100, entryAdvisoryFee: 3_000 } },
+      { ...reward, id: "a_cast-1", introducer: { id: "intro", name: "紹介者", feeType: "gross10", attendanceAdvisoryFee: 100, entryAdvisoryFee: 3_000 } },
+    ];
+    expect(() => summarizeExpenseIntroducers(results)).toThrow("紹介者IDを一意に確認できません");
   });
 });
