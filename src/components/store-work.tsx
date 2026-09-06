@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { User } from "firebase/auth";
 import type {
   BottleAllocation, CastKind, DailyCast, DailyClosing, DailyDriverWork, DailyExpense, DailyStaffWork, ExpenseCategory,
-  PosClosingV3, PosItem, PosTransaction
+  PosClosingV3, PosItem, PosTransaction, ReconciledDailyCastInputs
 } from "@/domain/gms";
-import { buildDailyCasts, calculateCash, canMapAsDispatch, floorHundred, floorTen, hoursBetweenQuarter, isCastMappingComplete, isUnapprovedClosingStatus, parsePosClosingV3, posCastReferences, posItemOccurrenceKey, rateForMonth, requiresBottleCost, restoreDailyCastBackMetadata, staffCandidatesForBusinessDate } from "@/domain/gms";
+import { buildDailyCasts, calculateCash, canMapAsDispatch, deriveReeditCastMapping, floorHundred, floorTen, hoursBetweenQuarter, invalidTrialBeautyExpensesForRows, isCastMappingComplete, isUnapprovedClosingStatus, mergeReconciledDailyCastInputs, parsePosClosingV3, posCastReferences, posItemOccurrenceKey, rateForMonth, requiresBottleCost, restoreDailyCastBackMetadata, staffCandidatesForBusinessDate } from "@/domain/gms";
 import type { AccountingWorkspaceData } from "@/domain/month-accounting";
 import { deleteUnapprovedClosing, submitClosing, withdrawClosing } from "@/lib/firebase/repository";
 import { Card, Field, MoneyInput, StatusPill, Table, yen } from "./ui";
@@ -38,6 +38,62 @@ function lockedMonthMessage(data: AccountingWorkspaceData, businessDate: string)
 
 export function closingDeletionConfirmation(row: Pick<DailyClosing, "businessDate" | "status">) {
   return `${row.businessDate}の送信済みデータ（${closingLabels[row.status]}）を完全削除しますか？\n\nPOS原本・店舗入力・現金照合・差戻し履歴を含む、この営業日の日次データがすべて削除されます。\n削除後は復元できません。`;
+}
+
+export function jsonReimportConfirmation(previousDate: string, nextDate: string) {
+  if (previousDate === nextDate) {
+    return `${nextDate}のJSONを再取込します。\n\n入力済みの店舗データと現金実在高は保持し、勤務・指名本数・商品配賦などPOS由来の項目だけを新しいJSONから再計算します。続けますか？`;
+  }
+  return `${previousDate}から${nextDate}へ営業日を変更します。\n\n別営業日のデータが混ざらないよう、入力済みの店舗データ・現金照合・今回のみの特別原価はすべて初期化されます。続けますか？`;
+}
+
+export function shouldResetDailyInputsForJson(previousDate: string, nextDate: string) {
+  return Boolean(previousDate && previousDate !== nextDate);
+}
+
+export function retainCurrentCastMappingForJson(
+  previousPos: PosClosingV3 | null,
+  nextPos: PosClosingV3,
+  currentMapping: Record<string, string>,
+) {
+  if (!previousPos || previousPos.businessDate !== nextPos.businessDate) return {};
+  const previousSources = new Map(posCastReferences(previousPos).map((source) => [source.id, source] as const));
+  const result: Record<string, string> = {};
+  posCastReferences(nextPos).forEach((source) => {
+    const previous = previousSources.get(source.id);
+    if (!previous || previous.name !== source.name || previous.kind !== source.kind) return;
+    const selected = currentMapping[source.id];
+    if (!selected) return;
+    if (selected === "dispatch") {
+      if (canMapAsDispatch(source.kind)) result[source.id] = selected;
+      return;
+    }
+    if (source.kind !== "dispatch") result[source.id] = selected;
+  });
+  return result;
+}
+
+export function reconcileTrialBeautyExpenses(
+  expenses: DailyExpense[],
+  reconciled: Pick<ReconciledDailyCastInputs, "rows" | "matches">,
+) {
+  return expenses.map((expense) => {
+    if (expense.category !== "beautyTrial" || !expense.personId) return expense;
+    const matches = reconciled.matches.filter(({ previous, next }) => previous.kind === "trial"
+      && next.kind === "trial"
+      && previous.masterId === expense.personId
+      && (!expense.personName || previous.name === expense.personName));
+    if (matches.length === 1) {
+      const next = matches[0].next;
+      return { ...expense, personId: next.masterId, personName: next.name, payee: next.name };
+    }
+    // POS人物行との対応がない名称訂正だけは、一意な同一masterIdへ追従する。
+    const sameMaster = reconciled.rows.filter((row) => row.kind === "trial" && row.masterId === expense.personId);
+    if (sameMaster.length === 1) {
+      return { ...expense, personName: sameMaster[0].name, payee: sameMaster[0].name };
+    }
+    return expense;
+  });
 }
 
 export function StoreWork(props: Props) {
@@ -103,12 +159,14 @@ export function StoreWork(props: Props) {
 function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChange }: Props & { initial: DailyClosing | null; onFinished: () => void; onDirtyChange: (dirty: boolean) => void }) {
   const [stage, setStage] = useState<Stage>(initial?.posSnapshot ? "details" : "json");
   const [pos, setPos] = useState<PosClosingV3 | null>(initial?.posSnapshot || null);
-  const [mapping, setMapping] = useState<Record<string, string>>(() => initial ? Object.fromEntries(initial.casts.map((row) => [row.posCastId, row.masterId || "dispatch"])) : {});
+  const [mapping, setMapping] = useState<Record<string, string>>(() => deriveReeditCastMapping(initial));
   const [allowInitialSnapshotMapping, setAllowInitialSnapshotMapping] = useState(Boolean(initial?.posSnapshot));
   const [specialCosts, setSpecialCosts] = useState<Record<string, number>>(() => initialStoredBottleCosts(initial));
   const [castRows, setCastRows] = useState<DailyCast[]>(() => initial?.posSnapshot
     ? restoreDailyCastBackMetadata(initial.posSnapshot, initial.casts || [])
     : initial?.casts || []);
+  const [castRowsSourcePos, setCastRowsSourcePos] = useState<PosClosingV3 | null>(initial?.posSnapshot || null);
+  const [unmatchedCastDrafts, setUnmatchedCastDrafts] = useState<DailyCast[]>([]);
   const [staffWork, setStaffWork] = useState<DailyStaffWork[]>(() => (initial?.staffWork || []).map((row) => row.kind === "trial"
     ? { ...row, dailyPayment: floorHundred(row.hourlyRate * row.hours) }
     : row));
@@ -128,6 +186,8 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
   const [cashFloat] = useState(initial?.cash.cashFloat ?? data.cashFloat);
   const [actualCash, setActualCash] = useState(initial?.cash.actualClosingCash || 0);
   const [error, setError] = useState("");
+  const [jsonReading, setJsonReading] = useState(false);
+  const jsonImportSequence = useRef(0);
   const hasUnsavedDailyData = Boolean(initial || pos);
   useEffect(() => {
     onDirtyChange(hasUnsavedDailyData);
@@ -166,6 +226,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     const value = specialCostValue(specialCosts, bottle);
     return value !== undefined && Number.isFinite(value) && value >= 0;
   });
+  const invalidTrialBeautyExpenses = invalidTrialBeautyExpensesForRows(expenses, castRows);
   const workflowLock = lockedMonthMessage(data, pos?.businessDate || initial?.businessDate || "");
   useEffect(() => {
     if (workflowLock && stage !== "json") setStage("json");
@@ -173,14 +234,28 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
 
   const hydrateMapping = (closing: PosClosingV3) => {
     const auto: Record<string, string> = {};
+    const retainedMapping = retainCurrentCastMappingForJson(pos, closing, mapping);
+    const reeditSourcePos = initial?.businessDate === closing.businessDate
+      ? initial.posSnapshot || closing
+      : undefined;
+    const savedMapping = initial && reeditSourcePos
+      ? deriveReeditCastMapping({ businessDate: initial.businessDate, casts: initial.casts, posSnapshot: reeditSourcePos })
+      : {};
+    const savedReferences = new Map(reeditSourcePos
+      ? posCastReferences(reeditSourcePos).map((source) => [source.id, source] as const)
+      : []);
     posCastReferences(closing).forEach((source) => {
+      if (retainedMapping[source.id]) {
+        auto[source.id] = retainedMapping[source.id];
+        return;
+      }
       if (source.kind === "dispatch") auto[source.id] = "dispatch";
       else {
-        const savedSnapshot = initial?.businessDate === closing.businessDate
-          ? initial.casts.find((row) => row.posCastId === source.id && row.name === source.name && row.kind === source.kind && row.masterId)
-          : undefined;
-        if (savedSnapshot) {
-          auto[source.id] = savedSnapshot.masterId;
+        const savedSource = savedReferences.get(source.id);
+        if (savedSource?.name === source.name
+          && savedSource.kind === source.kind
+          && savedMapping[source.id]) {
+          auto[source.id] = savedMapping[source.id];
           return;
         }
         const matches = data.casts.filter((row) => row.name === source.name && (source.kind === "trial"
@@ -192,9 +267,11 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     setMapping(auto);
   };
 
-  const resetDailyInputsForJson = () => {
+  const resetDailyInputsForDifferentDate = () => {
     setSpecialCosts({});
     setCastRows([]);
+    setCastRowsSourcePos(null);
+    setUnmatchedCastDrafts([]);
     setStaffWork([]);
     setStaffId("");
     setStaffStart("20:00");
@@ -214,13 +291,23 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
 
   const ensureCurrentReferences = () => {
     if (!mappingComplete) {
-      setError("照合済みのキャストデータが現在の営業日・名前・区分と一致しません。JSON取込画面で再照合してください。");
+      setError("照合済みのキャストデータが現在の営業日・名前・区分と一致しません。この画面で再照合してください。入力済みの店舗データは保持されています。");
       setStage("json");
       return false;
     }
     if (!costsComplete) {
       setError("今回のみの酒代原価が未入力、または正しくありません。JSON取込画面で確認してください。");
       setStage("json");
+      return false;
+    }
+    if (unmatchedCastDrafts.length > 0) {
+      setError("自動で引き継げなかったキャスト入力があります。店舗データ画面の「引継ぎ保留」を確認してください。");
+      setStage("details");
+      return false;
+    }
+    if (invalidTrialBeautyExpenses.length > 0) {
+      setError("体入キャストとの紐付けを確認できない美容室手当経費があります。対象行を削除し、現在の体入キャストを選び直してください。");
+      setStage("details");
       return false;
     }
     return true;
@@ -257,8 +344,20 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
         } : undefined
       }];
     }));
-    setCastRows(buildDailyCasts(pos, details, data.liquor, occurrenceSpecialCosts(pos, specialCosts)));
-    setStage("details"); setError("");
+    const generatedRows = buildDailyCasts(pos, details, data.liquor, occurrenceSpecialCosts(pos, specialCosts));
+    const draftRows = [...unmatchedCastDrafts, ...castRows].filter((row, index, rows) => rows.findIndex((candidate) =>
+      candidate.posCastId === row.posCastId
+      && candidate.name === row.name
+      && candidate.kind === row.kind) === index);
+    const reconciled = mergeReconciledDailyCastInputs(draftRows, generatedRows, castRowsSourcePos);
+    setCastRows(reconciled.rows);
+    setCastRowsSourcePos(pos);
+    setUnmatchedCastDrafts(reconciled.unmatchedPrevious);
+    setExpenses((current) => reconcileTrialBeautyExpenses(current, reconciled));
+    setStage("details");
+    setError(reconciled.unmatchedPrevious.length > 0
+      ? "新しいPOSデータへ自動で引き継げなかったキャスト入力があります。内容を確認するまで送信できません。"
+      : "");
   };
 
   const updateCast = (posId: string, patch: Partial<DailyCast>) => setCastRows((rows) => rows.map((row) => row.posCastId === posId ? { ...row, ...patch } : row));
@@ -301,7 +400,16 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
       liquorDeliveryAmount, cash, posSnapshot: pos, updatedAt: new Date().toISOString()
     };
     const saved = await run(() => submitClosing(value, user, initial?.updatedAt), `${pos.businessDate}のデータを経理へ送信しました。`);
-    if (saved) { setStage("json"); setPos(null); setCastRows([]); onFinished(); }
+    if (saved) {
+      // 新規作成は親のkeyが"new"のままで再マウントされないため、翌営業日へ入力を残さない。
+      resetDailyInputsForDifferentDate();
+      setMapping({});
+      setAllowInitialSnapshotMapping(false);
+      setPos(null);
+      setError("");
+      setStage("json");
+      onFinished();
+    }
   };
 
   return <Card title={initial ? `${initial.businessDate} 再編集` : "当日営業データ作成"} description="POS JSONの照合から現金実在高まで順番に確認します。" action={initial ? <button className="button secondary" disabled={busy} onClick={() => { if (window.confirm("保存していない再編集内容を破棄して終了しますか？")) onFinished(); }}>再編集を終了</button> : null}>
@@ -309,32 +417,38 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     {error && <div className="notice error">{error}</div>}
     {workflowLock && <div className="notice warn"><strong>この営業日は編集できません。</strong><br />{workflowLock}</div>}
     {stage === "json" && <div className="stack section-pad">
-      {initial && !initial.posSnapshot && <div className="notice warn">この旧データにはPOS原本が保存されていません。再編集するには、同じ営業日のPOS JSONをもう一度取り込んでください。既存データは送信を完了するまで変更されません。</div>}
-      {(initial || pos) && <div className="notice warn">JSONを再取込すると、キャスト売上修正・手当と控除、スタッフ／ドライバー勤務と日払い、経費、派遣支払3項目、酒代納品書、現金実在高、今回のみの特別原価をすべて初期化します。</div>}
-      <Field label="POS営業終了JSON（schemaVersion 3）"><input className="input" type="file" accept=".json,application/json" onChange={async (event) => {
+      {initial && !initial.posSnapshot && <div className="notice warn">この旧データにはPOS原本が保存されていません。再編集するには、同じ営業日のPOS JSONをもう一度取り込んでください。既存データは送信を完了するまで変更されません。商品との一致を検証できない今回のみの特別原価は、安全のため再入力が必要です。</div>}
+      {(initial || pos) && <div className="notice warn">同じ営業日のJSONを再取込しても、入力済みの店舗データと現金実在高は保持されます。勤務・指名本数・商品配賦などPOS由来の項目だけを再計算します。</div>}
+      <Field label="POS営業終了JSON（schemaVersion 3）"><input className="input" type="file" accept=".json,application/json" disabled={busy || jsonReading || Boolean(workflowLock)} onChange={async (event) => {
         const input = event.currentTarget;
         const file = input.files?.[0];
         if (!file) return;
+        const sequence = ++jsonImportSequence.current;
+        setJsonReading(true);
         try {
           const parsed = await parsePosClosingV3(JSON.parse((await file.text()).replace(/^\uFEFF/, "")));
+          if (sequence !== jsonImportSequence.current) return;
           if (initial && parsed.businessDate !== initial.businessDate) throw new Error(`再編集対象は${initial.businessDate}です。同じ営業日のPOS JSONを選択してください。`);
+          const previousDate = pos?.businessDate || initial?.businessDate || "";
           if (initial || pos) {
-            const changedDate = Boolean(pos && pos.businessDate !== parsed.businessDate);
-            const message = `${changedDate ? `${pos?.businessDate}から${parsed.businessDate}へ営業日を変更` : `${parsed.businessDate}のJSONを再取込`}します。\n\nキャスト売上修正・手当と控除、スタッフ／ドライバー勤務と日払い、経費、派遣支払3項目、酒代納品書、現金実在高、今回のみの特別原価はすべて初期化されます。続けますか？`;
-            if (!window.confirm(message)) return;
+            if (!window.confirm(jsonReimportConfirmation(previousDate, parsed.businessDate))) return;
           }
-          resetDailyInputsForJson();
+          const changedDate = shouldResetDailyInputsForJson(previousDate, parsed.businessDate);
+          if (changedDate) resetDailyInputsForDifferentDate();
+          else setSpecialCosts((current) => retainMatchingSpecialCosts(pos, parsed, current));
           const isSameEditedDay = Boolean(initial && parsed.businessDate === initial.businessDate);
           setAllowInitialSnapshotMapping(isSameEditedDay);
-          setSpecialCosts(isSameEditedDay ? initialStoredBottleCosts(initial, parsed) : {});
           setPos(parsed);
           hydrateMapping(parsed);
           setError("");
         } catch (caught) {
           // 読込失敗時は、編集中の営業日データや手入力を破棄しない。
-          setError(caught instanceof Error ? caught.message : String(caught));
-        } finally { input.value = ""; }
-      }} /></Field>
+          if (sequence === jsonImportSequence.current) setError(caught instanceof Error ? caught.message : String(caught));
+        } finally {
+          if (sequence === jsonImportSequence.current) setJsonReading(false);
+          input.value = "";
+        }
+      }} />{jsonReading && <small>JSONを検証しています…</small>}</Field>
       {pos && <><div className="summary-strip"><span><small>営業日</small><strong>{pos.businessDate}</strong></span><span><small>総売上</small><strong>{yen.format(pos.sales.totalSales)}</strong></span><span><small>会計</small><strong>{pos.transactions.length}件</strong></span><span><small>勤務</small><strong>{pos.castWork.length}名</strong></span></div>
         <h3>キャストデータ照合</h3><Table headers={["POS名", "区分", "GMSデータ", "状態"]}>{references.map((source) => {
           const options = candidates(source.kind, source.name);
@@ -355,12 +469,14 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
         <button className="button wide-button" disabled={busy || Boolean(workflowLock) || !mappingComplete || !costsComplete} title={workflowLock || undefined} onClick={createRows}>照合を確定して店舗データ作成へ</button></>}
     </div>}
     {stage === "details" && pos && !workflowLock && <div className="stack section-pad">
+      {unmatchedCastDrafts.length > 0 && <div className="notice error"><strong>引継ぎ保留のキャスト入力があります</strong><p>POSキャストID・名前・区分の一致を確認できなかったため、別人への誤転記を防いで元の入力を保留しています。正しいJSONまたは照合内容を確認してください。</p><Table headers={["キャスト", "本指名売上", "場内延長売上", "美容室", "日払い", "立替", "送迎"]}>{unmatchedCastDrafts.map((row) => <tr key={`${row.posCastId}-${row.name}-${row.kind}`}><td>{row.name}<br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td><td>{yen.format(row.honShimeiSales)}</td><td>{yen.format(row.jonaiExtensionSales)}</td><td>{yen.format(row.beautyAllowance)}</td><td>{yen.format(row.dailyPayment)}</td><td>{yen.format(row.advancePayment)}</td><td>{yen.format(row.transportFee)}</td></tr>)}</Table><button className="button danger mini" onClick={() => { if (window.confirm("引継ぎ保留のキャスト入力を破棄しますか？破棄した値は現在の再編集画面へ戻せません。")) { setUnmatchedCastDrafts([]); setError(""); } }}>保留入力を確認済みとして破棄</button></div>}
+      {invalidTrialBeautyExpenses.length > 0 && <div className="notice error">体入キャストとの紐付けを確認できない美容室手当経費があります。経費一覧から対象行を削除し、現在の体入キャストを選び直してください。</div>}
       <h3>キャスト出勤・売上・手当控除</h3><Table headers={["キャスト", "勤務", "本指名", "場内", "同伴", "本指名売上", "場内延長売上", "ボトル/ドリンク", "美容室", "日払い", "立替", "送迎"]}>{castRows.map((row) => <tr key={row.posCastId}><td><strong>{row.name}</strong><br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td><td>{row.startTime}–{row.endTime}<br />{row.hours}時間</td><td>{row.honShimeiCount}本</td><td>{row.banaiShimeiCount}本</td><td>{row.dohanCount}本</td><td><MoneyInput value={row.honShimeiSales} step={10} onChange={(value) => updateCast(row.posCastId, { honShimeiSales: value })} /></td><td><MoneyInput value={row.jonaiExtensionSales} step={10} onChange={(value) => updateCast(row.posCastId, { jonaiExtensionSales: value })} /></td><td><CastProductSummary row={row} pos={pos} /></td><td><label className="check-row"><input type="checkbox" checked={row.beautyAllowance === 500} disabled={row.kind === "trial"} onChange={(e) => updateCast(row.posCastId, { beautyAllowance: e.target.checked ? 500 : 0 })} />500円</label></td><td><MoneyInput value={row.dailyPayment} step={row.kind === "trial" ? 10 : 1} onChange={(value) => updateCast(row.posCastId, { dailyPayment: value })} /></td><td><MoneyInput value={row.advancePayment} onChange={(value) => updateCast(row.posCastId, { advancePayment: value })} /></td><td><MoneyInput value={row.transportFee} step={500} onChange={(value) => updateCast(row.posCastId, { transportFee: value })} /></td></tr>)}</Table>
       <h3>スタッフ勤務・日払い</h3><div className="grid form-row"><Field label="スタッフ"><select className="input" value={staffId} onChange={(e) => setStaffId(e.target.value)}><option value="">選択</option>{staffCandidates.map((row) => <option key={row.id} value={row.id}>{row.name}（{row.status === "trial" ? "体入" : "在籍"}）</option>)}</select></Field><Field label="出勤"><input className="input" type="time" value={staffStart} onChange={(e) => setStaffStart(e.target.value)} /></Field><Field label="退勤"><input className="input" type="time" value={staffEnd} onChange={(e) => setStaffEnd(e.target.value)} /></Field><button className="button compact" onClick={addStaff}>追加</button></div><Table headers={["スタッフ", "区分", "出勤", "退勤", "勤務", "時給", "日払い", "操作"]}>{staffWork.map((row) => <tr key={row.staffId}><td>{row.name}</td><td>{row.kind === "trial" ? "体入" : "在籍"}</td><td>{row.startTime}</td><td>{row.endTime}</td><td>{row.hours}時間</td><td>{yen.format(row.hourlyRate)}</td><td><MoneyInput value={row.dailyPayment} disabled={row.kind === "trial"} onChange={(value) => setStaffWork((rows) => rows.map((item) => item.staffId === row.staffId ? { ...item, dailyPayment: value } : item))} />{row.kind === "trial" && <small>基本給与全額を即日払い</small>}</td><td><button className="button danger mini" onClick={() => setStaffWork((rows) => rows.filter((item) => item.staffId !== row.staffId))}>削除</button></td></tr>)}</Table>
       <h3>送迎ドライバー・日払い</h3><div className="check-grid">{data.drivers.filter((row) => activeOnBusinessDate(row.hiredAt, row.departedAt)).map((row) => { const selected = driverWork.some((item) => item.driverId === row.id); return <label className="select-card" key={row.id}><input type="checkbox" checked={selected} onChange={(e) => setDriverWork(e.target.checked ? [...driverWork.filter((item) => item.driverId !== row.id), { driverId: row.id, name: row.name, dailyRate: row.dailyRate, dailyPayment: 0 }] : driverWork.filter((item) => item.driverId !== row.id))} /><span>{row.name}<small>日給 {yen.format(row.dailyRate)}</small></span></label>; })}</div><Table headers={["ドライバー", "日給", "日払い", "操作"]}>{driverWork.map((row) => <tr key={row.driverId}><td>{row.name}</td><td>{yen.format(row.dailyRate)}</td><td><MoneyInput value={row.dailyPayment} onChange={(value) => setDriverWork((rows) => rows.map((item) => item.driverId === row.driverId ? { ...item, dailyPayment: value } : item))} /></td><td><button className="button danger mini" onClick={() => setDriverWork((rows) => rows.filter((item) => item.driverId !== row.driverId))}>削除</button></td></tr>)}</Table>
       <h3>当日経費</h3><div className="grid form-row expense-row"><Field label="勘定科目"><select className="input" value={expenseCategory} onChange={(e) => { setExpenseCategory(e.target.value as ExpenseCategory); setExpensePayee(""); setExpensePersonId(""); }}>{Object.entries(expenseLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>{expenseCategory === "beautyTrial" ? <Field label="対象の体入キャスト"><select className="input" value={expensePersonId} onChange={(e) => setExpensePersonId(e.target.value)}><option value="">選択</option>{castRows.filter((row) => row.kind === "trial").map((row) => <option key={row.posCastId} value={row.posCastId}>{row.name}</option>)}</select></Field> : <Field label="支払先"><input className="input" value={expensePayee} onChange={(e) => setExpensePayee(e.target.value)} /></Field>}<Field label="金額"><MoneyInput value={expenseAmount} onChange={setExpenseAmount} /></Field><button className="button compact" onClick={addExpense}>追加</button></div><Table headers={["勘定科目", "支払先", "金額", "操作"]}>{expenses.map((row) => <tr key={row.id}><td>{expenseLabels[row.category]}</td><td>{row.payee}</td><td>{yen.format(row.amount)}</td><td><button className="button danger mini" onClick={() => setExpenses((rows) => rows.filter((item) => item.id !== row.id))}>削除</button></td></tr>)}</Table><div className="right-total">経費総計 <strong>{yen.format(expenseTotal)}</strong></div>
       <h3>派遣・納品書</h3><div className="grid four"><Field label="派遣スタッフ支払"><MoneyInput value={dispatchStaffPayment} onChange={setDispatchStaffPayment} /></Field><Field label="派遣キャスト支払"><MoneyInput value={dispatchCastPayment} onChange={setDispatchCastPayment} /></Field><Field label="派遣手数料"><MoneyInput value={dispatchFee} onChange={setDispatchFee} /></Field><Field label="酒代納品書分"><MoneyInput value={liquorDeliveryAmount} onChange={setLiquorDeliveryAmount} /></Field></div>
-      <div className="actions spread"><button className="button secondary" onClick={() => { if (window.confirm("JSON照合をやり直すと、この画面で入力した売上修正・手当・日払い・立替・送迎を再作成時にリセットします。戻りますか？")) setStage("json"); }}>JSON照合をやり直す</button><button className="button" onClick={() => { if (!ensureCurrentReferences()) return; setCastRows((rows) => rows.map((row) => ({ ...row, honShimeiSales: floorTen(row.honShimeiSales), jonaiExtensionSales: floorTen(row.jonaiExtensionSales), dailyPayment: row.kind === "trial" ? floorTen(row.dailyPayment) : row.dailyPayment, transportFee: Math.floor(row.transportFee / 500) * 500 }))); setError(""); setStage("cash"); }}>店舗データを確認して現金照合へ</button></div>
+      <div className="actions spread"><button className="button secondary" onClick={() => { setError(""); setStage("json"); }}>入力を保持してキャスト照合へ戻る</button><button className="button" onClick={() => { if (!ensureCurrentReferences()) return; setCastRows((rows) => rows.map((row) => ({ ...row, honShimeiSales: floorTen(row.honShimeiSales), jonaiExtensionSales: floorTen(row.jonaiExtensionSales), dailyPayment: row.kind === "trial" ? floorTen(row.dailyPayment) : row.dailyPayment, transportFee: Math.floor(row.transportFee / 500) * 500 }))); setError(""); setStage("cash"); }}>店舗データを確認して現金照合へ</button></div>
     </div>}
     {stage === "cash" && pos && cash && <div className="stack section-pad"><h3>当日現金照合</h3><div className="grid metrics"><Metric label="現金売上" value={cash.cashSales} /><Metric label="カード売上" value={cash.cardSales} /><Metric label="当日合計売上" value={cash.totalSales} /><Metric label="つり銭" value={cash.cashFloat} /></div><Table headers={["計算項目", "金額"]}><tr><td>経費総計</td><td>{yen.format(expenseTotal)}</td></tr><tr><td>在籍キャスト日払い</td><td>{yen.format(regularDailyPayments)}</td></tr><tr><td>体入キャスト即日支払い</td><td>{yen.format(trialDailyPayments)}</td></tr><tr><td>スタッフ日払い</td><td>{yen.format(staffDailyPayments)}</td></tr><tr><td>送迎ドライバー日払い</td><td>{yen.format(driverDailyPayments)}</td></tr><tr><td>派遣キャスト支払い</td><td>{yen.format(dispatchCastPayment)}</td></tr><tr><td>派遣スタッフ支払い</td><td>{yen.format(dispatchStaffPayment)}</td></tr><tr><td>派遣手数料</td><td>{yen.format(dispatchFee)}</td></tr><tr className="total-row"><td>経費・日払い・派遣支払い・手数料 合計</td><td>{yen.format(cash.expenseAndPaymentTotal)}</td></tr><tr><td>現金売上＋つり銭</td><td>{yen.format(cash.cashSales + cash.cashFloat)}</td></tr><tr><td><strong>営業終了時点の計算上現金残額</strong></td><td><strong>{yen.format(cash.expectedClosingCash)}</strong></td></tr><tr><td>つり銭を除いた現金利益額</td><td>{yen.format(cash.cashProfit)}</td></tr></Table><Field label="営業終了時点の現金実在高"><MoneyInput value={actualCash} onChange={setActualCash} step={1} /></Field><div className={`reconciliation-result ${cash.difference === 0 ? "match" : "mismatch"}`}><span>照合差額</span><strong>{yen.format(cash.difference)}</strong><small>{cash.difference === 0 ? "現金が一致しました" : "差額を記録したまま送信できます。入力内容を再確認してください"}</small></div><div className="actions spread"><button className="button secondary" onClick={() => setStage("details")}>店舗データへ戻る</button><button className="button" onClick={() => setStage("preview")}>現金照合内容を確認して送信確認へ</button></div></div>}
     {stage === "preview" && pos && cash && <div className="stack section-pad"><DailyPreview closing={{ id: initial?.id || "preview", businessDate: pos.businessDate, status: "submitted", submissionId: pos.submissionId, checksum: pos.checksum, sales: pos.sales, customers: pos.customers, nominations: pos.nominations, casts: castRows, staffWork, drivers: driverRows, expenses, staffDailyPaymentTotal: staffWork.reduce((sum, row) => sum + row.dailyPayment, 0), dispatchStaffPayment, dispatchCastPayment, dispatchFee, liquorDeliveryAmount, cash, posSnapshot: pos, updatedAt: new Date().toISOString() }} /><div className="actions spread"><button className="button secondary" onClick={() => setStage("cash")}>現金照合へ戻る</button><button className="button submit-button" disabled={busy} onClick={() => void submit()}>{busy ? "送信中…" : "確認済み・経理へ送信"}</button></div></div>}
@@ -528,6 +644,51 @@ function allocatedBottleCost(pos: PosClosingV3, casts: DailyCast[], sourceKey: s
   if (!legacy.length) return 0;
   const occurrenceCount = pos.transactions.reduce((count, transaction) => count + transaction.items.filter((item) => item.itemId === itemId).length, 0);
   return occurrenceCount === 1 ? legacy.reduce((sum, bottle) => sum + bottle.costAmount, 0) : undefined;
+}
+
+export function retainMatchingSpecialCosts(
+  previousPos: PosClosingV3 | null,
+  nextPos: PosClosingV3,
+  costs: Record<string, number>,
+) {
+  // 元のPOS商品を照合できない旧日次では、同じキー文字列だけを根拠に原価を移さない。
+  if (!previousPos) return {};
+  const result: Record<string, number> = {};
+  const previousItems = new Map(previousPos?.transactions.flatMap((transaction) => transaction.items.map((item, itemIndex) => [
+    posItemOccurrenceKey(transaction, itemIndex),
+    item,
+  ] as const)) || []);
+  const previousItemIdCount = new Map<string, number>();
+  const nextItemIdCount = new Map<string, number>();
+  previousPos?.transactions.forEach((transaction) => transaction.items.forEach((item) => {
+    previousItemIdCount.set(item.itemId, (previousItemIdCount.get(item.itemId) || 0) + 1);
+  }));
+  nextPos.transactions.forEach((transaction) => transaction.items.forEach((item) => {
+    nextItemIdCount.set(item.itemId, (nextItemIdCount.get(item.itemId) || 0) + 1);
+  }));
+
+  nextPos.transactions.forEach((transaction) => transaction.items.forEach((item, itemIndex) => {
+    const sourceKey = posItemOccurrenceKey(transaction, itemIndex);
+    const previousItem = previousItems.get(sourceKey);
+    const sameOccurrence = Boolean(previousItem
+      && previousItem.itemId === item.itemId
+      && previousItem.label === item.label
+      && previousItem.category === item.category
+      && previousItem.price === item.price
+      && previousItem.quantity === item.quantity);
+    if (sameOccurrence && Object.hasOwn(costs, sourceKey)) {
+      result[sourceKey] = costs[sourceKey];
+      return;
+    }
+    // 旧画面でitemId単位に保存された原価は、新旧双方に同じ商品が1件だけの時に限り引き継ぐ。
+    if (sameOccurrence
+      && Object.hasOwn(costs, item.itemId)
+      && previousItemIdCount.get(item.itemId) === 1
+      && nextItemIdCount.get(item.itemId) === 1) {
+      result[sourceKey] = costs[item.itemId];
+    }
+  }));
+  return result;
 }
 
 function initialStoredBottleCosts(initial: DailyClosing | null, posOverride?: PosClosingV3) {

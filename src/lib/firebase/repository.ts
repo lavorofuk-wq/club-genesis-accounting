@@ -7,6 +7,7 @@ import { readOneShotValue } from "./one-shot-value";
 import {
   bottleBackAmountFromPosItem,
   compareIntroducerMonthEventEffectiveOrder,
+  invalidTrialBeautyExpensesForRows,
   isUnapprovedClosingStatus,
   isStaffHireDateAfterTrial,
   japanMonthFromTimestamp,
@@ -585,6 +586,8 @@ function validateDailyClosingForSubmission(value: DailyClosing) {
   value.drivers.forEach((row) => {
     require(Boolean(row.driverId) && Boolean(row.name) && money(row.dailyRate) && money(row.dailyPayment), `${row.name}のドライバー給与金額が正しくありません。`);
   });
+  require(invalidTrialBeautyExpensesForRows(value.expenses, value.casts).length === 0,
+    "体入キャスト美容室手当の対象が日次キャストデータと一致しません。対象を選び直してください。");
   value.expenses.forEach((row) => require(Boolean(row.id) && Boolean(row.payee?.trim()) && money(row.amount) && row.amount > 0, "経費の支払先または金額が正しくありません。"));
   [value.dispatchStaffPayment, value.dispatchCastPayment, value.dispatchFee, value.liquorDeliveryAmount,
     value.cash.cashSales, value.cash.cardSales, value.cash.totalSales, value.cash.cashFloat,

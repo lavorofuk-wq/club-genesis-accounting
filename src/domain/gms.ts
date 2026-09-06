@@ -1405,6 +1405,155 @@ export function isCastMappingComplete(
   });
 }
 
+/**
+ * 保存済み日次から、差戻し・取下げ後の再編集に必要なキャスト照合を復元する。
+ * 派遣指定された体入キャストはDailyCastへ保存されないため、保存POSに勤務行があり、
+ * 対応する保存済みキャスト行がない場合だけ派遣として扱う。在籍の欠落は推測しない。
+ */
+export function deriveReeditCastMapping(
+  closing: Pick<DailyClosing, "businessDate" | "casts" | "posSnapshot"> | null | undefined,
+) {
+  if (!closing?.posSnapshot || closing.posSnapshot.businessDate !== closing.businessDate) return {};
+
+  const result: Record<string, string> = {};
+  const workByPosId = new Map(closing.posSnapshot.castWork.map((row) => [row.castId, row]));
+  posCastReferences(closing.posSnapshot).forEach((source) => {
+    const rowsForPosId = closing.casts.filter((row) => row.posCastId === source.id);
+    const exactRows = rowsForPosId.filter((row) => row.masterId
+      && row.name === source.name
+      && row.kind === source.kind);
+    if (exactRows.length === 1) {
+      result[source.id] = exactRows[0].masterId;
+      return;
+    }
+    // 保存行があるのに内容が食い違う場合は、破損や別人の可能性があるため自動補完しない。
+    if (rowsForPosId.length > 0) return;
+    if (source.kind === "dispatch") {
+      result[source.id] = "dispatch";
+      return;
+    }
+    const work = workByPosId.get(source.id);
+    if (source.kind === "trial"
+      && work?.castType === "trial"
+      && work.castName === source.name) {
+      result[source.id] = "dispatch";
+    }
+  });
+  return result;
+}
+
+const DAILY_CAST_ALWAYS_PRESERVED_INPUT_KEYS = [
+  "beautyAllowance",
+  "advancePayment",
+  "transportFee",
+] as const satisfies ReadonlyArray<keyof DailyCast>;
+
+const DAILY_CAST_EDITABLE_SALES_KEYS = [
+  "honShimeiSales",
+  "jonaiExtensionSales",
+] as const satisfies ReadonlyArray<keyof DailyCast>;
+
+export type ReconciledDailyCastInputs = {
+  rows: DailyCast[];
+  unmatchedPrevious: DailyCast[];
+  matches: Array<{ previous: DailyCast; next: DailyCast }>;
+};
+
+/**
+ * 再照合後のPOS計算行へ、店舗で手入力した値だけを安全に載せ直す。
+ * 名前だけでは同名体入を識別できないため、POS ID・名前・区分の完全一致を優先し、
+ * POS IDが変わった場合に限り一意なmasterIdと区分の一致へフォールバックする。
+ */
+export function mergeReconciledDailyCastInputs(
+  previousRows: DailyCast[],
+  nextRows: DailyCast[],
+  previousPos?: PosClosingV3 | null,
+): ReconciledDailyCastInputs {
+  const usedPrevious = new Set<number>();
+  const matches: ReconciledDailyCastInputs["matches"] = [];
+  const previousSources = new Map(previousPos
+    ? posCastReferences(previousPos).map((source) => [source.id, source] as const)
+    : []);
+  const previousSales = new Map(previousPos?.castSales.map((row) => [row.castId, row] as const) || []);
+  const previousMasterCounts = new Map<string, number>();
+  const nextMasterCounts = new Map<string, number>();
+  previousRows.forEach((row) => {
+    if (row.masterId) previousMasterCounts.set(row.masterId, (previousMasterCounts.get(row.masterId) || 0) + 1);
+  });
+  nextRows.forEach((row) => {
+    if (row.masterId) nextMasterCounts.set(row.masterId, (nextMasterCounts.get(row.masterId) || 0) + 1);
+  });
+
+  const rows = nextRows.map((next): DailyCast => {
+    const exactCandidates = previousRows
+      .map((previous, index) => ({ previous, index }))
+      .filter(({ previous, index }) => !usedPrevious.has(index)
+        && previous.posCastId === next.posCastId
+        && previous.name === next.name
+        && previous.kind === next.kind);
+    let selected = exactCandidates.length === 1 ? exactCandidates[0] : undefined;
+
+    // 同一POS IDの行が食い違う場合は、masterIdが同じでも自動転記せず確認を必須にする。
+    const hasDifferentSamePosId = previousRows.some((previous) => previous.posCastId === next.posCastId)
+      && exactCandidates.length === 0;
+    if (!selected && !hasDifferentSamePosId && next.masterId
+      && previousMasterCounts.get(next.masterId) === 1
+      && nextMasterCounts.get(next.masterId) === 1) {
+      const index = previousRows.findIndex((previous, previousIndex) => !usedPrevious.has(previousIndex)
+        && previous.masterId === next.masterId
+        && previous.kind === next.kind);
+      if (index >= 0) selected = { previous: previousRows[index], index };
+    }
+
+    if (!selected) return next;
+    usedPrevious.add(selected.index);
+    const merged = { ...next };
+    DAILY_CAST_ALWAYS_PRESERVED_INPUT_KEYS.forEach((key) => {
+      merged[key] = selected!.previous[key];
+    });
+    const originalTrialDailyPayment = floorTen(asNumber(selected.previous.hourlyRate) * asNumber(selected.previous.hours));
+    if (selected.previous.kind !== "trial"
+      || selected.previous.dailyPayment !== originalTrialDailyPayment) {
+      merged.dailyPayment = selected.previous.dailyPayment;
+    }
+    const previousSource = previousSources.get(selected.previous.posCastId);
+    const canIdentifyPreviousPosValue = Boolean(previousSource
+      && previousSource.name === selected.previous.name
+      && previousSource.kind === selected.previous.kind);
+    DAILY_CAST_EDITABLE_SALES_KEYS.forEach((key) => {
+      const posSales = previousSales.get(selected!.previous.posCastId);
+      const originalValue = key === "honShimeiSales"
+        ? floorTen(asNumber(posSales?.honShimeiSales))
+        : floorTen(asNumber(posSales?.jonaiExtensionSales));
+      // 旧POS値から変更されている場合だけ店舗修正値として維持する。旧POSが確認できない
+      // データは、入力消失を避けるため保存値を維持して要確認とする。
+      if (!canIdentifyPreviousPosValue || selected!.previous[key] !== originalValue) {
+        merged[key] = selected!.previous[key];
+      }
+    });
+    matches.push({ previous: selected.previous, next: merged });
+    return merged;
+  });
+
+  return {
+    rows,
+    unmatchedPrevious: previousRows.filter((_row, index) => !usedPrevious.has(index)),
+    matches,
+  };
+}
+
+/** 体入美容室手当経費が、同じ日次内の体入キャスト1名へ確実に紐づくか検査する。 */
+export function invalidTrialBeautyExpensesForRows(expenses: DailyExpense[], rows: DailyCast[]) {
+  return expenses.filter((expense) => {
+    if (expense.category !== "beautyTrial") return false;
+    if (!expense.personId) return true;
+    const matches = rows.filter((row) => row.kind === "trial" && row.masterId === expense.personId);
+    if (matches.length !== 1) return true;
+    return Boolean((expense.personName && expense.personName !== matches[0].name)
+      || expense.payee !== matches[0].name);
+  });
+}
+
 export function requiresBottleCost(transaction: PosTransaction, item: PosItem, mapping: Record<string, string>) {
   return ["champagneWine", "keepBottle"].includes(item.category)
     && asNumber(item.price) * asNumber(item.quantity) > 0
