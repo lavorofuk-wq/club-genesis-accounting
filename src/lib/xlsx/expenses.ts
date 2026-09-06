@@ -63,7 +63,7 @@ export function createMonthlyExpenseWorkbook(input: ExpenseExportInput, sourceLa
   const totalRow = Math.max(45, 36 + fixed.length, 37 + Math.ceil(results.staffPayroll.length / 2),
     driverStart + Math.max(3, Math.ceil(results.driverPayroll.length / 2)));
   const book = new ExcelJS.Workbook();
-  book.creator = "GENESIS Management System Ver2.16.0";
+  book.creator = "GENESIS Management System Ver2.16.1";
   book.created = new Date();
   book.calcProperties.fullCalcOnLoad = true;
   const sheet = book.addWorksheet("ジェネシス経費表");
@@ -118,7 +118,7 @@ export function createMonthlyExpenseWorkbook(input: ExpenseExportInput, sourceLa
       } else {
         for (const expense of closing?.expenses || []) {
           if (expense.category !== category.category) continue;
-          const name = expense.personName || expense.payee;
+          const name = expense.payee;
           payments.set(name, (payments.get(name) || 0) + expense.amount);
         }
       }

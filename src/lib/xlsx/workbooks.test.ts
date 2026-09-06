@@ -69,7 +69,7 @@ describe("preserved XLSX outputs", () => {
       createCastStatementsWorkbook([closing], casts, "2026-07"),
       createCastMonthlyWorkbook([closing], casts, "2026-07")
     ];
-    books.forEach((book) => expect(book.creator).toBe("GENESIS Management System Ver2.16.0"));
+    books.forEach((book) => expect(book.creator).toBe("GENESIS Management System Ver2.16.1"));
     const buffers = await Promise.all(books.map((book) => book.xlsx.writeBuffer()));
     buffers.forEach((buffer) => {
       expect(buffer.byteLength).toBeGreaterThan(1_000);

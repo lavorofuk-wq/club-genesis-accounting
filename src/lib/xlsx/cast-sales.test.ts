@@ -39,7 +39,7 @@ describe("キャスト売上XLSX", () => {
   it("指定の列・勤務時間・月合計・左右両方の給与を保存値どおり出力する", () => {
     const book = createCastSalesWorkbook(input(), "2026-09", "承認済みデータ（未確定）");
     const sheet = book.worksheets[0];
-    expect(book.creator).toBe("GENESIS Management System Ver2.16.0");
+    expect(book.creator).toBe("GENESIS Management System Ver2.16.1");
     expect(sheet.getCell("G4").value).toBe(2000);
     expect(sheet.getCell("J4").value).toBe(500);
     expect(sheet.getCell("M4").value).toBe(4000);

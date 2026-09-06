@@ -158,6 +158,13 @@ describe("見本形式の月次経費XLSX", () => {
     expect(value(sheet, "P45")).toBe(data.results.balance.totalCosts);
   });
 
+  it("人物メタデータが残っていても保存した経費の支払先を変えない", () => {
+    const data = input();
+    data.closings[0].expenses[0].personName = "経費とは別の人物";
+    const sheet = createMonthlyExpenseWorkbook(data, "未確定").worksheets[0];
+    expect(sheet.getCell("B4").value).toBe("liquor支払先");
+  });
+
   it("同名の固定酒代・カード手数料を保持して納品書調整・決済手数料へ加算する", () => {
     const data = input();
     data.adjustments.fixedExpenses.push({ id: "extra-liquor", account: "酒代", amount: 99 }, { id: "extra-card", account: "カード決済手数料", amount: 88 });
