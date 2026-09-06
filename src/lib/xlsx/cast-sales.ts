@@ -155,7 +155,7 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error("対象月を選択してください。");
   if (!results.castSalesReports.length) throw new Error("対象月の承認済みキャスト売上がありません。");
   const book = new ExcelJS.Workbook();
-  book.creator = "GENESIS Management System Ver2.16.2";
+  book.creator = "GENESIS Management System Ver2.17.1";
   book.created = new Date();
   book.calcProperties.fullCalcOnLoad = true;
   const used = new Set<string>();

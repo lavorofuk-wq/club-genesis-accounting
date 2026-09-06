@@ -6,7 +6,7 @@ import { invalidTrialBeautyExpensesForRows, mergeReconciledDailyCastInputs, posI
 import type { AccountingWorkspaceData } from "@/domain/month-accounting";
 import { buildMonthlySnapshot, calculateMonthlyAccounting } from "@/domain/month-accounting";
 import { introducerDeletionLinkedCastSignature } from "@/lib/firebase/repository";
-import { AccountingForms, ClosingCastProductDetails, ExpenseExport } from "./accounting-forms";
+import { AccountingForms, BalanceExport, ClosingCastProductDetails, ExpenseExport } from "./accounting-forms";
 import { CommonForms, introducerDeletionConfirmation } from "./common-forms";
 import { CastProductSummary, closingDeletionConfirmation, DailyPreview, jsonReimportConfirmation, reconcileTrialBeautyExpenses, retainCurrentCastMappingForJson, retainMatchingSpecialCosts, shouldResetDailyInputsForJson, StoreWork, summarizeCastDrinksByPrice } from "./store-work";
 import { Modal, currentMonth } from "./ui";
@@ -107,7 +107,112 @@ const data: AccountingWorkspaceData = {
   monthSnapshots: [],
 };
 
+function balanceWorkspace(): AccountingWorkspaceData {
+  const source = structuredClone(data);
+  const daily = source.closings[0];
+  daily.nominations = { honShimeiCount: 0, jonaiCount: 0 };
+  daily.liquorDeliveryAmount = 0;
+  daily.casts = daily.casts.map((cast) => ({ ...cast, honShimeiCount: 0, banaiShimeiCount: 0, introducer: undefined }));
+  source.casts = source.casts.map((cast) => ({ ...cast, introducerId: undefined, attendanceAdvisoryFee: 0 }));
+  source.introducers = [];
+  daily.posSnapshot = {
+    ...daily.posSnapshot!,
+    nominations: { ...daily.nominations },
+    castWork: daily.casts.map((cast) => ({
+      castId: cast.posCastId, castName: cast.name, castType: cast.kind, isTrial: cast.kind === "trial",
+      startTime: cast.startTime, endTime: cast.endTime, breakMinutes: 0, hours: cast.hours,
+    })),
+  };
+  return source;
+}
+
 describe("主要ページのSSRスモーク", () => {
+  it("収支表XLSXは未確定の承認済みデータを出力でき、日別配分・紹介料列・Excel入金入力を案内する", () => {
+    const markup = renderToStaticMarkup(createElement(AccountingForms, {
+      section: "balance", data: balanceWorkspace(), user, busy: false, run,
+    }));
+    expect(markup).toContain("収支表をXLSX出力");
+    expect(markup).toContain("承認済みデータ（未確定）");
+    expect(markup).toContain("月間の採用報酬方式を日別に配分");
+    expect(markup).toContain("紹介料を独立列で出力");
+    expect(markup).toContain("カード入金額はExcel内で入力してください");
+    expect(markup).toContain("未承認・差戻し中・店舗編集中の日次は含みません");
+    expect(markup).not.toMatch(/<button[^>]*disabled[^>]*>収支表をXLSX出力/);
+  });
+
+  it("月額費用があっても計上日の手入力なしで収支表XLSXを出力できる", () => {
+    const source = balanceWorkspace();
+    source.adjustments[0].fixedExpenses = [{ id: "rent", account: "家賃", amount: 60000 }];
+    source.adjustments[0].cardFee = 1000;
+    source.adjustments[0].liquorDeliveryAmount = 3500;
+    const markup = renderToStaticMarkup(createElement(AccountingForms, {
+      section: "balance", data: source, user, busy: false, run,
+    }));
+    expect(markup).toContain("最後の承認済み営業日に計上します");
+    expect(markup).not.toContain("計上日が未指定");
+    expect(markup).not.toMatch(/<button[^>]*disabled[^>]*>収支表をXLSX出力/);
+  });
+
+  it("収支表XLSXは未承認日があっても承認済み部分を出力し、処理中・不整合時は止める", () => {
+    const source = balanceWorkspace();
+    const render = (workspace: AccountingWorkspaceData, busy = false) => renderToStaticMarkup(createElement(AccountingForms, {
+      section: "balance", data: workspace, user, busy, run,
+    }));
+    const partial = render({ ...source, closings: [source.closings[0], { ...source.closings[0], id: "unapproved", status: "submitted", businessDate: `${month}-03` }] });
+    expect(partial).not.toMatch(/<button[^>]*disabled[^>]*>収支表をXLSX出力/);
+    expect(render(source, true)).toMatch(/<button[^>]*disabled[^>]*>収支表をXLSX出力/);
+    const invalid = render({ ...source, closings: [{ ...source.closings[0], integrityIssues: ["日次経費が破損しています。"] }] });
+    expect(invalid).toMatch(/<button[^>]*disabled[^>]*>収支表をXLSX出力/);
+    expect(invalid).toContain("データの警告を解消してから出力してください。");
+  });
+
+  it("確定した収支表は保存結果と元の日次・経理入力版が揃う場合だけ出力できる", () => {
+    const source = balanceWorkspace();
+    const result = calculateMonthlyAccounting(source, month, source.adjustments[0]);
+    const snapshot = buildMonthlySnapshot(month, 3, "a".repeat(64), source.adjustments[0], result, source.closings, user.uid, new Date().toISOString());
+    const closed: AccountingWorkspaceData = {
+      ...source, monthSnapshots: [snapshot],
+      monthStates: [{ month, status: "closed", revision: 1, currentSnapshotRevision: 3, updatedAt: "", updatedBy: user.uid }],
+    };
+    const render = (workspace: AccountingWorkspaceData) => renderToStaticMarkup(createElement(AccountingForms, {
+      section: "balance", data: workspace, user, busy: false, run,
+    }));
+    expect(render(closed)).toContain("月次確定済み 第3版");
+    expect(render(closed)).not.toMatch(/<button[^>]*disabled[^>]*>収支表をXLSX出力/);
+    expect(render({ ...closed, closings: [] })).toMatch(/<button[^>]*disabled[^>]*>収支表をXLSX出力/);
+    expect(render({ ...closed, adjustments: [{ ...source.adjustments[0], revision: 2 }] })).toMatch(/<button[^>]*disabled[^>]*>収支表をXLSX出力/);
+    expect(render({ ...closed, monthSnapshots: [] })).toMatch(/<button[^>]*disabled[^>]*>収支表をXLSX出力/);
+    expect(render({ ...closed, monthStates: [{ ...closed.monthStates[0], status: "closing" }] })).toMatch(/<button[^>]*disabled[^>]*>収支表をXLSX出力/);
+  });
+
+  it("収支表XLSXの事前検査はPOS原本欠損時に理由を表示して出力を止める", () => {
+    const source = balanceWorkspace();
+    source.closings[0].posSnapshot = undefined as unknown as DailyClosing["posSnapshot"];
+    const markup = renderToStaticMarkup(createElement(AccountingForms, {
+      section: "balance", data: source, user, busy: false, run,
+    }));
+    expect(markup).toMatch(/<button[^>]*disabled[^>]*>収支表をXLSX出力/);
+    expect(markup).toContain("POS");
+  });
+
+  it("収支表XLSXは未保存・未計算・対象月不一致・入力欠損の場合に操作できない", () => {
+    const source = balanceWorkspace();
+    const input = {
+      results: calculateMonthlyAccounting(source, month, source.adjustments[0]), closings: source.closings,
+      adjustments: source.adjustments[0], month, staff: source.staff, archivedStaff: source.archivedStaff,
+    };
+    for (const disabledReason of ["未保存の経理入力を保存してください。", "ボトル区分を確認して保存してください。"]) {
+      const markup = renderToStaticMarkup(createElement(BalanceExport, { input, month, sourceLabel: "未確定", disabledReason }));
+      expect(markup).toContain(disabledReason);
+      expect(markup).toMatch(/<button[^>]*disabled[^>]*>収支表をXLSX出力/);
+    }
+    const missing = renderToStaticMarkup(createElement(BalanceExport, { month, sourceLabel: "未確定", disabledReason: "" }));
+    expect(missing).toMatch(/<button[^>]*disabled[^>]*>収支表をXLSX出力/);
+    const mismatch = renderToStaticMarkup(createElement(BalanceExport, { input: { ...input, month: "2000-01" }, month, sourceLabel: "未確定", disabledReason: "" }));
+    expect(mismatch).toMatch(/<button[^>]*disabled[^>]*>収支表をXLSX出力/);
+    expect(mismatch).toContain("表示中の対象月と出力データが一致しません。");
+  });
+
   it("経費表XLSXは承認済みデータを出力し、日次なしでも固定費を出力できる", () => {
     const render = (source: AccountingWorkspaceData) => renderToStaticMarkup(createElement(AccountingForms, {
       section: "expenses", data: source, user, busy: false, run,
