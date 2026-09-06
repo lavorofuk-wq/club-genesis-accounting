@@ -5,6 +5,7 @@ import type { User } from "firebase/auth";
 import type { CastReward, CastSalesBackBreakdown, CastSalesBottleSummary, CastSalesReport, DailyClosing, LegacyBottleClassification, MonthlyAdjustments } from "@/domain/gms";
 import { findUnclassifiedLegacyBottles, normalizeMonthlyAdjustments } from "@/domain/gms";
 import { validateExpenseExport, type ExpenseExportInput } from "@/domain/expense-export";
+import { buildBalanceExportReport, type BalanceExportInput } from "@/domain/balance-export";
 import {
   buildMonthlySnapshot, calculateMonthlyAccounting, canFinalizeMonthlyAccounting, monthlySourceFingerprint,
   type AccountingWorkspaceData, type IntroducerPaymentRow, type MonthlyAccountingResults, type StaffPayrollRow,
@@ -190,6 +191,16 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
         : !results ? "出力する月次データを読み込めません。"
         : results.warnings.length || (!closed && finalizeCheck.integrityIssues.length) ? "データの警告を解消してから出力してください。" : ""}
     />}
+    {section === "balance" && <BalanceExport
+      input={results ? { results, closings: data.closings, adjustments, month, snapshot: currentSnapshot, staff: data.staff, archivedStaff: data.archivedStaff } : undefined}
+      month={month}
+      sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
+      disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"
+        : adjustmentsDirty ? "未保存の経理入力を保存してください。"
+        : calculationsBlocked ? "ボトル区分を確認して保存してください。"
+        : !results ? "出力する月次データを読み込めません。"
+        : results.warnings.length || (!closed && finalizeCheck.integrityIssues.length) ? "データの警告を解消してから出力してください。" : ""}
+    />}
     {results && section === "castSales" && <CastSalesReports rows={results.castSalesReports} month={month} />}
     {results && section === "castRewards" && <CastRewards rows={results.castRewards} disabled={busy || locked} onWithholding={(id, value) => setMap("withholdingByCast", id, value)} />}
     {results && section === "introducers" && <IntroducerPayments rows={results.introducerPayments} />}
@@ -273,6 +284,51 @@ export function ExpenseExport({ input, month, sourceLabel, disabledReason }: {
   };
   return <Card title="経費表XLSX" description={`${month}・${sourceLabel}。見本の経費表形式で、日次経費・固定費・給与・紹介者支払を出力します。未承認・差戻し中・店舗編集中の日次は含みません。`}
     action={<button className="button" disabled={Boolean(blockedReason) || exporting || !input} title={blockedReason || undefined} onClick={() => void exportExpenses()}>{exporting ? "XLSX出力中…" : "経費表をXLSX出力"}</button>}>
+    {blockedReason && <p className="muted compact-text">{blockedReason}</p>}
+    {notice?.month === month && <div role="status" className={`notice${notice.error ? " error" : ""}`}>{notice.text}</div>}
+  </Card>;
+}
+
+export function BalanceExport({ input, month, sourceLabel, disabledReason }: {
+  input?: BalanceExportInput;
+  month: string;
+  sourceLabel: string;
+  disabledReason: string;
+}) {
+  const exportingRef = useRef(false);
+  const [exporting, setExporting] = useState(false);
+  const [notice, setNotice] = useState<{ month: string; error: boolean; text: string }>();
+  const validationError = useMemo(() => {
+    if (disabledReason || !input) return "";
+    if (input.month !== month) return "表示中の対象月と出力データが一致しません。最新データを読み込んでください。";
+    try {
+      buildBalanceExportReport(input);
+      return "";
+    } catch (error) {
+      return error instanceof Error ? error.message : "出力元データを確認してください。";
+    }
+  }, [disabledReason, input, month]);
+  const blockedReason = disabledReason || validationError;
+  const exportBalance = async () => {
+    if (blockedReason || !input || input.month !== month || exportingRef.current) return;
+    exportingRef.current = true;
+    setExporting(true);
+    setNotice(undefined);
+    try {
+      const { createMonthlyBalanceWorkbook } = await import("@/lib/xlsx/balance");
+      const { downloadWorkbook } = await import("@/lib/xlsx/workbooks");
+      const book = createMonthlyBalanceWorkbook(input, sourceLabel);
+      await downloadWorkbook(book, `GENESIS収支表_${month}.xlsx`);
+      setNotice({ month, error: false, text: `${month}の収支表XLSXを出力しました。` });
+    } catch (error) {
+      setNotice({ month, error: true, text: `XLSXを出力できませんでした。${error instanceof Error ? error.message : "もう一度お試しください。"}` });
+    } finally {
+      exportingRef.current = false;
+      setExporting(false);
+    }
+  };
+  return <Card title="収支表XLSX" description={`${month}・${sourceLabel}。月間の採用報酬方式を日別に配分し、紹介料を独立列で出力します。カード入金額はExcel内で入力してください。未承認・差戻し中・店舗編集中の日次は含みません。`}
+    action={<button className="button" disabled={Boolean(blockedReason) || exporting || !input} title={blockedReason || undefined} onClick={() => void exportBalance()}>{exporting ? "XLSX出力中…" : "収支表をXLSX出力"}</button>}>
     {blockedReason && <p className="muted compact-text">{blockedReason}</p>}
     {notice?.month === month && <div role="status" className={`notice${notice.error ? " error" : ""}`}>{notice.text}</div>}
   </Card>;
