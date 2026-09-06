@@ -156,6 +156,11 @@ tbody tr:hover { background: #f8f9f9; }
 .reconciliation-result small { grid-column: 1 / -1; }
 .preview-sheet { display: grid; gap: 14px; border: 1px solid var(--line-dark); padding: 18px; background: #fff; }
 .preview-sheet header { padding-bottom: 12px; border-bottom: 2px solid var(--navy); display: flex; justify-content: space-between; align-items: flex-start; }
+.preview-product-cell { min-width: 230px; max-width: 310px; }
+.preview-product-list { display: grid; gap: 8px; }
+.preview-product-item { border-bottom: 1px solid var(--line); padding-bottom: 7px; line-height: 1.55; }
+.preview-product-item:last-child { border-bottom: 0; padding-bottom: 0; }
+.preview-product-item strong, .preview-product-item small { display: block; }
 .popover-preview { position: absolute; right: 20px; z-index: 20; width: min(920px, calc(100vw - 300px)); padding: 12px; border: 1px solid var(--line-dark); background: #fff; box-shadow: 0 7px 25px rgba(0,0,0,.18); }
 details { position: relative; }
 details summary { list-style: none; cursor: pointer; }

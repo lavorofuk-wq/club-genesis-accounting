@@ -489,9 +489,21 @@ export function DailyPreview({ closing }: { closing: DailyClosing }) {
     <header><div><p className="eyebrow">営業日次データ</p><h2>{closing.businessDate}</h2></div><StatusPill tone={closing.status === "approved" ? "good" : "warn"}>{closingLabels[closing.status]}</StatusPill></header>
     <div className="grid metrics"><Metric label="総売上" value={closing.sales.totalSales} /><Metric label="現金売上" value={closing.sales.cashSales} /><Metric label="カード売上" value={closing.sales.cardSales} /><Metric label="経費総計" value={expenseTotal} /></div>
     <h3>キャスト</h3>
-    <Table headers={["名前", "勤務", "本指名売上", "場内延長売上", "酒代原価", "美容室", "日払い・立替・送迎"]}>{closing.casts.map((row) => <tr key={row.posCastId}><td>{row.name}<br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td><td>{row.startTime}–{row.endTime}<br />{row.hours}時間</td><td>{yen.format(row.honShimeiSales)}</td><td>{yen.format(row.jonaiExtensionSales)}</td><td>{yen.format(row.liquorCost)}</td><td>{yen.format(row.beautyAllowance)}</td><td>{yen.format(row.dailyPayment + row.advancePayment + row.transportFee)}</td></tr>)}</Table>
-    <h3>キャスト別ボトル・ドリンク配賦明細</h3>
-    <div className="stack">{closing.casts.map((row) => <section key={row.posCastId}><strong>{row.name}</strong><CastProductDetails row={row} pos={closing.posSnapshot} /></section>)}</div>
+    <Table headers={["名前", "勤務", "本指名", "場内指名", "同伴", "本指名売上", "場内延長売上", "ボトルバック", "ドリンクバック", "美容室", "日払い", "立替", "送迎"]}>{closing.casts.map((row) => <tr key={row.posCastId}>
+      <td>{row.name}<br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td>
+      <td>{row.startTime}–{row.endTime}<br />{row.hours}時間</td>
+      <td>{row.honShimeiCount}本</td>
+      <td>{row.banaiShimeiCount}本</td>
+      <td>{row.dohanCount}本</td>
+      <td>{yen.format(row.honShimeiSales)}</td>
+      <td>{yen.format(row.jonaiExtensionSales)}</td>
+      <td className="wrap-cell preview-product-cell"><PreviewBottleBackDetails row={row} /></td>
+      <td className="wrap-cell preview-product-cell"><PreviewDrinkBackDetails row={row} pos={closing.posSnapshot} /></td>
+      <td>{yen.format(row.beautyAllowance)}</td>
+      <td>{yen.format(row.dailyPayment)}</td>
+      <td>{yen.format(row.advancePayment)}</td>
+      <td>{yen.format(row.transportFee)}</td>
+    </tr>)}</Table>
     <h3>スタッフ</h3>
     <Table headers={["名前", "区分", "出勤", "退勤", "勤務時間", "時給", "日払い"]}>{closing.staffWork.map((row) => <tr key={row.staffId}><td>{row.name}</td><td>{row.kind === "trial" ? "体入" : "在籍"}</td><td>{row.startTime}</td><td>{row.endTime}</td><td>{row.hours}時間</td><td>{yen.format(row.hourlyRate)}</td><td>{yen.format(row.dailyPayment)}</td></tr>)}</Table>
     <h3>送迎ドライバー</h3>
@@ -507,6 +519,36 @@ export function DailyPreview({ closing }: { closing: DailyClosing }) {
     <h3>現金照合</h3>
     <div className="summary-strip"><span><small>支払合計</small><strong>{yen.format(closing.cash.expenseAndPaymentTotal)}</strong></span><span><small>計算上残額</small><strong>{yen.format(closing.cash.expectedClosingCash)}</strong></span><span><small>実在高</small><strong>{yen.format(closing.cash.actualClosingCash)}</strong></span><span><small>差額</small><strong>{yen.format(closing.cash.difference)}</strong></span></div>
   </div>;
+}
+
+function PreviewBottleBackDetails({ row }: { row: DailyCast }) {
+  if (!row.bottles.length) return <>—</>;
+  return <div className="preview-product-list">{row.bottles.map((bottle, index) => {
+    const rate = bottle.kind === "champagneWine" ? 25 : 15;
+    const backAmount = typeof bottle.backAmount === "number" && Number.isFinite(bottle.backAmount)
+      ? yen.format(bottle.backAmount)
+      : "旧データのため確認不可";
+    return <div className="preview-product-item" key={`${bottle.sourceKey || bottle.itemId}-${index}`}>
+      <strong>{bottle.name} ×{bottle.quantity}本</strong>
+      <small>{bottle.kind === "champagneWine" ? "シャンパン・ワイン" : "キープボトル"}{bottle.specialCost ? "（特別原価）" : ""}</small>
+      <small>金額（配賦後） {yen.format(bottle.salesAmount)}</small>
+      <small>酒代原価（配賦後） {yen.format(bottle.costAmount)}</small>
+      <small>バック率 {rate}% / バック金額 {backAmount}</small>
+    </div>;
+  })}</div>;
+}
+
+function PreviewDrinkBackDetails({ row, pos }: { row: DailyCast; pos?: PosClosingV3 }) {
+  const hasPosDetails = Boolean(pos?.transactions.some((transaction) => transaction.items.some((item) =>
+    item.category === "castDrink" && item.backTargetCastIds.includes(row.posCastId))));
+  const drinks = hasPosDetails ? summarizeCastDrinksByPrice(row, pos) : [];
+  if (drinks.length > 0) return <div className="preview-product-list">{drinks.map((drink) => <div className="preview-product-item" key={`drink-price-${drink.unitPrice}`}>
+    <strong>{yen.format(drink.unitPrice)}　{drink.quantity}杯</strong>
+  </div>)}</div>;
+  const storedQuantity = (row.drinkAllocations || []).reduce((sum, drink) => sum + drink.quantity, 0);
+  return row.drinkSales > 0 || storedQuantity > 0
+    ? <>合計（配賦後） {yen.format(row.drinkSales)}<br /><small>{storedQuantity > 0 ? `${storedQuantity}杯 / ` : ""}旧データのため単価確認不可</small></>
+    : <>—</>;
 }
 
 function Metric({ label, value }: { label: string; value: number }) { return <div className="metric-card"><small>{label}</small><strong>{yen.format(value)}</strong></div>; }
