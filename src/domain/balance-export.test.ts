@@ -110,11 +110,11 @@ function fullInput(): BalanceExportInput {
   results.balance.introducer = 4300;
   results.balance.totalCosts += 4300;
   results.balance.profit -= 4300;
-  return { month: "2026-09", results, closings: [second, first], adjustments, monthlyChargeDate: "2026-09-04" };
+  return { month: "2026-09", results, closings: [second, first], adjustments };
 }
 
 describe("収支帳票の月次突合", () => {
-  it("明示計上日に月額費用を置き、派遣支払をP/Rへ分離してGMS収支に一致する", () => {
+  it("最後の承認済み営業日に月額費用を置き、派遣支払をP/Rへ分離してGMS収支に一致する", () => {
     const data = fullInput();
     const before = structuredClone(data);
     const report = buildBalanceExportReport(data);
@@ -143,10 +143,34 @@ describe("収支帳票の月次突合", () => {
       - employeeNet - report.castDailyAndAdvance - report.employeeDaily - result.expenses.total;
     expect(expanded).toBe(result.sales.cash - result.balance.totalCosts + report.castTransport);
   });
-  it("未回答の月額計上日を勝手に既定化しない", () => {
+  it("承認操作順や一覧順ではなく営業日順を使い、後日の未承認・差戻し・取下げ・別月は計上先にしない", () => {
     const data = fullInput();
-    delete data.monthlyChargeDate;
-    expect(() => buildBalanceExportReport(data)).toThrow("計上日が未指定");
+    const expected = buildBalanceExportReport(data);
+    data.closings.reverse();
+    data.closings[0].approvedAt = "2026-09-30T12:00:00.000Z";
+    for (const status of ["submitted", "returned", "withdrawn"] as const) {
+      data.closings.push({ ...data.closings[0], id: status, businessDate: "2026-09-30", status });
+    }
+    data.closings.push({ ...data.closings[0], id: "next-month", businessDate: "2026-10-01" });
+    expect(buildBalanceExportReport(data)).toEqual(expected);
+  });
+  it("承認済み営業日がない月の費用を架空の日次へ計上せず、理由を表示する", () => {
+    const data = fullInput();
+    data.closings = [];
+    data.results = calculateMonthlyAccounting({ casts: [], staff: [], drivers: [], introducers: [], liquor: [],
+      closings: [], adjustments: [data.adjustments], cashFloat: 200000 }, data.month, data.adjustments);
+    expect(() => buildBalanceExportReport(data)).toThrow("承認済み営業日がない");
+  });
+  it("営業日も金額もない月は空の帳票を出力できる", () => {
+    const data = fullInput();
+    data.closings = [];
+    data.adjustments.fixedExpenses = [];
+    data.adjustments.liquorDeliveryAmount = 0;
+    data.adjustments.cardFee = 0;
+    data.results = calculateMonthlyAccounting({ casts: [], staff: [], drivers: [], introducers: [], liquor: [],
+      closings: [], adjustments: [data.adjustments], cashFloat: 200000 }, data.month, data.adjustments);
+    expect(buildBalanceExportReport(data).days).toEqual([]);
+    expect(buildBalanceExportReport(data).approvedDays).toBe(0);
   });
   it("承認前・別月の日次を含めず、月次確定時の日次の保存世代を突合する", () => {
     const data = fullInput();

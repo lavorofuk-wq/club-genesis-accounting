@@ -140,6 +140,19 @@ describe("主要ページのSSRスモーク", () => {
     expect(markup).not.toMatch(/<button[^>]*disabled[^>]*>収支表をXLSX出力/);
   });
 
+  it("月額費用があっても計上日の手入力なしで収支表XLSXを出力できる", () => {
+    const source = balanceWorkspace();
+    source.adjustments[0].fixedExpenses = [{ id: "rent", account: "家賃", amount: 60000 }];
+    source.adjustments[0].cardFee = 1000;
+    source.adjustments[0].liquorDeliveryAmount = 3500;
+    const markup = renderToStaticMarkup(createElement(AccountingForms, {
+      section: "balance", data: source, user, busy: false, run,
+    }));
+    expect(markup).toContain("最後の承認済み営業日に計上します");
+    expect(markup).not.toContain("計上日が未指定");
+    expect(markup).not.toMatch(/<button[^>]*disabled[^>]*>収支表をXLSX出力/);
+  });
+
   it("収支表XLSXは未承認日があっても承認済み部分を出力し、処理中・不整合時は止める", () => {
     const source = balanceWorkspace();
     const render = (workspace: AccountingWorkspaceData, busy = false) => renderToStaticMarkup(createElement(AccountingForms, {

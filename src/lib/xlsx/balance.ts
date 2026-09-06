@@ -62,7 +62,7 @@ export function createMonthlyBalanceWorkbook(input: BalanceExportInput, sourceLa
   const meanCastRatio = sales === 0 ? "" : ratio(report.days.reduce((sum, day) => sum + (day.totalSales === 0 ? 0 : (day.castHourly + day.castSalesReward + day.dispatchCastPayment) / day.totalSales), 0), report.approvedDays);
   const meanExpenseRatio = sales === 0 ? "" : ratio(report.days.reduce((sum, day) => sum + (day.totalSales === 0 ? 0 : day.expenses / day.totalSales), 0), report.approvedDays);
   const book = new ExcelJS.Workbook();
-  book.creator = "GENESIS Management System Ver2.17.0";
+  book.creator = "GENESIS Management System Ver2.17.1";
   book.created = new Date();
   book.calcProperties.fullCalcOnLoad = true;
   const sheet = book.addWorksheet("ジェネシス収支表");

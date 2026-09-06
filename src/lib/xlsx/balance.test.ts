@@ -43,7 +43,7 @@ describe("見本形式の月次収支XLSX", () => {
   it("検証済み日別データを紹介料列追加後の正しい列へ出力する", () => {
     const book = createMonthlyBalanceWorkbook(input, "承認済みデータ（未確定）");
     expect(mockedBuild).toHaveBeenCalledWith(input);
-    expect(book.creator).toBe("GENESIS Management System Ver2.17.0");
+    expect(book.creator).toBe("GENESIS Management System Ver2.17.1");
     expect(book.worksheets).toHaveLength(1);
     const sheet = book.worksheets[0];
     expect(sheet.name).toBe("ジェネシス収支表");

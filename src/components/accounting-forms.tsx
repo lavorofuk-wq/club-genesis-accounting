@@ -327,7 +327,7 @@ export function BalanceExport({ input, month, sourceLabel, disabledReason }: {
       setExporting(false);
     }
   };
-  return <Card title="収支表XLSX" description={`${month}・${sourceLabel}。月間の採用報酬方式を日別に配分し、紹介料を独立列で出力します。カード入金額はExcel内で入力してください。未承認・差戻し中・店舗編集中の日次は含みません。`}
+  return <Card title="収支表XLSX" description={`${month}・${sourceLabel}。月間の採用報酬方式を日別に配分し、紹介料を独立列で出力します。月額の紹介料・固定費・納品酒代・カード手数料は最後の承認済み営業日に計上します。カード入金額はExcel内で入力してください。未承認・差戻し中・店舗編集中の日次は含みません。`}
     action={<button className="button" disabled={Boolean(blockedReason) || exporting || !input} title={blockedReason || undefined} onClick={() => void exportBalance()}>{exporting ? "XLSX出力中…" : "収支表をXLSX出力"}</button>}>
     {blockedReason && <p className="muted compact-text">{blockedReason}</p>}
     {notice?.month === month && <div role="status" className={`notice${notice.error ? " error" : ""}`}>{notice.text}</div>}

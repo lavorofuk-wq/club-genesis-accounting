@@ -5,8 +5,6 @@ import { allocateBalancePayroll } from "./balance-allocation";
 export type BalanceExportInput = ExpenseExportInput & {
   staff?: StaffRecord[];
   archivedStaff?: StaffRecord[];
-  /** 月額費用の計上日。日次給与の配分日とは別に明示する。 */
-  monthlyChargeDate?: string;
 };
 
 export type BalanceExportDay = {
@@ -159,14 +157,16 @@ export function buildBalanceExportReport(input: BalanceExportInput): BalanceExpo
     .sort((a, b) => a.businessDate.localeCompare(b.businessDate));
   const payroll = new Map(allocateBalancePayroll(input).byDate.map((day) => [day.businessDate, day]));
   const monthlyExpenses = results.expenses.fixed + results.expenses.liquorDelivery + results.expenses.cardFee;
+  // 月額費用は営業日順で最後の承認済み日へまとめる。承認操作の順番や暦の月末ではない。
+  const monthlyChargeDate = approved.at(-1)?.businessDate;
   if (monthlyExpenses !== 0 || results.balance.introducer !== 0) {
-    requireValue(input.monthlyChargeDate && approved.some((day) => day.businessDate === input.monthlyChargeDate),
-      "月額の紹介料・固定費・納品酒代・カード手数料の計上日が未指定です。");
+    requireValue(monthlyChargeDate,
+      "対象月の承認済み営業日がないため、月額の紹介料・固定費・納品酒代・カード手数料を日別に計上できません。");
   }
   const days = approved.map((closing): BalanceExportDay => {
     const dailyPayroll = payroll.get(closing.businessDate);
     requireValue(dailyPayroll, `${closing.businessDate}の給与配分結果がありません。`);
-    const monthlyDate = closing.businessDate === input.monthlyChargeDate;
+    const monthlyDate = closing.businessDate === monthlyChargeDate;
     return {
       businessDate: closing.businessDate,
       cashSales: closing.sales.cashSales,
