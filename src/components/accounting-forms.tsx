@@ -10,7 +10,7 @@ import {
 } from "@/domain/month-accounting";
 import { approveClosing, cancelAccountingMonthClosing, finalizeAccountingMonth, reopenAccountingMonth, returnClosing, saveMonthlyAdjustments } from "@/lib/firebase/repository";
 import { Card, Field, MoneyInput, StatusPill, Table, currentMonth, yen } from "./ui";
-import { PosProductDetails, summarizeCastDrinksByPrice } from "./store-work";
+import { summarizeCastDrinksByPrice } from "./store-work";
 
 type Props = { data: AccountingWorkspaceData; user: User; busy: boolean; run: (action: () => Promise<unknown>, message: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void };
 type Section = "approval" | "castSales" | "castRewards" | "introducers" | "staffPayroll" | "driverPayroll" | "expenses" | "balance";
@@ -84,8 +84,6 @@ function ClosingDetail({ closing, reviewed, disabled, onReviewed }: { closing: D
     <Table headers={["キャスト", "出退勤・時間", "本指名/場内/同伴", "本指名売上", "場内延長売上", "ボトル・ドリンク明細", "手当・控除"]}>
       {closing.casts.map((row) => <tr key={row.posCastId}><td><strong>{row.name}</strong><br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td><td>{row.startTime}–{row.endTime}<br />{row.hours}時間</td><td>{row.honShimeiCount} / {row.banaiShimeiCount} / {row.dohanCount}</td><td>{yen.format(row.honShimeiSales)}</td><td>{yen.format(row.jonaiExtensionSales)}</td><td className="wrap-cell"><ClosingCastProductDetails row={row} pos={closing.posSnapshot} /></td><td className="wrap-cell">美容室 {yen.format(row.beautyAllowance)}<br />日払い {yen.format(row.dailyPayment)}<br />立替 {yen.format(row.advancePayment)}<br />送迎 {yen.format(row.transportFee)}</td></tr>)}
     </Table>
-    <h3>POSボトル・ドリンク注文明細（対象外を含む全件）</h3>
-    <PosProductDetails pos={closing.posSnapshot} casts={closing.casts} />
     <h3>スタッフ・送迎ドライバー</h3>
     <Table headers={["区分", "名前", "勤務・給与基準", "日払い"]}>{[
       ...closing.staffWork.map((row) => <tr key={`staff-${row.staffId}`}><td>{row.kind === "trial" ? "体入スタッフ" : "スタッフ"}</td><td>{row.name}</td><td>{row.startTime}–{row.endTime}（{row.hours}時間）<br /><small>時給 {yen.format(row.hourlyRate)}</small></td><td>{yen.format(row.dailyPayment)}</td></tr>),

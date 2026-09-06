@@ -603,30 +603,6 @@ function PreviewDrinkBackDetails({ row, pos }: { row: DailyCast; pos?: PosClosin
 
 function Metric({ label, value }: { label: string; value: number }) { return <div className="metric-card"><small>{label}</small><strong>{yen.format(value)}</strong></div>; }
 
-export function PosProductDetails({ pos, casts }: { pos?: PosClosingV3; casts: DailyCast[] }) {
-  if (!pos) return <div className="notice warn">旧保存データのため、POSの注文単位明細は確認できません。下のキャスト別配賦明細を確認してください。</div>;
-  const products = pos.transactions.flatMap((transaction) => transaction.items.flatMap((item, itemIndex) => {
-    if (!["champagneWine", "keepBottle", "castDrink"].includes(item.category)) return [];
-    return [{ transaction, item, itemIndex, sourceKey: posItemOccurrenceKey(transaction, itemIndex) }];
-  }));
-  return <Table headers={["会計", "商品", "商品区分", "数量", "注文売上", "計上原価", "バック対象区分・対象"]}>{products.map(({ transaction, item, itemIndex, sourceKey }) => {
-    const cost = ["champagneWine", "keepBottle"].includes(item.category) ? allocatedBottleCost(pos, casts, sourceKey, item.itemId) : undefined;
-    const target = ["champagneWine", "keepBottle"].includes(item.category)
-      ? bottleOrderTargetLabel(transaction, itemIndex)
-      : item.backTargetCastIds.length ? "ドリンクバック対象" : "対象外";
-    const targetNames = item.backTargetCastNames.filter(Boolean).join("、");
-    return <tr key={sourceKey}>
-      <td>{transaction.tableLabel || transaction.transactionId}</td>
-      <td>{item.label}</td>
-      <td>{item.category === "champagneWine" ? "シャンパン・ワイン" : item.category === "keepBottle" ? "キープボトル" : "キャストドリンク"}</td>
-      <td>{item.quantity}</td>
-      <td>{yen.format(item.price * item.quantity)}</td>
-      <td>{item.category === "castDrink" ? "—" : cost === undefined ? "旧データのため特定不可" : yen.format(cost)}</td>
-      <td>{target}{targetNames ? `（${targetNames}）` : ""}</td>
-    </tr>;
-  })}</Table>;
-}
-
 export function CastProductSummary({ row, pos }: { row: DailyCast; pos?: PosClosingV3 }) {
   const bottleQuantity = row.bottles.reduce((sum, bottle) => sum + bottle.quantity, 0);
   const drinkSummaries = summarizeCastDrinksByPrice(row, pos);
@@ -711,14 +687,6 @@ function bottleTargetLabel(pos: PosClosingV3 | undefined, posCastId: string, bot
   return banaiExtensionIds.has(posCastId) ? "場内延長" : "対象外";
 }
 
-function bottleOrderTargetLabel(transaction: PosTransaction, itemIndex: number) {
-  const item = transaction.items[itemIndex];
-  const { honShimeiIds, banaiExtensionIds } = bottleOrderContext(transaction, itemIndex);
-  if (item.backTargetCastIds.some((id) => honShimeiIds.has(id))) return "本指名";
-  if (item.backTargetCastIds.some((id) => banaiExtensionIds.has(id))) return "場内延長";
-  return "対象外";
-}
-
 function bottleOrderContext(transaction: PosTransaction, itemIndex: number) {
   const honShimeiIds = new Set(transaction.items.filter((item) => item.isHonShimei).map((item) => item.castId).filter((id): id is string => Boolean(id)));
   let banaiExtensionIds = new Set<string>();
@@ -727,15 +695,6 @@ function bottleOrderContext(transaction: PosTransaction, itemIndex: number) {
     if (item.isBanaiExtension) banaiExtensionIds = new Set([...(item.banaiExtCastIds || []), item.castId].filter((id): id is string => Boolean(id)));
   }
   return { honShimeiIds, banaiExtensionIds };
-}
-
-function allocatedBottleCost(pos: PosClosingV3, casts: DailyCast[], sourceKey: string, itemId: string) {
-  const exact = casts.flatMap((row) => row.bottles).filter((bottle) => bottle.sourceKey === sourceKey);
-  if (exact.length) return exact.reduce((sum, bottle) => sum + bottle.costAmount, 0);
-  const legacy = casts.flatMap((row) => row.bottles).filter((bottle) => !bottle.sourceKey && bottle.itemId === itemId);
-  if (!legacy.length) return 0;
-  const occurrenceCount = pos.transactions.reduce((count, transaction) => count + transaction.items.filter((item) => item.itemId === itemId).length, 0);
-  return occurrenceCount === 1 ? legacy.reduce((sum, bottle) => sum + bottle.costAmount, 0) : undefined;
 }
 
 export function retainMatchingSpecialCosts(
