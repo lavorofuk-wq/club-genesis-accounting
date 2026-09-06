@@ -349,27 +349,113 @@ describe("主要ページのSSRスモーク", () => {
     expect(accountingMarkup).not.toContain("キャストドリンク ￥13,000");
   });
 
-  it("店舗の日次プレビューからPOS全件明細を除外する", () => {
+  it("店舗の日次プレビューのキャスト欄へ本数・商品バック・控除をまとめる", () => {
     const groupedClosing: DailyClosing = {
       ...closing,
       casts: [{
         ...closing.casts[0],
-        drinkSales: 26_000,
+        honShimeiCount: 11,
+        banaiShimeiCount: 7,
+        dohanCount: 3,
+        bottles: [
+          {
+            itemId: "champagne-a",
+            sourceKey: "tx-1|0|champagne-a",
+            name: "銘柄A",
+            kind: "champagneWine",
+            quantity: 1,
+            salesAmount: 17_500,
+            costAmount: 6_250,
+            backAmount: 2_810,
+            specialCost: false,
+          },
+          {
+            itemId: "keep-b",
+            sourceKey: "tx-1|1|keep-b",
+            name: "銘柄B",
+            kind: "keepBottle",
+            quantity: 1,
+            salesAmount: 20_000,
+            costAmount: 8_000,
+            backAmount: 1_800,
+            specialCost: true,
+          },
+        ],
+        drinkSales: 32_000,
         drinkAllocations: [
           { itemId: "drink-a", name: "ドリンクA", quantity: 1, salesAmount: 2_000 },
           { itemId: "drink-b", name: "ドリンクB", quantity: 3, salesAmount: 6_000 },
-          { itemId: "drink-c", name: "ドリンクC", quantity: 6, salesAmount: 18_000 },
+          { itemId: "drink-c", name: "ドリンクC", quantity: 8, salesAmount: 24_000 },
         ],
+        dailyPayment: 1_111,
+        advancePayment: 2_222,
+        transportFee: 3_500,
       }],
+      posSnapshot: {
+        ...closing.posSnapshot,
+        transactions: [{
+          transactionId: "preview-tx", tableId: "table-1", tableLabel: "A",
+          startTime: 0, endTime: 0, payMethod: "cash", splits: [], subtotal: 32_000,
+          discount: 0, tax: 0, total: 32_000,
+          items: [
+            { itemId: "drink-a", label: "ドリンクA", category: "castDrink", price: 2_000, quantity: 1, backTargetCastIds: ["pos-cast-1"], backTargetCastNames: ["花子"], banaiExtCastIds: [], isSet: false, isHonShimei: false, isBanaiShimei: false, isExtension: false, isBanaiExtension: false, isDiscount: false },
+            { itemId: "drink-b", label: "ドリンクB", category: "castDrink", price: 2_000, quantity: 3, backTargetCastIds: ["pos-cast-1"], backTargetCastNames: ["花子"], banaiExtCastIds: [], isSet: false, isHonShimei: false, isBanaiShimei: false, isExtension: false, isBanaiExtension: false, isDiscount: false },
+            { itemId: "drink-c", label: "ドリンクC", category: "castDrink", price: 3_000, quantity: 8, backTargetCastIds: ["pos-cast-1"], backTargetCastNames: ["花子"], banaiExtCastIds: [], isSet: false, isHonShimei: false, isBanaiShimei: false, isExtension: false, isBanaiExtension: false, isDiscount: false },
+          ],
+        }],
+      },
     };
     const markup = renderToStaticMarkup(createElement(DailyPreview, { closing: groupedClosing }));
+    expect(markup).toContain("<th>名前</th><th>勤務</th><th>本指名</th><th>場内指名</th><th>同伴</th><th>本指名売上</th><th>場内延長売上</th><th>ボトルバック</th><th>ドリンクバック</th><th>美容室</th><th>日払い</th><th>立替</th><th>送迎</th>");
+    expect(markup).toContain("11本");
+    expect(markup).toContain("7本");
+    expect(markup).toContain("3本");
+    expect(markup).toContain("銘柄A ×1本");
+    expect(markup).toContain("シャンパン・ワイン");
+    expect(markup).toContain("金額（配賦後） ￥17,500");
+    expect(markup).toContain("酒代原価（配賦後） ￥6,250");
+    expect(markup).toContain("バック率 25% / バック金額 ￥2,810");
+    expect(markup).toContain("銘柄B ×1本");
+    expect(markup).toContain("キープボトル（特別原価）");
+    expect(markup).toContain("金額（配賦後） ￥20,000");
+    expect(markup).toContain("酒代原価（配賦後） ￥8,000");
+    expect(markup).toContain("バック率 15% / バック金額 ￥1,800");
     expect(markup).not.toContain("POSボトル・ドリンク注文明細");
-    expect(markup).toContain("キャスト別ボトル・ドリンク配賦明細");
+    expect(markup).not.toContain("キャスト別ボトル・ドリンク配賦明細");
     expect(markup).toContain("￥2,000");
     expect(markup).toContain("4杯");
     expect(markup).toContain("￥3,000");
-    expect(markup).toContain("6杯");
+    expect(markup).toContain("8杯");
     expect(markup).not.toContain("ドリンクA");
+    expect(markup).toContain("￥1,111");
+    expect(markup).toContain("￥2,222");
+    expect(markup).toContain("￥3,500");
+    expect(markup).not.toContain("￥6,833");
+  });
+
+  it("店舗の日次プレビューは旧商品データを推測せず安全に表示する", () => {
+    const legacyClosing: DailyClosing = {
+      ...closing,
+      casts: [{
+        ...closing.casts[0],
+        bottles: [{
+          itemId: "legacy-bottle",
+          name: "旧ボトル",
+          kind: "keepBottle",
+          quantity: 1,
+          salesAmount: 10_000,
+          costAmount: 4_000,
+          specialCost: false,
+        }],
+        drinkSales: 2_460,
+        drinkAllocations: [{ itemId: "legacy-drink", name: "旧ドリンク", quantity: 2, salesAmount: 2_460 }],
+      }],
+    };
+    const markup = renderToStaticMarkup(createElement(DailyPreview, { closing: legacyClosing }));
+    expect(markup).toContain("バック金額 旧データのため確認不可");
+    expect(markup).toContain("2杯 / 旧データのため単価確認不可");
+    expect(markup).not.toContain("undefined");
+    expect(markup).not.toContain("NaN");
   });
 
   it("紹介者削除の警告へ紐づく在籍・体入・退店キャストを一覧表示する", () => {
