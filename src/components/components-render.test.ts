@@ -456,6 +456,56 @@ describe("主要ページのSSRスモーク", () => {
     expect(markup).toContain("2杯 / 旧データのため単価確認不可");
     expect(markup).not.toContain("undefined");
     expect(markup).not.toContain("NaN");
+    const totalRow = markup.match(/<tr class="total-row">([\s\S]*?)<\/tr>/)?.[1];
+    expect(totalRow).toContain("単価不明　2杯");
+    expect(totalRow).toContain("合計杯数 2杯");
+    expect(totalRow).not.toContain("￥1,230");
+  });
+
+  it("キャスト合計は表示行の売上・本数・手当人数と単価別の延べ杯数を集計する", () => {
+    const source: DailyClosing = {
+      ...closing,
+      casts: [
+        { ...closing.casts[0], honShimeiCount: 1, banaiShimeiCount: 2, dohanCount: 1, honShimeiSales: 30_010, jonaiExtensionSales: 10_020, beautyAllowance: 500 },
+        { ...closing.casts[0], masterId: "cast-2", posCastId: "pos-cast-2", name: "春子", honShimeiCount: 2, banaiShimeiCount: 3, dohanCount: 0, honShimeiSales: 20_120, jonaiExtensionSales: 2_070, beautyAllowance: 500 },
+        { ...closing.casts[0], masterId: "cast-3", posCastId: "pos-cast-3", name: "夏子", honShimeiCount: 0, banaiShimeiCount: 0, dohanCount: 0, honShimeiSales: 0, jonaiExtensionSales: 0, beautyAllowance: 0, drinkSales: 0, drinkAllocations: [] },
+      ],
+      posSnapshot: {
+        ...closing.posSnapshot,
+        transactions: [{
+          transactionId: "totals-tx", tableId: "table-1", tableLabel: "A",
+          startTime: 0, endTime: 0, payMethod: "cash", splits: [], subtotal: 42_000,
+          discount: 0, tax: 0, total: 42_000,
+          items: [
+            { itemId: "shared", label: "共有ドリンク", category: "castDrink", price: 2_000, quantity: 2, backTargetCastIds: ["pos-cast-1", "pos-cast-2"], backTargetCastNames: ["花子", "春子"], banaiExtCastIds: [], isSet: false, isHonShimei: false, isBanaiShimei: false, isExtension: false, isBanaiExtension: false, isDiscount: false },
+            { itemId: "single-a", label: "ドリンクA", category: "castDrink", price: 2_000, quantity: 3, backTargetCastIds: ["pos-cast-1"], backTargetCastNames: ["花子"], banaiExtCastIds: [], isSet: false, isHonShimei: false, isBanaiShimei: false, isExtension: false, isBanaiExtension: false, isDiscount: false },
+            { itemId: "single-b", label: "ドリンクB", category: "castDrink", price: 3_000, quantity: 4, backTargetCastIds: ["pos-cast-2"], backTargetCastNames: ["春子"], banaiExtCastIds: [], isSet: false, isHonShimei: false, isBanaiShimei: false, isExtension: false, isBanaiExtension: false, isDiscount: false },
+            { itemId: "dispatch", label: "派遣分", category: "castDrink", price: 2_000, quantity: 10, backTargetCastIds: ["pos-dispatch"], backTargetCastNames: ["派遣"], banaiExtCastIds: [], isSet: false, isHonShimei: false, isBanaiShimei: false, isExtension: false, isBanaiExtension: false, isDiscount: false },
+          ],
+        }],
+      },
+    };
+    const markup = renderToStaticMarkup(createElement(DailyPreview, { closing: source }));
+    const totalRow = markup.match(/<tr class="total-row">([\s\S]*?)<\/tr>/)?.[1];
+    expect(totalRow).toContain("<td>3本</td><td>5本</td><td>1本</td><td>￥50,130</td><td>￥12,090</td>");
+    expect(totalRow).toContain("￥2,000　7杯");
+    expect(totalRow).toContain("￥3,000　4杯");
+    expect(totalRow).toContain("合計杯数 11杯");
+    expect(totalRow).toContain("キャスト欄の延べ杯数");
+    expect(totalRow).toContain("<td>2人</td>");
+    expect(markup.indexOf('class="total-row"')).toBeLessThan(markup.indexOf("<h3>スタッフ</h3>"));
+  });
+
+  it("ドリンク杯数不明の旧データを合計ゼロと誤表示せず、キャストなしはゼロ表示する", () => {
+    const unknown = renderToStaticMarkup(createElement(DailyPreview, { closing: {
+      ...closing, casts: [{ ...closing.casts[0], drinkAllocations: undefined }],
+    } }));
+    expect(unknown.match(/<tr class="total-row">([\s\S]*?)<\/tr>/)?.[1]).toContain("合計杯数 確認不可");
+    const empty = renderToStaticMarkup(createElement(DailyPreview, { closing: { ...closing, casts: [] } }));
+    const totalRow = empty.match(/<tr class="total-row">([\s\S]*?)<\/tr>/)?.[1];
+    expect(totalRow).toContain("<td>0本</td><td>0本</td><td>0本</td><td>￥0</td><td>￥0</td>");
+    expect(totalRow).toContain("合計杯数 0杯");
+    expect(totalRow).toContain("<td>0人</td>");
   });
 
   it("紹介者削除の警告へ紐づく在籍・体入・退店キャストを一覧表示する", () => {

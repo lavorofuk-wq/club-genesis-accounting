@@ -485,11 +485,20 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
 
 export function DailyPreview({ closing }: { closing: DailyClosing }) {
   const expenseTotal = closing.expenses.reduce((sum, row) => sum + row.amount, 0);
+  const castTotals = closing.casts.reduce((total, row) => ({
+    honShimeiCount: total.honShimeiCount + row.honShimeiCount,
+    banaiShimeiCount: total.banaiShimeiCount + row.banaiShimeiCount,
+    dohanCount: total.dohanCount + row.dohanCount,
+    honShimeiSales: total.honShimeiSales + row.honShimeiSales,
+    jonaiExtensionSales: total.jonaiExtensionSales + row.jonaiExtensionSales,
+    beautyCount: total.beautyCount + (row.beautyAllowance > 0 ? 1 : 0),
+  }), { honShimeiCount: 0, banaiShimeiCount: 0, dohanCount: 0, honShimeiSales: 0, jonaiExtensionSales: 0, beautyCount: 0 });
+  const drinkTotals = summarizePreviewDrinks(closing.casts, closing.posSnapshot);
   return <div className="preview-sheet">
     <header><div><p className="eyebrow">営業日次データ</p><h2>{closing.businessDate}</h2></div><StatusPill tone={closing.status === "approved" ? "good" : "warn"}>{closingLabels[closing.status]}</StatusPill></header>
     <div className="grid metrics"><Metric label="総売上" value={closing.sales.totalSales} /><Metric label="現金売上" value={closing.sales.cashSales} /><Metric label="カード売上" value={closing.sales.cardSales} /><Metric label="経費総計" value={expenseTotal} /></div>
     <h3>キャスト</h3>
-    <Table headers={["名前", "勤務", "本指名", "場内指名", "同伴", "本指名売上", "場内延長売上", "ボトルバック", "ドリンクバック", "美容室", "日払い", "立替", "送迎"]}>{closing.casts.map((row) => <tr key={row.posCastId}>
+    <Table headers={["名前", "勤務", "本指名", "場内指名", "同伴", "本指名売上", "場内延長売上", "ボトルバック", "ドリンクバック", "美容室", "日払い", "立替", "送迎"]}>{[...closing.casts.map((row) => <tr key={row.posCastId}>
       <td>{row.name}<br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td>
       <td>{row.startTime}–{row.endTime}<br />{row.hours}時間</td>
       <td>{row.honShimeiCount}本</td>
@@ -503,7 +512,25 @@ export function DailyPreview({ closing }: { closing: DailyClosing }) {
       <td>{yen.format(row.dailyPayment)}</td>
       <td>{yen.format(row.advancePayment)}</td>
       <td>{yen.format(row.transportFee)}</td>
-    </tr>)}</Table>
+    </tr>), <tr key="cast-totals" className="total-row">
+      <td colSpan={2}><strong>合計</strong></td>
+      <td>{castTotals.honShimeiCount}本</td>
+      <td>{castTotals.banaiShimeiCount}本</td>
+      <td>{castTotals.dohanCount}本</td>
+      <td>{yen.format(castTotals.honShimeiSales)}</td>
+      <td>{yen.format(castTotals.jonaiExtensionSales)}</td>
+      <td>—</td>
+      <td className="wrap-cell preview-product-cell">
+        <div className="preview-product-list">
+          {drinkTotals.drinks.map((drink) => <div key={drink.unitPrice}>{yen.format(drink.unitPrice)}　{drink.quantity}杯</div>)}
+          {drinkTotals.unpricedQuantity > 0 && <div>単価不明　{drinkTotals.unpricedQuantity}杯</div>}
+          <strong>合計杯数 {drinkTotals.hasUnknownQuantity ? "確認不可" : `${drinkTotals.quantity}杯`}</strong>
+          <small>キャスト欄の延べ杯数{drinkTotals.hasUnknownQuantity ? "（杯数不明の旧データあり）" : ""}</small>
+        </div>
+      </td>
+      <td>{castTotals.beautyCount}人</td>
+      <td>—</td><td>—</td><td>—</td>
+    </tr>]}</Table>
     <h3>スタッフ</h3>
     <Table headers={["名前", "区分", "出勤", "退勤", "勤務時間", "時給", "日払い"]}>{closing.staffWork.map((row) => <tr key={row.staffId}><td>{row.name}</td><td>{row.kind === "trial" ? "体入" : "在籍"}</td><td>{row.startTime}</td><td>{row.endTime}</td><td>{row.hours}時間</td><td>{yen.format(row.hourlyRate)}</td><td>{yen.format(row.dailyPayment)}</td></tr>)}</Table>
     <h3>送迎ドライバー</h3>
@@ -538,16 +565,39 @@ function PreviewBottleBackDetails({ row }: { row: DailyCast }) {
   })}</div>;
 }
 
+/** キャスト欄の表示を合算する。旧配賦額から販売単価や不明な杯数を推測しない。 */
+function summarizePreviewDrinks(rows: DailyCast[], pos?: PosClosingV3) {
+  const grouped = new Map<number, { unitPrice: number; quantity: number }>();
+  let quantity = 0;
+  let unpricedQuantity = 0;
+  let hasUnknownQuantity = false;
+  rows.forEach((row) => {
+    const hasPosDetails = Boolean(pos?.transactions.some((transaction) => transaction.items.some((item) =>
+      item.category === "castDrink" && item.backTargetCastIds.includes(row.posCastId))));
+    if (hasPosDetails) {
+      summarizeCastDrinksByPrice(row, pos).forEach((drink) => {
+        const current = grouped.get(drink.unitPrice) || { unitPrice: drink.unitPrice, quantity: 0 };
+        current.quantity += drink.quantity;
+        grouped.set(drink.unitPrice, current);
+        quantity += drink.quantity;
+      });
+    } else {
+      const storedQuantity = (row.drinkAllocations || []).reduce((sum, drink) => sum + drink.quantity, 0);
+      quantity += storedQuantity;
+      unpricedQuantity += storedQuantity;
+      if (row.drinkSales > 0 && storedQuantity === 0) hasUnknownQuantity = true;
+    }
+  });
+  return { drinks: [...grouped.values()].sort((a, b) => a.unitPrice - b.unitPrice), quantity, unpricedQuantity, hasUnknownQuantity };
+}
+
 function PreviewDrinkBackDetails({ row, pos }: { row: DailyCast; pos?: PosClosingV3 }) {
-  const hasPosDetails = Boolean(pos?.transactions.some((transaction) => transaction.items.some((item) =>
-    item.category === "castDrink" && item.backTargetCastIds.includes(row.posCastId))));
-  const drinks = hasPosDetails ? summarizeCastDrinksByPrice(row, pos) : [];
+  const { drinks, quantity } = summarizePreviewDrinks([row], pos);
   if (drinks.length > 0) return <div className="preview-product-list">{drinks.map((drink) => <div className="preview-product-item" key={`drink-price-${drink.unitPrice}`}>
     <strong>{yen.format(drink.unitPrice)}　{drink.quantity}杯</strong>
   </div>)}</div>;
-  const storedQuantity = (row.drinkAllocations || []).reduce((sum, drink) => sum + drink.quantity, 0);
-  return row.drinkSales > 0 || storedQuantity > 0
-    ? <>合計（配賦後） {yen.format(row.drinkSales)}<br /><small>{storedQuantity > 0 ? `${storedQuantity}杯 / ` : ""}旧データのため単価確認不可</small></>
+  return row.drinkSales > 0 || quantity > 0
+    ? <>合計（配賦後） {yen.format(row.drinkSales)}<br /><small>{quantity > 0 ? `${quantity}杯 / ` : ""}旧データのため単価確認不可</small></>
     : <>—</>;
 }
 
