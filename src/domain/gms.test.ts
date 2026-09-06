@@ -7,6 +7,7 @@ import {
   calculateDriverPayroll,
   canMapAsDispatch,
   dayAfterIsoDate,
+  deriveReeditCastMapping,
   floorHundred,
   floorTen,
   findUnclassifiedLegacyBottles,
@@ -17,6 +18,7 @@ import {
   isCastMappingComplete,
   japanMonthFromTimestamp,
   legacyBottleSourceKey,
+  mergeReconciledDailyCastInputs,
   normalizeDailyClosing,
   normalizeMonthlyAdjustments,
   parsePosClosingV3,
@@ -667,6 +669,238 @@ describe("GMS報酬・日次計算", () => {
     } as DailyClosing], [], "2026-09")[0];
     // 派遣分の給与データは作らないが、商品バックの分母にはPOS上の全対象者を使う。
     expect(reward.bottleBack).toBe(2500);
+  });
+
+  it("再編集時は保存行のない体入勤務だけを派遣へ復元し、在籍勤務の欠落は未照合にする", () => {
+    const value = pos();
+    value.castWork[0] = {
+      ...value.castWork[0],
+      castType: "trial",
+      isTrial: true,
+    };
+
+    const savedRows = buildDailyCasts(value, {
+      p1: { masterId: "", name: "花子", kind: "dispatch", hourlyRate: 0 },
+      p2: { masterId: "c2", name: "春子", kind: "regular", hourlyRate: 3_000 },
+    }, [], {});
+    const restored = deriveReeditCastMapping({
+      businessDate: value.businessDate,
+      casts: savedRows,
+      posSnapshot: value,
+    });
+
+    expect(restored).toEqual({ p1: "dispatch", p2: "c2" });
+    expect(isCastMappingComplete(posCastReferences(value), restored)).toBe(true);
+
+    const mapping = deriveReeditCastMapping({
+      businessDate: value.businessDate,
+      casts: [],
+      posSnapshot: value,
+    });
+
+    expect(mapping).toEqual({ p1: "dispatch" });
+    expect(mapping.p2).toBeUndefined();
+    expect(isCastMappingComplete(posCastReferences(value), mapping)).toBe(false);
+  });
+
+  it("再照合では6つの店舗手入力だけを保持し、再選択したマスタとPOS再計算値を採用する", () => {
+    const value = pos();
+    const liquor = [{
+      id: "l1", kind: "champagneWine" as const, name: "テストシャンパン",
+      salePrice: 30_000, costPrice: 10_000, createdAt: "", updatedAt: "",
+    }];
+    const previous = buildDailyCasts(value, {
+      p1: { masterId: "old-master", name: "花子", kind: "regular", hourlyRate: 3_000 },
+      p2: { masterId: "c2", name: "春子", kind: "regular", hourlyRate: 3_000 },
+    }, liquor, {})[0];
+    Object.assign(previous, {
+      honShimeiSales: 345_670,
+      jonaiExtensionSales: 78_900,
+      beautyAllowance: 500,
+      dailyPayment: 12_345,
+      advancePayment: 6_789,
+      transportFee: 1_500,
+    });
+    const generated = {
+      ...buildDailyCasts(value, {
+        p1: {
+          masterId: "new-master",
+          name: "花子",
+          kind: "regular",
+          hourlyRate: 4_500,
+          introducer: {
+            id: "intro-new", name: "新紹介者", feeType: "gross10" as const,
+            attendanceAdvisoryFee: 800, entryAdvisoryFee: 1_000,
+          },
+        },
+        p2: { masterId: "c2", name: "春子", kind: "regular", hourlyRate: 3_000 },
+      }, liquor, {})[0],
+      startTime: "21:00",
+      endTime: "02:00",
+      hours: 5,
+      honShimeiCount: 8,
+      banaiShimeiCount: 7,
+      dohanCount: 6,
+      dohanBack: 25_000,
+      drinkSales: 9_999,
+      drinkAllocations: [{
+        itemId: "new-drink", sourceKey: "new-drink-key", name: "新ドリンク",
+        quantity: 3, salesAmount: 9_999, backAmount: 990,
+      }],
+      bottles: [{
+        itemId: "new-bottle", sourceKey: "new-bottle-key", name: "新ボトル",
+        kind: "champagneWine" as const, quantity: 1, salesAmount: 40_000,
+        costAmount: 15_000, backAmount: 6_250, specialCost: true,
+      }],
+      liquorCost: 15_000,
+      honShimeiSales: 111_110,
+      jonaiExtensionSales: 22_220,
+      beautyAllowance: 0,
+      dailyPayment: 0,
+      advancePayment: 0,
+      transportFee: 0,
+    };
+
+    const result = mergeReconciledDailyCastInputs([previous], [generated], value);
+
+    expect(result.unmatchedPrevious).toEqual([]);
+    expect(result.matches).toHaveLength(1);
+    expect(result.rows[0]).toMatchObject({
+      masterId: "new-master",
+      hourlyRate: 4_500,
+      startTime: "21:00",
+      endTime: "02:00",
+      hours: 5,
+      honShimeiCount: 8,
+      banaiShimeiCount: 7,
+      dohanCount: 6,
+      dohanBack: 25_000,
+      drinkSales: 9_999,
+      liquorCost: 15_000,
+      honShimeiSales: 345_670,
+      jonaiExtensionSales: 78_900,
+      beautyAllowance: 500,
+      dailyPayment: 12_345,
+      advancePayment: 6_789,
+      transportFee: 1_500,
+      introducer: { id: "intro-new", name: "新紹介者" },
+    });
+    expect(result.rows[0].bottles).toEqual(generated.bottles);
+    expect(result.rows[0].drinkAllocations).toEqual(generated.drinkAllocations);
+  });
+
+  it("店舗で未修正のキャスト売上は再取込したPOSの新しい値へ更新する", () => {
+    const previousPos = pos();
+    const previous = buildDailyCasts(previousPos, {
+      p1: { masterId: "c1", name: "花子", kind: "regular", hourlyRate: 3_000 },
+      p2: { masterId: "c2", name: "春子", kind: "regular", hourlyRate: 3_000 },
+    }, [], {})[0];
+    previous.beautyAllowance = 500;
+    previous.dailyPayment = 5_000;
+    const generated = {
+      ...previous,
+      honShimeiSales: previous.honShimeiSales + 12_340,
+      jonaiExtensionSales: previous.jonaiExtensionSales + 5_670,
+      beautyAllowance: 0,
+      dailyPayment: 0,
+    };
+
+    const result = mergeReconciledDailyCastInputs([previous], [generated], previousPos);
+
+    expect(result.rows[0].honShimeiSales).toBe(generated.honShimeiSales);
+    expect(result.rows[0].jonaiExtensionSales).toBe(generated.jonaiExtensionSales);
+    expect(result.rows[0].beautyAllowance).toBe(500);
+    expect(result.rows[0].dailyPayment).toBe(5_000);
+  });
+
+  it("体入の未修正即日払いは新しい勤務時間で再計算し、手修正済みなら保持する", () => {
+    const base = {
+      ...buildDailyCasts(pos(), {
+        p1: { masterId: "trial-1", name: "花子", kind: "trial", hourlyRate: 3_000 },
+        p2: { masterId: "c2", name: "春子", kind: "regular", hourlyRate: 3_000 },
+      }, [], {})[0],
+      kind: "trial" as const,
+      hours: 4,
+      hourlyRate: 3_000,
+      dailyPayment: 12_000,
+    };
+    const generated = { ...base, hours: 5, dailyPayment: 15_000 };
+
+    expect(mergeReconciledDailyCastInputs([base], [generated]).rows[0].dailyPayment).toBe(15_000);
+    expect(mergeReconciledDailyCastInputs([{ ...base, dailyPayment: 11_990 }], [generated]).rows[0].dailyPayment).toBe(11_990);
+  });
+
+  it.each([
+    ["名前", { name: "別人" }],
+    ["区分", { kind: "trial" as const }],
+  ])("同じPOS IDでも%sが違う行へ店舗入力を誤移管せず保留する", (_label, patch) => {
+    const previous = buildDailyCasts(pos(), {
+      p1: { masterId: "c1", name: "花子", kind: "regular", hourlyRate: 3_000 },
+      p2: { masterId: "c2", name: "春子", kind: "regular", hourlyRate: 3_000 },
+    }, [], {})[0];
+    Object.assign(previous, {
+      honShimeiSales: 345_670,
+      jonaiExtensionSales: 78_900,
+      beautyAllowance: 500,
+      dailyPayment: 12_345,
+      advancePayment: 6_789,
+      transportFee: 1_500,
+    });
+    const generated = {
+      ...previous,
+      ...patch,
+      honShimeiSales: 10_000,
+      jonaiExtensionSales: 20_000,
+      beautyAllowance: 0,
+      dailyPayment: 0,
+      advancePayment: 0,
+      transportFee: 0,
+    };
+
+    const result = mergeReconciledDailyCastInputs([previous], [generated]);
+
+    expect(result.rows).toEqual([generated]);
+    expect(result.matches).toEqual([]);
+    expect(result.unmatchedPrevious).toEqual([previous]);
+  });
+
+  it("POS IDが変わってもmasterIdと区分が旧新で一意なら店舗入力を保持する", () => {
+    const previous = buildDailyCasts(pos(), {
+      p1: { masterId: "c1", name: "花子", kind: "regular", hourlyRate: 3_000 },
+      p2: { masterId: "c2", name: "春子", kind: "regular", hourlyRate: 3_000 },
+    }, [], {})[0];
+    Object.assign(previous, {
+      honShimeiSales: 345_670,
+      jonaiExtensionSales: 78_900,
+      beautyAllowance: 500,
+      dailyPayment: 12_345,
+      advancePayment: 6_789,
+      transportFee: 1_500,
+    });
+    const generated = {
+      ...previous,
+      posCastId: "new-pos-id",
+      honShimeiSales: 10_000,
+      jonaiExtensionSales: 20_000,
+      beautyAllowance: 0,
+      dailyPayment: 0,
+      advancePayment: 0,
+      transportFee: 0,
+    };
+
+    const result = mergeReconciledDailyCastInputs([previous], [generated]);
+
+    expect(result.unmatchedPrevious).toEqual([]);
+    expect(result.matches).toHaveLength(1);
+    expect(result.rows[0]).toMatchObject({
+      posCastId: "new-pos-id",
+      honShimeiSales: 345_670,
+      jonaiExtensionSales: 78_900,
+      beautyAllowance: 500,
+      dailyPayment: 12_345,
+      advancePayment: 6_789,
+      transportFee: 1_500,
+    });
   });
 
   it("体入行は派遣を選ぶと照合完了になり、在籍行では派遣を選べない", () => {

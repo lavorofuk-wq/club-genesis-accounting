@@ -2,13 +2,13 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { User } from "firebase/auth";
 import { describe, expect, it } from "vitest";
-import type { DailyClosing } from "@/domain/gms";
+import { invalidTrialBeautyExpensesForRows, mergeReconciledDailyCastInputs, posItemOccurrenceKey, type DailyClosing, type PosClosingV3 } from "@/domain/gms";
 import type { AccountingWorkspaceData } from "@/domain/month-accounting";
 import { buildMonthlySnapshot, calculateMonthlyAccounting } from "@/domain/month-accounting";
 import { introducerDeletionLinkedCastSignature } from "@/lib/firebase/repository";
 import { AccountingForms, ClosingCastProductDetails } from "./accounting-forms";
 import { CommonForms, introducerDeletionConfirmation } from "./common-forms";
-import { CastProductSummary, closingDeletionConfirmation, DailyPreview, StoreWork, summarizeCastDrinksByPrice } from "./store-work";
+import { CastProductSummary, closingDeletionConfirmation, DailyPreview, jsonReimportConfirmation, reconcileTrialBeautyExpenses, retainCurrentCastMappingForJson, retainMatchingSpecialCosts, shouldResetDailyInputsForJson, StoreWork, summarizeCastDrinksByPrice } from "./store-work";
 import { Modal, currentMonth } from "./ui";
 
 const month = currentMonth();
@@ -166,6 +166,114 @@ describe("主要ページのSSRスモーク", () => {
     expect(message).toContain("差戻し");
     expect(message).toContain("POS原本・店舗入力・現金照合・差戻し履歴");
     expect(message).toContain("復元できません");
+  });
+
+  it("同じ営業日のJSON再取込は店舗入力の保持とPOS項目の再計算を明示する", () => {
+    const message = jsonReimportConfirmation("2026-09-02", "2026-09-02");
+
+    expect(shouldResetDailyInputsForJson("2026-09-02", "2026-09-02")).toBe(false);
+    expect(message).toContain("2026-09-02");
+    expect(message).toContain("入力済みの店舗データ");
+    expect(message).toContain("現金実在高");
+    expect(message).toContain("保持");
+    expect(message).toContain("POS由来");
+    expect(message).toContain("再計算");
+    expect(message).not.toContain("すべて初期化");
+  });
+
+  it("別営業日のJSONへ変更する場合は入力を初期化すると明示する", () => {
+    const message = jsonReimportConfirmation("2026-09-02", "2026-09-03");
+
+    expect(shouldResetDailyInputsForJson("2026-09-02", "2026-09-03")).toBe(true);
+    expect(message).toContain("2026-09-02");
+    expect(message).toContain("2026-09-03");
+    expect(message).toContain("別営業日");
+    expect(message).toContain("店舗データ");
+    expect(message).toContain("現金照合");
+    expect(message).toContain("特別原価");
+    expect(message).toContain("すべて初期化");
+  });
+
+  it("同日JSON再取込では画面上で修正したキャスト照合を保持し、別日へは移さない", () => {
+    const previous = structuredClone(closing.posSnapshot!) as PosClosingV3;
+    previous.castWork = [{
+      castId: "pos-trial", castName: "同名", castType: "trial", isTrial: true,
+      startTime: "20:00", endTime: "00:00", breakMinutes: 0, hours: 4,
+    }];
+    const sameDay = structuredClone(previous) as PosClosingV3;
+    const changedDay = { ...structuredClone(previous), businessDate: "2026-09-03" } as PosClosingV3;
+
+    expect(retainCurrentCastMappingForJson(previous, sameDay, { "pos-trial": "master-new" }))
+      .toEqual({ "pos-trial": "master-new" });
+    expect(retainCurrentCastMappingForJson(previous, changedDay, { "pos-trial": "master-new" }))
+      .toEqual({});
+  });
+
+  it("体入美容室経費は一意なmasterIdの現在名へ更新し、欠落や名前不一致を送信不可として検出する", () => {
+    const previous = { ...closing.casts[0], masterId: "trial-1", name: "旧名", kind: "trial" as const };
+    const next = { ...previous, name: "新名" };
+    const expense = {
+      id: "beauty-trial-1", category: "beautyTrial" as const, payee: "旧名", amount: 3_000,
+      personId: "trial-1", personName: "旧名",
+    };
+
+    const reconciled = reconcileTrialBeautyExpenses([expense], { rows: [next], matches: [] });
+
+    expect(reconciled[0]).toMatchObject({ personId: "trial-1", personName: "新名", payee: "新名" });
+    expect(invalidTrialBeautyExpensesForRows(reconciled, [next])).toEqual([]);
+    expect(invalidTrialBeautyExpensesForRows([expense], [next])).toEqual([expense]);
+    expect(invalidTrialBeautyExpensesForRows([{ ...expense, personId: undefined }], [next])).toHaveLength(1);
+  });
+
+  it("同名体入2名の照合先を入れ替えても美容室経費を同じPOS人物行へ追従させる", () => {
+    const previousA = { ...closing.casts[0], posCastId: "pos-trial-a", masterId: "trial-a", name: "同名", kind: "trial" as const };
+    const previousB = { ...closing.casts[0], posCastId: "pos-trial-b", masterId: "trial-b", name: "同名", kind: "trial" as const };
+    const nextA = { ...previousA, masterId: "trial-b" };
+    const nextB = { ...previousB, masterId: "trial-a" };
+    const castResult = mergeReconciledDailyCastInputs([previousA, previousB], [nextA, nextB]);
+    const expenses = [
+      { id: "beauty-a", category: "beautyTrial" as const, payee: "同名", amount: 1_000, personId: "trial-a", personName: "同名" },
+      { id: "beauty-b", category: "beautyTrial" as const, payee: "同名", amount: 2_000, personId: "trial-b", personName: "同名" },
+    ];
+
+    const reconciled = reconcileTrialBeautyExpenses(expenses, castResult);
+
+    expect(reconciled.map((expense) => expense.personId)).toEqual(["trial-b", "trial-a"]);
+    expect(invalidTrialBeautyExpensesForRows(reconciled, castResult.rows)).toEqual([]);
+  });
+
+  it("特別原価は同じ商品出現だけ保持し、商品内容または出現位置が変われば破棄する", () => {
+    const previous = structuredClone(closing.posSnapshot!) as PosClosingV3;
+    previous.transactions = [{
+      transactionId: "tx-special", tableId: "1", tableLabel: "1",
+      startTime: 0, endTime: 1, payMethod: "cash", splits: [{ method: "cash", amount: 35_000 }],
+      subtotal: 35_000, discount: 0, tax: 0, total: 35_000,
+      items: [{
+        itemId: "bottle-special", label: "特別シャンパン", category: "champagneWine",
+        price: 35_000, quantity: 1, backTargetCastIds: ["pos-cast-1"],
+        backTargetCastNames: ["花子"], banaiExtCastIds: [], isSet: false,
+        isHonShimei: false, isBanaiShimei: false, isExtension: false,
+        isBanaiExtension: false, isDiscount: false,
+      }],
+    }];
+    const sourceKey = posItemOccurrenceKey(previous.transactions[0], 0);
+    const costs = { [sourceKey]: 12_500, unrelated: 99_999 };
+
+    const same = structuredClone(previous) as PosClosingV3;
+    expect(retainMatchingSpecialCosts(previous, same, costs)).toEqual({ [sourceKey]: 12_500 });
+    expect(retainMatchingSpecialCosts(null, same, costs)).toEqual({});
+
+    const changed = structuredClone(previous) as PosClosingV3;
+    changed.transactions[0].items[0].price = 36_000;
+    expect(retainMatchingSpecialCosts(previous, changed, costs)).toEqual({});
+
+    const moved = structuredClone(previous) as PosClosingV3;
+    moved.transactions[0].items.unshift({
+      ...moved.transactions[0].items[0],
+      itemId: "another-item",
+      label: "別商品",
+    });
+    expect(retainMatchingSpecialCosts(previous, moved, costs)).toEqual({});
   });
 
   it.each([
