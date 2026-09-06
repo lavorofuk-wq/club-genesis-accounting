@@ -229,6 +229,9 @@ describe("月次会計ドメイン", () => {
       }], workspace(), month)[0];
 
     expect(payment("sales10")).toMatchObject({
+      id: "introducer-1_cast-1",
+      introducerId: "introducer-1",
+      castId: "cast-1",
       salesBase: 1_234_500,
       salesFee: 123_450,
       grossFee: 111_111,
@@ -333,6 +336,9 @@ describe("月次会計ドメイン", () => {
     expect(result.introducerPayments).toHaveLength(1);
     expect(result.introducerPayments[0]).toMatchObject({
       cast: "新人キャスト",
+      id: "introducer-1_cast-no-attendance",
+      introducerId: "introducer-1",
+      castId: "cast-no-attendance",
       introducer: "紹介者A",
       salesFee: 0,
       attendanceAdvisory: 0,
@@ -819,6 +825,40 @@ describe("月次会計ドメイン", () => {
       ...storedWithoutEmptyArrays,
       sales: { cash: 0, card: 0, total: "不正" },
     }, month, 4)).toBeUndefined();
+  });
+
+  it("紹介者支払の人物IDを新規snapshotへ保持し、旧確定snapshotの未保存IDは補完しない", () => {
+    const event: IntroducerEntryEvent = {
+      id: "cast-no-attendance", month, hiredAt: `${month}-15`, castId: "cast-no-attendance",
+      castName: "新人キャスト", introducerId: "introducer-1", introducerName: "紹介者A", feeType: "sales10", amount: 30_001,
+      createdAt: "2026-09-15T10:00:00.000Z", createdBy: "op-user", updatedAt: "2026-09-15T10:00:00.000Z", updatedBy: "op-user",
+    };
+    const input = adjustments();
+    const results = calculateMonthlyAccounting(workspace(), month, input, [event]);
+    const snapshot = buildMonthlySnapshot(month, 1, "f".repeat(64), input, results, [], "accounting-user", "2026-09-30T23:59:59.000Z");
+    const normalized = normalizeMonthlyAccountingSnapshot(snapshot, month, 1);
+    expect(normalized?.introducerPayments[0]).toMatchObject({
+      id: "introducer-1_cast-no-attendance", introducerId: "introducer-1", castId: "cast-no-attendance", total: 30_001,
+    });
+
+    const legacy = structuredClone(snapshot);
+    legacy.schemaVersion = 1;
+    legacy.calculationVersion = "2.12.0";
+    delete legacy.introducerPayments[0].introducerId;
+    delete legacy.introducerPayments[0].castId;
+    const before = structuredClone(legacy);
+    const normalizedLegacy = normalizeMonthlyAccountingSnapshot(legacy, month, 1);
+    expect(normalizedLegacy?.introducerPayments).toEqual(before.introducerPayments);
+    expect(normalizedLegacy?.introducerPayments[0]).not.toHaveProperty("introducerId");
+    expect(normalizedLegacy?.introducerPayments[0]).not.toHaveProperty("castId");
+    expect(legacy).toEqual(before);
+
+    const missingCastId = structuredClone(snapshot);
+    delete missingCastId.introducerPayments[0].castId;
+    expect(normalizeMonthlyAccountingSnapshot(missingCastId, month, 1)).toBeUndefined();
+    const mismatchedId = structuredClone(snapshot);
+    mismatchedId.introducerPayments[0].introducerId = "other-introducer";
+    expect(normalizeMonthlyAccountingSnapshot(mismatchedId, month, 1)).toBeUndefined();
   });
 
   it("日次キャスト売上の必須日付が欠落した破損スナップショットを拒否する", async () => {
