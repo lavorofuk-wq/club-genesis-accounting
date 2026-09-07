@@ -1,9 +1,10 @@
 "use client";
 
-import { get, onValue, runTransaction, serverTimestamp, set, update, ref } from "firebase/database";
+import { get, onValue, serverTimestamp, set, update, ref } from "firebase/database";
 import type { User } from "firebase/auth";
 import { database, rootRef } from "./client";
 import { readOneShotValue } from "./one-shot-value";
+import { runReadyTransaction } from "./ready-transaction";
 import {
   bottleBackAmountFromPosItem,
   compareIntroducerMonthEventEffectiveOrder,
@@ -192,7 +193,7 @@ async function acquireIntroducerDeletionLock(introducerId: string, user: User): 
     acquiredAtMs: serverOrderTimestamp(),
     expiresAt: serverClock.milliseconds + INTRODUCER_DELETION_LOCK_TTL_MS,
   };
-  const result = await runTransaction(rootRef(`introducerDeletionLocks/${introducerId}`), (current) => {
+  const result = await runReadyTransaction(rootRef(`introducerDeletionLocks/${introducerId}`), (current) => {
     const existing = current as IntroducerDeletionLock | null;
     if (existing && Number(existing.expiresAt || 0) > serverClock.milliseconds) {
       throw new Error("この紹介者は別の端末で削除確認中です。少し待ってから最新データを読み込んでください。");
@@ -207,7 +208,7 @@ async function acquireIntroducerDeletionLock(introducerId: string, user: User): 
 }
 
 async function releaseIntroducerDeletionLock(introducerId: string, lock: IntroducerDeletionLock) {
-  await runTransaction(rootRef(`introducerDeletionLocks/${introducerId}`), (current) => {
+  await runReadyTransaction(rootRef(`introducerDeletionLocks/${introducerId}`), (current) => {
     const existing = current as IntroducerDeletionLock | null;
     if (!existing || existing.owner !== lock.owner || existing.token !== lock.token) return;
     return null;
@@ -224,7 +225,7 @@ async function acquireClaim(path: string, key: string, id: string): Promise<Clai
   const token = crypto.randomUUID();
   const expiresAt = Date.now() + CLAIM_PENDING_TTL_MS;
   let created = false;
-  await runTransaction(rootRef(`${path}/${key}`), (current) => {
+  await runReadyTransaction(rootRef(`${path}/${key}`), (current) => {
     const stored = current as ClaimValue | null;
     if (stored && typeof stored !== "string" && stored.state === "pending" && Number(stored.expiresAt || 0) <= Date.now()) {
       created = true;
@@ -247,7 +248,7 @@ async function acquireClaim(path: string, key: string, id: string): Promise<Clai
 
 async function commitClaim(handle: ClaimHandle) {
   if (!handle.created) return;
-  await runTransaction(rootRef(`${handle.path}/${handle.key}`), (current) => {
+  await runReadyTransaction(rootRef(`${handle.path}/${handle.key}`), (current) => {
     const stored = current as ClaimValue | null;
     if (!stored || typeof stored === "string" || stored.id !== handle.id || stored.state !== "pending" || stored.token !== handle.token) {
       throw new Error("重複防止情報が別の処理で更新されています。最新データを読み込んでください。");
@@ -281,7 +282,7 @@ async function commitClaimAfterEntitySaved(handle: ClaimHandle, entityLabel: str
 
 async function releasePendingClaim(handle: ClaimHandle) {
   if (!handle.created) return;
-  await runTransaction(rootRef(`${handle.path}/${handle.key}`), (current) => {
+  await runReadyTransaction(rootRef(`${handle.path}/${handle.key}`), (current) => {
     const stored = current as ClaimValue | null;
     return stored && typeof stored !== "string" && stored.id === handle.id && stored.state === "pending" && stored.token === handle.token
       ? null
@@ -290,7 +291,7 @@ async function releasePendingClaim(handle: ClaimHandle) {
 }
 
 async function releaseClaim(path: string, key: string, id: string) {
-  await runTransaction(rootRef(`${path}/${key}`), (current) => claimId(current) === id ? null : current, { applyLocally: false });
+  await runReadyTransaction(rootRef(`${path}/${key}`), (current) => claimId(current) === id ? null : current, { applyLocally: false });
 }
 
 async function releaseClaimAfterEntitySaved(path: string, key: string, id: string, entityLabel: string) {
@@ -326,7 +327,7 @@ async function acquireDailyClosingDeletionLock(
     acquiredAtMs: serverOrderTimestamp(),
     expiresAt: serverClock.milliseconds + DAILY_CLOSING_DELETION_LOCK_TTL_MS,
   };
-  const result = await runTransaction(rootRef("dailyClosingDeletionLock"), (current) => {
+  const result = await runReadyTransaction(rootRef("dailyClosingDeletionLock"), (current) => {
     const existing = current as DailyClosingDeletionLock | null;
     if (existing && Number(existing.expiresAt || 0) > serverClock.milliseconds) {
       throw new Error("別の端末で送信済みデータを削除中です。完了後に最新データを読み込んでください。");
@@ -342,7 +343,7 @@ async function acquireDailyClosingDeletionLock(
 }
 
 async function releaseDailyClosingDeletionLock(lock: DailyClosingDeletionLock) {
-  await runTransaction(rootRef("dailyClosingDeletionLock"), (current) => {
+  await runReadyTransaction(rootRef("dailyClosingDeletionLock"), (current) => {
     const existing = current as DailyClosingDeletionLock | null;
     if (!existing || existing.id !== lock.id || existing.token !== lock.token || existing.owner !== lock.owner) return;
     return null;
@@ -405,7 +406,7 @@ async function acquireConversionLock<T extends { status: string; updatedAt?: str
   const operationId = crypto.randomUUID();
   const token = crypto.randomUUID();
   const expiresAt = Date.now() + CONVERSION_LOCK_TTL_MS;
-  const result = await runTransaction(rootRef(path), (current) => {
+  const result = await runReadyTransaction(rootRef(path), (current) => {
     const row = current as (T & ConversionLockCarrier) | null;
     if (!row || row.status !== "trial") throw new Error(missingMessage);
     if (convertedId(row)) throw new Error("この体入データはすでに在籍登録されています。");
@@ -434,7 +435,7 @@ async function assertConversionLockOwned<T>(handle: ConversionLockHandle<T>) {
 }
 
 async function releaseConversionLock<T>(handle: ConversionLockHandle<T>) {
-  await runTransaction(rootRef(handle.path), (current) => {
+  await runReadyTransaction(rootRef(handle.path), (current) => {
     if (!current || typeof current !== "object") return current;
     const row = current as Record<string, unknown> & ConversionLockCarrier;
     const lock = row.conversionLock;
@@ -1228,7 +1229,7 @@ export async function saveCast(value: Partial<CastRecord> & Pick<CastRecord, "na
       );
       castAndIntroducerSavedAtomically = true;
     } else {
-      await runTransaction(rootRef(`casts/${id}`), (current) => {
+      await runReadyTransaction(rootRef(`casts/${id}`), (current) => {
         const existing = current as CastRecord | null;
         if (value.id && !existing) throw new Error("対象のキャストデータが見つかりません。最新データを読み込んでください。");
         if ((existing as (CastRecord & { deletedAt?: string }) | null)?.deletedAt) throw new Error("このキャストデータは削除されています。最新データを読み込んでください。");
@@ -1355,7 +1356,7 @@ export async function departCast(id: string, date: string, expectedUpdatedAt: st
   await requireUser(user);
   if (!validDate(date)) throw new Error("退店日はYYYY-MM-DD形式の実在する日付で入力してください。");
   const timestamp = now();
-  const result = await runTransaction(rootRef(`casts/${id}`), (current) => {
+  const result = await runReadyTransaction(rootRef(`casts/${id}`), (current) => {
     const existing = current as (CastRecord & ConversionLockCarrier) | null;
     if (!existing || existing.status !== "active" || existing.deletedAt) throw new Error("在籍キャストが見つかりません。最新データを読み込んでください。");
     assertConversionUnlocked(existing);
@@ -1385,7 +1386,7 @@ export async function restoreCast(id: string, expectedUpdatedAt: string, user: U
     throw claimAcquisitionError(error, "同じキャスト名の在籍キャストがいるため、退店取消できません。");
   }
   try {
-    await runTransaction(rootRef(`casts/${id}`), (current) => {
+    await runReadyTransaction(rootRef(`casts/${id}`), (current) => {
       const existing = current as CastRecord | null;
       if (!existing || existing.status !== "departed") throw new Error("退店キャストが更新されています。最新データを読み込んでください。");
       assertConversionUnlocked(existing as CastRecord & ConversionLockCarrier);
@@ -1408,7 +1409,7 @@ export async function deleteCast(id: string, expectedUpdatedAt: string, user: Us
   assertConversionUnlocked(existing as CastRecord & ConversionLockCarrier);
   assertFresh(existing, expectedUpdatedAt);
   const deletedAt = now();
-  await runTransaction(rootRef(`casts/${id}`), (current) => {
+  await runReadyTransaction(rootRef(`casts/${id}`), (current) => {
     const row = current as (CastRecord & ConversionLockCarrier) | null;
     if (!row) throw new Error("このキャストデータはすでに削除されています。");
     if (row.deletedAt) return row;
@@ -1423,7 +1424,7 @@ export async function saveStaff(value: Partial<StaffRecord> & Pick<StaffRecord, 
   await requireUser(user);
   const id = value.id || entityId("staff");
   const timestamp = now();
-  await runTransaction(rootRef(`staff/${id}`), (current) => {
+  await runReadyTransaction(rootRef(`staff/${id}`), (current) => {
     const existing = current as (StaffRecord & ConversionLockCarrier) | null;
     if (value.id && !existing) throw new Error("対象のスタッフデータが見つかりません。最新データを読み込んでください。");
     if (existing?.deletedAt) throw new Error("このスタッフデータは削除されています。最新データを読み込んでください。");
@@ -1519,7 +1520,7 @@ export async function departStaff(id: string, date: string, expectedUpdatedAt: s
   await requireUser(user);
   if (!validDate(date)) throw new Error("退店日はYYYY-MM-DD形式の実在する日付で入力してください。");
   const timestamp = now();
-  await runTransaction(rootRef(`staff/${id}`), (current) => {
+  await runReadyTransaction(rootRef(`staff/${id}`), (current) => {
     const existing = current as (StaffRecord & ConversionLockCarrier) | null;
     if (!existing || existing.status !== "active" || existing.deletedAt) throw new Error("在籍スタッフが見つかりません。最新データを読み込んでください。");
     assertConversionUnlocked(existing);
@@ -1531,7 +1532,7 @@ export async function departStaff(id: string, date: string, expectedUpdatedAt: s
 export async function restoreStaff(id: string, expectedUpdatedAt: string, user: User) {
   await requireUser(user);
   const timestamp = now();
-  await runTransaction(rootRef(`staff/${id}`), (current) => {
+  await runReadyTransaction(rootRef(`staff/${id}`), (current) => {
     const existing = current as (StaffRecord & ConversionLockCarrier) | null;
     if (!existing || existing.status !== "departed" || existing.deletedAt) throw new Error("退店スタッフが見つかりません。最新データを読み込んでください。");
     assertConversionUnlocked(existing);
@@ -1542,7 +1543,7 @@ export async function restoreStaff(id: string, expectedUpdatedAt: string, user: 
 export async function deleteStaff(id: string, expectedUpdatedAt: string, user: User) {
   await requireUser(user);
   const deletedAt = now();
-  await runTransaction(rootRef(`staff/${id}`), (current) => {
+  await runReadyTransaction(rootRef(`staff/${id}`), (current) => {
     const existing = current as (StaffRecord & ConversionLockCarrier) | null;
     if (!existing) return null;
     if (existing.deletedAt) return existing;
@@ -1556,7 +1557,7 @@ export async function saveDriver(value: Partial<DriverRecord> & Pick<DriverRecor
   await requireUser(user);
   const id = value.id || entityId("driver");
   const timestamp = now();
-  await runTransaction(rootRef(`drivers/${id}`), (current) => {
+  await runReadyTransaction(rootRef(`drivers/${id}`), (current) => {
     const existing = current as DriverRecord | null;
     if (value.id && !existing) throw new Error("対象のドライバーデータが見つかりません。最新データを読み込んでください。");
     assertFresh(existing, value.updatedAt);
@@ -1571,7 +1572,7 @@ export async function saveDriver(value: Partial<DriverRecord> & Pick<DriverRecor
 }
 export async function deleteDriver(id: string, expectedUpdatedAt: string, user: User) {
   await requireUser(user);
-  await runTransaction(rootRef(`drivers/${id}`), (current) => {
+  await runReadyTransaction(rootRef(`drivers/${id}`), (current) => {
     const existing = current as DriverRecord | null;
     if (!existing) return null;
     assertFresh(existing, expectedUpdatedAt);
@@ -1583,7 +1584,7 @@ export async function saveIntroducer(value: Partial<IntroducerRecord> & Pick<Int
   await requireUser(user);
   const id = value.id || entityId("introducer");
   const timestamp = now();
-  await runTransaction(rootRef(`introducers/${id}`), (current) => {
+  await runReadyTransaction(rootRef(`introducers/${id}`), (current) => {
     const existing = current as IntroducerRecord | null;
     if (value.id && !existing) throw new Error("対象の紹介者データが見つかりません。最新データを読み込んでください。");
     assertFresh(existing, value.updatedAt);
@@ -1763,7 +1764,7 @@ export async function saveLiquor(value: Partial<LiquorRecord> & Pick<LiquorRecor
     throw claimAcquisitionError(error, "同じ区分・ボトル名・販売金額の酒代原価がすでに登録されています。");
   }
   try {
-    await runTransaction(rootRef(`liquorCosts/${id}`), (current) => {
+    await runReadyTransaction(rootRef(`liquorCosts/${id}`), (current) => {
       const existing = current as LiquorRecord | null;
       if (value.id && !existing) throw new Error("対象の酒代原価データが見つかりません。最新データを読み込んでください。");
       assertFresh(existing, value.updatedAt);
@@ -1782,7 +1783,7 @@ export async function deleteLiquor(id: string, expectedUpdatedAt: string, user: 
   const existing = (await get(rootRef(`liquorCosts/${id}`))).val() as LiquorRecord | null;
   if (!existing) return;
   assertFresh(existing, expectedUpdatedAt);
-  await runTransaction(rootRef(`liquorCosts/${id}`), (current) => {
+  await runReadyTransaction(rootRef(`liquorCosts/${id}`), (current) => {
     const row = current as LiquorRecord | null;
     if (!row) return null;
     assertFresh(row, expectedUpdatedAt);
@@ -1829,7 +1830,7 @@ export async function submitClosing(value: DailyClosing, user: User, expectedUpd
     throw claimAcquisitionError(error, "同じPOS JSONがすでに送信されています。最新データを読み込んで確認してください。");
   }
   try {
-    await runTransaction(rootRef(`history/${value.id}`), (current) => {
+    await runReadyTransaction(rootRef(`history/${value.id}`), (current) => {
       const existing = current as DailyClosing | null;
       if (before && !existing) throw new Error("再編集元データは完全削除されています。最新データを読み込んでください。");
       if (existing && !expectedUpdatedAt) throw new Error("再編集元データが確認できません。最新データを読み込んでやり直してください。");
@@ -1866,7 +1867,7 @@ export async function withdrawClosing(id: string, expected: ClosingRevision, use
   await requireUser(user, ["shop", "op"]);
   await assertMonthOpen(expected.businessDate.slice(0, 7));
   const timestamp = now();
-  await runTransaction(rootRef(`history/${id}`), (current) => {
+  await runReadyTransaction(rootRef(`history/${id}`), (current) => {
     const existing = current as DailyClosing | null;
     if (!existing || !["submitted", "returned"].includes(existing.status)) throw new Error("このデータは取り下げできません。");
     assertClosingRevision(existing, expected);
@@ -1929,7 +1930,7 @@ export async function approveClosing(id: string, expected: ClosingRevision, user
   await requireUser(user, ["accounting", "op"]);
   await assertMonthOpen(expected.businessDate.slice(0, 7));
   const timestamp = now();
-  await runTransaction(rootRef(`history/${id}`), (current) => {
+  await runReadyTransaction(rootRef(`history/${id}`), (current) => {
     const existing = current as DailyClosing | null;
     if (!existing || existing.status !== "submitted") throw new Error("経理確認待ちのデータだけ承認できます。");
     assertClosingRevision(existing, expected);
@@ -1953,7 +1954,7 @@ export async function returnClosing(id: string, expected: ClosingRevision, reaso
   if (!normalizedReason) throw new Error("差戻し理由を入力してください。");
   if (normalizedReason.length > 500) throw new Error("差戻し理由は500文字以内で入力してください。");
   const returnedAt = now();
-  await runTransaction(rootRef(`history/${id}`), (current) => {
+  await runReadyTransaction(rootRef(`history/${id}`), (current) => {
     const existing = current as DailyClosing | null;
     if (!existing || !["submitted", "approved"].includes(existing.status)) throw new Error("経理確認待ちまたは承認済みのデータだけ差し戻せます。");
     assertClosingRevision(existing, expected);
@@ -1982,7 +1983,7 @@ export async function saveMonthlyAdjustments(value: MonthlyAdjustments, user: Us
   if (!nonNegative(value.cardFee) || (value.liquorDeliveryAmount !== undefined && !nonNegative(value.liquorDeliveryAmount))) throw new Error("経費金額が正しくありません。");
   if (value.fixedExpenses.some((row) => !row.account.trim() || !nonNegative(row.amount))) throw new Error("固定経費の科目と金額を確認してください。");
   const timestamp = now();
-  await runTransaction(rootRef(`accountingAdjustments/${value.month}`), (current) => {
+  await runReadyTransaction(rootRef(`accountingAdjustments/${value.month}`), (current) => {
     const existing = current as Omit<MonthlyAdjustments, "month"> | null;
     const currentRevision = Number(existing?.revision || 0);
     const expectedRevision = Number(value.revision || 0);
@@ -2112,7 +2113,7 @@ async function cleanupExpiredIntroducerDeletionLocks(serverNowMs: number) {
   const locks = (snapshot.val() || {}) as Record<string, IntroducerDeletionLock>;
   await Promise.all(Object.entries(locks)
     .filter(([, lock]) => Number(lock?.expiresAt || 0) <= serverNowMs)
-    .map(([introducerId]) => runTransaction(rootRef(`introducerDeletionLocks/${introducerId}`), (current) => {
+    .map(([introducerId]) => runReadyTransaction(rootRef(`introducerDeletionLocks/${introducerId}`), (current) => {
       const lock = current as IntroducerDeletionLock | null;
       return lock && Number(lock.expiresAt || 0) <= serverNowMs ? null : current;
     }, { applyLocally: false })));
@@ -2123,7 +2124,7 @@ async function acquireAccountingFinalizeLock(month: string, operationId: string,
   await cleanupExpiredIntroducerDeletionLocks(serverClock.milliseconds);
   const acquiredAt = serverClock.milliseconds;
   const expiresAt = acquiredAt + ACCOUNTING_FINALIZE_LOCK_TTL_MS;
-  await runTransaction(rootRef("accountingFinalizeLock"), (current) => {
+  await runReadyTransaction(rootRef("accountingFinalizeLock"), (current) => {
     const lock = current as AccountingFinalizeLock | null;
     if (lock && Number(lock.expiresAt || 0) > serverClock.milliseconds && lock.operationId !== operationId) {
       throw new Error(`${lock.month || "別の月"}の月次確定処理中です。完了後にやり直してください。`);
@@ -2134,7 +2135,7 @@ async function acquireAccountingFinalizeLock(month: string, operationId: string,
 
 async function renewAccountingFinalizeLock(month: string, operationId: string, user: User) {
   const renewedAt = (await firebaseServerNow()).milliseconds;
-  await runTransaction(rootRef("accountingFinalizeLock"), (current) => {
+  await runReadyTransaction(rootRef("accountingFinalizeLock"), (current) => {
     const lock = current as AccountingFinalizeLock | null;
     if (!lock || lock.operationId !== operationId || lock.owner !== user.uid || lock.month !== month) {
       throw new Error("月次確定用の排他情報が失われました。最新データを読み込んでください。");
@@ -2147,7 +2148,7 @@ async function releaseAccountingFinalizeLock(operationId: string) {
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      await runTransaction(rootRef("accountingFinalizeLock"), (current) => {
+      await runReadyTransaction(rootRef("accountingFinalizeLock"), (current) => {
         const lock = current as AccountingFinalizeLock | null;
         return lock?.operationId === operationId ? null : current;
       }, { applyLocally: false });
@@ -2184,7 +2185,7 @@ export async function finalizeAccountingMonth(
   try {
     await acquireAccountingFinalizeLock(month, operationId, user);
     lockAcquired = true;
-    const started = await runTransaction(rootRef(`accountingMonthStates/${month}`), (current) => {
+    const started = await runReadyTransaction(rootRef(`accountingMonthStates/${month}`), (current) => {
       const state = current as AccountingMonthState | null;
       const revision = Number(state?.revision || 0);
       if (revision !== expectedStateRevision) throw new Error("月次状態が別の端末で更新されています。最新データを読み込んでください。");
@@ -2218,7 +2219,7 @@ export async function finalizeAccountingMonth(
     await renewAccountingFinalizeLock(month, operationId, user);
     // 呼出元の計算結果ではなく、ロック取得後の現在ソースから再計算した値だけを保存する。
     const storedSnapshot: MonthlyAccountingSnapshot = clean(recomputedSnapshot);
-    await runTransaction(rootRef(`accountingMonthSnapshots/${month}/${snapshotRevision}`), (existing) => {
+    await runReadyTransaction(rootRef(`accountingMonthSnapshots/${month}/${snapshotRevision}`), (existing) => {
       if (existing) throw new Error("同じ世代の月次スナップショットがすでに存在します。最新データを読み込んでください。");
       return storedSnapshot;
     }, { applyLocally: false });
@@ -2242,7 +2243,7 @@ export async function finalizeAccountingMonth(
     );
     assertMonthlySnapshotMatchesCurrent(storedSnapshot, finalRecomputedSnapshot);
     const closedAt = now();
-    await runTransaction(rootRef(`accountingMonthStates/${month}`), (currentState) => {
+    await runReadyTransaction(rootRef(`accountingMonthStates/${month}`), (currentState) => {
       const state = currentState as AccountingMonthState | null;
       if (!state || state.status !== "closing" || state.operationId !== operationId) throw new Error("月次確定状態が変更されました。最新データを確認してください。");
       return clean({
@@ -2260,7 +2261,7 @@ export async function finalizeAccountingMonth(
     return snapshotRevision;
   } catch (error) {
     const reopenedAt = now();
-    await runTransaction(rootRef(`accountingMonthStates/${month}`), (currentState) => {
+    await runReadyTransaction(rootRef(`accountingMonthStates/${month}`), (currentState) => {
       const state = currentState as AccountingMonthState | null;
       if (!state || state.status !== "closing" || state.operationId !== operationId) return state;
       return clean({
@@ -2288,7 +2289,7 @@ export async function reopenAccountingMonth(month: string, expectedStateRevision
   const finalizeLock = (await get(rootRef("accountingFinalizeLock"))).val() as AccountingFinalizeLock | null;
   const staleOperationId = finalizeLock?.month === month ? finalizeLock.operationId : "";
   const reopenedAt = now();
-  await runTransaction(rootRef(`accountingMonthStates/${month}`), (current) => {
+  await runReadyTransaction(rootRef(`accountingMonthStates/${month}`), (current) => {
     const state = current as AccountingMonthState | null;
     if (!state || state.status !== "closed") throw new Error("確定済みの月だけ確定解除できます。");
     if (Number(state.revision || 0) !== expectedStateRevision) throw new Error("月次状態が別の端末で更新されています。最新データを読み込んでください。");
@@ -2311,7 +2312,7 @@ export async function cancelAccountingMonthClosing(month: string, expectedStateR
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error("対象月が正しくありません。");
   const reopenedAt = now();
   let operationId = "";
-  await runTransaction(rootRef(`accountingMonthStates/${month}`), (current) => {
+  await runReadyTransaction(rootRef(`accountingMonthStates/${month}`), (current) => {
     const state = current as AccountingMonthState | null;
     if (!state || state.status !== "closing") throw new Error("月次確定処理中の月だけ処理を中止できます。");
     if (Number(state.revision || 0) !== expectedStateRevision) throw new Error("月次状態が別の端末で更新されています。最新データを読み込んでください。");
