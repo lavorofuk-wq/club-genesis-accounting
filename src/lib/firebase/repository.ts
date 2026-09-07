@@ -5,6 +5,7 @@ import type { User } from "firebase/auth";
 import { database, rootRef } from "./client";
 import { readOneShotValue } from "./one-shot-value";
 import { runReadyTransaction } from "./ready-transaction";
+import { assertCurrentClientRelease } from "../client-release";
 import {
   bottleBackAmountFromPosItem,
   compareIntroducerMonthEventEffectiveOrder,
@@ -861,6 +862,8 @@ async function prepareEntryEventPlan(
 }
 
 async function requireUser(user: User, roles?: Role[]) {
+  // 新規操作の入口だけで検証する。開始済みの多段更新やロック解放を途中で止めない。
+  await assertCurrentClientRelease();
   const role = await userRole(user);
   if (roles && !roles.includes(role)) throw new Error("この操作を実行する権限がありません。");
   return role;

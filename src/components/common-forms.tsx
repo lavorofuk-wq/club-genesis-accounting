@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import type { User } from "firebase/auth";
 import type { CastRecord, DriverRecord, IntroducerFeeType, IntroducerRecord, LiquorRecord, StaffRecord, WorkspaceData } from "@/domain/gms";
 import { dayAfterIsoDate, rateForMonth } from "@/domain/gms";
@@ -10,6 +10,7 @@ import {
   departCast, departStaff, restoreCast, restoreStaff, saveCashFloat, saveCast, saveDriver, saveIntroducer, saveLiquor, saveStaff
 } from "@/lib/firebase/repository";
 import { Card, Field, Modal, MoneyInput, StatusPill, Table, currentMonth, today, yen } from "./ui";
+import { useRecoverableState } from "./update-drafts";
 
 type Props = { data: WorkspaceData; user: User; busy: boolean; section: "casts" | "staff" | "drivers" | "introducers" | "liquor" | "cash"; run: (action: () => Promise<unknown>, message: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void };
 
@@ -46,11 +47,11 @@ export function CommonForms(props: Props) {
 }
 
 function CastManager({ data, user, busy, run, onDirtyChange }: Props) {
-  const [tab, setTab] = useState<CastRecord["status"]>("active");
-  const [editing, setEditing] = useState<Partial<CastRecord> | null>(null);
-  const [sourceTrialId, setSourceTrialId] = useState("");
-  const [month, setMonth] = useState(currentMonth());
-  const [rate, setRate] = useState(0);
+  const [tab, setTab] = useRecoverableState<CastRecord["status"]>("common.casts.tab", "active");
+  const [editing, setEditing] = useRecoverableState<Partial<CastRecord> | null>("common.casts.editing", null);
+  const [sourceTrialId, setSourceTrialId] = useRecoverableState("common.casts.sourceTrialId", "");
+  const [month, setMonth] = useRecoverableState("common.casts.month", currentMonth());
+  const [rate, setRate] = useRecoverableState("common.casts.rate", 0);
   useCommonDirty(onDirtyChange, Boolean(editing));
   const rows = useMemo(() => data.casts.filter((row) => row.status === tab).sort((a, b) => (b.trialDate || b.hiredAt || "").localeCompare(a.trialDate || a.hiredAt || "")), [data.casts, tab]);
   const begin = (status: CastRecord["status"], row?: CastRecord) => {
@@ -107,9 +108,9 @@ function CastManager({ data, user, busy, run, onDirtyChange }: Props) {
 }
 
 function StaffManager({ data, user, busy, run, onDirtyChange }: Props) {
-  const [tab, setTab] = useState<StaffRecord["status"]>("active");
-  const [editing, setEditing] = useState<Partial<StaffRecord> | null>(null);
-  const [sourceTrialId, setSourceTrialId] = useState("");
+  const [tab, setTab] = useRecoverableState<StaffRecord["status"]>("common.staff.tab", "active");
+  const [editing, setEditing] = useRecoverableState<Partial<StaffRecord> | null>("common.staff.editing", null);
+  const [sourceTrialId, setSourceTrialId] = useRecoverableState("common.staff.sourceTrialId", "");
   useCommonDirty(onDirtyChange, Boolean(editing));
   const rows = data.staff.filter((row) => row.status === tab);
   const sourceTrial = sourceTrialId ? data.staff.find((row) => row.id === sourceTrialId) : undefined;
@@ -122,8 +123,8 @@ function StaffManager({ data, user, busy, run, onDirtyChange }: Props) {
 }
 
 function DriverManager({ data, user, busy, run, onDirtyChange }: Props) {
-  const [tab, setTab] = useState<"active" | "departed">("active");
-  const [editing, setEditing] = useState<Partial<DriverRecord> | null>(null);
+  const [tab, setTab] = useRecoverableState<"active" | "departed">("common.drivers.tab", "active");
+  const [editing, setEditing] = useRecoverableState<Partial<DriverRecord> | null>("common.drivers.editing", null);
   useCommonDirty(onDirtyChange, Boolean(editing));
   return <div className="grid"><div className="tabs"><button className={tab === "active" ? "active" : ""} onClick={() => setTab("active")}>在籍ドライバー<b>{data.drivers.filter((r) => r.status === "active").length}</b></button><button className={tab === "departed" ? "active" : ""} onClick={() => setTab("departed")}>退店ドライバー<b>{data.drivers.filter((r) => r.status === "departed").length}</b></button></div><Card title="送迎ドライバーデータ" action={tab === "active" ? <button className="button" disabled={busy} onClick={() => setEditing({ name: "", hiredAt: today(), dailyRate: 0, status: "active", note: "" })}>新規登録</button> : null}><Table headers={tab === "departed" ? ["名前", "採用日", "退店日", "日給", "備考", "操作"] : ["名前", "採用日", "日給", "備考", "操作"]}>{data.drivers.filter((r) => r.status === tab).map((row) => <tr key={row.id}><td>{row.name}</td><td>{row.hiredAt}</td>{tab === "departed" && <td>{row.departedAt || "—"}</td>}<td>{yen.format(row.dailyRate)}</td><td>{row.note || "—"}</td><td><div className="row-actions"><button className="button secondary mini" disabled={busy} onClick={() => setEditing(row)}>編集</button>{row.status === "active" && <button className="button secondary mini" disabled={busy} onClick={() => { const date = promptDepartureDate(); if (date) void run(() => saveDriver({ ...row, status: "departed", departedAt: date }, user), "退店ドライバーへ移管しました。"); }}>退店</button>}{row.status === "departed" && <button className="button secondary mini" disabled={busy} onClick={() => void run(() => saveDriver({ ...row, status: "active", departedAt: undefined }, user), "退店登録を取り消しました。")}>退店取消</button>}{row.status === "departed" && <button className="button danger mini" disabled={busy} onClick={() => { if (window.confirm(`「${row.name}」を完全削除しますか？`)) void run(() => deleteDriver(row.id, row.updatedAt, user), "ドライバーを完全削除しました。"); }}>完全削除</button>}</div></td></tr>)}</Table></Card>{editing && <Modal title="ドライバー登録・編集" disabled={busy} onClose={() => setEditing(null)}><form className="stack" onSubmit={async (e) => { e.preventDefault(); const saved = await run(() => saveDriver(editing as DriverRecord, user), editing.id ? "ドライバーを更新しました。" : "ドライバーを登録しました。"); if (saved) setEditing(null); }}><Field label="名前"><input className="input" required value={editing.name || ""} onChange={(e) => setEditing({ ...editing, name: e.target.value })} /></Field><div className="grid two"><Field label="採用日"><input className="input" required type="date" value={editing.hiredAt || ""} onChange={(e) => setEditing({ ...editing, hiredAt: e.target.value })} /></Field><Field label="日給"><MoneyInput min={1} value={editing.dailyRate || 0} onChange={(value) => setEditing({ ...editing, dailyRate: value })} /></Field></div><Field label="備考"><textarea className="input" rows={3} value={editing.note || ""} onChange={(e) => setEditing({ ...editing, note: e.target.value })} /></Field><div className="actions"><button className="button" disabled={busy}>保存</button><button type="button" className="button secondary" onClick={() => setEditing(null)}>取消</button></div></form></Modal>}</div>;
 }
@@ -141,21 +142,26 @@ export function introducerDeletionConfirmation(introducerName: string, linkedCas
 }
 
 function IntroducerManager({ data, user, busy, run, onDirtyChange }: Props) {
-  const [editing, setEditing] = useState<Partial<IntroducerRecord> | null>(null);
+  const [editing, setEditing] = useRecoverableState<Partial<IntroducerRecord> | null>("common.introducers.editing", null);
   useCommonDirty(onDirtyChange, Boolean(editing));
   return <Card title="紹介者データ" description="報酬形態と顧問料の有無を管理します。" action={<button className="button" disabled={busy} onClick={() => setEditing({ name: "", feeType: "sales10", attendanceAdvisoryEnabled: false, entryAdvisoryEnabled: false, note: "" })}>新規登録</button>}><Table headers={["紹介者", "報酬形態", "出勤顧問料", "入店顧問料", "備考", "操作"]}>{data.introducers.map((row) => <tr key={row.id}><td><strong>{row.name}</strong></td><td className="wrap-cell">{feeLabels[row.feeType]}</td><td>{row.attendanceAdvisoryEnabled ? "あり" : "なし"}</td><td>{row.entryAdvisoryEnabled ? "あり" : "なし"}</td><td>{row.note || "—"}</td><td><div className="row-actions"><button className="button secondary mini" disabled={busy} onClick={() => setEditing(row)}>編集</button><button className="button danger mini" disabled={busy} onClick={() => { const linkedCasts = data.casts.filter((cast) => cast.introducerId === row.id); if (window.confirm(introducerDeletionConfirmation(row.name, linkedCasts))) void run(() => deleteIntroducer(row.id, row.updatedAt, linkedCasts.map(({ id, updatedAt }) => ({ id, updatedAt })), user), "紹介者を削除しました。"); }}>削除</button></div></td></tr>)}</Table>{editing && <Modal title="紹介者登録・編集" disabled={busy} onClose={() => setEditing(null)}><form className="stack" onSubmit={async (e) => { e.preventDefault(); const saved = await run(() => saveIntroducer(editing as IntroducerRecord, user), editing.id ? "紹介者を更新しました。" : "紹介者を登録しました。"); if (saved) setEditing(null); }}><Field label="紹介者名"><input className="input" required value={editing.name || ""} onChange={(e) => setEditing({ ...editing, name: e.target.value })} /></Field><Field label="紹介者報酬形態"><select className="input" value={editing.feeType} onChange={(e) => setEditing({ ...editing, feeType: e.target.value as IntroducerFeeType })}>{Object.entries(feeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field><div className="grid two"><label className="check-row"><input type="checkbox" checked={editing.attendanceAdvisoryEnabled || false} onChange={(e) => setEditing({ ...editing, attendanceAdvisoryEnabled: e.target.checked })} />出勤顧問料あり</label><label className="check-row"><input type="checkbox" checked={editing.entryAdvisoryEnabled || false} onChange={(e) => setEditing({ ...editing, entryAdvisoryEnabled: e.target.checked })} />入店顧問料あり</label></div><Field label="備考"><textarea className="input" rows={3} value={editing.note || ""} onChange={(e) => setEditing({ ...editing, note: e.target.value })} /></Field><div className="actions"><button className="button" disabled={busy}>保存</button><button type="button" className="button secondary" onClick={() => setEditing(null)}>取消</button></div></form></Modal>}</Card>;
 }
 
 function LiquorManager({ data, user, busy, run, onDirtyChange }: Props) {
-  const [tab, setTab] = useState<LiquorRecord["kind"]>("champagneWine");
-  const [editing, setEditing] = useState<Partial<LiquorRecord> | null>(null);
+  const [tab, setTab] = useRecoverableState<LiquorRecord["kind"]>("common.liquor.tab", "champagneWine");
+  const [editing, setEditing] = useRecoverableState<Partial<LiquorRecord> | null>("common.liquor.editing", null);
   useCommonDirty(onDirtyChange, Boolean(editing));
   return <div className="grid"><div className="tabs"><button className={tab === "champagneWine" ? "active" : ""} onClick={() => setTab("champagneWine")}>シャンパン・ワイン</button><button className={tab === "keepBottle" ? "active" : ""} onClick={() => setTab("keepBottle")}>キープボトル</button></div><Card title="酒代原価データ" action={<button className="button" disabled={busy} onClick={() => setEditing({ kind: tab, name: "", salePrice: 0, costPrice: 0 })}>新規登録</button>}><Table headers={["ボトル名", "販売金額", "酒代原価", "原価率", "操作"]}>{data.liquor.filter((row) => row.kind === tab).map((row) => <tr key={row.id}><td><strong>{row.name}</strong></td><td>{yen.format(row.salePrice)}</td><td>{yen.format(row.costPrice)}</td><td>{row.salePrice ? `${Math.round(row.costPrice / row.salePrice * 1000) / 10}%` : "—"}</td><td><div className="row-actions"><button className="button secondary mini" disabled={busy} onClick={() => setEditing(row)}>編集</button><button className="button danger mini" disabled={busy} onClick={() => { if (window.confirm(`「${row.name}」を削除しますか？`)) void run(() => deleteLiquor(row.id, row.updatedAt, user), "酒代原価を削除しました。"); }}>削除</button></div></td></tr>)}</Table>{editing && <Modal title="酒代原価登録・編集" disabled={busy} onClose={() => setEditing(null)}><form className="stack" onSubmit={async (e) => { e.preventDefault(); const saved = await run(() => saveLiquor(editing as LiquorRecord, user), editing.id ? "酒代原価を更新しました。" : "酒代原価を登録しました。"); if (saved) setEditing(null); }}><Field label="区分"><select className="input" value={editing.kind} onChange={(e) => setEditing({ ...editing, kind: e.target.value as LiquorRecord["kind"] })}><option value="champagneWine">シャンパン・ワイン</option><option value="keepBottle">キープボトル</option></select></Field><Field label="ボトル名"><input className="input" required value={editing.name || ""} onChange={(e) => setEditing({ ...editing, name: e.target.value })} /></Field><div className="grid two"><Field label="販売金額"><MoneyInput value={editing.salePrice || 0} onChange={(value) => setEditing({ ...editing, salePrice: value })} /></Field><Field label="酒代原価"><MoneyInput value={editing.costPrice || 0} onChange={(value) => setEditing({ ...editing, costPrice: value })} /></Field></div><div className="actions"><button className="button" disabled={busy}>保存</button><button type="button" className="button secondary" onClick={() => setEditing(null)}>取消</button></div></form></Modal>}</Card></div>;
 }
 
 function CashSetting({ data, user, busy, run, onDirtyChange }: Props) {
-  const [amount, setAmount] = useState(data.cashFloat);
-  useEffect(() => setAmount(data.cashFloat), [data.cashFloat]);
+  const [amount, setAmount] = useRecoverableState("common.cash.amount", data.cashFloat);
+  const loadedCashFloat = useRef(data.cashFloat);
+  useEffect(() => {
+    if (loadedCashFloat.current === data.cashFloat) return;
+    loadedCashFloat.current = data.cashFloat;
+    setAmount(data.cashFloat);
+  }, [data.cashFloat, setAmount]);
   useCommonDirty(onDirtyChange, amount !== data.cashFloat);
   return <Card title="現金照合設定" description="営業開始時につり銭として用意する金額です。"><div className="setting-row"><Field label="つり銭設定額"><MoneyInput value={amount} onChange={setAmount} /></Field><button className="button" disabled={busy || amount < 0} onClick={() => void run(() => saveCashFloat(amount, user), "つり銭金額を保存しました。")}>保存</button></div></Card>;
 }

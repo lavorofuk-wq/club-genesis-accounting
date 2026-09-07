@@ -10,6 +10,7 @@ import { buildDailyCasts, calculateCash, canMapAsDispatch, deriveReeditCastMappi
 import type { AccountingWorkspaceData } from "@/domain/month-accounting";
 import { deleteUnapprovedClosing, submitClosing, withdrawClosing } from "@/lib/firebase/repository";
 import { Card, Field, MoneyInput, StatusPill, Table, yen } from "./ui";
+import { useRecoverableState, useUpdateDraftBusy } from "./update-drafts";
 
 type Props = { data: AccountingWorkspaceData; user: User; busy: boolean; run: (action: () => Promise<unknown>, message: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void };
 type Stage = "json" | "details" | "cash" | "preview";
@@ -97,8 +98,8 @@ export function reconcileTrialBeautyExpenses(
 }
 
 export function StoreWork(props: Props) {
-  const [editing, setEditing] = useState<DailyClosing | null>(null);
-  const [workflowDirty, setWorkflowDirty] = useState(false);
+  const [editing, setEditing] = useRecoverableState<DailyClosing | null>("store.editing", null);
+  const [workflowDirty, setWorkflowDirty] = useRecoverableState("store.workflowDirty", false);
   const beginEditing = (row: DailyClosing) => {
     if (lockedMonthMessage(props.data, row.businessDate)) return;
     if (workflowDirty && !window.confirm("現在入力中の営業日データは保存されていません。破棄して別の送信済みデータを再編集しますか？")) return;
@@ -157,36 +158,39 @@ export function StoreWork(props: Props) {
 }
 
 function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChange }: Props & { initial: DailyClosing | null; onFinished: () => void; onDirtyChange: (dirty: boolean) => void }) {
-  const [stage, setStage] = useState<Stage>(initial?.posSnapshot ? "details" : "json");
-  const [pos, setPos] = useState<PosClosingV3 | null>(initial?.posSnapshot || null);
-  const [mapping, setMapping] = useState<Record<string, string>>(() => deriveReeditCastMapping(initial));
-  const [allowInitialSnapshotMapping, setAllowInitialSnapshotMapping] = useState(Boolean(initial?.posSnapshot));
-  const [specialCosts, setSpecialCosts] = useState<Record<string, number>>(() => initialStoredBottleCosts(initial));
-  const [castRows, setCastRows] = useState<DailyCast[]>(() => initial?.posSnapshot
+  // 再編集対象とその入力を同じキーで復元し、別営業日の下書きを混在させない。
+  const draftKey = `store.workflow.${initial?.id || "new"}`;
+  const [stage, setStage] = useRecoverableState<Stage>(`${draftKey}.stage`, initial?.posSnapshot ? "details" : "json");
+  const [pos, setPos] = useRecoverableState<PosClosingV3 | null>(`${draftKey}.pos`, initial?.posSnapshot || null);
+  const [mapping, setMapping] = useRecoverableState<Record<string, string>>(`${draftKey}.mapping`, () => deriveReeditCastMapping(initial));
+  const [allowInitialSnapshotMapping, setAllowInitialSnapshotMapping] = useRecoverableState(`${draftKey}.allowInitialSnapshotMapping`, Boolean(initial?.posSnapshot));
+  const [specialCosts, setSpecialCosts] = useRecoverableState<Record<string, number>>(`${draftKey}.specialCosts`, () => initialStoredBottleCosts(initial));
+  const [castRows, setCastRows] = useRecoverableState<DailyCast[]>(`${draftKey}.castRows`, () => initial?.posSnapshot
     ? restoreDailyCastBackMetadata(initial.posSnapshot, initial.casts || [])
     : initial?.casts || []);
-  const [castRowsSourcePos, setCastRowsSourcePos] = useState<PosClosingV3 | null>(initial?.posSnapshot || null);
-  const [unmatchedCastDrafts, setUnmatchedCastDrafts] = useState<DailyCast[]>([]);
-  const [staffWork, setStaffWork] = useState<DailyStaffWork[]>(() => (initial?.staffWork || []).map((row) => row.kind === "trial"
+  const [castRowsSourcePos, setCastRowsSourcePos] = useRecoverableState<PosClosingV3 | null>(`${draftKey}.castRowsSourcePos`, initial?.posSnapshot || null);
+  const [unmatchedCastDrafts, setUnmatchedCastDrafts] = useRecoverableState<DailyCast[]>(`${draftKey}.unmatchedCastDrafts`, []);
+  const [staffWork, setStaffWork] = useRecoverableState<DailyStaffWork[]>(`${draftKey}.staffWork`, () => (initial?.staffWork || []).map((row) => row.kind === "trial"
     ? { ...row, dailyPayment: floorHundred(row.hourlyRate * row.hours) }
     : row));
-  const [staffId, setStaffId] = useState("");
-  const [staffStart, setStaffStart] = useState("20:00");
-  const [staffEnd, setStaffEnd] = useState("02:00");
-  const [driverWork, setDriverWork] = useState<DailyDriverWork[]>(initial?.drivers || []);
-  const [expenses, setExpenses] = useState<DailyExpense[]>(initial?.expenses || []);
-  const [expenseCategory, setExpenseCategory] = useState<ExpenseCategory>("supplies");
-  const [expensePayee, setExpensePayee] = useState("");
-  const [expensePersonId, setExpensePersonId] = useState("");
-  const [expenseAmount, setExpenseAmount] = useState(0);
-  const [dispatchStaffPayment, setDispatchStaffPayment] = useState(initial?.dispatchStaffPayment || 0);
-  const [dispatchCastPayment, setDispatchCastPayment] = useState(initial?.dispatchCastPayment || 0);
-  const [dispatchFee, setDispatchFee] = useState(initial?.dispatchFee || 0);
-  const [liquorDeliveryAmount, setLiquorDeliveryAmount] = useState(initial?.liquorDeliveryAmount || 0);
-  const [cashFloat] = useState(initial?.cash.cashFloat ?? data.cashFloat);
-  const [actualCash, setActualCash] = useState(initial?.cash.actualClosingCash || 0);
+  const [staffId, setStaffId] = useRecoverableState(`${draftKey}.staffId`, "");
+  const [staffStart, setStaffStart] = useRecoverableState(`${draftKey}.staffStart`, "20:00");
+  const [staffEnd, setStaffEnd] = useRecoverableState(`${draftKey}.staffEnd`, "02:00");
+  const [driverWork, setDriverWork] = useRecoverableState<DailyDriverWork[]>(`${draftKey}.driverWork`, initial?.drivers || []);
+  const [expenses, setExpenses] = useRecoverableState<DailyExpense[]>(`${draftKey}.expenses`, initial?.expenses || []);
+  const [expenseCategory, setExpenseCategory] = useRecoverableState<ExpenseCategory>(`${draftKey}.expenseCategory`, "supplies");
+  const [expensePayee, setExpensePayee] = useRecoverableState(`${draftKey}.expensePayee`, "");
+  const [expensePersonId, setExpensePersonId] = useRecoverableState(`${draftKey}.expensePersonId`, "");
+  const [expenseAmount, setExpenseAmount] = useRecoverableState(`${draftKey}.expenseAmount`, 0);
+  const [dispatchStaffPayment, setDispatchStaffPayment] = useRecoverableState(`${draftKey}.dispatchStaffPayment`, initial?.dispatchStaffPayment || 0);
+  const [dispatchCastPayment, setDispatchCastPayment] = useRecoverableState(`${draftKey}.dispatchCastPayment`, initial?.dispatchCastPayment || 0);
+  const [dispatchFee, setDispatchFee] = useRecoverableState(`${draftKey}.dispatchFee`, initial?.dispatchFee || 0);
+  const [liquorDeliveryAmount, setLiquorDeliveryAmount] = useRecoverableState(`${draftKey}.liquorDeliveryAmount`, initial?.liquorDeliveryAmount || 0);
+  const [cashFloat] = useRecoverableState(`${draftKey}.cashFloat`, initial?.cash.cashFloat ?? data.cashFloat);
+  const [actualCash, setActualCash] = useRecoverableState(`${draftKey}.actualCash`, initial?.cash.actualClosingCash || 0);
   const [error, setError] = useState("");
   const [jsonReading, setJsonReading] = useState(false);
+  useUpdateDraftBusy(`${draftKey}.jsonReading`, jsonReading);
   const jsonImportSequence = useRef(0);
   const hasUnsavedDailyData = Boolean(initial || pos);
   useEffect(() => {
