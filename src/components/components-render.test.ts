@@ -127,6 +127,37 @@ function balanceWorkspace(): AccountingWorkspaceData {
 }
 
 describe("主要ページのSSRスモーク", () => {
+  it.each([false, true])("紹介者ページは現在データの変更・削除後も確定時の紹介者名と支払額を表示する（旧ID形式=%s）", (legacyIds) => {
+    const result = calculateMonthlyAccounting(data, month, data.adjustments[0]);
+    expect(result.introducerPayments).toHaveLength(1);
+    result.introducerPayments[0].introducer = "確定時の紹介者名";
+    if (legacyIds) {
+      delete result.introducerPayments[0].introducerId;
+      delete result.introducerPayments[0].castId;
+    }
+    const snapshot = buildMonthlySnapshot(month, 3, "a".repeat(64), data.adjustments[0], result, data.closings, user.uid, new Date().toISOString());
+    const closed: AccountingWorkspaceData = {
+      ...structuredClone(data), monthSnapshots: [snapshot],
+      monthStates: [{ month, status: "closed", revision: 1, currentSnapshotRevision: 3, updatedAt: "", updatedBy: user.uid }],
+    };
+    const render = (source: AccountingWorkspaceData) => renderToStaticMarkup(createElement(AccountingForms, {
+      section: "introducers", data: source, user, busy: false, run,
+    }));
+    const originalMarkup = render(closed);
+    const savedAmount = new Intl.NumberFormat("ja-JP", { style: "currency", currency: "JPY", maximumFractionDigits: 0 }).format(result.introducerPayments[0].total);
+    expect(originalMarkup).toContain("確定時の紹介者名");
+    expect(originalMarkup).toContain(`<strong>${savedAmount}</strong>`);
+    expect(originalMarkup).toContain("<th>対象キャスト数</th>");
+    expect(originalMarkup).toContain('aria-label="確定時の紹介者名の詳細"');
+    expect(originalMarkup).not.toContain("紹介者別に集約できないため");
+    const changed = structuredClone(closed);
+    changed.introducers[0].name = "変更後の紹介者名";
+    changed.closings[0].casts[0].introducer!.name = "変更後の紹介者名";
+    changed.closings[0].casts[0].honShimeiSales = 9_990_000;
+    expect(render(changed)).toBe(originalMarkup);
+    expect(render({ ...closed, closings: [], casts: [], introducers: [] })).toBe(originalMarkup);
+  });
+
   it("収支表XLSXは未確定の承認済みデータを出力でき、日別配分・紹介料列・Excel入金入力を案内する", () => {
     const markup = renderToStaticMarkup(createElement(AccountingForms, {
       section: "balance", data: balanceWorkspace(), user, busy: false, run,

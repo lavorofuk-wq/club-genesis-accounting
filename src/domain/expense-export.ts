@@ -1,5 +1,5 @@
 import type { DailyClosing, ExpenseCategory, MonthlyAdjustments } from "./gms";
-import type { MonthlyAccountingResults, MonthlyAccountingSnapshot } from "./month-accounting";
+import type { IntroducerPaymentRow, MonthlyAccountingResults, MonthlyAccountingSnapshot } from "./month-accounting";
 
 export type ExpenseExportInput = {
   results: MonthlyAccountingResults;
@@ -66,13 +66,13 @@ function canonical(value: unknown): unknown {
 }
 
 /** 保存済み支払額を紹介者ID別に集約する。現在マスタや名前から人物を推測しない。 */
-export function summarizeExpenseIntroducers(
+export function groupIntroducerPayments(
   results: Pick<MonthlyAccountingResults, "castRewards" | "introducerPayments">,
-): Array<{ id: string; name: string; total: number }> {
+): Array<{ id: string; name: string; total: number; rows: IntroducerPaymentRow[] }> {
   const rewards = array(results.castRewards, "キャスト報酬");
   const payments = array(results.introducerPayments, "紹介者支払");
   const paymentIds = new Set<string>();
-  const groups = new Map<string, { names: Set<string>; total: number }>();
+  const groups = new Map<string, { names: Set<string>; total: number; rows: IntroducerPaymentRow[] }>();
   for (const payment of payments) {
     requireValue(payment, "紹介者支払を読み込めません。");
     uniqueId(payment.id, paymentIds, "紹介者支払");
@@ -100,16 +100,25 @@ export function summarizeExpenseIntroducers(
     requireValue(candidates.size === 1,
       `${payment.introducer}の紹介者IDを一意に確認できません。保存済み紹介者支払データの確認が必要です。`);
     const introducerId = candidates.values().next().value!;
-    const group = groups.get(introducerId) || { names: new Set<string>(), total: 0 };
+    const group = groups.get(introducerId) || { names: new Set<string>(), total: 0, rows: [] };
     group.names.add(payment.introducer.trim());
     group.total = amount(group.total + amount(payment.total, "紹介者支払計"), "紹介者別支払合計");
+    group.rows.push(payment);
     groups.set(introducerId, group);
   }
   return [...groups.entries()].map(([id, group]) => ({
     id,
     name: [...group.names].sort((left, right) => left.localeCompare(right, "ja") || (left < right ? -1 : left > right ? 1 : 0)).join("／"),
     total: group.total,
+    rows: [...group.rows].sort((left, right) => left.cast.localeCompare(right.cast, "ja") || left.id.localeCompare(right.id)),
   })).sort((left, right) => left.name.localeCompare(right.name, "ja") || left.id.localeCompare(right.id));
+}
+
+/** 帳票と画面で同じ人物照合・支払集約を使用する。 */
+export function summarizeExpenseIntroducers(
+  results: Pick<MonthlyAccountingResults, "castRewards" | "introducerPayments">,
+): Array<{ id: string; name: string; total: number }> {
+  return groupIntroducerPayments(results).map(({ id, name, total }) => ({ id, name, total }));
 }
 
 /** 経費帳票を生成する前に、明細・月計・確定時の保存世代が一致することを検査する。 */
