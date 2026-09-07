@@ -29,6 +29,9 @@ import { CommonForms } from "./common-forms";
 import { StoreWork } from "./store-work";
 import { AccountingForms } from "./accounting-forms";
 import { Card, StatusPill, currentMonth, yen } from "./ui";
+import { APP_VERSION } from "@/lib/app-release";
+import { ClientUpdateNotice, LoginUpdateNotice, useClientReleaseState } from "./client-update";
+import { UpdateDraftProvider } from "./update-drafts";
 
 type View =
   | "home"
@@ -232,6 +235,7 @@ const viewInfo: Record<
 };
 
 export function AccountingApp() {
+  const release = useClientReleaseState();
   const [user, setUser] = useState<User | null>(null);
   const [role, setRole] = useState<Role | null>(null);
   const [authReady, setAuthReady] = useState(false);
@@ -245,6 +249,7 @@ export function AccountingApp() {
   const authEpochRef = useRef(0);
   const reloadRequestRef = useRef(0);
   const runLockRef = useRef(false);
+  const updateReloadRef = useRef(false);
 
   const reload = useCallback(async (
     knownRole?: Role,
@@ -393,6 +398,7 @@ export function AccountingApp() {
   useEffect(() => {
     if (!pageDirty) return;
     const preventUnload = (event: BeforeUnloadEvent) => {
+      if (updateReloadRef.current) return;
       event.preventDefault();
       event.returnValue = "";
     };
@@ -406,7 +412,7 @@ export function AccountingApp() {
         <p>認証状態を確認しています…</p>
       </main>
     );
-  if (!user) return <Login notice={notice?.kind === "error" ? notice.text : ""} />;
+  if (!user) return <Login notice={notice?.kind === "error" ? notice.text : ""} release={release} />;
   if (!role)
     return (
       <main className="login">
@@ -483,8 +489,19 @@ export function AccountingApp() {
   const integrityIssueCount = data.closings.filter(
     (row) => (row.integrityIssues?.length || 0) > 0,
   ).length;
+  const mutationDisabled = busy || release.status !== "current";
 
   return (
+    <UpdateDraftProvider userId={user.uid} environment={environmentRoot()} view={view} onRestoreView={(restored) => {
+      if (!Object.hasOwn(viewInfo, restored) || !viewInfo[restored as View].roles.includes(role)) throw new Error("退避された画面への権限を確認できません。入力は退避したままです。");
+      setView(restored as View);
+      setNotice({ kind: "success", text: "更新前の入力を復元しました。内容を確認してから保存してください。自動保存・送信はしていません。" });
+    }}>
+    <ClientUpdateNotice state={release} busy={busy} dirty={pageDirty} onReload={() => {
+      if (runLockRef.current) throw new Error("処理中のため更新できません。完了してからやり直してください。");
+      updateReloadRef.current = true;
+      window.location.reload();
+    }} />
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
@@ -527,7 +544,7 @@ export function AccountingApp() {
           </StatusPill>
           <small>{user.email}</small>
           <small>
-            Ver2.17.2 ·{" "}
+            Ver{APP_VERSION} ·{" "}
             {role === "shop" ? "店舗" : role === "accounting" ? "経理" : "OP"}
           </small>
           <button className="button secondary" disabled={busy} onClick={logout}>
@@ -573,7 +590,7 @@ export function AccountingApp() {
                 <Dashboard data={data} role={role} onNavigate={navigateTo} />
               )}
               {view === "store" && (
-                <StoreWork key={`store:${pageRevision}`} data={data} user={user} busy={busy} run={run} onDirtyChange={setPageDirty} />
+                <StoreWork key={`store:${pageRevision}`} data={data} user={user} busy={mutationDisabled} run={run} onDirtyChange={setPageDirty} />
               )}
               {commonSection && (
                 <CommonForms
@@ -589,7 +606,7 @@ export function AccountingApp() {
                   }
                   data={data}
                   user={user}
-                  busy={busy}
+                  busy={mutationDisabled}
                   run={run}
                   onDirtyChange={setPageDirty}
                 />
@@ -610,7 +627,7 @@ export function AccountingApp() {
                   }
                   data={data}
                   user={user}
-                  busy={busy}
+                  busy={mutationDisabled}
                   run={run}
                   onDirtyChange={setPageDirty}
                 />
@@ -620,16 +637,18 @@ export function AccountingApp() {
         </PageErrorBoundary>
       </main>
     </div>
+    </UpdateDraftProvider>
   );
 }
 
-function Login({ notice = "" }: { notice?: string }) {
+function Login({ notice = "", release }: { notice?: string; release: import("@/lib/client-release").ClientReleaseState }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   return (
     <main className="login">
+      <LoginUpdateNotice state={release} busy={busy} />
       <form
         className="login-card"
         onSubmit={async (event) => {
@@ -649,7 +668,7 @@ function Login({ notice = "" }: { notice?: string }) {
           <span>CLUB GENESIS</span>
           <strong>GMS</strong>
           <p>GENESIS Management System</p>
-          <small>Ver2.17.2</small>
+          <small>Ver{APP_VERSION}</small>
         </div>
         <div className="stack">
           <label className="field">

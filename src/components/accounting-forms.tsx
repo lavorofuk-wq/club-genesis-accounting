@@ -13,6 +13,7 @@ import {
 import { approveClosing, cancelAccountingMonthClosing, finalizeAccountingMonth, reopenAccountingMonth, returnClosing, saveMonthlyAdjustments } from "@/lib/firebase/repository";
 import { Card, Field, MoneyInput, StatusPill, Table, currentMonth, yen } from "./ui";
 import { summarizeCastDrinksByPrice } from "./store-work";
+import { useRecoverableState, useUpdateDraftBusy } from "./update-drafts";
 
 type Props = { data: AccountingWorkspaceData; user: User; busy: boolean; run: (action: () => Promise<unknown>, message: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void };
 type Section = "approval" | "castSales" | "castRewards" | "introducers" | "staffPayroll" | "driverPayroll" | "expenses" | "balance";
@@ -38,7 +39,7 @@ function accountingMonthLockMessage(data: AccountingWorkspaceData, businessDate:
 }
 
 function ApprovalView({ data, user, busy, run }: Props) {
-  const [expanded, setExpanded] = useState("");
+  const [expanded, setExpanded] = useRecoverableState("accounting.approval.expanded", "");
   const [reviewed, setReviewed] = useState<Record<string, boolean>>({});
   const expandedClosing = data.closings.find((row) => row.id === expanded);
   return <div className="grid">
@@ -116,10 +117,16 @@ export function ClosingCastProductDetails({
 }
 
 function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Props & { section: Exclude<Section, "approval"> }) {
-  const [month, setMonth] = useState(currentMonth());
+  const [month, setMonth] = useRecoverableState("accounting.monthly.month", currentMonth());
   const stored = data.adjustments.find((row) => row.month === month);
-  const [adjustments, setAdjustments] = useState<MonthlyAdjustments>(() => blankAdjustments(month, stored));
-  useEffect(() => setAdjustments(blankAdjustments(month, data.adjustments.find((row) => row.month === month))), [data.adjustments, month]);
+  const [adjustments, setAdjustments] = useRecoverableState<MonthlyAdjustments>("accounting.monthly.adjustments", () => blankAdjustments(month, stored));
+  const loadedAdjustments = useRef({ month, rows: data.adjustments });
+  useEffect(() => {
+    // A restored draft keeps its original revision; do not replace it on mount.
+    if (loadedAdjustments.current.month === month && loadedAdjustments.current.rows === data.adjustments) return;
+    loadedAdjustments.current = { month, rows: data.adjustments };
+    setAdjustments(blankAdjustments(month, data.adjustments.find((row) => row.month === month)));
+  }, [data.adjustments, month, setAdjustments]);
   const state = data.monthStates.find((row) => row.month === month);
   const closed = state?.status === "closed";
   const currentSnapshot = closed ? data.monthSnapshots.find((row) => row.month === month && row.revision === state.currentSnapshotRevision) : undefined;
@@ -219,6 +226,7 @@ export function CastSalesExport({ results, month, sourceLabel, disabledReason }:
 }) {
   const exportingRef = useRef(false);
   const [exporting, setExporting] = useState(false);
+  useUpdateDraftBusy("accounting.export.castSales", exporting);
   const [notice, setNotice] = useState<{ month: string; error: boolean; text: string }>();
   const exportAll = async () => {
     if (disabledReason || !results || exportingRef.current) return;
@@ -253,6 +261,7 @@ export function ExpenseExport({ input, month, sourceLabel, disabledReason }: {
 }) {
   const exportingRef = useRef(false);
   const [exporting, setExporting] = useState(false);
+  useUpdateDraftBusy("accounting.export.expenses", exporting);
   const [notice, setNotice] = useState<{ month: string; error: boolean; text: string }>();
   const validationError = useMemo(() => {
     if (disabledReason || !input) return "";
@@ -297,6 +306,7 @@ export function BalanceExport({ input, month, sourceLabel, disabledReason }: {
 }) {
   const exportingRef = useRef(false);
   const [exporting, setExporting] = useState(false);
+  useUpdateDraftBusy("accounting.export.balance", exporting);
   const [notice, setNotice] = useState<{ month: string; error: boolean; text: string }>();
   const validationError = useMemo(() => {
     if (disabledReason || !input) return "";
