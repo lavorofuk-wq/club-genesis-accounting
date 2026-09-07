@@ -8,12 +8,13 @@ import { validateExpenseExport, type ExpenseExportInput } from "@/domain/expense
 import { buildBalanceExportReport, type BalanceExportInput } from "@/domain/balance-export";
 import {
   buildMonthlySnapshot, calculateMonthlyAccounting, canFinalizeMonthlyAccounting, monthlySourceFingerprint,
-  type AccountingWorkspaceData, type IntroducerPaymentRow, type MonthlyAccountingResults, type StaffPayrollRow,
+  type AccountingWorkspaceData, type MonthlyAccountingResults, type StaffPayrollRow,
 } from "@/domain/month-accounting";
 import { approveClosing, cancelAccountingMonthClosing, finalizeAccountingMonth, reopenAccountingMonth, returnClosing, saveMonthlyAdjustments } from "@/lib/firebase/repository";
 import { Card, Field, MoneyInput, StatusPill, Table, currentMonth, yen } from "./ui";
 import { summarizeCastDrinksByPrice } from "./store-work";
 import { useRecoverableState, useUpdateDraftBusy } from "./update-drafts";
+import { IntroducerPayments } from "./introducer-payments";
 
 type Props = { data: AccountingWorkspaceData; user: User; busy: boolean; run: (action: () => Promise<unknown>, message: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void };
 type Section = "approval" | "castSales" | "castRewards" | "introducers" | "staffPayroll" | "driverPayroll" | "expenses" | "balance";
@@ -210,7 +211,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
     />}
     {results && section === "castSales" && <CastSalesReports rows={results.castSalesReports} month={month} />}
     {results && section === "castRewards" && <CastRewards rows={results.castRewards} disabled={busy || locked} onWithholding={(id, value) => setMap("withholdingByCast", id, value)} />}
-    {results && section === "introducers" && <IntroducerPayments rows={results.introducerPayments} />}
+    {results && section === "introducers" && <IntroducerPayments key={month} rows={results.introducerPayments} castRewards={results.castRewards} />}
     {results && section === "staffPayroll" && <StaffPayroll rows={results.staffPayroll} disabled={busy || locked} onSales={(id, value) => setMap("staffSalesAllowance", id, value)} onBottle={(id, value) => setMap("staffBottleAllowance", id, value)} />}
     {results && section === "driverPayroll" && <DriverPayroll rows={results.driverPayroll} disabled={busy || locked} onRemote={(id, value) => setMap("driverRemoteAllowance", id, value)} />}
     {results && section === "expenses" && <Expenses results={results} adjustments={adjustments} setAdjustments={setAdjustments} disabled={busy || locked} />}
@@ -377,7 +378,6 @@ function CastRewards({ rows, disabled, onWithholding }: { rows: CastReward[]; di
     <td><strong>{yen.format(row.netPay)}</strong></td>
   </tr>)}</Table></Card>;
 }
-function IntroducerPayments({ rows }: { rows: IntroducerPaymentRow[] }) { return <Card title="紹介者支払データ" description="売上基準は本指名売上のみです。場内延長売上は含みません。"><Table headers={["紹介者", "対象キャスト", "本指名酒代原価", "売上算定額", "売上10%", "総支給額", "総支給10%", "採用タイプ", "出勤顧問料", "入店顧問料", "支払合計"]}>{rows.map((row) => <tr key={row.id}><td>{row.introducer}</td><td>{row.cast}</td><td>{yen.format(row.honShimeiLiquorCost)}</td><td>{yen.format(row.salesBase)}</td><td>{yen.format(row.salesFee)}</td><td>{yen.format(row.grossBase)}</td><td>{yen.format(row.grossFee)}</td><td>{row.adopted}</td><td>{yen.format(row.attendanceAdvisory)}</td><td>{yen.format(row.entryAdvisory)}</td><td><strong>{yen.format(row.total)}</strong></td></tr>)}</Table></Card>; }
 function StaffPayroll({ rows, disabled, onSales, onBottle }: { rows: StaffPayrollRow[]; disabled: boolean; onSales: (id: string, value: number) => void; onBottle: (id: string, value: number) => void }) { return <Card title="スタッフ給与データ"><Table headers={["スタッフ", "勤務時間", "基本給与", "売上手当", "ボトル手当", "総支給", "日払い", "差引支給"]}>{rows.map((row) => <tr key={row.id}><td>{row.name}</td><td>{row.hours}時間</td><td>{yen.format(row.hourly)}</td><td><MoneyInput value={row.sales} disabled={disabled} onChange={(value) => onSales(row.id, value)} /></td><td><MoneyInput value={row.bottle} disabled={disabled} onChange={(value) => onBottle(row.id, value)} /></td><td>{yen.format(row.gross)}</td><td>{yen.format(row.daily)}</td><td><strong>{yen.format(row.net)}</strong></td></tr>)}</Table></Card>; }
 function DriverPayroll({ rows, disabled, onRemote }: { rows: MonthlyAccountingResults["driverPayroll"]; disabled: boolean; onRemote: (id: string, value: number) => void }) { return <Card title="送迎ドライバー給与データ"><Table headers={["ドライバー", "出勤日数", "基本給与", "遠方手当", "総支給", "日払い", "差引支給"]}>{rows.map((row) => <tr key={row.id}><td>{row.name}</td><td>{row.days}日</td><td>{yen.format(row.basic)}</td><td><MoneyInput value={row.remote} disabled={disabled} onChange={(value) => onRemote(row.id, value)} /></td><td>{yen.format(row.gross)}</td><td>{yen.format(row.dailyPayment)}</td><td><strong>{yen.format(row.net)}</strong></td></tr>)}</Table></Card>; }
 
