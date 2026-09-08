@@ -9,6 +9,7 @@ import { assertCurrentClientRelease } from "../client-release";
 import {
   bottleBackAmountFromPosItem,
   compareIntroducerMonthEventEffectiveOrder,
+  floorYen,
   invalidTrialBeautyExpensesForRows,
   isUnapprovedClosingStatus,
   isStaffHireDateAfterTrial,
@@ -447,7 +448,7 @@ async function releaseConversionLock<T>(handle: ConversionLockHandle<T>) {
   }, { applyLocally: false });
 }
 
-function validateDailyClosingForSubmission(value: DailyClosing) {
+function validateDailyClosingForSubmission(value: DailyClosing, before: DailyClosing | null = null) {
   const require = (condition: unknown, message: string) => {
     if (!condition) throw new Error(message);
   };
@@ -513,7 +514,7 @@ function validateDailyClosingForSubmission(value: DailyClosing) {
       row.dailyPayment, row.advancePayment, row.transportFee].forEach((amount) => require(money(amount), `${row.name}に不正な金額または本数があります。`));
     require(row.honShimeiSales % 10 === 0 && row.jonaiExtensionSales % 10 === 0, `${row.name}の売上は10円単位で入力してください。`);
     require(row.dohanBack % 10 === 0, `${row.name}の同伴バックは10円単位で処理してください。`);
-    if (row.kind === "trial") require(row.dailyPayment % 10 === 0, `${row.name}の体入即日支払いは10円単位で入力してください。`);
+    if (row.kind === "trial") require(Number.isSafeInteger(row.dailyPayment), `${row.name}の体入即日支払いは1円単位で入力してください。`);
     require(row.transportFee % 500 === 0, `${row.name}の送迎代は500円単位で入力してください。`);
     require(row.beautyAllowance === 0 || (row.kind === "regular" && row.beautyAllowance === 500), `${row.name}の美容室手当が正しくありません。`);
     require(Array.isArray(row.bottles), `${row.name}のボトル明細が不完全です。`);
@@ -583,7 +584,16 @@ function validateDailyClosingForSubmission(value: DailyClosing) {
   value.staffWork.forEach((row) => {
     require((row.kind === "regular" || row.kind === "trial") && Boolean(row.staffId) && Boolean(row.name) && money(row.hours) && row.hours > 0 && Number.isInteger(row.hours * 4), `${row.name}のスタッフ勤務が正しくありません。`);
     require(money(row.hourlyRate) && money(row.dailyPayment), `${row.name}のスタッフ給与金額が正しくありません。`);
-    if (row.kind === "trial") require(row.dailyPayment === Math.floor(row.hourlyRate * row.hours / 100) * 100, `${row.name}の体入給与は当日の基本給与全額を日払いにしてください。`);
+    if (row.kind === "trial") {
+      const savedPayments = Object.values(before?.staffWork || {})
+        .filter((saved) => saved && saved.staffId === row.staffId && saved.kind === "trial");
+      // 過去に現金で払った金額は、給与の端数処理を変更しても書き換えない。
+      // 許容する旧額はサーバーから取得した同一スタッフの保存値だけに限定する。
+      const preservesPaidAmount = savedPayments.length === 1 && savedPayments[0].dailyPayment === row.dailyPayment;
+      require(Number.isSafeInteger(row.dailyPayment)
+        && (row.dailyPayment === floorYen(row.hourlyRate * row.hours) || preservesPaidAmount),
+      `${row.name}の体入給与は当日の基本給与全額を日払いにしてください。再送時は保存済みの実支払額も維持できます。`);
+    }
   });
   value.drivers.forEach((row) => {
     require(Boolean(row.driverId) && Boolean(row.name) && money(row.dailyRate) && money(row.dailyPayment), `${row.name}のドライバー給与金額が正しくありません。`);
@@ -1803,7 +1813,6 @@ export async function submitClosing(value: DailyClosing, user: User, expectedUpd
   await requireUser(user, ["shop", "op"]);
   if (!value.posSnapshot) throw new Error("POS原本がありません。POS JSONを取り込み直してください。");
   await parsePosClosingV3(value.posSnapshot);
-  validateDailyClosingForSubmission(value);
   if (!validDate(value.businessDate)) throw new Error("営業日が正しくありません。");
   await assertMonthOpen(value.businessDate.slice(0, 7));
   const timestamp = now();
@@ -1817,6 +1826,7 @@ export async function submitClosing(value: DailyClosing, user: User, expectedUpd
   assertFresh(before, expectedUpdatedAt);
   if (before && before.businessDate !== value.businessDate) throw new Error("再送時に営業日は変更できません。元の営業日データから再編集してください。");
   if (before && !["returned", "withdrawn"].includes(before.status)) throw new Error("差戻しまたは取下げ済みのデータだけ再送できます。");
+  validateDailyClosingForSubmission(value, before);
   const sameBusinessDate = asArray<DailyClosing>(allSnapshot.val()).find((row) => row.id !== value.id && row.businessDate === value.businessDate);
   if (sameBusinessDate) {
     throw new Error(`${value.businessDate}の店舗データはすでに存在します。既存データを開いて再編集してください。`);

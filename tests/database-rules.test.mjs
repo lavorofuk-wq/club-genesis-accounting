@@ -201,26 +201,28 @@ test("日次と紹介者イベントのサーバー保存時刻をdevで必須�
   assert.match(repositorySource, /cleanupExpiredIntroducerDeletionLocks/);
 });
 
-test("月次snapshotはschema 2だけを新規保存し、キャスト売上・報酬を10円単位に限定する", () => {
+test("月次snapshotはschema 2/3を併存し、売上・バックは10円単位を維持する", () => {
   const snapshot = databaseRules.accountingMonthSnapshots.$month.$revision;
   const day = snapshot.castSalesReports.$index.days.$dayIndex;
   const totals = snapshot.castSalesReports.$index.totals;
   const reward = snapshot.castRewards.$index;
 
   assert.match(snapshot[".validate"], /schemaVersion'\)\.val\(\) === 2/);
-  assert.equal(snapshot.schemaVersion[".validate"], "newData.val() === 2");
+  assert.match(snapshot[".validate"], /schemaVersion'\)\.val\(\) === 3/);
+  assert.equal(snapshot.schemaVersion[".validate"], "newData.val() === 2 || newData.val() === 3");
   const calculationVersionRule = snapshot.calculationVersion[".validate"];
-  assert.equal(
-    calculationVersionRule,
-    "newData.isString() && newData.val().matches(/^(2\\.13\\.[1-9][0-9]*|2\\.(1[4-9]|[2-9][0-9]|[1-9][0-9]{2,})\\.[0-9]+|([3-9]|[1-9][0-9]+)\\.[0-9]+\\.[0-9]+)$/)",
-  );
-  const versionPattern = calculationVersionRule.match(/\.matches\(\/(.+)\/\)$/)?.[1];
-  assert.ok(versionPattern);
-  const permittedCalculationVersion = new RegExp(versionPattern);
+  const patterns = [...calculationVersionRule.matchAll(/\.matches\(\/(.+?)\/\)/g)].map((match) => new RegExp(match[1]));
+  assert.equal(patterns.length, 2);
+  const [permittedCalculationVersion, oneYenCalculationVersion] = patterns;
   assert.equal(permittedCalculationVersion.test("2.13.0"), false);
   assert.equal(permittedCalculationVersion.test("2.13.1"), true);
   assert.equal(permittedCalculationVersion.test("2.14.0"), true);
   assert.equal(permittedCalculationVersion.test("3.0.0"), true);
+  assert.equal(permittedCalculationVersion.test("2.20.0"), true);
+  assert.equal(oneYenCalculationVersion.test("2.19.9"), false);
+  assert.equal(oneYenCalculationVersion.test("2.20.0"), true);
+  assert.equal(oneYenCalculationVersion.test("3.0.0"), true);
+  assert.match(calculationVersionRule, /schemaVersion'\)\.val\(\) !== 3/);
   for (const row of [day, totals]) {
     for (const key of ["honShimeiSales", "jonaiExtensionSales", "totalSales", "backTotal"]) {
       assert.match(row[key][".validate"], /val\(\) % 10 === 0/);
@@ -230,11 +232,70 @@ test("月次snapshotはschema 2だけを新規保存し、キャスト売上・�
   }
   assert.match(day.backs.$backIndex[".validate"], /amount'\)\.val\(\) % 10 === 0/);
   for (const key of [
-    "hourlyPay", "honShimeiSales", "jonaiExtensionSales", "honShimeiBack", "banaiShimeiBack",
-    "dohanBack", "bottleBack", "drinkBack", "hourlyAndBack", "salesRewardBase", "salesReward",
-    "adoptedReward",
+    "honShimeiSales", "jonaiExtensionSales", "honShimeiBack", "banaiShimeiBack",
+    "dohanBack", "bottleBack", "drinkBack", "salesRewardBase", "salesReward",
   ]) assert.match(reward[key][".validate"], /val\(\) % 10 === 0/);
 
   // POSの実売上は現金・カードを含め1円単位の実額を保持する。
   assert.doesNotMatch(snapshot.sales[".validate"], /% 10/);
+});
+
+function valueNode(value, schemaVersion) {
+  return {
+    val: () => typeof value === "string" ? {
+      matches: (pattern) => pattern.test(value),
+      beginsWith: (prefix) => value.startsWith(prefix),
+    } : value,
+    isNumber: () => typeof value === "number" && Number.isFinite(value),
+    isString: () => typeof value === "string",
+    hasChildren: (keys = []) => value !== null && typeof value === "object"
+      && Object.keys(value).length > 0 && keys.every((key) => value[key] !== undefined && value[key] !== null),
+    child: (key) => valueNode(value?.[key], schemaVersion),
+    parent: () => ({ parent: () => ({ parent: () => ({ child: (key) => valueNode(key === "schemaVersion" ? schemaVersion : undefined, schemaVersion) }) }) }),
+  };
+}
+
+test("schema 3だけ時給・時給バック合計・採用報酬の1円を許容し、旧schemaと非時給の条件を維持する", () => {
+  const reward = databaseRules.accountingMonthSnapshots.$month.$revision.castRewards.$index;
+  for (const key of ["hourlyPay", "hourlyAndBack", "adoptedReward"]) {
+    const rule = reward[key][".validate"];
+    assert.match(rule, /parent\(\)\.parent\(\)\.parent\(\)\.child\('schemaVersion'\)/);
+    const permitted = new Function("newData", `return (${rule});`);
+    assert.equal(permitted(valueNode(1503, 3)), true);
+    assert.equal(permitted(valueNode(1500, 3)), true);
+    assert.equal(permitted(valueNode(1503.75, 3)), false);
+    assert.equal(permitted(valueNode(-1, 3)), false);
+    assert.equal(permitted(valueNode(Number.MAX_SAFE_INTEGER + 1, 3)), false);
+    assert.equal(permitted(valueNode(1503, 2)), false);
+    assert.equal(permitted(valueNode(1500, 2)), true);
+  }
+  for (const key of ["honShimeiSales", "jonaiExtensionSales", "honShimeiBack", "banaiShimeiBack", "dohanBack", "bottleBack", "drinkBack", "salesRewardBase", "salesReward"]) {
+    const permitted = new Function("newData", `return (${reward[key][".validate"]});`);
+    assert.equal(permitted(valueNode(1503, 3)), false);
+    assert.equal(permitted(valueNode(1500, 3)), true);
+  }
+});
+
+test("schema 3のキャスト・スタッフに営業日別時給明細を要求し各明細を1円単位で検証する", () => {
+  const snapshot = databaseRules.accountingMonthSnapshots.$month.$revision;
+  for (const row of [snapshot.castRewards.$index, snapshot.staffPayroll.$index]) {
+    assert.match(row[".validate"], /schemaVersion'\)\.val\(\) !== 3 \|\|/);
+    assert.match(row[".validate"], /hourlyByDay'\)\.hasChildren\(\)/);
+    assert.equal(row.hourlyByDay[".validate"], "newData.hasChildren()");
+    const rule = row.hourlyByDay.$dayIndex[".validate"];
+    const permitted = new Function("newData", "$dayIndex", "$month", `return (${rule});`);
+    const check = (value, index = "0") => permitted(valueNode(value, 3), { matches: (pattern) => pattern.test(index) }, "2026-09");
+    const day = { businessDate: "2026-09-09", hours: 1.25, amount: 1503 };
+    assert.equal(check(day), true);
+    assert.equal(check({ ...day, amount: 1503.75 }), false);
+    assert.equal(check({ ...day, amount: -1 }), false);
+    assert.equal(check({ ...day, amount: Number.MAX_SAFE_INTEGER + 1 }), false);
+    assert.equal(check({ ...day, hours: 1.1 }), false);
+    assert.equal(check({ ...day, businessDate: "2026-08-09" }), false);
+    assert.equal(check({ ...day, businessDate: "2026-09-32" }), false);
+    assert.equal(check({ businessDate: day.businessDate, hours: day.hours }), false);
+    assert.equal(check(day, "-1"), false);
+    assert.equal(check(day, "01"), false);
+  }
+  assert.match(snapshot.staffPayroll.$index[".validate"], /hourly'\)\.val\(\) % 1 === 0/);
 });

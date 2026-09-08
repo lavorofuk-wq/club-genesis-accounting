@@ -60,14 +60,14 @@ describe("収支表の日別給与配分", () => {
     ]);
   });
 
-  it("月間変更後の時給報酬を時間比で配分し、バックと美容室手当は発生日に計上する", () => {
+  it("月間変更後の日別時給を1円のまま配分し、バックと美容室手当は発生日に計上する", () => {
     const input = fixture([
       closing(2, { casts: [cast({ hours: 2, hourlyRate: 1_000, banaiShimeiCount: 1, beautyAllowance: 500 })] }),
       closing(1, { casts: [cast({ hours: 4, hourlyRate: 1_000, honShimeiCount: 2, dohanCount: 1, dohanBack: 3_000 })] }),
     ], { casts: [master({ hourlyRates: { [month]: 3_007 } })] });
-    // 月額18,040円を4:2で12,020円・6,020円へ配分。日次の旧時給へ戻さない。
-    expect(allocateBalancePayroll(input).byDate.map((day) => day.castHourly)).toEqual([17_020, 7_020]);
-    expect(input.results.castRewards[0].grossPay).toBe(24_040);
+    // 日別12,028円・6,014円をそのまま使用。旧時給や10円時間比配分へ戻さない。
+    expect(allocateBalancePayroll(input).byDate.map((day) => day.castHourly)).toEqual([17_028, 7_014]);
+    expect(input.results.castRewards[0].grossPay).toBe(24_042);
   });
 
   it("日別売上比で月額の売上報酬を配分し、採用されない時給・バックは加算しない", () => {
@@ -93,25 +93,29 @@ describe("収支表の日別給与配分", () => {
     expect(input.results.castSalesReports[0].totals.beautyAllowance).toBe(1_000);
     expect(input.results.castRewards[0].beautyAllowance).toBe(500);
     const output = allocateBalancePayroll(input).byDate;
-    // 体入と在籍の時給が違っても、確認済みの月額×時間比を使う。
-    expect(output.map((day) => day.castHourly)).toEqual([10_000, 9_500]);
+    // 体入6,000円と在籍12,000円の発生日を保持し、時間比で均さない。
+    expect(output.map((day) => day.castHourly)).toEqual([7_000, 12_500]);
     expect(output.reduce((sum, day) => sum + day.castHourly, 0)).toBe(input.results.castRewards[0].grossPay);
   });
 
-  it("体入のみは各日の体入時給額を維持し、保存月額との端数差だけ最終出勤日に置く", () => {
+  it("体入のみも日別1円切捨て額を使用し、支払済額や最終日の給与を書き換えない", () => {
     const input = fixture([
       closing(1, { casts: [cast({ kind: "trial", hours: 4.25, hourlyRate: 2_007, dailyPayment: 8_520, honShimeiCount: 1 })] }),
       closing(2, { casts: [cast({ kind: "trial", hours: 4.25, hourlyRate: 3_007, dailyPayment: 12_770 })] }),
     ]);
     const reward = input.results.castRewards[0];
     expect(reward.trialOnly).toBe(true);
-    expect(reward.hourlyPay).toBe(21_300);
-    expect(allocateBalancePayroll(input).byDate.map((day) => day.castHourly)).toEqual([8_520, 12_780]);
+    expect(reward.hourlyPay).toBe(21_308);
+    const before = structuredClone(input.closings);
+    expect(allocateBalancePayroll(input).byDate.map((day) => day.castHourly)).toEqual([8_529, 12_779]);
+    expect(input.closings).toEqual(before);
+    expect(reward.dailyPayment).toBe(21_290);
   });
 
   it("旧100円単位の体入月額を維持し、保存時給の改変を端数調整で隠さない", () => {
     const input = fixture([closing(1, { casts: [cast({ kind: "trial", hours: 4.25, hourlyRate: 2_007 })] })]);
     const reward = input.results.castRewards[0];
+    input.snapshot = { schemaVersion: 1, calculationVersion: "2.12.0" };
     reward.hourlyPay = reward.hourlyAndBack = reward.adoptedReward = reward.grossPay = reward.netPay = 8_500;
     expect(allocateBalancePayroll(input).byDate[0].castHourly).toBe(8_500);
     input.closings[0].casts[0].hourlyRate += 1_000;
@@ -121,6 +125,7 @@ describe("収支表の日別給与配分", () => {
   it("旧確定データの1円単位月額・バックを新ルールで丸め直さない", () => {
     const input = fixture([closing(1, { casts: [cast()] }), closing(3, { casts: [cast()] })]);
     const reward = input.results.castRewards[0];
+    input.snapshot = { schemaVersion: 2, calculationVersion: "2.19.0" };
     reward.hourlyPay = 24_003;
     reward.bottleBack = 333;
     reward.hourlyAndBack = reward.adoptedReward = reward.grossPay = reward.netPay = 24_336;
@@ -134,7 +139,7 @@ describe("収支表の日別給与配分", () => {
     expect(input).toEqual(before);
   });
 
-  it("スタッフの日次生値・ドライバー日給を使用し、手当と端数は各本人の最終出勤日に置く", () => {
+  it("スタッフ時給は各日1円切捨て、ドライバー日給は変更せず、手当のみ最終出勤日に置く", () => {
     const input = fixture([
       closing(1, { staffWork: [staffWork({ hours: 4.25, hourlyRate: 1_507, dailyPayment: 3_000 })],
         drivers: [{ driverId: "driver-1", name: "運転手", dailyRate: 5_000, dailyPayment: 2_000 }], dispatchStaffPayment: 99_999 }),
@@ -143,8 +148,8 @@ describe("収支表の日別給与配分", () => {
       closing(4),
     ], { adjustments: { staffSalesAllowance: { "staff-1": 400 }, staffBottleAllowance: { "staff-1": 200 }, driverRemoteAllowance: { "driver-1": 1_000 } } });
     const output = allocateBalancePayroll(input).byDate;
-    expect(output.map((day) => day.employeeGross)).toEqual([11_404.75, 4_195.25, 7_000, 0]);
-    expect(output.reduce((sum, day) => sum + day.employeeGross, 0)).toBe(22_600);
+    expect(output.map((day) => day.employeeGross)).toEqual([11_404, 4_215, 7_000, 0]);
+    expect(output.reduce((sum, day) => sum + day.employeeGross, 0)).toBe(22_619);
   });
 
   it("同月体入→在籍スタッフは明示IDのみを使い、退店・削除済みアーカイブでも配分できる", () => {
@@ -208,7 +213,7 @@ describe("収支表の日別給与配分", () => {
   it("日次の変更で保存済みスタッフ月額・日払いと一致しなければ停止する", () => {
     const input = fixture([closing(1, { staffWork: [staffWork()] })]);
     input.closings[0].staffWork[0].hourlyRate += 100;
-    expect(() => allocateBalancePayroll(input)).toThrow("月間基本給与");
+    expect(() => allocateBalancePayroll(input)).toThrow("日別基本給与");
     input.closings[0].staffWork[0].hourlyRate -= 100;
     input.closings[0].staffWork[0].dailyPayment += 10;
     expect(() => allocateBalancePayroll(input)).toThrow("日払い合計");
@@ -235,7 +240,129 @@ describe("収支表の日別給与配分", () => {
   it("配分基準ゼロで月額が正の場合は停止する", () => {
     const input = fixture([closing(1, { casts: [cast({ hours: 0 })] })]);
     const reward = input.results.castRewards[0];
+    input.snapshot = { schemaVersion: 2, calculationVersion: "2.19.0" };
     reward.hourlyPay = reward.hourlyAndBack = reward.adoptedReward = reward.grossPay = 10;
     expect(() => allocateBalancePayroll(input)).toThrow("配分基準が0");
+  });
+
+  it.each([1, 2] as const)("schema%sの確定済みスタッフ時給は従来の日次生値と最終日端数を保持する", (schemaVersion) => {
+    const input = fixture([
+      closing(1, { staffWork: [staffWork({ hours: 4.25, hourlyRate: 1_507 })] }),
+      closing(2, { staffWork: [staffWork({ hours: 2.25, hourlyRate: 1_607 })] }),
+    ], { adjustments: { staffSalesAllowance: { "staff-1": 400 }, staffBottleAllowance: { "staff-1": 200 } } });
+    input.snapshot = { schemaVersion, calculationVersion: schemaVersion === 1 ? "2.12.0" : "2.19.0" };
+    const payroll = input.results.staffPayroll[0];
+    delete payroll.hourlyByDay;
+    payroll.hourly = 10_000;
+    payroll.gross = payroll.net = 10_600;
+    const before = structuredClone(input);
+    expect(allocateBalancePayroll(input).byDate.map((day) => day.employeeGross)).toEqual([6_404.75, 4_195.25]);
+    expect(input).toEqual(before);
+  });
+
+  it("schema3も未確定月と同じ日別1円額を使い、保存済み現金や日払いを変更しない", () => {
+    const input = fixture([
+      closing(1, { casts: [cast({ hours: 4.25, hourlyRate: 2_007, dailyPayment: 8_520 })],
+        staffWork: [staffWork({ hours: 4.25, hourlyRate: 1_507, dailyPayment: 6_400 })] }),
+      closing(2, { casts: [cast({ hours: 2.25, hourlyRate: 2_007 })],
+        staffWork: [staffWork({ hours: 2.25, hourlyRate: 1_507 })] }),
+    ]);
+    const live = allocateBalancePayroll(input);
+    input.snapshot = { schemaVersion: 3, calculationVersion: "2.20.0" };
+    const before = structuredClone(input);
+    expect(allocateBalancePayroll(input)).toEqual(live);
+    expect(live.byDate.map((day) => [day.castHourly, day.employeeGross])).toEqual([[8_529, 6_404], [4_515, 3_390]]);
+    expect(input).toEqual(before);
+  });
+
+  it.each([undefined, 3] as const)("新計算（snapshot=%s）の日別時給欠落を旧配分へフォールバックしない", (schemaVersion) => {
+    const input = fixture([closing(1, { casts: [cast()], staffWork: [staffWork()] })]);
+    if (schemaVersion) input.snapshot = { schemaVersion, calculationVersion: "2.20.0" };
+    const reward = input.results.castRewards[0];
+    const saved = reward.hourlyByDay;
+    delete reward.hourlyByDay;
+    expect(() => allocateBalancePayroll(input)).toThrow("日別時給内訳がありません");
+    reward.hourlyByDay = saved;
+    delete input.results.staffPayroll[0].hourlyByDay;
+    expect(() => allocateBalancePayroll(input)).toThrow("日別時給内訳がありません");
+  });
+
+  it.each([
+    ["月額不一致", (input: BalancePayrollAllocationInput) => { input.results.castRewards[0].hourlyByDay![0].amount += 1; }, "日別時給合計"],
+    ["時間不一致", (input: BalancePayrollAllocationInput) => { input.results.castRewards[0].hourlyByDay![0].hours += .25; }, "勤務時間"],
+    ["非出勤日", (input: BalancePayrollAllocationInput) => { input.results.castRewards[0].hourlyByDay![0].businessDate = "2026-09-03"; }, "出勤日が一致しません"],
+    ["日付重複", (input: BalancePayrollAllocationInput) => { input.results.castRewards[0].hourlyByDay!.push({ ...input.results.castRewards[0].hourlyByDay![0] }); }, "重複"],
+    ["1円未満", (input: BalancePayrollAllocationInput) => { input.results.castRewards[0].hourlyByDay![0].amount += .25; }, "1円単位"],
+    ["負額", (input: BalancePayrollAllocationInput) => { input.results.castRewards[0].hourlyByDay![0].amount = -1; }, "1円単位"],
+    ["NaN", (input: BalancePayrollAllocationInput) => { input.results.castRewards[0].hourlyByDay![0].amount = Number.NaN; }, "1円単位"],
+    ["勤務0・給与あり", (input: BalancePayrollAllocationInput) => { input.results.castRewards[0].hourlyByDay![0].hours = 0; }, "勤務時間0"],
+  ] as const)("キャスト日別時給の%sを最終日調整で隠さず停止する", (_label, change, error) => {
+    const input = fixture([closing(1, { casts: [cast()] })]);
+    change(input);
+    expect(() => allocateBalancePayroll(input)).toThrow(error);
+  });
+
+  it("日別時給の保存順序ではなく営業日を一致させて使用する", () => {
+    const input = fixture([
+      closing(1, { casts: [cast({ hours: 4.25, hourlyRate: 2_007 })] }),
+      closing(2, { casts: [cast({ hours: 2.25, hourlyRate: 2_007 })] }),
+    ]);
+    input.results.castRewards[0].hourlyByDay!.reverse();
+    expect(allocateBalancePayroll(input).byDate.map((day) => day.castHourly)).toEqual([8_529, 4_515]);
+  });
+
+  it("同じキャストが同日複数勤務しても、日別合算後1円額とバック・手当を一度ずつ計上する", () => {
+    const input = fixture([closing(1, { casts: [
+      cast({ posCastId: "pos-shift-1", hours: .25, hourlyRate: 3_007, honShimeiCount: 1 }),
+      cast({ posCastId: "pos-shift-2", hours: .25, hourlyRate: 3_007, honShimeiCount: 1, beautyAllowance: 500 }),
+    ] })]);
+    expect(input.results.castSalesReports[0].days).toHaveLength(2);
+    expect(input.results.castRewards[0].hourlyByDay).toEqual([{ businessDate: "2026-09-01", hours: .5, amount: 1_503 }]);
+    expect(allocateBalancePayroll(input).byDate).toEqual([
+      { businessDate: "2026-09-01", castHourly: 4_003, castSalesReward: 0, employeeGross: 0 },
+    ]);
+  });
+
+  it("同営業日の体入・在籍aliasを日別合算し、勤務行ごとの切捨てや時間比配分をしない", () => {
+    const input = fixture([closing(1, { casts: [
+      cast({ masterId: "trial-1", posCastId: "trial-pos", kind: "trial", hours: .25, hourlyRate: 1_507, honShimeiCount: 1, dailyPayment: 370 }),
+      cast({ hours: .25, hourlyRate: 3_007, honShimeiCount: 2, beautyAllowance: 500 }),
+    ] })], { casts: [master({ convertedFromTrialId: "trial-1", hiredAt: "2026-09-01", hourlyRates: { [month]: 3_007 } })] });
+    expect(input.results.castSalesReports[0].days).toHaveLength(2);
+    expect(input.results.castRewards[0].hourlyByDay).toEqual([{ businessDate: "2026-09-01", hours: .5, amount: 1_128 }]);
+    const before = structuredClone(input);
+    expect(allocateBalancePayroll(input).byDate[0].castHourly).toBe(4_628);
+    expect(input).toEqual(before);
+  });
+
+  it("勤務0時間の出勤行も日別時給0円として保持し、スタッフ手当は最終出勤日に計上する", () => {
+    const input = fixture([closing(1, { casts: [cast({ hours: 0 })], staffWork: [staffWork({ hours: 0 })] })],
+      { adjustments: { staffSalesAllowance: { "staff-1": 1_001 } } });
+    expect(allocateBalancePayroll(input).byDate).toEqual([
+      { businessDate: "2026-09-01", castHourly: 0, castSalesReward: 0, employeeGross: 1_001 },
+    ]);
+  });
+
+  it("売上報酬採用でも新計算の日別時給欠落を見逃さない", () => {
+    const input = fixture([closing(1, { casts: [cast({ honShimeiSales: 1_300_000 })] })]);
+    expect(input.results.castRewards[0].adoptedSystem).toBe("salesReward");
+    delete input.results.castRewards[0].hourlyByDay;
+    expect(() => allocateBalancePayroll(input)).toThrow("日別時給内訳がありません");
+  });
+
+  it("スタッフ日別時給は月額が一致しても保存勤務額と不一致なら停止する", () => {
+    const input = fixture([
+      closing(1, { staffWork: [staffWork({ hours: 4.25, hourlyRate: 1_507 })] }),
+      closing(2, { staffWork: [staffWork({ hours: 2.25, hourlyRate: 1_507 })] }),
+    ]);
+    input.results.staffPayroll[0].hourlyByDay![0].amount += 1;
+    input.results.staffPayroll[0].hourlyByDay![1].amount -= 1;
+    expect(() => allocateBalancePayroll(input)).toThrow("日別基本給与");
+  });
+
+  it.each(["2.19.9", "2.20", "invalid", "1.99.0"])("schema3に非対応の計算版%sを拒否する", (calculationVersion) => {
+    const input = fixture([closing(1, { casts: [cast()] })]);
+    input.snapshot = { schemaVersion: 3, calculationVersion };
+    expect(() => allocateBalancePayroll(input)).toThrow("保存形式を確認");
   });
 });

@@ -846,6 +846,9 @@ export type WorkspaceData = {
   cashFloat: number;
 };
 
+/** 時給は営業日ごとに1円未満を切り捨て、月額はこの確定した日額の合計とする。 */
+export type DailyHourlyPay = { businessDate: string; hours: number; amount: number };
+
 export type CastReward = {
   id: string;
   name: string;
@@ -854,6 +857,8 @@ export type CastReward = {
   hours: number;
   trialOnly: boolean;
   hourlyPay: number;
+  /** Ver2.20.0以降の計算で保存する。旧確定月では未保存。 */
+  hourlyByDay?: DailyHourlyPay[];
   honShimeiSales: number;
   jonaiExtensionSales: number;
   liquorCost: number;
@@ -1009,6 +1014,26 @@ export const floorTen = (value: number) => {
     : tenUnits;
   return Math.floor(stableUnits) * 10;
 };
+
+/** 時給専用の1円未満切捨て。売上・バック等の10円処理には使用しない。 */
+export const floorYen = (value: number) => {
+  const amount = Math.max(0, value);
+  const nearest = Math.round(amount);
+  const tolerance = Math.min(1e-7, Number.EPSILON * Math.max(1, Math.abs(amount)) * 8);
+  return Math.floor(Math.abs(amount - nearest) <= tolerance ? nearest : amount);
+};
+
+export function calculateDailyHourlyPay(entries: Array<{ businessDate: string; hourlyRate: number; hours: number }>): DailyHourlyPay[] {
+  const days = new Map<string, { hours: number; raw: number }>();
+  entries.forEach(({ businessDate, hourlyRate, hours }) => {
+    const day = days.get(businessDate) || { hours: 0, raw: 0 };
+    day.hours += hours;
+    day.raw += hourlyRate * hours;
+    days.set(businessDate, day);
+  });
+  return [...days].sort(([left], [right]) => left.localeCompare(right))
+    .map(([businessDate, day]) => ({ businessDate, hours: day.hours, amount: floorYen(day.raw) }));
+}
 
 /**
  * 商品1行全体の％バックを先に10円単位へ切り捨ててから均等割りする。
@@ -1468,6 +1493,7 @@ export function mergeReconciledDailyCastInputs(
   previousRows: DailyCast[],
   nextRows: DailyCast[],
   previousPos?: PosClosingV3 | null,
+  options: { preserveRecordedDailyPayments?: boolean } = {},
 ): ReconciledDailyCastInputs {
   const usedPrevious = new Set<number>();
   const matches: ReconciledDailyCastInputs["matches"] = [];
@@ -1511,8 +1537,8 @@ export function mergeReconciledDailyCastInputs(
     DAILY_CAST_ALWAYS_PRESERVED_INPUT_KEYS.forEach((key) => {
       merged[key] = selected!.previous[key];
     });
-    const originalTrialDailyPayment = floorTen(asNumber(selected.previous.hourlyRate) * asNumber(selected.previous.hours));
-    if (selected.previous.kind !== "trial"
+    const originalTrialDailyPayment = floorYen(asNumber(selected.previous.hourlyRate) * asNumber(selected.previous.hours));
+    if (options.preserveRecordedDailyPayments || selected.previous.kind !== "trial"
       || selected.previous.dailyPayment !== originalTrialDailyPayment) {
       merged.dailyPayment = selected.previous.dailyPayment;
     }
@@ -1656,7 +1682,7 @@ export function buildDailyCasts(
       bottles,
       liquorCost,
       beautyAllowance: 0,
-      dailyPayment: source.kind === "trial" ? floorTen((target?.hourlyRate || 0) * roundedHours) : 0,
+      dailyPayment: source.kind === "trial" ? floorYen((target?.hourlyRate || 0) * roundedHours) : 0,
       advancePayment: 0,
       transportFee: 0,
       introducer: target?.introducer
@@ -2137,7 +2163,11 @@ export function calculateCastRewards(
     const trialOnly = rows.every((row) => row.kind === "trial") && !convertedMember;
     const sum = (key: keyof DailyCast) => rows.reduce((total, row) => total + asNumber(row[key]), 0);
     const monthlyRate = rateForMonth(member?.hourlyRates || {}, month);
-    const hourlyPay = floorTen(rows.reduce((total, row) => total + (row.kind === "regular" && monthlyRate > 0 ? monthlyRate : row.hourlyRate) * row.hours, 0));
+    const hourlyByDay = calculateDailyHourlyPay(entries.map(({ businessDate, row }) => ({
+      businessDate, hours: row.hours,
+      hourlyRate: row.kind === "regular" && monthlyRate > 0 ? monthlyRate : row.hourlyRate,
+    })));
+    const hourlyPay = hourlyByDay.reduce((total, day) => total + day.amount, 0);
     const honShimeiSales = rows.reduce((total, row) => total + floorTen(asNumber(row.honShimeiSales)), 0);
     const jonaiExtensionSales = rows.reduce((total, row) => total + floorTen(asNumber(row.jonaiExtensionSales)), 0);
     const eligibleBottles = entries.flatMap((entry) => {
@@ -2225,6 +2255,7 @@ export function calculateCastRewards(
       hours: rows.reduce((total, row) => total + row.hours, 0),
       trialOnly,
       hourlyPay,
+      hourlyByDay,
       honShimeiSales,
       jonaiExtensionSales,
       liquorCost,

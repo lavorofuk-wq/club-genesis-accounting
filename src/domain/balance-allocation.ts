@@ -1,5 +1,6 @@
-import type { CastReward, CastSalesDay, CastSalesReport, DailyClosing, DailyStaffWork, StaffRecord } from "./gms";
-import type { MonthlyAccountingResults } from "./month-accounting";
+import type { CastReward, CastSalesDay, CastSalesReport, DailyClosing, DailyHourlyPay, DailyStaffWork, StaffRecord } from "./gms";
+import { floorYen } from "./gms";
+import type { MonthlyAccountingResults, MonthlyAccountingSnapshot } from "./month-accounting";
 
 export type BalancePayrollAllocationInput = {
   results: MonthlyAccountingResults;
@@ -7,6 +8,7 @@ export type BalancePayrollAllocationInput = {
   month: string;
   staff?: StaffRecord[];
   archivedStaff?: StaffRecord[];
+  snapshot?: Pick<MonthlyAccountingSnapshot, "schemaVersion" | "calculationVersion">;
 };
 
 export type BalancePayrollDay = {
@@ -81,6 +83,27 @@ function weightedTenYen(total: number, weights: number[], label: string): number
   });
 }
 
+/** 新形式の時給は日別計算の確定値を使い、比率配分・最終日の端数調整をしない。 */
+function dailyHourlyAmounts(value: DailyHourlyPay[] | undefined, days: Array<{ businessDate: string; hours: number }>, total: number, label: string): number[] {
+  requireValue(Array.isArray(value), `${label}の日別時給内訳がありません。推測で配分せず、月次データを確認してください。`);
+  const byDate = new Map<string, DailyHourlyPay>();
+  for (const day of value) {
+    requireValue(day && typeof day.businessDate === "string" && !byDate.has(day.businessDate), `${label}の日別時給内訳の営業日が不正または重複しています。`);
+    requireValue(Number.isSafeInteger(day.amount) && day.amount >= 0, `${label}の日別時給額が1円単位の金額ではありません。`);
+    amount(day.hours, `${label}の日別時給内訳の勤務時間`);
+    requireValue(day.hours > 0 || day.amount === 0, `${label}の勤務時間0の日に時給額が計上されています。`);
+    byDate.set(day.businessDate, day);
+  }
+  requireValue(byDate.size === days.length && days.every((day) => byDate.has(day.businessDate)), `${label}の日別時給内訳と出勤日が一致しません。`);
+  requireValue(Number.isSafeInteger(total) && total >= 0, `${label}の月額時給が1円単位の金額ではありません。`);
+  same(value.reduce((sum, day) => sum + day.amount, 0), total, `${label}の日別時給合計`);
+  return days.map((day) => {
+    const saved = byDate.get(day.businessDate)!;
+    same(saved.hours, day.hours, `${label} ${day.businessDate}の日別時給内訳の勤務時間`);
+    return saved.amount;
+  });
+}
+
 function castDays(report: CastSalesReport, reward: CastReward, approved: Map<string, DailyClosing>) {
   requireValue(rows(report.days, `${reward.name}の出勤日`).length > 0, `${reward.name}の最終出勤日を確認できません。`);
   const grouped = new Map<string, { businessDate: string; hours: number; sales: number; backs: number; beauty: number }>();
@@ -135,8 +158,9 @@ function castDays(report: CastSalesReport, reward: CastReward, approved: Map<str
   return result;
 }
 
-function allocateCast(reward: CastReward, report: CastSalesReport, approved: Map<string, DailyClosing>, output: Map<string, BalancePayrollDay>) {
+function allocateCast(reward: CastReward, report: CastSalesReport, approved: Map<string, DailyClosing>, output: Map<string, BalancePayrollDay>, legacyHourly: boolean) {
   const days = castDays(report, reward, approved);
+  const dailyHourly = legacyHourly ? undefined : dailyHourlyAmounts(reward.hourlyByDay, days, reward.hourlyPay, `${reward.name}の時給報酬`);
   const beauties = new Map<string, number>();
   const trialBase = new Map<string, number>();
   const trialHours = new Map<string, number>();
@@ -152,7 +176,7 @@ function allocateCast(reward: CastReward, report: CastSalesReport, approved: Map
         requireValue(days.some((day) => day.businessDate === closing.businessDate), `${reward.name}の美容室手当の出勤日を確認できません。`);
         beauties.set(closing.businessDate, (beauties.get(closing.businessDate) || 0) + beauty);
       }
-      if (reward.trialOnly) {
+      if (reward.trialOnly && legacyHourly) {
         requireValue(cast.kind === "trial", `${reward.name}の体入報酬と保存済み勤務区分が一致しません。`);
         const raw = amount(cast.hourlyRate, `${reward.name}の体入時給`) * amount(cast.hours, `${reward.name}の体入勤務時間`);
         amount(raw, `${reward.name}の体入基本報酬`);
@@ -175,6 +199,11 @@ function allocateCast(reward: CastReward, report: CastSalesReport, approved: Map
   let base: number[];
   if (reward.trialOnly) {
     requireValue(reward.adoptedSystem === "hourlyAndBack" && backTotal === 0, `${reward.name}の体入報酬に対象外の報酬が含まれています。`);
+  }
+  if (!legacyHourly) {
+    base = reward.adoptedSystem === "hourlyAndBack" ? dailyHourly!
+      : weightedTenYen(reward.salesReward, days.map((day) => day.sales), `${reward.name}の売上報酬`);
+  } else if (reward.trialOnly) {
     requireValue(trialBase.size === days.length && days.every((day) => trialBase.has(day.businessDate)),
       `${reward.name}の体入日別時給を保存IDから復元できません。`);
     days.forEach((day) => same(trialHours.get(day.businessDate)!, day.hours, `${reward.name} ${day.businessDate}の体入勤務時間`));
@@ -218,8 +247,15 @@ function staffSourceId(work: DailyStaffWork, payrollIds: ReadonlySet<string>, ma
 }
 
 /** 保存済み月次給与を日次へ配分する。給与再計算・現在の時給への置換は行わない。 */
-export function allocateBalancePayroll({ results, closings, month, staff = [], archivedStaff = [] }: BalancePayrollAllocationInput): { byDate: BalancePayrollDay[] } {
+export function allocateBalancePayroll({ results, closings, month, staff = [], archivedStaff = [], snapshot }: BalancePayrollAllocationInput): { byDate: BalancePayrollDay[] } {
   requireValue(/^\d{4}-(0[1-9]|1[0-2])$/.test(month), "給与配分の対象月が不正です。");
+  const legacyHourly = snapshot?.schemaVersion === 1 || snapshot?.schemaVersion === 2;
+  if (snapshot && !legacyHourly) {
+    const version = /^(\d+)\.(\d+)\.(\d+)$/.exec(snapshot.calculationVersion);
+    requireValue(Number(snapshot.schemaVersion) === 3 && version
+      && (Number(version[1]) > 2 || (Number(version[1]) === 2 && Number(version[2]) >= 20)),
+    "時給の日別1円計算に対応する月次確定データではありません。推測で配分せず、保存形式を確認してください。");
+  }
   const approved = new Map<string, DailyClosing>();
   for (const closing of rows(closings, "日次データ")) {
     if (closing?.status !== "approved" || !closing.businessDate?.startsWith(`${month}-`)) continue;
@@ -235,7 +271,7 @@ export function allocateBalancePayroll({ results, closings, month, staff = [], a
   const rewards = indexed(results.castRewards, "キャスト報酬");
   const reports = indexed(results.castSalesReports, "キャスト売上明細");
   requireValue(rewards.size === reports.size && [...reports.keys()].every((id) => rewards.has(id)), "キャスト報酬と売上明細の人物IDが一致しません。");
-  rewards.forEach((reward) => allocateCast(reward, reports.get(reward.id)!, approved, output));
+  rewards.forEach((reward) => allocateCast(reward, reports.get(reward.id)!, approved, output, legacyHourly));
 
   const staffPayroll = indexed(results.staffPayroll, "スタッフ給与");
   const payrollIds = new Set(staffPayroll.keys());
@@ -265,12 +301,29 @@ export function allocateBalancePayroll({ results, closings, month, staff = [], a
     const rawTotal = raw.reduce((sum, value) => sum + amount(value, `${payroll.name}の日別基本給与`), 0);
     same(payroll.hours, hours, `${payroll.name}の月間勤務時間`);
     same(payroll.daily, entries.reduce((sum, { work }) => sum + amount(work.dailyPayment, `${payroll.name}の日払い`), 0), `${payroll.name}の日払い合計`);
-    same(payroll.hourly, Math.floor(rawTotal / 100) * 100, `${payroll.name}の月間基本給与`);
     same(payroll.gross, payroll.hourly + amount(payroll.sales, `${payroll.name}の売上手当`) + amount(payroll.bottle, `${payroll.name}のボトル手当`), `${payroll.name}のスタッフ総支給額`);
-    entries.forEach(({ businessDate }, index) => {
-      output.get(businessDate)!.employeeGross += raw[index]
-        + (index === entries.length - 1 ? payroll.hourly - rawTotal + payroll.sales + payroll.bottle : 0);
-    });
+    if (legacyHourly) {
+      same(payroll.hourly, Math.floor(rawTotal / 100) * 100, `${payroll.name}の月間基本給与`);
+      entries.forEach(({ businessDate }, index) => {
+        output.get(businessDate)!.employeeGross += raw[index]
+          + (index === entries.length - 1 ? payroll.hourly - rawTotal + payroll.sales + payroll.bottle : 0);
+      });
+    } else {
+      const grouped = new Map<string, { businessDate: string; hours: number; raw: number }>();
+      entries.forEach(({ businessDate, work }, index) => {
+        const day = grouped.get(businessDate) || { businessDate, hours: 0, raw: 0 };
+        day.hours += work.hours;
+        day.raw += raw[index];
+        grouped.set(businessDate, day);
+      });
+      const days = [...grouped.values()];
+      const hourly = dailyHourlyAmounts(payroll.hourlyByDay, days, payroll.hourly, `${payroll.name}の基本給与`);
+      days.forEach((day, index) => {
+        same(hourly[index], floorYen(day.raw), `${payroll.name} ${day.businessDate}の日別基本給与`);
+        output.get(day.businessDate)!.employeeGross += hourly[index]
+          + (index === days.length - 1 ? payroll.sales + payroll.bottle : 0);
+      });
+    }
   }
 
   const driverPayroll = indexed(results.driverPayroll, "ドライバー給与");
