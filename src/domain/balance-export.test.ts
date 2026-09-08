@@ -114,6 +114,37 @@ function fullInput(): BalanceExportInput {
 }
 
 describe("収支帳票の月次突合", () => {
+  it("新しい日別1円時給を月次・帳票に一致させ、支払済み日払いと現金照合は保持する", () => {
+    const data = fullInput();
+    for (const closing of data.closings) {
+      const hours = closing.businessDate === "2026-09-02" ? 4.25 : 2.25;
+      closing.casts[0].hours = hours;
+      closing.casts[0].hourlyRate = 2007;
+      closing.staffWork[0].hours = hours;
+      closing.staffWork[0].hourlyRate = 1507;
+    }
+    const before = structuredClone(data.closings);
+    data.results = calculateMonthlyAccounting({ casts: [], staff: [], drivers: [], introducers: [], liquor: [],
+      closings: data.closings, adjustments: [data.adjustments], cashFloat: 200000 }, data.month, data.adjustments);
+    const report = buildBalanceExportReport(data);
+    expect(report.days.map((day) => day.castHourly)).toEqual([13529, 9515]);
+    expect(report.days.map((day) => day.employeeGross)).toEqual([17404, 16390]);
+    expect(report.days.every((day) => Number.isInteger(day.castHourly) && Number.isInteger(day.employeeGross))).toBe(true);
+    expect(report.castDailyAndAdvance).toBe(5000);
+    expect(report.employeeDaily).toBe(6000);
+    expect(data.closings).toEqual(before);
+    data.snapshot = buildMonthlySnapshot(data.month, 1, "b".repeat(64), data.adjustments,
+      structuredClone(data.results), data.closings, "user", "2026-09-30T12:00:00.000Z");
+    expect(data.snapshot.schemaVersion).toBe(3);
+    expect(buildBalanceExportReport(data)).toEqual(report);
+  });
+
+  it("新計算の日別時給内訳が欠落したら帳票出力を停止する", () => {
+    const data = fullInput();
+    delete data.results.castRewards[0].hourlyByDay;
+    expect(() => buildBalanceExportReport(data)).toThrow("日別時給内訳がありません");
+  });
+
   it("最後の承認済み営業日に月額費用を置き、派遣支払をP/Rへ分離してGMS収支に一致する", () => {
     const data = fullInput();
     const before = structuredClone(data);

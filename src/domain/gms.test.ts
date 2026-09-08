@@ -5,11 +5,13 @@ import {
   calculateCastSalesReports,
   calculateCastRewards,
   calculateDriverPayroll,
+  calculateDailyHourlyPay,
   canMapAsDispatch,
   dayAfterIsoDate,
   deriveReeditCastMapping,
   floorHundred,
   floorTen,
+  floorYen,
   findUnclassifiedLegacyBottles,
   hoursBetweenQuarter,
   introducerSalesBase,
@@ -440,7 +442,7 @@ describe("GMS報酬・日次計算", () => {
     const trial = rows.find((row) => row.posCastId === "p1")!;
 
     expect(trial.hours).toBe(4);
-    expect(trial.dailyPayment).toBe(4930);
+    expect(trial.dailyPayment).toBe(4936);
   });
 
   it("完全削除された体入を在籍側の逆参照で同月報酬・売上へ統合する", () => {
@@ -918,7 +920,7 @@ describe("GMS報酬・日次計算", () => {
     expect(requiresBottleCost(transaction, bottle, { p1: "dispatch", p2: "cast-2" })).toBe(true);
   });
 
-  it("POS原本のない旧日次も売上・時給・バック・売上報酬を10円単位へ切り捨てる", () => {
+  it("POS原本のない旧日次も時給は1円、売上・バック・売上報酬は10円単位へ切り捨てる", () => {
     const source = pos();
     const base = buildDailyCasts(source, {
       p1: { masterId: "c1", name: "花子", kind: "regular", hourlyRate: 1_234 },
@@ -952,12 +954,12 @@ describe("GMS報酬・日次計算", () => {
     const report = calculateCastSalesReports([closing], [], "2026-09")[0];
 
     expect(reward).toMatchObject({
-      hourlyPay: 4_930,
+      hourlyPay: 4_936,
       honShimeiSales: 1_210_010,
       jonaiExtensionSales: 20,
       dohanBack: 1_230,
       drinkBack: 330,
-      hourlyAndBack: 6_490,
+      hourlyAndBack: 6_496,
       salesRewardBase: 1_210_030,
       salesReward: 726_010,
       adoptedSystem: "salesReward",
@@ -972,7 +974,7 @@ describe("GMS報酬・日次計算", () => {
     expect(report.days[0].backs.every((back) => back.amount % 10 === 0)).toBe(true);
   });
 
-  it("時給報酬は日別ではなく月間の未丸め合計から10円未満を切り捨てる", () => {
+  it("時給報酬は日ごとに1円未満を切り捨てて月額を合計する", () => {
     const source = pos();
     const base = buildDailyCasts(source, {
       p1: { masterId: "c1", name: "花子", kind: "regular", hourlyRate: 1_230 },
@@ -1001,8 +1003,45 @@ describe("GMS報酬・日次計算", () => {
       casts: [{ ...row }],
     } as unknown as DailyClosing));
 
-    // 1,230円×0.25時間×2日＝615円。日別なら300円×2だが、月合計後なので610円。
-    expect(calculateCastRewards(closings, [], "2026-09")[0].hourlyPay).toBe(610);
+    // 1,230円×0.25時間＝307.5円。日ごとに307円へ切り捨て、2日で614円。
+    expect(calculateCastRewards(closings, [], "2026-09")[0]).toMatchObject({
+      hourlyPay: 614,
+      hourlyByDay: [
+        { businessDate: "2026-09-02", hours: 0.25, amount: 307 },
+        { businessDate: "2026-09-03", hours: 0.25, amount: 307 },
+      ],
+    });
+  });
+
+  it.each([
+    [0, 0], [0.99, 0], [125, 125], [375.25, 375], [375.5, 375],
+    [375.75, 375], [6404.75, 6404], [124.99999999999999, 125],
+  ])("1円切捨て %s → %s（浮動小数誤差だけ補正）", (amount, expected) => {
+    expect(floorYen(amount)).toBe(expected);
+  });
+
+  it("500円単位の時給でも15分勤務の125円を10円へ再丸めしない", () => {
+    expect(calculateDailyHourlyPay([
+      { businessDate: "2026-09-02", hourlyRate: 500, hours: 0.25 },
+      { businessDate: "2026-09-03", hourlyRate: 3500, hours: 4.25 },
+    ])).toEqual([
+      { businessDate: "2026-09-02", hours: 0.25, amount: 125 },
+      { businessDate: "2026-09-03", hours: 4.25, amount: 14875 },
+    ]);
+    expect(floorTen(125)).toBe(120);
+    expect(floorHundred(125)).toBe(100);
+  });
+
+  it("日ごとの端数切捨てで月間端数を繰越さず、同じ日の複数勤務は合算して切り捨てる", () => {
+    const daily = calculateDailyHourlyPay([
+      { businessDate: "2026-09-03", hourlyRate: 1503, hours: 0.25 },
+      { businessDate: "2026-09-02", hourlyRate: 1503, hours: 0.25 },
+    ]);
+    expect(daily.reduce((sum, day) => sum + day.amount, 0)).toBe(750);
+    expect(calculateDailyHourlyPay([
+      { businessDate: "2026-09-02", hourlyRate: 1503, hours: 0.25 },
+      { businessDate: "2026-09-02", hourlyRate: 1503, hours: 0.25 },
+    ])).toEqual([{ businessDate: "2026-09-02", hours: 0.5, amount: 751 }]);
   });
 
   it("時給＋バックと売上報酬を比較する", () => {

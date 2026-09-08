@@ -40,10 +40,45 @@ beforeEach(() => {
 });
 
 describe("見本形式の月次収支XLSX", () => {
+  it("日別時給の1円額を再丸めせず数値セル・月合計・収支へ反映する", async () => {
+    const data = report();
+    data.days[0].castHourly = 11529;
+    data.days[1].castHourly = 18515;
+    data.days[0].employeeGross = 3504;
+    data.days[1].employeeGross = 7037;
+    mockedBuild.mockReturnValue(data);
+    const restored = new ExcelJS.Workbook();
+    await restored.xlsx.load(await createMonthlyBalanceWorkbook(input, "日別1円時給").xlsx.writeBuffer());
+    const sheet = restored.worksheets[0];
+    expect(value(sheet, "M4")).toBe(11529);
+    expect(value(sheet, "M22")).toBe(18515);
+    expect(value(sheet, "R4")).toBe(3504);
+    expect(value(sheet, "R22")).toBe(7037);
+    expect(value(sheet, "M35")).toBe(30044);
+    expect(value(sheet, "R35")).toBe(10541);
+    expect(value(sheet, "V35")).toBe(94415);
+    expect(sheet.getCell("M4").numFmt).toBe('#,##0;[Red]-#,##0;0');
+    expect(sheet.getCell("R4").numFmt).toBe('#,##0;[Red]-#,##0;0');
+  });
+
+  it("旧確定月の従業員日別小数額も勝手に1円へ丸めず保存する", async () => {
+    const data = report();
+    data.days[0].employeeGross = 6404.75;
+    data.days[1].employeeGross = 4195.25;
+    mockedBuild.mockReturnValue(data);
+    const restored = new ExcelJS.Workbook();
+    await restored.xlsx.load(await createMonthlyBalanceWorkbook(input, "旧確定月").xlsx.writeBuffer());
+    const sheet = restored.worksheets[0];
+    expect(value(sheet, "R4")).toBe(6404.75);
+    expect(value(sheet, "R22")).toBe(4195.25);
+    expect(value(sheet, "R35")).toBe(10600);
+    expect(sheet.getCell("R4").numFmt).toContain(".########");
+  });
+
   it("検証済み日別データを紹介料列追加後の正しい列へ出力する", () => {
     const book = createMonthlyBalanceWorkbook(input, "承認済みデータ（未確定）");
     expect(mockedBuild).toHaveBeenCalledWith(input);
-    expect(book.creator).toBe("GENESIS Management System Ver2.19.0");
+    expect(book.creator).toBe("GENESIS Management System Ver2.20.0");
     expect(book.worksheets).toHaveLength(1);
     const sheet = book.worksheets[0];
     expect(sheet.name).toBe("ジェネシス収支表");

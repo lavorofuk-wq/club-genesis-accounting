@@ -2,13 +2,13 @@ import {
   calculateCastRewards,
   calculateCastSalesReports,
   calculateDriverPayroll,
+  calculateDailyHourlyPay,
   castIdentityForMonth,
   castMasterIdentityForMonth,
   compareDailyClosingSubmissionOrder,
   compareIntroducerMonthEventEffectiveOrder,
   dailyClosingSubmissionOrderValue,
   findUnclassifiedLegacyBottles,
-  floorHundred,
   hasDailyClosingSubmissionOrder,
   introducerMonthEventEffectiveOrderValue,
   introducerSalesBase,
@@ -19,6 +19,7 @@ import type {
   CastReward,
   CastSalesReport,
   DailyClosing,
+  DailyHourlyPay,
   DriverPayrollRow,
   IntroducerDeletionCommit,
   IntroducerFeeType,
@@ -28,8 +29,8 @@ import type {
   WorkspaceData,
 } from "./gms";
 
-export const MONTHLY_CALCULATION_VERSION = "2.13.1";
-export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 2 as const;
+export const MONTHLY_CALCULATION_VERSION = "2.20.0";
+export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 3 as const;
 
 export type IntroducerEntryEvent = {
   id: string;
@@ -72,6 +73,8 @@ export type StaffPayrollRow = {
   name: string;
   hours: number;
   hourly: number;
+  /** 旧確定月では未保存。新形式では当日勤務から算出した1円単位の日額を保持する。 */
+  hourlyByDay?: DailyHourlyPay[];
   sales: number;
   bottle: number;
   gross: number;
@@ -136,8 +139,8 @@ export type AccountingMonthState = {
 };
 
 export type MonthlyAccountingSnapshot = MonthlyAccountingResults & {
-  /** schema 1はVer2.12以前、schema 2はキャスト売上・報酬を10円単位で保存する。 */
-  schemaVersion: 1 | 2;
+  /** schema 1は旧形式、2は10円報酬、3は日別時給1円・売上/バック/売上報酬10円。 */
+  schemaVersion: 1 | 2 | 3;
   calculationVersion: string;
   month: string;
   revision: number;
@@ -176,6 +179,12 @@ const supportsTenYenSnapshot = (value: string) => {
   // Ver2.13.0で確定済みのschema 2も、当時の金額を変えずに互換読込する。
   // 新規保存の最低versionはFirebase Rules側で別途2.13.1へ限定する。
   return major > 2 || (major === 2 && minor >= 13);
+};
+const supportsDailyHourlyYenSnapshot = (value: string) => {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(value);
+  if (!match) return false;
+  const [major, minor] = match.slice(1).map(Number);
+  return major > 2 || (major === 2 && minor >= 20);
 };
 const snapshotMillisecondsInstant = (value: unknown) => {
   if (!snapshotInteger(value)) return undefined;
@@ -289,6 +298,38 @@ function validSnapshotRows(value: unknown, stringKeys: string[], numericKeys: st
   return valid ? rows : undefined;
 }
 
+/** 日額は再計算せず、保存された1円額・営業日・時間・月額の整合だけを検証する。 */
+function normalizeSnapshotHourlyRows(
+  values: unknown[] | undefined, month: string, payKey: "hourlyPay" | "hourly", reports?: CastSalesReport[],
+): Record<string, unknown>[] | undefined {
+  if (!values) return undefined;
+  const normalized: Record<string, unknown>[] = [];
+  for (const item of values) {
+    if (!snapshotObject(item) || !snapshotInteger(item[payKey])
+      || (!Array.isArray(item.hourlyByDay) && !snapshotObject(item.hourlyByDay))) return undefined;
+    const days = snapshotList<unknown>(item.hourlyByDay);
+    if (days.length === 0 || days.some((day) => !snapshotObject(day)
+      || !snapshotDateInMonth(day.businessDate, month) || !snapshotNonNegative(day.hours)
+      || !Number.isSafeInteger(Number(day.hours) * 4) || !snapshotInteger(day.amount))) return undefined;
+    const hourlyByDay = (days as DailyHourlyPay[]).map((day) => ({ ...day }));
+    if (new Set(hourlyByDay.map((day) => day.businessDate)).size !== hourlyByDay.length
+      || hourlyByDay.reduce((sum, day) => sum + day.amount, 0) !== item[payKey]
+      || hourlyByDay.reduce((sum, day) => sum + day.hours, 0) !== item.hours) return undefined;
+    if (payKey === "hourlyPay") {
+      const report = reports?.find((row) => row.id === item.id);
+      if (!report) return undefined;
+      const hoursByDate = new Map<string, number>();
+      for (const source of report.days) {
+        hoursByDate.set(source.businessDate, (hoursByDate.get(source.businessDate) || 0) + source.hours);
+      }
+      if (hoursByDate.size !== hourlyByDay.length
+        || !hourlyByDay.every((day) => hoursByDate.get(day.businessDate) === day.hours)) return undefined;
+    }
+    normalized.push({ ...item, hourlyByDay });
+  }
+  return normalized;
+}
+
 /** Firebase境界で月次スナップショットを検証し、空配列がオブジェクト化された場合も復元する。 */
 export function normalizeMonthlyAccountingSnapshot(
   value: unknown,
@@ -297,10 +338,11 @@ export function normalizeMonthlyAccountingSnapshot(
 ): MonthlyAccountingSnapshot | undefined {
   if (!snapshotObject(value)) return undefined;
   const row = value as unknown as MonthlyAccountingSnapshot;
-  if ((row.schemaVersion !== 1 && row.schemaVersion !== 2) || row.month !== pathMonth || row.revision !== pathRevision
+  if ((row.schemaVersion !== 1 && row.schemaVersion !== 2 && row.schemaVersion !== 3) || row.month !== pathMonth || row.revision !== pathRevision
     || !Number.isSafeInteger(pathRevision) || pathRevision <= 0
     || typeof row.calculationVersion !== "string" || !row.calculationVersion
     || (row.schemaVersion === 2 && !supportsTenYenSnapshot(row.calculationVersion))
+    || (row.schemaVersion === 3 && !supportsDailyHourlyYenSnapshot(row.calculationVersion))
     || !/^[0-9a-f]{64}$/.test(String(row.sourceFingerprint || ""))
     || !Number.isSafeInteger(row.adjustmentsRevision) || row.adjustmentsRevision < 0
     || typeof row.createdAt !== "string" || typeof row.createdBy !== "string") return undefined;
@@ -312,9 +354,10 @@ export function normalizeMonthlyAccountingSnapshot(
     row.balance.cast, row.balance.introducer, row.balance.staff, row.balance.driver,
     row.balance.expenses, row.balance.totalCosts, row.balance.profit].every(snapshotNumber)) return undefined;
 
-  const requireTenYen = row.schemaVersion === 2;
+  const requireTenYen = row.schemaVersion >= 2;
+  const requireDailyHourlyYen = row.schemaVersion === 3;
   const castSalesReports = normalizeSnapshotCastSales(row.castSalesReports, pathMonth, requireTenYen);
-  const castRewards = validSnapshotRows(row.castRewards, ["id", "name", "adoptedSystem"], [
+  const storedCastRewards = validSnapshotRows(row.castRewards, ["id", "name", "adoptedSystem"], [
     "hours", "hourlyPay", "honShimeiSales", "jonaiExtensionSales", "liquorCost", "honShimeiLiquorCost",
     "honShimeiBack", "banaiShimeiBack", "dohanBack", "bottleBack", "drinkBack", "hourlyAndBack",
     "rewardRate", "salesRewardBase", "salesReward", "adoptedReward", "beautyAllowance", "grossPay",
@@ -324,10 +367,15 @@ export function normalizeMonthlyAccountingSnapshot(
     booleanKeys: ["trialOnly"],
     allowNegativeKeys: ["netPay"],
   });
+  const castRewards = requireDailyHourlyYen
+    ? normalizeSnapshotHourlyRows(storedCastRewards, pathMonth, "hourlyPay", castSalesReports)
+    : storedCastRewards;
   const introducerPayments = validSnapshotRows(row.introducerPayments,
     ["id", "introducer", "cast", "feeType", "adopted"],
     ["honShimeiLiquorCost", "salesBase", "salesFee", "grossBase", "grossFee", "attendanceAdvisory", "entryAdvisory", "advisory", "total"]);
-  const staffPayroll = validSnapshotRows(row.staffPayroll, ["id", "name"], ["hours", "hourly", "sales", "bottle", "gross", "daily"], { allowNegativeKeys: ["net"] });
+  const storedStaffPayroll = validSnapshotRows(row.staffPayroll, ["id", "name"], ["hours", "hourly", "sales", "bottle", "gross", "daily"], { allowNegativeKeys: ["net"] });
+  const staffPayroll = requireDailyHourlyYen
+    ? normalizeSnapshotHourlyRows(storedStaffPayroll, pathMonth, "hourly") : storedStaffPayroll;
   const driverPayroll = validSnapshotRows(row.driverPayroll, ["id", "name"], ["basic", "remote", "gross", "dailyPayment"], { integerKeys: ["days"], allowNegativeKeys: ["net"] });
   const approvedClosings = validSnapshotRows(row.approvedClosings, ["id", "checksum", "updatedAt"], []);
   const warnings = snapshotList<unknown>(row.warnings);
@@ -337,10 +385,11 @@ export function normalizeMonthlyAccountingSnapshot(
     return (item.adoptedSystem === "hourlyAndBack" || item.adoptedSystem === "salesReward")
       && Number(item.rewardRate) <= 1
       && (!requireTenYen || [
-        "hourlyPay", "honShimeiSales", "jonaiExtensionSales", "honShimeiBack", "banaiShimeiBack",
-        "dohanBack", "bottleBack", "drinkBack", "hourlyAndBack", "salesRewardBase", "salesReward",
-        "adoptedReward",
+        "honShimeiSales", "jonaiExtensionSales", "honShimeiBack", "banaiShimeiBack",
+        "dohanBack", "bottleBack", "drinkBack", "salesRewardBase", "salesReward",
       ].every((key) => snapshotTenYen(item[key])))
+      && (!requireTenYen || ["hourlyPay", "hourlyAndBack", "adoptedReward"]
+        .every((key) => requireDailyHourlyYen ? snapshotInteger(item[key]) : snapshotTenYen(item[key])))
       && item.hourlyAndBack === Number(item.hourlyPay) + Number(item.honShimeiBack) + Number(item.banaiShimeiBack)
         + Number(item.dohanBack) + Number(item.bottleBack) + Number(item.drinkBack)
       && item.adoptedReward === Math.max(Number(item.hourlyAndBack), Number(item.salesReward))
@@ -484,6 +533,7 @@ export function calculateStaffPayroll(
   month = "",
 ): StaffPayrollRow[] {
   const map = new Map<string, StaffPayrollRow>();
+  const hourlyEntries = new Map<string, Array<{ businessDate: string; hours: number; hourlyRate: number }>>();
   const staffById = new Map(staff.map((member) => [member.id, member]));
   const monthWorkIds = new Set(closings.flatMap((closing) => (closing.staffWork ?? [])
     .filter((work) => work.kind === "regular")
@@ -512,14 +562,17 @@ export function calculateStaffPayroll(
       net: 0,
     };
     row.hours += work.hours;
-    row.hourly += work.hourlyRate * work.hours;
+    const entries = hourlyEntries.get(staffId) || [];
+    entries.push({ businessDate: closing.businessDate, hours: work.hours, hourlyRate: work.hourlyRate });
+    hourlyEntries.set(staffId, entries);
     row.daily += work.dailyPayment;
     map.set(staffId, row);
   }));
   return [...map.values()].map((row) => {
-    const hourly = floorHundred(row.hourly);
+    const hourlyByDay = calculateDailyHourlyPay(hourlyEntries.get(row.id) || []);
+    const hourly = hourlyByDay.reduce((sum, day) => sum + day.amount, 0);
     const gross = hourly + row.sales + row.bottle;
-    return { ...row, hourly, gross, net: gross - row.daily };
+    return { ...row, hourly, hourlyByDay, gross, net: gross - row.daily };
   });
 }
 

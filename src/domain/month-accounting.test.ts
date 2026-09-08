@@ -23,6 +23,7 @@ import {
   normalizeIntroducerMonthEvent,
   normalizeMonthlyAccountingSnapshot,
   type IntroducerEntryEvent,
+  type MonthlyAccountingSnapshot,
 } from "./month-accounting";
 
 const month = "2026-09";
@@ -204,6 +205,143 @@ function approvedClosing(overrides: Partial<DailyClosing> = {}): DailyClosing {
 }
 
 describe("月次会計ドメイン", () => {
+  function hourlyYenSnapshot() {
+    const closing = approvedClosing({
+      casts: [dailyCast({ hours: 4.25, endTime: "00:15", hourlyRate: 3500, dailyPayment: 14870, beautyAllowance: 500 })],
+      staffWork: [{ staffId: "staff-1", name: "スタッフ一郎", kind: "trial", startTime: "20:00", endTime: "00:15", hours: 4.25, hourlyRate: 1507, dailyPayment: 6400 }],
+      staffDailyPaymentTotal: 6400,
+      cash: { cashSales: 0, cardSales: 0, totalSales: 0, cashFloat: 200000, expenseAndPaymentTotal: 21270, expectedClosingCash: 178730, cashProfit: -21270, actualClosingCash: 178730, difference: 0 },
+    });
+    const source = workspace({ casts: [cast({ hourlyRates: { [month]: 3500 } })], staff: [staff()], closings: [closing] });
+    const input = adjustments({ staffSalesAllowance: { "staff-1": 301 }, staffBottleAllowance: { "staff-1": 202 } });
+    const results = calculateMonthlyAccounting(source, month, input);
+    const snapshot = buildMonthlySnapshot(month, 1, "a".repeat(64), input, results, source.closings, "accounting-user", "2026-09-30T23:59:59.000Z");
+    return { source, input, results, snapshot };
+  }
+
+  it("時給だけ1円化し、記録済み支払・現金を変更せず差額を月次に残す", () => {
+    const { source, input, results, snapshot } = hourlyYenSnapshot();
+    const before = structuredClone(source);
+    expect(results.castRewards[0]).toMatchObject({
+      hourlyPay: 14875, hourlyAndBack: 14875, adoptedReward: 14875,
+      beautyAllowance: 500, grossPay: 15375, dailyPayment: 14870, netPay: 505,
+      hourlyByDay: [{ businessDate: "2026-09-02", hours: 4.25, amount: 14875 }],
+    });
+    expect(results.staffPayroll[0]).toMatchObject({
+      hourly: 6404, sales: 301, bottle: 202, gross: 6907, daily: 6400, net: 507,
+      hourlyByDay: [{ businessDate: "2026-09-02", hours: 4.25, amount: 6404 }],
+    });
+    expect(calculateMonthlyAccounting(source, month, input)).toEqual(results);
+    expect(source).toEqual(before);
+    expect(normalizeMonthlyAccountingSnapshot(snapshot, month, 1)?.castRewards).toEqual(results.castRewards);
+    expect(normalizeMonthlyAccountingSnapshot(snapshot, month, 1)?.staffPayroll).toEqual(results.staffPayroll);
+  });
+
+  it("スタッフ時給も日ごとに1円未満を切り捨て、現在マスタ単価に置換しない", () => {
+    const closings = ["02", "03"].map((day) => approvedClosing({
+      id: `day-${day}`, businessDate: `${month}-${day}`,
+      staffWork: [{ staffId: "staff-1", name: "スタッフ", kind: "regular", startTime: "20:00", endTime: "20:15", hours: 0.25, hourlyRate: 1503, dailyPayment: 0 }],
+    }));
+    const results = calculateMonthlyAccounting(workspace({ staff: [staff({ hourlyRate: 9999 })], closings }), month, adjustments());
+    expect(results.staffPayroll[0]).toMatchObject({ hourly: 750, gross: 750, net: 750, hourlyByDay: [
+      { businessDate: "2026-09-02", hours: 0.25, amount: 375 },
+      { businessDate: "2026-09-03", hours: 0.25, amount: 375 },
+    ] });
+  });
+
+  it("未確定月の在籍時給は月度単価を全日へ適用し、日払いを再計算しない", () => {
+    const { source, input } = hourlyYenSnapshot();
+    source.closings.push({ ...structuredClone(source.closings[0]), id: "closing-2", businessDate: "2026-09-03", staffWork: [], staffDailyPaymentTotal: 0 });
+    source.casts[0].hourlyRates[month] = 4500;
+    const before = structuredClone(source);
+    const result = calculateMonthlyAccounting(source, month, input).castRewards[0];
+    expect(result.hourlyPay).toBe(19125 * 2);
+    expect(result.hourlyByDay?.map((day) => day.amount)).toEqual([19125, 19125]);
+    expect(result.dailyPayment).toBe(14870 * 2);
+    expect(source).toEqual(before);
+  });
+
+  it("schema 3は日別時給のFirebaseオブジェクト形式を復元し、保存元を変更しない", () => {
+    const { snapshot } = hourlyYenSnapshot();
+    const saved = JSON.parse(JSON.stringify(snapshot));
+    for (const rows of [saved.castRewards, saved.staffPayroll]) {
+      rows[0].hourlyByDay = { 0: rows[0].hourlyByDay[0] };
+    }
+    const before = structuredClone(saved);
+    const restored = normalizeMonthlyAccountingSnapshot(saved, month, 1)!;
+    expect(restored.schemaVersion).toBe(3);
+    expect(restored.calculationVersion).toBe("2.20.0");
+    expect(restored.castRewards[0].hourlyByDay).toEqual(snapshot.castRewards[0].hourlyByDay);
+    expect(restored.staffPayroll[0].hourlyByDay).toEqual(snapshot.staffPayroll[0].hourlyByDay);
+    expect(saved).toEqual(before);
+  });
+
+  it("同一人物・同営業日の複数POS勤務も日別合算して確定保存できる", () => {
+    const closing = approvedClosing({ casts: [
+      dailyCast({ posCastId: "pos-a", hours: 0.25, hourlyRate: 1503 }),
+      dailyCast({ posCastId: "pos-b", hours: 0.25, hourlyRate: 1503 }),
+    ] });
+    const source = workspace({ casts: [cast({ hourlyRates: { [month]: 1503 } })], closings: [closing] });
+    const input = adjustments();
+    const results = calculateMonthlyAccounting(source, month, input);
+    const snapshot = buildMonthlySnapshot(month, 1, "a".repeat(64), input, results, source.closings, "accounting-user", "2026-09-30T23:59:59.000Z");
+    expect(snapshot.castRewards[0].hourlyByDay).toEqual([{ businessDate: "2026-09-02", hours: 0.5, amount: 751 }]);
+    expect(normalizeMonthlyAccountingSnapshot(snapshot, month, 1)?.castRewards[0].hourlyPay).toBe(751);
+  });
+
+  const corruptHourlyDay: Array<[string, (snapshot: MonthlyAccountingSnapshot) => void]> = [
+    ["キャスト日額なし", (s) => { delete s.castRewards[0].hourlyByDay; }],
+    ["スタッフ日額なし", (s) => { delete s.staffPayroll[0].hourlyByDay; }],
+    ["空の日額", (s) => { s.castRewards[0].hourlyByDay = []; }],
+    ["重複日付", (s) => { s.castRewards[0].hourlyByDay!.push({ ...s.castRewards[0].hourlyByDay![0] }); }],
+    ["他の月", (s) => { s.castRewards[0].hourlyByDay![0].businessDate = "2026-10-02"; }],
+    ["存在しない日付", (s) => { s.castRewards[0].hourlyByDay![0].businessDate = "2026-09-31"; }],
+    ["売上明細と異なる日付", (s) => { s.castRewards[0].hourlyByDay![0].businessDate = "2026-09-03"; }],
+    ["日額合計不一致", (s) => { s.castRewards[0].hourlyByDay![0].amount += 1; }],
+    ["1円未満", (s) => { s.castRewards[0].hourlyByDay![0].amount += 0.5; }],
+    ["マイナス日額", (s) => { s.staffPayroll[0].hourlyByDay![0].amount = -1; }],
+    ["勤務合計不一致", (s) => { s.staffPayroll[0].hourlyByDay![0].hours += 0.25; }],
+    ["15分以外", (s) => { s.staffPayroll[0].hourlyByDay![0].hours = 4.1; }],
+    ["月間時給に1円未満", (s) => { s.staffPayroll[0].hourly += 0.5; }],
+    ["旧計算version", (s) => { s.calculationVersion = "2.19.0"; }],
+  ];
+  it.each(corruptHourlyDay)("schema 3の不正な日別時給を拒否する：%s", (_name, corrupt) => {
+    const { snapshot } = hourlyYenSnapshot();
+    corrupt(snapshot);
+    expect(normalizeMonthlyAccountingSnapshot(snapshot, month, 1)).toBeUndefined();
+  });
+
+  it.each(["honShimeiSales", "jonaiExtensionSales", "honShimeiBack", "banaiShimeiBack", "dohanBack", "bottleBack", "drinkBack", "salesRewardBase", "salesReward"] as const)(
+    "schema 3でも%sの10円未満は受け付けない", (key) => {
+      const { snapshot } = hourlyYenSnapshot();
+      snapshot.castRewards[0][key] += 1;
+      expect(normalizeMonthlyAccountingSnapshot(snapshot, month, 1)).toBeUndefined();
+    },
+  );
+
+  it.each([1, 2] as const)("schema %sで確定済みの旧時給・日払い・差引額は再計算しない", (schemaVersion) => {
+    const { snapshot } = hourlyYenSnapshot();
+    snapshot.schemaVersion = schemaVersion;
+    snapshot.calculationVersion = schemaVersion === 1 ? "2.12.0" : "2.19.0";
+    const reward = snapshot.castRewards[0];
+    Object.assign(reward, { hourlyPay: 14870, hourlyAndBack: 14870, adoptedReward: 14870, grossPay: 15370, netPay: 500 });
+    const payroll = snapshot.staffPayroll[0];
+    Object.assign(payroll, { hourly: 6400, gross: 6903, net: 503 });
+    delete reward.hourlyByDay;
+    delete payroll.hourlyByDay;
+    snapshot.balance.cast -= 5;
+    snapshot.balance.staff -= 4;
+    snapshot.balance.totalCosts -= 9;
+    snapshot.balance.profit += 9;
+    const before = structuredClone(snapshot);
+    const restored = normalizeMonthlyAccountingSnapshot(snapshot, month, 1)!;
+    expect(restored).toBeDefined();
+    expect(restored.castRewards).toEqual(before.castRewards);
+    expect(restored.staffPayroll).toEqual(before.staffPayroll);
+    expect(restored.balance).toEqual(before.balance);
+    expect(snapshot).toEqual(before);
+  });
+
   it("紹介者報酬は場内延長を含めず、本指名基準・原価引き・総支給を1円単位で算出する", () => {
     const baseReward = {
       id: "cast-1",
@@ -640,6 +778,10 @@ describe("月次会計ドメイン", () => {
       name: activeStaff.name,
       hours: 8,
       hourly: 14_000,
+      hourlyByDay: [
+        { businessDate: "2026-09-05", hours: 4, amount: 6_000 },
+        { businessDate: "2026-09-12", hours: 4, amount: 8_000 },
+      ],
       sales: 0,
       bottle: 0,
       gross: 14_000,
@@ -913,6 +1055,8 @@ describe("月次会計ドメイン", () => {
     const base = buildMonthlySnapshot(month, 1, await monthlySourceFingerprint(source, month, input), input,
       calculateMonthlyAccounting(source, month, input), source.closings,
       "accounting-user", "2026-09-30T23:59:59.000Z");
+    base.schemaVersion = 2;
+    base.calculationVersion = "2.19.0";
 
     const oneYenSales = structuredClone(base);
     const salesDay = oneYenSales.castSalesReports[0].days[0];
@@ -948,6 +1092,7 @@ describe("月次会計ドメイン", () => {
     const snapshot = buildMonthlySnapshot(month, 1, await monthlySourceFingerprint(source, month, input), input,
       calculateMonthlyAccounting(source, month, input), source.closings,
       "accounting-user", "2026-09-30T23:59:59.000Z");
+    snapshot.schemaVersion = 2;
 
     expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "2.12.9" }, month, 1)).toBeUndefined();
     // Ver2.13.0で確定済みのschema 2は、過去金額を保持して互換読込する。
