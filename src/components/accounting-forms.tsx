@@ -14,7 +14,7 @@ import { approveClosing, cancelAccountingMonthClosing, finalizeAccountingMonth, 
 import { Card, Field, MoneyInput, StatusPill, Table, currentMonth, yen } from "./ui";
 import { summarizeCastDrinksByPrice } from "./store-work";
 import { useRecoverableState, useUpdateDraftBusy } from "./update-drafts";
-import { cashFundingIssues, type CashFundingSummary } from "@/domain/cash-funding";
+import { cashDayIssues, cashFundingIssues, cashLedgerIssues, type CashFundingSummary } from "@/domain/cash-funding";
 import { IntroducerPayments } from "./introducer-payments";
 
 type Props = { data: AccountingWorkspaceData; user: User; busy: boolean; run: (action: () => Promise<unknown>, message: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void };
@@ -29,8 +29,18 @@ export function AccountingForms({ section, ...props }: Props & { section: Sectio
   return <MonthlyAccounting section={section} {...props} />;
 }
 
-function closingRevisionKey(closing: DailyClosing) {
-  return [closing.id, closing.status, closing.updatedAt, closing.checksum].join(":");
+export function closingReviewKey(closing: DailyClosing, closings: DailyClosing[]) {
+  const previous = closings.filter((row) => row.businessDate < closing.businessDate)
+    .sort((a, b) => a.businessDate.localeCompare(b.businessDate) || a.id.localeCompare(b.id)).at(-1);
+  return JSON.stringify({ revision: [closing.id, closing.status, closing.updatedAt, closing.checksum],
+    cash: closing.cash, previous: previous && { id: previous.id, businessDate: previous.businessDate, cash: previous.cash },
+    // 前々日以前の変更は繰越不整合として検出する。全過去cashを各行のキーへ複製しない。
+    issues: closingApprovalCashIssues(closing, closings) });
+}
+
+export function closingApprovalCashIssues(closing: DailyClosing, closings: DailyClosing[]) {
+  return [...new Set([...cashDayIssues(closing, closings),
+    ...cashLedgerIssues(closings.filter((row) => row.businessDate <= closing.businessDate), closing.businessDate.slice(0, 7))])];
 }
 
 function accountingMonthLockMessage(data: AccountingWorkspaceData, businessDate: string) {
@@ -43,6 +53,12 @@ function accountingMonthLockMessage(data: AccountingWorkspaceData, businessDate:
 function ApprovalView({ data, user, busy, run }: Props) {
   const [expanded, setExpanded] = useRecoverableState("accounting.approval.expanded", "");
   const [reviewed, setReviewed] = useState<Record<string, boolean>>({});
+  const reviewKeys = JSON.stringify(data.closings.map((row) => closingReviewKey(row, data.closings)).sort());
+  useEffect(() => {
+    const currentKeys = new Set<string>(JSON.parse(reviewKeys) as string[]);
+    // 前提変更で失効した確認は破棄する。後から金額が元へ戻っても確認済みを復元しない。
+    setReviewed((rows) => Object.fromEntries(Object.entries(rows).filter(([key]) => currentKeys.has(key))));
+  }, [reviewKeys]);
   const expandedClosing = data.closings.find((row) => row.id === expanded);
   return <div className="grid">
     <div className="grid metrics">
@@ -54,11 +70,11 @@ function ApprovalView({ data, user, busy, run }: Props) {
     <Card title="店舗送信データの確認・承認" description="店舗データと現金照合の全項目を詳細で確認してから承認します。">
       <Table headers={["営業日", "状態", "総売上", "経費・支払", "営業終了時現金", "照合", "操作"]}>
         {data.closings.filter((row) => row.status !== "withdrawn").map((row) => {
-          const revisionKey = closingRevisionKey(row);
+          const revisionKey = closingReviewKey(row, data.closings);
           const isReviewed = Boolean(reviewed[revisionKey]);
           const monthLock = accountingMonthLockMessage(data, row.businessDate);
-          const fundingProblems = cashFundingIssues(row.cash);
-          return <tr key={row.id}><td>{row.businessDate}</td><td><StatusPill tone={row.status === "approved" ? "good" : row.status === "returned" ? "danger" : "warn"}>{statusLabel[row.status]}</StatusPill></td><td>{yen.format(row.sales.totalSales)}</td><td>{yen.format(row.cash.expenseAndPaymentTotal)}</td><td>{yen.format(row.cash.actualClosingCash)}</td><td className={row.cash.difference ? "text-danger" : "text-good"}>{row.cash.funding ? <StatusPill tone={row.cash.funding.confirmed && !fundingProblems.length ? "good" : "warn"}>{row.cash.funding.confirmed && !fundingProblems.length ? "照合確認済み" : "要確認"}</StatusPill> : yen.format(row.cash.difference)}</td><td><div className="row-actions">
+          const fundingProblems = closingApprovalCashIssues(row, data.closings);
+          return <tr key={row.id}><td>{row.businessDate}</td><td><StatusPill tone={row.status === "approved" ? "good" : row.status === "returned" ? "danger" : "warn"}>{statusLabel[row.status]}</StatusPill></td><td>{yen.format(row.sales.totalSales)}</td><td>{yen.format(row.cash.expenseAndPaymentTotal)}</td><td>{yen.format(row.cash.actualClosingCash)}</td><td><StatusPill tone={!fundingProblems.length ? "good" : "warn"}>{!fundingProblems.length ? "照合確認済み" : !row.cash.funding ? "補充・返済未入力" : "要確認"}</StatusPill></td><td><div className="row-actions">
             <button className="button secondary mini" disabled={busy} onClick={() => setExpanded(expanded === row.id ? "" : row.id)}>{expanded === row.id ? "閉じる" : "詳細"}</button>
             {row.status === "submitted" && <button className="button mini" title={monthLock || fundingProblems[0] || (!isReviewed ? "詳細下部の確認ボタンを押してください。" : undefined)} disabled={busy || Boolean(monthLock) || !isReviewed || (row.integrityIssues?.length || 0) > 0 || fundingProblems.length > 0} onClick={() => { if (window.confirm(`${row.businessDate}の店舗データと現金照合を承認しますか？`)) void run(() => approveClosing(row.id, { businessDate: row.businessDate, updatedAt: row.updatedAt, checksum: row.checksum, submissionId: row.submissionId }, user), "店舗データを承認しました。"); }}>承認</button>}
             {(row.status === "submitted" || row.status === "approved") && <button className="button danger mini" title={monthLock || undefined} disabled={busy || Boolean(monthLock)} onClick={() => {
@@ -67,26 +83,27 @@ function ApprovalView({ data, user, busy, run }: Props) {
               if (reason?.trim()) void run(() => returnClosing(row.id, { businessDate: row.businessDate, updatedAt: row.updatedAt, checksum: row.checksum, submissionId: row.submissionId }, reason, user), "店舗へ差し戻しました。");
             }}>差戻し</button>}
             {monthLock && <small className="text-danger">{monthLock}</small>}
+            {fundingProblems.length > 0 && <small className="text-danger">{fundingProblems[0]}</small>}
           </div></td></tr>;
         })}
       </Table>
-      {expandedClosing && <ClosingDetail closing={expandedClosing} reviewed={Boolean(reviewed[closingRevisionKey(expandedClosing)])} disabled={busy || Boolean(accountingMonthLockMessage(data, expandedClosing.businessDate))} onReviewed={() => setReviewed((rows) => ({ ...rows, [closingRevisionKey(expandedClosing)]: true }))} />}
+      {expandedClosing && <ClosingDetail closing={expandedClosing} closings={data.closings} reviewed={Boolean(reviewed[closingReviewKey(expandedClosing, data.closings)])} disabled={busy || Boolean(accountingMonthLockMessage(data, expandedClosing.businessDate))} onReviewed={() => setReviewed((rows) => ({ ...rows, [closingReviewKey(expandedClosing, data.closings)]: true }))} />}
       {expanded && !expandedClosing && <div className="notice error">対象データが更新されたため、最新データを読み込んでください。</div>}
     </Card>
   </div>;
 }
 
-function ClosingDetail({ closing, reviewed, disabled, onReviewed }: { closing: DailyClosing; reviewed: boolean; disabled: boolean; onReviewed: () => void }) {
+function ClosingDetail({ closing, closings, reviewed, disabled, onReviewed }: { closing: DailyClosing; closings: DailyClosing[]; reviewed: boolean; disabled: boolean; onReviewed: () => void }) {
   const expenseTotal = closing.expenses.reduce((sum, row) => sum + row.amount, 0);
   const regularDaily = closing.casts.filter((row) => row.kind === "regular").reduce((sum, row) => sum + row.dailyPayment, 0);
   const trialDaily = closing.casts.filter((row) => row.kind === "trial").reduce((sum, row) => sum + row.dailyPayment, 0);
   const staffDaily = closing.staffWork.reduce((sum, row) => sum + row.dailyPayment, 0);
   const driverDaily = closing.drivers.reduce((sum, row) => sum + row.dailyPayment, 0);
-  const fundingProblems = cashFundingIssues(closing.cash);
+  const fundingProblems = closingApprovalCashIssues(closing, closings);
   return <div className="detail-panel">
     {(closing.integrityIssues?.length || 0) > 0 && <div className="notice error"><strong>この営業日のデータが不完全です。</strong><ul>{closing.integrityIssues?.map((issue) => <li key={issue}>{issue}</li>)}</ul></div>}
     {closing.returnReason && <div className="notice error"><strong>差戻し理由</strong><br />{closing.returnReason}</div>}
-    <div className="summary-strip"><span><small>総売上</small><strong>{yen.format(closing.sales.totalSales)}</strong></span><span><small>現金売上</small><strong>{yen.format(closing.sales.cashSales)}</strong></span><span><small>カード売上</small><strong>{yen.format(closing.sales.cardSales)}</strong></span><span><small>{closing.cash.funding ? "現金照合" : "現金差額"}</small><strong className={closing.cash.difference ? "text-danger" : "text-good"}>{closing.cash.funding ? closing.cash.funding.confirmed && !fundingProblems.length ? "照合確認済み" : "要確認" : yen.format(closing.cash.difference)}</strong></span></div>
+    <div className="summary-strip"><span><small>総売上</small><strong>{yen.format(closing.sales.totalSales)}</strong></span><span><small>現金売上</small><strong>{yen.format(closing.sales.cashSales)}</strong></span><span><small>カード売上</small><strong>{yen.format(closing.sales.cardSales)}</strong></span><span><small>現金照合</small><strong className={fundingProblems.length ? "text-danger" : "text-good"}>{!fundingProblems.length ? "照合確認済み" : !closing.cash.funding ? "補充・返済未入力" : "要確認"}</strong></span></div>
     <h3>店舗データプレビュー</h3>
     <Table headers={["キャスト", "出退勤・時間", "本指名/場内/同伴", "本指名売上", "場内延長売上", "ボトル・ドリンク明細", "手当・控除"]}>
       {closing.casts.map((row) => <tr key={row.posCastId}><td><strong>{row.name}</strong><br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td><td>{row.startTime}–{row.endTime}<br />{row.hours}時間</td><td>{row.honShimeiCount} / {row.banaiShimeiCount} / {row.dohanCount}</td><td>{yen.format(row.honShimeiSales)}</td><td>{yen.format(row.jonaiExtensionSales)}</td><td className="wrap-cell"><ClosingCastProductDetails row={row} pos={closing.posSnapshot} /></td><td className="wrap-cell">美容室 {yen.format(row.beautyAllowance)}<br />日払い {yen.format(row.dailyPayment)}<br />立替 {yen.format(row.advancePayment)}<br />送迎 {yen.format(row.transportFee)}</td></tr>)}
@@ -100,20 +117,21 @@ function ClosingDetail({ closing, reviewed, disabled, onReviewed }: { closing: D
     <div className="grid two"><Table headers={["当日経費", "支払先", "金額"]}>{closing.expenses.map((row) => <tr key={row.id}><td>{expenseLabels[row.category] || row.category || "科目未設定"}</td><td>{row.payee}</td><td>{yen.format(row.amount)}</td></tr>)}</Table><Table headers={["現金支払内訳", "金額"]}>
       <tr><td>経費総計</td><td>{yen.format(expenseTotal)}</td></tr><tr><td>在籍キャスト日払い</td><td>{yen.format(regularDaily)}</td></tr><tr><td>体入キャスト即日払い</td><td>{yen.format(trialDaily)}</td></tr><tr><td>スタッフ日払い</td><td>{yen.format(staffDaily)}</td></tr><tr><td>ドライバー日払い</td><td>{yen.format(driverDaily)}</td></tr><tr><td>派遣キャスト支払</td><td>{yen.format(closing.dispatchCastPayment)}</td></tr><tr><td>派遣スタッフ支払</td><td>{yen.format(closing.dispatchStaffPayment)}</td></tr><tr><td>派遣手数料</td><td>{yen.format(closing.dispatchFee)}</td></tr><tr className="total-row"><td>経費・支払合計</td><td><strong>{yen.format(closing.cash.expenseAndPaymentTotal)}</strong></td></tr>
     </Table></div>
-    <Table headers={["現金照合計算", "金額"]}><tr><td>現金売上 ＋ つり銭</td><td>{yen.format(closing.cash.cashSales + closing.cash.cashFloat)}</td></tr><tr><td>{closing.cash.funding ? "補充・送金・返済後の営業終了時現金残額" : "経費・支払控除後（営業終了時の計算上現金残額）"}</td><td>{yen.format(closing.cash.expectedClosingCash)}</td></tr><tr><td>{closing.cash.funding ? "営業による現金収支（補充・返済を除く）" : "つり銭控除後の現金利益"}</td><td>{yen.format(closing.cash.cashProfit)}</td></tr><tr><td>営業終了時の現金実在高</td><td>{yen.format(closing.cash.actualClosingCash)}</td></tr><tr className="total-row"><td>{closing.cash.funding ? "照合確認" : "現金差額"}</td><td className={closing.cash.difference ? "text-danger" : "text-good"}><strong>{closing.cash.funding ? closing.cash.funding.confirmed && !fundingProblems.length ? "照合確認済み" : "要確認" : yen.format(closing.cash.difference)}</strong></td></tr><tr><td>酒代納品書分（当日現金控除外）</td><td>{yen.format(closing.liquorDeliveryAmount)}</td></tr></Table>
-    <CashFundingDetail cash={closing.cash} />
+    <Table headers={["現金照合計算", "金額"]}><tr><td>現金売上 ＋ つり銭</td><td>{yen.format(closing.cash.cashSales + closing.cash.cashFloat)}</td></tr><tr><td>営業終了時の計算上現金残額</td><td>{yen.format(closing.cash.expectedClosingCash)}</td></tr><tr><td>営業による現金収支（補充・返済を除く）</td><td>{yen.format(closing.cash.cashProfit)}</td></tr><tr><td>記録済みの営業終了時現金額</td><td>{yen.format(closing.cash.actualClosingCash)}</td></tr><tr><td>記録済みの現金差額</td><td className={closing.cash.difference ? "text-danger" : "text-good"}>{yen.format(closing.cash.difference)}</td></tr><tr className="total-row"><td>照合確認</td><td className={fundingProblems.length ? "text-danger" : "text-good"}><strong>{!fundingProblems.length ? "照合確認済み" : !closing.cash.funding ? "補充・返済未入力" : "要確認"}</strong></td></tr><tr><td>酒代納品書分（当日現金控除外）</td><td>{yen.format(closing.liquorDeliveryAmount)}</td></tr></Table>
+    <CashFundingDetail cash={closing.cash} dependencyIssues={fundingProblems} />
     {closing.status === "submitted" && <div className="actions top-gap"><button className="button" disabled={disabled || reviewed || (closing.integrityIssues?.length || 0) > 0 || fundingProblems.length > 0} onClick={onReviewed}>{reviewed ? "全項目を確認済み" : "店舗・現金プレビューの全項目を確認済みにする"}</button></div>}
   </div>;
 }
 
-export function CashFundingDetail({ cash }: { cash: CashReconciliation }) {
+export function CashFundingDetail({ cash, dependencyIssues = [] }: { cash: CashReconciliation; dependencyIssues?: string[] }) {
   const funding = cash.funding;
-  if (!funding) return null;
+  if (!funding) return <div className="notice warn top-gap"><strong>補充・返済未入力／要確認</strong><p>この営業日の補充元・会社送金・実際の返済額を確認してください。未記録の金額を0円として補完しません。保存済みの現金実在高・差額は記録として保持しています。</p>{dependencyIssues.length > 0 && <ul>{dependencyIssues.map((issue) => <li key={issue}>{issue}</li>)}</ul>}</div>;
   const issues = cashFundingIssues(cash);
   if (issues.length > 0) return <div className="notice error top-gap"><strong>現金補充・返済の記録を確認してください。</strong><ul>{issues.map((issue) => <li key={issue}>{issue}</li>)}</ul></div>;
   return <div className="top-gap">
     <h3>現金補充・返済（損益とは別管理）</h3>
-    <p className="muted compact-text">会社補充は返済不要です。個人補充は借りとして管理し、営業後の余剰現金と会社送金から可能な額を返済します。</p>
+    {dependencyIssues.length > 0 && <div className="notice error"><strong>前営業日との照合が必要です。保存済みの補充・返済額は自動変更していません。</strong><ul>{dependencyIssues.map((issue) => <li key={issue}>{issue}</li>)}</ul></div>}
+    <p className="muted compact-text">会社補充は返済不要です。個人補充は借りとして管理し、確認された実際の返済額を記録しています。過去の入力を修正しても、この返済実績を推奨額へ自動変更しません。</p>
     <Table headers={["区分", "金額・内容"]}>
       <tr><td>前営業日</td><td>{funding.previousBusinessDate || "初回（前営業日なし）"}</td></tr>
       <tr><td>前営業日の現金残高</td><td>{yen.format(funding.previousClosingCash)}</td></tr>
@@ -122,7 +140,7 @@ export function CashFundingDetail({ cash }: { cash: CashReconciliation }) {
       <tr><td>会社からの補充（返済不要）</td><td>{yen.format(funding.companyReplenishment)}</td></tr>
       <tr><td>個人による補充（借り）</td><td>{yen.format(funding.personalReplenishment)}</td></tr>
       <tr><td>会社からの送金（返済原資）</td><td>{yen.format(funding.companyTransfer)}</td></tr>
-      <tr><td>個人への返済</td><td>{yen.format(funding.personalRepayment)}</td></tr>
+      <tr><td>個人への実際の返済</td><td>{yen.format(funding.personalRepayment)}</td></tr>
       <tr className="total-row"><td>翌営業日へ繰り越す個人未返済残高</td><td><strong>{yen.format(funding.closingPersonalDebt)}</strong></td></tr>
     </Table>
   </div>;
@@ -188,6 +206,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
   const results = closed ? currentSnapshot : calculationsBlocked ? undefined : liveResults;
   const approved = data.closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(month));
   const finalizeCheck = canFinalizeMonthlyAccounting(data, month, adjustments, true);
+  const monthlyCashProblems = closed ? [] : cashLedgerIssues(data.closings, month);
   const setMap = (key: "withholdingByCast" | "staffSalesAllowance" | "staffBottleAllowance" | "driverRemoteAllowance", id: string, value: number) => setAdjustments((row) => ({ ...row, [key]: { ...row[key], [id]: value } }));
   const save = () => run(() => saveMonthlyAdjustments(adjustments, user), `${month}の経理入力を保存しました。`);
   const finalize = () => {
@@ -217,6 +236,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
     <Card><div className="month-toolbar"><Field label="対象月"><input className="input" type="month" value={month} onChange={(event) => changeMonth(event.target.value)} /></Field><span>承認済み営業日 <strong>{results?.approvedDays ?? approved.length}日</strong></span>{state?.status === "closed" ? <StatusPill tone="good">月次確定済み 第{state.currentSnapshotRevision}版</StatusPill> : state?.status === "closing" ? <StatusPill tone="warn">月次確定処理中</StatusPill> : <StatusPill>未確定</StatusPill>}{!closed && state?.status !== "closing" && (section !== "castSales" || adjustmentsDirty) && <button className="button" disabled={busy || !adjustmentsDirty} onClick={() => void save()}>経理入力を保存</button>}{!closed && state?.status !== "closing" && <button className="button secondary" disabled={busy || adjustmentsDirty || calculationsBlocked || !finalizeCheck.allowed} onClick={finalize}>月次確定</button>}{state?.status === "closing" && <button className="button danger" disabled={busy} onClick={cancelClosing}>確定処理を中止</button>}{closed && <button className="button danger" disabled={busy} onClick={reopen}>確定解除</button>}</div></Card>
     {state?.status === "closing" && <div className="notice error">月次確定処理中です。画面を更新しても解消しない場合は、処理を行った担当者と通信状態を確認してください。</div>}
     {!closed && finalizeCheck.unresolvedDaily.length > 0 && <div className="notice error"><strong>未承認・差戻し中・店舗編集中の日次データがあるため月次確定できません。</strong><ul>{finalizeCheck.unresolvedDaily.map((row) => <li key={row.id}>{row.businessDate}：{statusLabel[row.status]}</li>)}</ul></div>}
+    {monthlyCashProblems.length > 0 && <div className="notice error"><strong>現金補充・返済の未入力または前営業日との不整合があります。</strong><p>該当日を日付順に再確認してください。補充・返済額や後続日の支払実績は自動補完・変更しません。</p><ul>{monthlyCashProblems.map((issue) => <li key={issue}>{issue}</li>)}</ul></div>}
     {!closed && adjustmentsDirty && !calculationsBlocked && <div className="notice">未保存の経理入力があります。保存すると月次確定できます。</div>}
     {closed && !currentSnapshot && <div className="notice error">確定時の月次データを読み込めません。確定解除は可能ですが、先にFirebaseデータと通信状態を確認してください。</div>}
     {!closed && allLegacyBottles.length > 0 && <LegacyBottleClassifications rows={allLegacyBottles} adjustments={adjustments} setAdjustments={setAdjustments} disabled={busy || locked} onSave={save} />}
@@ -335,7 +355,7 @@ export function ExpenseExport({ input, month, sourceLabel, disabledReason }: {
       setExporting(false);
     }
   };
-  return <Card title="経費表XLSX" description={`${month}・${sourceLabel}。見本の経費表形式で、日次経費・固定費・給与・紹介者支払を出力します。未承認・差戻し中・店舗編集中の日次は含みません。`}
+  return <Card title="経費表XLSX" description={`${month}・${sourceLabel}。見本の経費表形式で、日次経費・固定費・給与・紹介者支払を出力します。未確定月は全営業日の現金補充・返済の確認と承認を済ませてください。`}
     action={<button className="button" disabled={Boolean(blockedReason) || exporting || !input} title={blockedReason || undefined} onClick={() => void exportExpenses()}>{exporting ? "XLSX出力中…" : "経費表をXLSX出力"}</button>}>
     {blockedReason && <p className="muted compact-text">{blockedReason}</p>}
     {notice?.month === month && <div role="status" className={`notice${notice.error ? " error" : ""}`}>{notice.text}</div>}
@@ -381,7 +401,7 @@ export function BalanceExport({ input, month, sourceLabel, disabledReason }: {
       setExporting(false);
     }
   };
-  return <Card title="収支表XLSX" description={`${month}・${sourceLabel}。月間の採用報酬方式を日別に配分し、紹介料を独立列で出力します。月額の紹介料・固定費・納品酒代・カード手数料は最後の承認済み営業日に計上します。カード入金額はExcel内で入力してください。未承認・差戻し中・店舗編集中の日次は含みません。`}
+  return <Card title="収支表XLSX" description={`${month}・${sourceLabel}。月間の採用報酬方式を日別に配分し、紹介料を独立列で出力します。月額の紹介料・固定費・納品酒代・カード手数料は最後の承認済み営業日に計上します。カード入金額はExcel内で入力してください。未確定月は全営業日の現金補充・返済の確認と承認を済ませてください。`}
     action={<button className="button" disabled={Boolean(blockedReason) || exporting || !input} title={blockedReason || undefined} onClick={() => void exportBalance()}>{exporting ? "XLSX出力中…" : "収支表をXLSX出力"}</button>}>
     {blockedReason && <p className="muted compact-text">{blockedReason}</p>}
     {notice?.month === month && <div role="status" className={`notice${notice.error ? " error" : ""}`}>{notice.text}</div>}

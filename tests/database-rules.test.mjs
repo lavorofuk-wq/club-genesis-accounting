@@ -177,7 +177,10 @@ test("日次本体・POS重複防止情報・削除ロックを同じ原子的�
   assert.match(repositorySource, /legacyClaimKey = claimKey\(lock\.submissionId, lock\.checksum\)/);
   assert.match(repositorySource, /const plan: Record<string, null> = \{[\s\S]*\[`history\/\$\{lock\.id\}`\]: null,[\s\S]*\[`posSubmissionClaims\/\$\{lock\.claimKey\}`\]: null,[\s\S]*dailyClosingDeletionLock: null/);
   assert.match(repositorySource, /plan\[`posSubmissionClaims\/\$\{legacyClaimKey\}`\] = null/);
-  assert.match(repositorySource, /if \(before && !existing\) throw new Error\("再編集元データは完全削除されています/);
+  // 再送は原子的な監査付きupdateへ移行。削除後の復活はルールのCASと新規制約で拒否する。
+  assert.match(repositorySource, /applyCashRevisionAtomically/);
+  assert.match(historyWrite, /newData\.child\('previousUpdatedAt'\)\.val\(\) === data\.child\('updatedAt'\)\.val\(\)/);
+  assert.match(historyWrite, /!newData\.child\('cashRevisionId'\)\.exists\(\) && !newData\.child\('previousUpdatedAt'\)\.exists\(\)/);
   assert.match(repositorySource, /await update\(rootRef\(\), plan\)/);
 });
 

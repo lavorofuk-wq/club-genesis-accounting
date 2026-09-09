@@ -369,7 +369,7 @@ export type DailyExpense = {
 };
 
 export type CashReconciliation = {
-  /** 未設定は旧日次。過去の実在高・照合差額はそのまま保管する。 */
+  /** 未設定は補充・返済未記録。過去の実在高・照合差額は確認入力前も保管する。 */
   funding?: CashFunding;
   cashSales: number;
   cardSales: number;
@@ -403,6 +403,10 @@ export type DailyClosing = {
   cash: CashReconciliation;
   /** 旧日次の現金照合を変更せず再送する旨を、今回の操作で確認済み。新方式の現金確認とは別。 */
   legacyCashConfirmed?: boolean;
+  /** 現金の変更理由と、原子的に作成した改訂記録への参照。 */
+  cashRevisionReason?: string;
+  cashRevisionId?: string;
+  previousUpdatedAt?: string;
   posSnapshot: PosClosingV3;
   submittedAt?: string;
   /** Firebaseサーバーが確定した店舗送信時刻（ミリ秒）。旧データでは未設定。 */

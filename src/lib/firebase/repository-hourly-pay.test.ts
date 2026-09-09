@@ -6,6 +6,7 @@ const memory = vi.hoisted(() => ({
   values: new Map<string, unknown>(),
   get: vi.fn(),
   transaction: vi.fn(),
+  update: vi.fn(),
 }));
 
 vi.mock("firebase/database", () => ({
@@ -14,7 +15,7 @@ vi.mock("firebase/database", () => ({
   serverTimestamp: () => Date.now(),
   onValue: (_reference: unknown, callback: (snapshot: { val: () => number }) => void) => {
     callback({ val: () => 0 }); return () => undefined;
-  }, set: vi.fn(), update: vi.fn(),
+  }, set: vi.fn(), update: memory.update,
 }));
 vi.mock("./client", () => ({ database: {}, rootRef: (path = "") => ({ path }) }));
 vi.mock("./ready-transaction", () => ({ runReadyTransaction: memory.transaction }));
@@ -48,7 +49,7 @@ function fixture(payment: number): DailyClosing {
     staffDailyPaymentTotal: payment, dispatchStaffPayment: 0, dispatchCastPayment: 0, dispatchFee: 0, liquorDeliveryAmount: 0,
     cash: { ...sales, cashFloat: 200000, expenseAndPaymentTotal: payment, expectedClosingCash,
       actualClosingCash: expectedClosingCash, cashProfit: expectedClosingCash - 200000, difference: 0,
-      funding: { schema: 1, previousClosingId: "", previousBusinessDate: "", previousClosingCash: 200000,
+      funding: { schema: 2, previousClosingId: "", previousBusinessDate: "", previousClosingCash: 200000,
         openingShortfall: 0, openingPersonalDebt: 0, companyReplenishment: 0, personalReplenishment: 0,
         companyTransfer: 0, personalRepayment: 0, closingPersonalDebt: 0, confirmed: true } },
     posSnapshot: { schema: "club-genesis-pos-closing", schemaVersion: 3, businessDate: "2026-09-09", status: "closed",
@@ -75,6 +76,9 @@ beforeEach(() => {
     const value = callback(structuredClone(memory.values.get(reference.path) ?? null));
     if (value !== undefined) memory.values.set(reference.path, structuredClone(value));
     return { committed: value !== undefined, snapshot: { val: () => value } };
+  });
+  memory.update.mockImplementation(async (_reference: unknown, plan: Record<string, unknown>) => {
+    for (const [path, value] of Object.entries(plan)) memory.values.set(path, structuredClone(value));
   });
 });
 

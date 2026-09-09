@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { calculateCash, normalizeDailyClosing, type DailyClosing } from "./gms";
-import { assertCashLedgerChange, calculateCashFunding, cashFundingContext, cashFundingIssues, cashLedgerIssues, preservesLegacyCash, summarizeCashFunding, type CashFundingInputs } from "./cash-funding";
+import { assertCashLedgerChange, calculateCashFunding, calculateConfirmedCashFunding, cashFundingContext, cashFundingDraftContext, cashFundingIssues, cashDayIssues, cashChangeImpacts, cashLedgerIssues, recommendedPersonalRepayment, sameCashReconciliation, summarizeCashFunding, type CashFundingInputs } from "./cash-funding";
 
 function closing(day: string, cashProfit: number, previous: DailyClosing[] = [], inputs: Partial<CashFundingInputs> = {}, cashFloat = 200000): DailyClosing {
   const funding = calculateCashFunding(cashFundingContext(previous, day, cashFloat), {
@@ -15,6 +15,15 @@ function closing(day: string, cashProfit: number, previous: DailyClosing[] = [],
 }
 
 describe("会社補充・個人立替・返済の現金管理", () => {
+  it("各区分が安全な整数でも月間現金移動の合算が上限を超えれば停止する", () => {
+    const amount = 4_000_000_000_000_000;
+    const first = closing("2026-09-01", -amount, [], {}, amount);
+    const second = closing("2026-09-02", -amount, [first], { companyReplenishment: amount, companyTransfer: amount }, amount);
+    const third = closing("2026-09-03", -amount, [first, second], { companyTransfer: amount }, amount);
+    expect(cashLedgerIssues([first, second, third])).toEqual([]);
+    expect(() => summarizeCashFunding([first, second, third], "2026-09")).toThrow("現金移動合計");
+  });
+
   it("初回の未返済残高は0、確認済みの計算残額を保存する", () => {
     const day = closing("2026-09-01", 30000);
     expect(day.cash).toMatchObject({ cashProfit: 30000, expectedClosingCash: 230000, actualClosingCash: 230000, difference: 0 });
@@ -139,124 +148,162 @@ describe("会社補充・個人立替・返済の現金管理", () => {
     expect(cashFundingIssues(day.cash)[0]).toContain("会社補充と個人立替の合計");
   });
 
-  it("後続営業日が利用した現金額の変更・削除を停止する", () => {
+  it("後続営業日が利用した現金額の変更は再確認へ進め、削除は停止する", () => {
     const first = closing("2026-09-01", -20000);
     const second = closing("2026-09-02", 10000, [first], { personalReplenishment: 20000 });
     expect(() => assertCashLedgerChange(first, null, [first, second])).toThrow(/実績を保護/);
     const changed = closing("2026-09-01", -10000);
-    expect(() => assertCashLedgerChange(first, changed, [first, second])).toThrow(/実績を保護/);
+    expect(() => assertCashLedgerChange(first, changed, [first, second])).not.toThrow();
     expect(() => assertCashLedgerChange(first, { ...first, updatedAt: "changed" }, [first, second])).not.toThrow();
     expect(() => assertCashLedgerChange(second, null, [first, second])).not.toThrow();
   });
 
-  it("過去への新規挿入と前日改変後の古い画面からの送信を停止する", () => {
+  it("過去への新規挿入は後続再確認へ進め、古い前日前提の送信を停止する", () => {
     const first = closing("2026-09-01", -20000);
     const second = closing("2026-09-03", 10000, [first], { personalReplenishment: 20000 });
     const inserted = closing("2026-09-02", 10000, [first], { companyReplenishment: 20000 });
-    expect(() => assertCashLedgerChange(null, inserted, [first, second])).toThrow(/過去日次の追加/);
+    expect(() => assertCashLedgerChange(null, inserted, [first, second])).not.toThrow();
     const changedFirst = closing("2026-09-01", -10000);
     expect(() => assertCashLedgerChange(null, second, [changedFirst])).toThrow(/繰越が前営業日/);
   });
 
-  describe("導入前の現金記録を保持した再送", () => {
-    function legacy(day: string, cashProfit: number): DailyClosing {
-      const row = closing(day, cashProfit);
-      delete row.cash.funding;
-      row.status = "returned";
-      return row;
+  describe("作成時期を問わない現金管理と改訂", () => {
+    const inputs: CashFundingInputs = { companyReplenishment: 0, personalReplenishment: 0, companyTransfer: 0 };
+    function unrecorded(day: string, profit: number) {
+      const row = closing(day, profit); delete row.cash.funding; row.status = "returned"; return row;
+    }
+    function reviewed(row: DailyClosing, previous: DailyClosing[], values = inputs, debt = 0, repayment = 0) {
+      const draft = cashFundingDraftContext(previous, row.businessDate, row.cash.cashFloat, row.id);
+      const funding = calculateConfirmedCashFunding({ ...draft, openingPersonalDebt: draft.openingPersonalDebt ?? debt }, values, repayment, row.cash.cashProfit, true);
+      const expectedClosingCash = row.cash.cashFloat + row.cash.cashProfit + values.companyTransfer - repayment;
+      return { ...row, cash: { ...row.cash, funding, expectedClosingCash, actualClosingCash: expectedClosingCash, difference: 0 } };
     }
 
-    it("09/07再送で09/08を新方式の確認漏れにせず、両日の現金を保持する", () => {
-      const first = legacy("2026-09-07", -33550);
-      const second = legacy("2026-09-08", 171750);
-      second.status = "withdrawn";
-      const original = structuredClone([first, second]);
-      const candidate = { ...structuredClone(first), status: "submitted" as const, legacyCashConfirmed: true };
-      expect(preservesLegacyCash(first, candidate)).toBe(true);
-      expect(() => assertCashLedgerChange(first, candidate, [first, second])).not.toThrow();
-      expect(candidate.cash).toEqual(original[0].cash);
-      expect([first, second]).toEqual(original);
-      expect(candidate.cash.funding).toBeUndefined();
-      expect(cashLedgerIssues([candidate, second])).toEqual([]);
+    it("未記録の開始残高は現在0円との情報から過去0円を推測せずnullにする", () => {
+      expect(cashFundingDraftContext([], "2026-09-01", 200000).openingPersonalDebt).toBeNull();
+      const previous = unrecorded("2026-09-07", -33550);
+      expect(cashFundingDraftContext([previous], "2026-09-08", 200000)).toMatchObject({
+        openingPersonalDebt: null, openingShortfall: 33550, previousClosingCash: 166450,
+      });
+      expect(previous.cash.funding).toBeUndefined();
     });
 
-    it("再送でロックtokenが付いても旧方式のまま再度確認して再送できる", () => {
-      const before = legacy("2026-09-07", -33550);
-      const firstSubmission = { ...structuredClone(before), legacyCashConfirmed: true, cashManagementToken: "first-token" };
-      expect(() => assertCashLedgerChange(before, firstSubmission, [before])).not.toThrow();
-      const secondSubmission = { ...structuredClone(firstSubmission), cashManagementToken: "next-token", updatedAt: "2026-09-10T10:00:00Z" };
-      expect(preservesLegacyCash(firstSubmission, secondSubmission)).toBe(true);
-      expect(() => assertCashLedgerChange(firstSubmission, secondSubmission, [firstSubmission])).not.toThrow();
+    it("9月7日を確認保存しても後続9月8日の未入力が保存自体を妨げない", () => {
+      const seventh = unrecorded("2026-09-07", -33550);
+      const eighth = unrecorded("2026-09-08", 171750);
+      const before = structuredClone([seventh, eighth]);
+      const candidate = reviewed(seventh, []);
+      expect(() => assertCashLedgerChange(seventh, candidate, [seventh, eighth])).not.toThrow();
+      expect(candidate.cash.expectedClosingCash).toBe(166450);
+      expect(cashChangeImpacts(seventh, candidate, [seventh, eighth])).toEqual([
+        { id: eighth.id, businessDate: eighth.businessDate, status: eighth.status, issues: [expect.stringContaining("確認記録がありません")] },
+      ]);
+      expect([seventh, eighth]).toEqual(before);
     });
 
-    it.each([undefined, false])("旧記録を保持しても明示確認が%sなら再送を拒否する", (confirmed) => {
-      const before = legacy("2026-09-07", -33550);
-      const candidate = { ...structuredClone(before), legacyCashConfirmed: confirmed };
-      expect(preservesLegacyCash(before, candidate)).toBe(true);
-      expect(() => assertCashLedgerChange(before, candidate, [before])).toThrow(/旧現金記録を変更していないことを確認/);
+    it("補充元と返済を入力した次の日も保存でき、同じ月を一貫した台帳にする", () => {
+      const seventh = reviewed(unrecorded("2026-09-07", -33550), []);
+      const eighthBefore = unrecorded("2026-09-08", 171750);
+      const eighth = reviewed(eighthBefore, [seventh], { ...inputs, companyReplenishment: 33550 });
+      expect(() => assertCashLedgerChange(eighthBefore, eighth, [seventh, eighthBefore])).not.toThrow();
+      expect(eighth.cash).toMatchObject({ expectedClosingCash: 371750, funding: { closingPersonalDebt: 0, companyReplenishment: 33550 } });
+      expect(cashLedgerIssues([seventh, eighth], "2026-09")).toEqual([]);
     });
 
-    it.each([
-      "cashSales", "cardSales", "totalSales", "cashFloat", "expenseAndPaymentTotal",
-      "expectedClosingCash", "cashProfit", "actualClosingCash", "difference",
-    ] as const)("旧現金の%sを1円でも変える再送を拒否する", (field) => {
-      const before = legacy("2026-09-07", -33550);
-      const candidate = { ...structuredClone(before), legacyCashConfirmed: true };
-      candidate.cash[field] += 1;
-      expect(preservesLegacyCash(before, candidate)).toBe(false);
-      expect(() => assertCashLedgerChange(before, candidate, [before])).toThrow(/旧方式の日次は保存済みの現金記録を変更せず/);
+    it("当時確認した初期の未返済残高を0円へ置き換えない", () => {
+      const day = reviewed(unrecorded("2026-09-01", 10000), [], inputs, 25000, 10000);
+      expect(cashFundingIssues(day.cash)).toEqual([]);
+      expect(day.cash.funding).toMatchObject({ schema: 2, openingPersonalDebt: 25000, personalRepayment: 10000, closingPersonalDebt: 15000 });
+      expect(cashDayIssues(day, [])).toEqual([]);
     });
 
-    it("未知の旧現金項目も深く比較し、削除・変更・追加を許可しない", () => {
-      const before = legacy("2026-09-07", -33550);
-      const originalCash = before.cash as typeof before.cash & { historicalDetail?: { memo: string; values: number[] } };
-      originalCash.historicalDetail = { memo: "保存記録", values: [10, 20] };
-      const candidate = { ...structuredClone(before), legacyCashConfirmed: true };
-      const nextCash = candidate.cash as typeof originalCash;
-      nextCash.historicalDetail = { values: [10, 20], memo: "保存記録" };
-      expect(preservesLegacyCash(before, candidate)).toBe(true);
-      nextCash.historicalDetail.values[0] = 11;
-      expect(preservesLegacyCash(before, candidate)).toBe(false);
-      delete nextCash.historicalDetail;
-      expect(preservesLegacyCash(before, candidate)).toBe(false);
-      expect(preservesLegacyCash(legacy("2026-09-07", -33550), before)).toBe(false);
+    it("推奨返済額と実返済を分け、過去の実返済を自動更新しない", () => {
+      const before = reviewed(unrecorded("2026-09-01", 10000), [], inputs, 20000, 3000);
+      expect(recommendedPersonalRepayment(before.cash.funding, inputs, before.cash.cashProfit)).toBe(10000);
+      const corrected = structuredClone(before);
+      corrected.cash.cashProfit = corrected.cash.cashSales = 20000;
+      const after = reviewed(corrected, [], inputs, before.cash.funding.openingPersonalDebt, before.cash.funding.personalRepayment);
+      expect(after.cash.funding.personalRepayment).toBe(3000);
+      expect(after.cash.funding.closingPersonalDebt).toBe(17000);
+      expect(cashFundingIssues(after.cash)).toEqual([]);
     });
 
-    it("同じ現金額でも別営業日・新規レコードは旧方式の例外にしない", () => {
-      const before = legacy("2026-09-07", -33550);
-      const candidate = { ...structuredClone(before), legacyCashConfirmed: true };
-      expect(preservesLegacyCash(null, candidate)).toBe(false);
-      expect(() => assertCashLedgerChange(null, candidate, [])).toThrow(/現金残額の一致確認/);
-      candidate.businessDate = "2026-09-08";
-      expect(preservesLegacyCash(before, candidate)).toBe(false);
-      expect(() => assertCashLedgerChange(before, candidate, [before])).toThrow(/現金残額の一致確認/);
+    it("過去の残額修正は保存でき、後続の実補充・返済は変更せず差分を警告する", () => {
+      const first = reviewed(unrecorded("2026-09-01", -20000), []);
+      const second = reviewed(unrecorded("2026-09-02", 10000), [first], { ...inputs, personalReplenishment: 20000 }, 0, 10000);
+      const original = structuredClone(second);
+      const corrected = reviewed(unrecorded("2026-09-01", -10000), []);
+      expect(() => assertCashLedgerChange(first, corrected, [first, second])).not.toThrow();
+      expect(cashChangeImpacts(first, corrected, [first, second])[0].issues[0]).toContain("現金繰越");
+      expect(second).toEqual(original);
+      const draft = cashFundingDraftContext([corrected, second], second.businessDate, 200000, second.id);
+      expect(draft.openingShortfall).toBe(10000);
+      const unchangedActual = reviewed(second, [corrected], { ...inputs, personalReplenishment: 20000 }, 0, 10000);
+      expect(cashFundingIssues(unchangedActual.cash)[0]).toContain("開店前のつり銭不足額");
     });
 
-    it("新方式からfundingを削除して旧方式へ降格することはできない", () => {
-      const before = closing("2026-09-07", 0);
-      const candidate = { ...structuredClone(before), legacyCashConfirmed: true };
-      delete candidate.cash.funding;
-      expect(preservesLegacyCash(before, candidate)).toBe(false);
-      expect(() => assertCashLedgerChange(before, candidate, [before])).toThrow(/現金残額の一致確認/);
+    it("先に確認した日より過去を補完した時も、異なる未返済残高は要再確認にする", () => {
+      const earlierBefore = unrecorded("2026-09-05", 0);
+      const seventh = reviewed(unrecorded("2026-09-07", 10000), [earlierBefore], inputs, 0, 0);
+      const earlier = reviewed(earlierBefore, [], inputs, 20000, 0);
+      expect(() => assertCashLedgerChange(earlierBefore, earlier, [earlierBefore, seventh])).not.toThrow();
+      expect(cashDayIssues(seventh, [earlier, seventh])[0]).toContain("前営業日");
     });
 
-    it("後続の新方式日次があっても旧現金を保持した再送だけ許可する", () => {
-      const before = legacy("2026-09-07", -33550);
-      const second = legacy("2026-09-08", 171750);
-      const managed = closing("2026-09-09", 5000, [before, second]);
-      const rows = [before, second, managed];
-      const candidate = { ...structuredClone(before), legacyCashConfirmed: true };
-      expect(() => assertCashLedgerChange(before, candidate, rows)).not.toThrow();
-      candidate.cash.expectedClosingCash += 1;
-      expect(() => assertCashLedgerChange(before, candidate, rows)).toThrow(/実績を保護/);
-      expect(() => assertCashLedgerChange(before, null, rows)).toThrow(/実績を保護/);
+    it("後続の確定済み空月へも繰越を変更しない", () => {
+      const before = reviewed(unrecorded("2026-08-31", 10000), [], inputs, 0, 0);
+      const after = reviewed(unrecorded("2026-08-31", 20000), [], inputs, 0, 0);
+      expect(() => assertCashLedgerChange(before, after, [before], [{ month: "2026-09", status: "closed" }])).toThrow("確定解除");
+      expect(() => assertCashLedgerChange(before, after, [before], [{ month: "2026-09", status: "closing" }])).toThrow("確定解除");
+      expect(() => assertCashLedgerChange(before, after, [before], [{ month: "2026-09", status: "open" }])).not.toThrow();
+      expect(() => assertCashLedgerChange(before, { ...before, updatedAt: "changed" }, [before], [{ month: "2026-09", status: "closed" }])).not.toThrow();
     });
 
-    it("旧現金再送の例外で既存の新方式以降の確認欠落を無効化しない", () => {
-      const managed = closing("2026-09-07", 5000);
-      const before = legacy("2026-09-08", 10000);
-      const candidate = { ...structuredClone(before), legacyCashConfirmed: true };
-      expect(() => assertCashLedgerChange(before, candidate, [managed, before])).toThrow(/補充・返済の確認記録がありません/);
+    it("0円と未入力を同一扱いにせず、補完前の月次集計を止める", () => {
+      const before = unrecorded("2026-09-01", 0);
+      expect(cashLedgerIssues([before], "2026-09")[0]).toContain("確認記録がありません");
+      expect(() => summarizeCashFunding([before], "2026-09")).toThrow("確認記録がありません");
+      expect(() => summarizeCashFunding([before], "2026-10")).toThrow("未返済残高が未確認");
+    });
+
+    it("前月の未記録は当月開始残高を確認して補え、前月分を勝手に変更しない", () => {
+      const previous = unrecorded("2026-08-31", 0);
+      const day = reviewed(unrecorded("2026-09-01", 10000), [previous], inputs, 12000, 3000);
+      expect(cashLedgerIssues([previous, day], "2026-09")).toEqual([]);
+      day.status = "approved";
+      expect(summarizeCashFunding([previous, day], "2026-09")).toMatchObject({ openingPersonalDebt: 12000, closingPersonalDebt: 9000 });
+      expect(previous.cash.funding).toBeUndefined();
+    });
+
+    it.each([undefined, false])("確認%sは作成時期を問わず保存できない", (confirmation) => {
+      const before = unrecorded("2026-09-07", 10000);
+      const candidate = reviewed(before, []);
+      candidate.cash.funding.confirmed = confirmation as boolean;
+      expect(() => assertCashLedgerChange(before, candidate, [before])).toThrow();
+    });
+
+    it("新規も既存も記録欠落へ降格させない", () => {
+      const before = reviewed(unrecorded("2026-09-07", 10000), []);
+      const missing = structuredClone(before); delete (missing.cash as DailyClosing["cash"]).funding;
+      expect(() => assertCashLedgerChange(null, missing, [])).toThrow("補充・返済の入力");
+      expect(() => assertCashLedgerChange(before, missing, [before])).toThrow("補充・返済の入力");
+    });
+
+    it.each([-1, 0.5, 10001])("不正または返済可能額を超えた実返済%sを拒否する", (repayment) => {
+      const context = { previousClosingId: "", previousBusinessDate: "", previousClosingCash: 200000, openingShortfall: 0, openingPersonalDebt: 20000 };
+      if (repayment < 0 || !Number.isInteger(repayment)) expect(() => calculateConfirmedCashFunding(context, inputs, repayment, 10000, true)).toThrow();
+      else {
+        const row = reviewed(unrecorded("2026-09-01", 10000), [], inputs, 20000, repayment);
+        expect(cashFundingIssues(row.cash).length).toBeGreaterThan(0);
+      }
+    });
+
+    it("改訂理由の判定は未知項目も含む現金全体を比較する", () => {
+      const cash = { ...closing("2026-09-01", 0).cash, detail: { values: [1, 2], note: "記録" } };
+      const same = { ...structuredClone(cash), detail: { note: "記録", values: [1, 2] } };
+      expect(sameCashReconciliation(cash, same)).toBe(true);
+      same.detail.values[0] = 3;
+      expect(sameCashReconciliation(cash, same)).toBe(false);
     });
   });
 

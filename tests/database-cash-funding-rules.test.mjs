@@ -5,6 +5,7 @@ import test from "node:test";
 const rules = JSON.parse(await readFile(new URL("../database.rules.json", import.meta.url), "utf8")).rules.$workspace;
 const now = 1800000000000;
 const id = "daily_20260909";
+const operationId = "12345678-1234-1234-1234-123456789abc";
 
 // 実際のrules式を、同一APIを持つ読み取り専用snapshotで評価する。
 class Snapshot {
@@ -20,13 +21,13 @@ class Snapshot {
 function check(rule, oldTree, newTree, path, role = "op", field = "") {
   const old = structuredClone(oldTree); old.users = { user: { role } };
   const expression = rule.replaceAll(".matches(", ".match(").replaceAll(".beginsWith(", ".startsWith(");
-  const evaluate = new Function("root", "data", "newData", "auth", "now", "$workspace", "$id", "$field", `return Boolean(${expression});`);
-  return evaluate(new Snapshot(old), new Snapshot(old, path.split("/")), new Snapshot(newTree, path.split("/")), { uid: "user" }, now, "accounting-dev", id, field);
+  const evaluate = new Function("root", "data", "newData", "auth", "now", "$workspace", "$id", "$field", "$operationId", `return Boolean(${expression});`);
+  return evaluate(new Snapshot(old), new Snapshot(old, path.split("/")), new Snapshot(newTree, path.split("/")), { uid: "user" }, now, "accounting-dev", id, field, operationId);
 }
 function closing() {
   const cash = { cashSales: 10000, cardSales: 0, totalSales: 10000, cashFloat: 200000,
     expenseAndPaymentTotal: 0, expectedClosingCash: 210000, cashProfit: 10000, actualClosingCash: 210000, difference: 0,
-    funding: { schema: 1, previousClosingId: "", previousBusinessDate: "", previousClosingCash: 200000,
+    funding: { schema: 2, previousClosingId: "", previousBusinessDate: "", previousClosingCash: 200000,
       openingShortfall: 0, openingPersonalDebt: 0, companyReplenishment: 0, personalReplenishment: 0,
       companyTransfer: 0, personalRepayment: 0, closingPersonalDebt: 0, confirmed: true } };
   return { businessDate: "2026-09-09", businessMonth: "2026-09", status: "submitted", submittedBy: "user", updatedAt: "new",
@@ -106,12 +107,12 @@ test("将来日・自分自身・存在しない前日への参照を拒否す�
   assert.equal(cashAllowed(result), false);
 });
 
-test("旧funding無しの承認・差戻しは不変の現金を保持でき、同時変更は拒否する", () => {
+test("旧funding無しは承認を止め、差戻し・取下げでは不変の現金を保持する", () => {
   for (const status of ["approved", "returned", "withdrawn"]) {
     const before = closing(); delete before.cash.funding; delete before.cashManagementToken;
     before.cash.actualClosingCash -= 1000; before.cash.difference = -1000;
     const value = structuredClone(before); value.status = status;
-    const result = trees(value, before); assert.equal(cashAllowed(result), true);
+    const result = trees(value, before); assert.equal(cashAllowed(result), status !== "approved");
     value.cash.actualClosingCash += 1; assert.equal(cashAllowed(trees(value, before)), false);
   }
 });
@@ -125,53 +126,32 @@ test("新fundingの承認・差戻しでは補充返済の各値を変更でき�
   }
 });
 
-test("保存済み旧cashの確認済み再送はtokenの有無と再送回数に依存しない", () => {
-  for (const existingToken of [undefined, "previous-submission-token"]) {
-    const before = closing(); delete before.cash.funding; before.status = "returned";
-    before.cashManagementToken = existingToken; before.legacyCashConfirmed = true; before.updatedAt = "before";
-    const value = structuredClone(before); value.status = "submitted"; value.cashManagementToken = "current-token";
-    value.legacyCashConfirmed = true; value.updatedAt = "new"; value.submittedAt = "new";
-    assert.equal(cashAllowed(trees(value, before)), true);
-    const allowed = trees(value, before);
-    assert.equal(check(rules.history.$id[".write"], allowed.old, allowed.next, historyPath), true);
-    delete allowed.old["accounting-dev"].cashManagementLock;
-    assert.equal(check(rules.history.$id[".write"], allowed.old, allowed.next, historyPath), false);
-    delete value.legacyCashConfirmed; assert.equal(cashAllowed(trees(value, before)), false);
-  }
-});
-
-test("旧互換では営業日と全9現金プリミティブが不変でなければ再送できない", () => {
-  const before = closing(); delete before.cash.funding; before.status = "returned";
-  for (const field of Object.keys(before.cash)) {
-    const value = structuredClone(before); value.status = "submitted"; value.legacyCashConfirmed = true;
-    value.cash[field] += 1; assert.equal(cashAllowed(trees(value, before)), false, field);
-  }
-  const value = structuredClone(before); value.status = "submitted"; value.legacyCashConfirmed = true;
-  value.businessDate = "2026-09-10"; assert.equal(cashAllowed(trees(value, before)), false);
-});
-
-test("旧差額の非0は旧現金と同値の場合だけ確認済み再送で保持する", () => {
-  const before = closing(); delete before.cash.funding; before.status = "returned";
-  before.cash.actualClosingCash -= 1000; before.cash.difference = -1000;
-  const value = structuredClone(before); value.status = "submitted"; value.legacyCashConfirmed = true;
-  assert.equal(cashAllowed(trees(value, before)), true);
-  value.cash.difference = 0; assert.equal(cashAllowed(trees(value, before)), false);
-});
-
-test("確認フラグを偽装しても新規missingとmanagedからのfunding削除は拒否する", () => {
+test("旧記録確認flagを付けても新規missing・旧再送・managed降格を許可しない", () => {
   const value = closing(); delete value.cash.funding; value.legacyCashConfirmed = true;
   assert.equal(cashAllowed(trees(value)), false);
-  const before = closing(); before.status = "returned";
-  assert.equal(cashAllowed(trees(value, before)), false);
+  const legacy = structuredClone(value); legacy.status = "returned";
+  assert.equal(cashAllowed(trees(value, legacy)), false);
+  const managed = closing(); managed.status = "returned";
+  assert.equal(cashAllowed(trees(value, managed)), false);
 });
 
-test("旧記録確認フラグはtrueかつfunding無しの保存だけ許可する", () => {
-  const path = `${historyPath}/legacyCashConfirmed`;
-  for (const [confirmed, managed, allowed] of [[true, false, true], [false, false, false], ["true", false, false], [true, true, false]]) {
-    const value = closing(); value.legacyCashConfirmed = confirmed; if (!managed) delete value.cash.funding;
-    const result = trees(value);
-    assert.equal(check(rules.history.$id.legacyCashConfirmed[".validate"], result.old, result.next, path), allowed);
-  }
+test("新規schema1は拒否し、保存済みschema1の全値不変再送だけ許可する", () => {
+  const value = closing(); value.cash.funding.schema = 1;
+  assert.equal(cashAllowed(trees(value)), false);
+  const before = structuredClone(value); before.status = "returned";
+  assert.equal(cashAllowed(trees(value, before)), true);
+  value.cash.funding.confirmed = false; assert.equal(cashAllowed(trees(value, before)), false);
+});
+
+test("schema2では初回・直前未記録の開始債務を明示し、推奨額以下の実返済を保存できる", () => {
+  const value = closing(); value.cash.funding.openingPersonalDebt = 12000; value.cash.funding.closingPersonalDebt = 12000;
+  assert.equal(cashAllowed(trees(value)), true);
+  value.cash.funding.personalRepayment = 3000; value.cash.funding.closingPersonalDebt = 9000;
+  value.cash.expectedClosingCash = value.cash.actualClosingCash = 207000;
+  assert.equal(cashAllowed(trees(value)), true);
+  value.cash.funding.personalRepayment = 11000; value.cash.funding.closingPersonalDebt = 1000;
+  value.cash.expectedClosingCash = value.cash.actualClosingCash = 199000;
+  assert.equal(cashAllowed(trees(value)), false);
 });
 
 test("新送信は有効な対象id・owner・token一致のcash lockを要求する", () => {
@@ -236,7 +216,7 @@ test("既存の削除・確定月・権限のガードを保持しcash token条�
 
 test("2.21以降の月次snapshotは現金移動summaryが必須で旧2.20は互換を維持する", () => {
   const rule = rules.accountingMonthSnapshots.$month.$revision[".validate"];
-  const start = rule.lastIndexOf(" && (!newData.child('calculationVersion')");
+  const start = rule.indexOf(" && (!newData.child('calculationVersion')");
   assert.ok(start > 0);
   const required = rule.slice(start + 4);
   for (const [version, hasSummary, allowed] of [["2.20.0", false, true], ["2.21.0", false, false],
@@ -258,4 +238,90 @@ test("現金移動summaryは1円整数・承認日数上限・移動純額と未
   assert.equal(permitted({ ...summary, netCashMovement: 10001 }), false);
   assert.equal(permitted({ managedDays: 1, openingPersonalDebt: 10000, companyReplenishment: 0, personalReplenishment: 0,
     companyTransfer: 0, personalRepayment: 5000, closingPersonalDebt: 5000, netCashMovement: -5000 }), true);
+});
+
+test("2.22以降の月次は承認日全件の現金確認を要求し旧2.21確定は維持する", () => {
+  const rule = rules.accountingMonthSnapshots.$month.$revision[".validate"];
+  const start = rule.lastIndexOf(" && (!newData.child('calculationVersion')");
+  const required = rule.slice(start + 4);
+  for (const [version, managedDays, allowed] of [["2.21.0", 0, true], ["2.21.1", 0, true], ["2.22.0", 0, false],
+    ["2.22.1", 1, false], ["2.22.0", 2, true], ["3.0.0", 0, false]]) {
+    const next = { snapshot: { calculationVersion: version, approvedDays: 2, cashFunding: { managedDays } } };
+    assert.equal(check(required, {}, next, "snapshot"), allowed, version);
+  }
+});
+
+function audited() {
+  const before = closing(); before.status = "returned"; before.updatedAt = "before";
+  const value = structuredClone(before); value.status = "submitted"; value.updatedAt = "new"; value.submittedAt = "new";
+  value.cashRevisionId = operationId; value.previousUpdatedAt = "before"; value.cashRevisionReason = "店舗データ再送";
+  const revision = { schema: 1, dailyId: id, businessDate: before.businessDate, operationId,
+    cashManagementToken: "current-token", beforeCash: structuredClone(before.cash), beforeRecordJson: JSON.stringify(before),
+    beforeUpdatedAt: "before", beforeStatus: "returned", actor: "user", createdAtMs: now, reason: value.cashRevisionReason };
+  const result = trees(value, before);
+  result.next["accounting-dev"].cashRevisions = { [id]: { [operationId]: revision } };
+  return result;
+}
+const auditPath = `accounting-dev/cashRevisions/${id}/${operationId}`;
+const auditRules = rules.cashRevisions.$id.$operationId;
+
+test("再送の本体と監査の同時保存だけを許可する双方向リンク", () => {
+  const result = audited();
+  assert.equal(check(rules.history.$id[".write"], result.old, result.next, historyPath), true);
+  assert.equal(check(auditRules[".write"], result.old, result.next, auditPath), true);
+  assert.equal(check(auditRules[".validate"], result.old, result.next, auditPath), true);
+  const historyOnly = structuredClone(result); delete historyOnly.next["accounting-dev"].cashRevisions;
+  assert.equal(check(rules.history.$id[".write"], historyOnly.old, historyOnly.next, historyPath), false);
+  const auditOnly = structuredClone(result); auditOnly.next["accounting-dev"].history = structuredClone(result.old["accounting-dev"].history);
+  assert.equal(check(auditRules[".write"], auditOnly.old, auditOnly.next, auditPath), false);
+});
+
+test("先読み後の旧updatedAt変更・別UUID・別token・監査既存は原子的再送を拒否する", () => {
+  for (const mutate of [result => { result.old["accounting-dev"].history[id].updatedAt = "concurrent"; },
+    result => { result.next["accounting-dev"].history[id].previousUpdatedAt = "wrong"; },
+    result => { result.next["accounting-dev"].cashRevisions[id][operationId].operationId = "wrong"; },
+    result => { result.next["accounting-dev"].cashRevisions[id][operationId].cashManagementToken = "wrong"; },
+    result => { result.old["accounting-dev"].cashRevisions = structuredClone(result.next["accounting-dev"].cashRevisions); }]) {
+    const result = audited(); mutate(result);
+    assert.equal(check(rules.history.$id[".write"], result.old, result.next, historyPath), false);
+  }
+});
+
+test("監査の旧現金全値・旧状態・旧版・actor・理由・時刻の改ざんを拒否する", () => {
+  const keys = ["beforeUpdatedAt", "beforeStatus", "actor", "reason", "createdAtMs", "businessDate", "dailyId", "operationId"];
+  for (const key of keys) {
+    const result = audited(); result.next["accounting-dev"].cashRevisions[id][operationId][key] = key === "createdAtMs" ? now - 1 : "wrong";
+    assert.equal(check(auditRules[".validate"], result.old, result.next, auditPath), false, key);
+  }
+  for (const field of Object.keys(closing().cash).filter(key => key !== "funding")) {
+    const result = audited(); result.next["accounting-dev"].cashRevisions[id][operationId].beforeCash[field] += 1;
+    assert.equal(check(auditRules[".validate"], result.old, result.next, auditPath), false, field);
+  }
+  for (const field of Object.keys(closing().cash.funding)) {
+    const result = audited(); const funding = result.next["accounting-dev"].cashRevisions[id][operationId].beforeCash.funding;
+    funding[field] = typeof funding[field] === "number" ? funding[field] + 1 : "wrong";
+    assert.equal(check(auditRules[".validate"], result.old, result.next, auditPath), false, field);
+  }
+});
+
+test("監査は作成専用で更新・削除はOPでも拒否し、日次削除後も削除できない", () => {
+  const result = audited(); result.old["accounting-dev"].cashRevisions = structuredClone(result.next["accounting-dev"].cashRevisions);
+  assert.equal(check(auditRules[".write"], result.old, result.next, auditPath), false);
+  delete result.next["accounting-dev"].cashRevisions;
+  assert.equal(check(auditRules[".write"], result.old, result.next, auditPath), false);
+  delete result.old["accounting-dev"].history[id];
+  assert.equal(check(auditRules[".write"], result.old, result.next, auditPath), false);
+});
+
+test("承認用cash lockは経理・OPのみ取得でき、本体承認にもそのtokenを要求する", () => {
+  const lockPath = "accounting-dev/cashManagementLock";
+  const pending = { "accounting-dev": { cashManagementLock: activeLock({ operation: "approve" }) } };
+  for (const role of ["accounting", "op"]) assert.equal(check(rules.cashManagementLock[".write"], { "accounting-dev": {} }, pending, lockPath, role), true);
+  assert.equal(check(rules.cashManagementLock[".write"], { "accounting-dev": {} }, pending, lockPath, "shop"), false);
+  const before = closing(); before.updatedAt = "before"; before.cashManagementToken = "old-token";
+  const value = { ...structuredClone(before), status: "approved", updatedAt: "new", approvedAt: "new", approvedBy: "user", cashManagementToken: "current-token" };
+  const result = trees(value, before); result.old["accounting-dev"].cashManagementLock.operation = "approve";
+  assert.equal(check(rules.history.$id[".write"], result.old, result.next, historyPath, "accounting"), true);
+  delete result.old["accounting-dev"].cashManagementLock;
+  assert.equal(check(rules.history.$id[".write"], result.old, result.next, historyPath, "accounting"), false);
 });

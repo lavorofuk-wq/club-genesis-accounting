@@ -78,18 +78,20 @@ describe("経理月次の現金補充・返済", () => {
     expect(check.integrityIssues.join("\n")).toContain("現金繰越");
   });
 
-  it("現金管理のない旧日次・営業日0の月はゼロ集計にし、過去の現金実額は変更しない", () => {
+  it("未記録日次をゼロと推定せず全件警告し、過去の現金実額は変更しない", () => {
     const source = fixture().source;
     source.closings.forEach((row) => { delete row.cash.funding; });
     const before = structuredClone(source);
     const result = calculateMonthlyAccounting(source, month, adjustments);
-    expect(result.cashFunding).toEqual({ managedDays: 0, openingPersonalDebt: 0, companyReplenishment: 0, personalReplenishment: 0,
-      companyTransfer: 0, personalRepayment: 0, closingPersonalDebt: 0, netCashMovement: 0 });
-    expect(calculateMonthlyAccounting({ ...source, closings: [] }, month, adjustments).cashFunding).toEqual(result.cashFunding);
+    expect(result.cashFunding).toBeUndefined();
+    expect(result.warnings.join("\n")).toContain("2026-09-01");
+    expect(result.warnings.join("\n")).toContain("2026-09-02");
+    expect(canFinalizeMonthlyAccounting(source, month, adjustments, true).allowed).toBe(false);
+    expect(calculateMonthlyAccounting({ ...source, closings: [] }, month, adjustments).cashFunding).toMatchObject({ managedDays: 0, openingPersonalDebt: 0, closingPersonalDebt: 0 });
     expect(source).toEqual(before);
   });
 
-  it("旧9月7日の現金不変再送確認を、新方式開始と誤認せず旧9月8日も保全する", () => {
+  it("過去の現金保持確認フラグだけでは統一台帳の実績確認を完了扱いにしない", () => {
     const seventh = day("2026-09-07", -33550);
     const eighth = day("2026-09-08", 171750);
     const source: WorkspaceData = { ...fixture().source, closings: [seventh, eighth] };
@@ -98,9 +100,10 @@ describe("経理月次の現金補充・返済", () => {
     const snapshot = structuredClone(source);
     const after = calculateMonthlyAccounting(source, month, adjustments);
     expect(after.cashFunding).toEqual(before.cashFunding);
-    expect(after.cashFunding?.managedDays).toBe(0);
+    expect(after.cashFunding).toBeUndefined();
     expect(after.balance).toEqual(before.balance);
-    expect(after.warnings.join("\n")).not.toContain("補充・返済の確認記録がありません");
+    expect(after.warnings.join("\n")).toContain("2026-09-07");
+    expect(after.warnings.join("\n")).toContain("2026-09-08");
     expect(source).toEqual(snapshot);
   });
 
@@ -159,6 +162,18 @@ describe("経理月次の現金補充・返済", () => {
     const normalized = normalizeMonthlyAccountingSnapshot(legacy, month, 1)!;
     expect(normalized).toBeDefined();
     expect(Object.hasOwn(normalized, "cashFunding")).toBe(false);
+  });
+
+  it("全日次共通方式では管理日数が承認日数と一致しない確定を拒否し、既存確定は保持する", () => {
+    const { source } = fixture();
+    const result = calculateMonthlyAccounting(source, month, adjustments);
+    const snapshot = buildMonthlySnapshot(month, 1, "a".repeat(64), adjustments, result, source.closings, "accounting", "2026-09-30T12:00:00.000Z");
+    snapshot.cashFunding = { managedDays: 0, openingPersonalDebt: 0, closingPersonalDebt: 0,
+      companyReplenishment: 0, personalReplenishment: 0, companyTransfer: 0, personalRepayment: 0, netCashMovement: 0 };
+    snapshot.calculationVersion = "2.21.1";
+    expect(normalizeMonthlyAccountingSnapshot(snapshot, month, 1)?.cashFunding).toEqual(snapshot.cashFunding);
+    snapshot.calculationVersion = "2.22.0";
+    expect(normalizeMonthlyAccountingSnapshot(snapshot, month, 1)).toBeUndefined();
   });
 
   it.each([

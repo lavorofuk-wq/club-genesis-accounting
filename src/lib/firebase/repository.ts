@@ -54,11 +54,26 @@ import {
   validateDriverPaySetting,
   validateStaffPaySetting,
 } from "@/domain/master-pay-validation";
-import { assertCashLedgerChange, cashFundingIssues, preservesLegacyCash } from "@/domain/cash-funding";
+import { assertCashLedgerChange, cashDayIssues, cashFundingIssues, cashLedgerIssues, sameCashReconciliation } from "@/domain/cash-funding";
 
 export type WorkspaceData = AccountingWorkspaceData;
 export type ClosingRevision = Pick<DailyClosing, "businessDate" | "updatedAt" | "checksum" | "submissionId">;
 export type IntroducerDeletionLinkedCastRevision = Pick<CastRecord, "id" | "updatedAt">;
+
+export type CashRevision = {
+  schema: 1;
+  dailyId: string;
+  businessDate: string;
+  operationId: string;
+  cashManagementToken: string;
+  beforeCash: DailyClosing["cash"];
+  beforeRecordJson: string;
+  beforeUpdatedAt: string;
+  beforeStatus: DailyClosing["status"];
+  actor: string;
+  createdAtMs: number;
+  reason: string;
+};
 
 export function introducerDeletionLinkedCastSignature(rows: IntroducerDeletionLinkedCastRevision[]) {
   return rows.map((cast) => `${cast.id}\u0000${cast.updatedAt}`).sort().join("\u0001");
@@ -101,7 +116,7 @@ const DAILY_CLOSING_DELETION_LOCK_TTL_MS = 120_000;
 
 type CashManagementLock = {
   id: string;
-  operation: "submit" | "delete";
+  operation: "submit" | "delete" | "approve";
   token: string;
   owner: string;
   acquiredAtMs: number;
@@ -398,6 +413,44 @@ async function assertCashManagementLockOwned(lock: CashManagementLock) {
   }
 }
 
+class AmbiguousCashRevisionWriteError extends Error {}
+
+function oldRecordForCashRevision(before: DailyClosing) {
+  // 過去版の全文を保存するが、監査本文を重ねて埋め込まない。
+  const { cashRevisions: _revisions, beforeRecordJson: _nestedRecord, ...record } = before as DailyClosing & {
+    cashRevisions?: unknown; beforeRecordJson?: unknown;
+  };
+  return JSON.stringify(record);
+}
+
+async function applyCashRevisionAtomically(id: string, stored: Record<string, unknown>, revision: CashRevision) {
+  const revisionPath = `cashRevisions/${id}/${revision.operationId}`;
+  const plan = clean({ [`history/${id}`]: stored, [revisionPath]: revision });
+  try {
+    await update(rootRef(), plan);
+  } catch (writeError) {
+    try {
+      const [historySnapshot, revisionSnapshot] = await Promise.all([
+        get(rootRef(`history/${id}`)), get(rootRef(revisionPath)),
+      ]);
+      const history = historySnapshot.val() as (DailyClosing & { cashManagementToken?: string }) | null;
+      const savedRevision = revisionSnapshot.val() as CashRevision | null;
+      if (history?.cashRevisionId === revision.operationId && history.previousUpdatedAt === revision.beforeUpdatedAt
+        && history.cashManagementToken === revision.cashManagementToken
+        && savedRevision?.operationId === revision.operationId && savedRevision.dailyId === id
+        && savedRevision.cashManagementToken === revision.cashManagementToken
+        && savedRevision.beforeUpdatedAt === revision.beforeUpdatedAt && savedRevision.beforeRecordJson === revision.beforeRecordJson) return;
+      if (savedRevision) {
+        throw new AmbiguousCashRevisionWriteError("現金改訂履歴は存在しますが、日次本体との対応を確認できません。再送せず最新データを読み込み、管理者へ連絡してください。");
+      }
+    } catch (readError) {
+      if (readError instanceof AmbiguousCashRevisionWriteError) throw readError;
+      throw new AmbiguousCashRevisionWriteError("日次と現金改訂履歴の保存結果を確認できません。通信状態を確認し、再送前に最新データを読み込んでください。");
+    }
+    throw writeError;
+  }
+}
+
 async function releaseDailyClosingDeletionLock(lock: DailyClosingDeletionLock) {
   await runReadyTransaction(rootRef("dailyClosingDeletionLock"), (current) => {
     const existing = current as DailyClosingDeletionLock | null;
@@ -667,19 +720,19 @@ function validateDailyClosingForSubmission(value: DailyClosing, before: DailyClo
     + value.dispatchStaffPayment + value.dispatchCastPayment + value.dispatchFee;
   const cashProfit = value.sales.cashSales - paymentTotal;
   const funding = value.cash.funding;
-  const keepsLegacyCash = before !== null && preservesLegacyCash({ ...before, id: value.id }, value)
-    && value.legacyCashConfirmed === true;
-  require(Boolean(funding) || keepsLegacyCash, "現金補充・返済、または旧記録を変更せず保持することを確認してから送信してください。");
+  require(Boolean(funding), "現金補充・返済を確認してから送信してください。");
+  require(funding?.schema === 2 || (funding?.schema === 1 && before !== null && sameCashReconciliation(before.cash, value.cash)),
+    "新規送信・保存済み現金の変更は、新しい補充・返済フォームで実際の金額を確認してください。");
   const fundingErrors = cashFundingIssues(value.cash);
   require(fundingErrors.length === 0, fundingErrors.join("\n"));
-  require(funding?.confirmed === true || keepsLegacyCash, "営業終了時の現金を確認してから送信してください。");
+  require(funding?.confirmed === true, "営業終了時の現金を確認してから送信してください。");
   const expectedClosingCash = value.cash.cashFloat + cashProfit
     + (funding?.companyTransfer || 0) - (funding?.personalRepayment || 0);
   require(value.cash.cashSales === value.sales.cashSales && value.cash.cardSales === value.sales.cardSales && value.cash.totalSales === value.sales.totalSales, "現金照合の売上がPOS売上と一致しません。");
   require(value.cash.expenseAndPaymentTotal === paymentTotal, "経費・日払い・派遣支払の合計が現金照合と一致しません。");
   require(value.cash.expectedClosingCash === expectedClosingCash && value.cash.cashProfit === cashProfit, "計算上の現金残額が一致しません。");
   require(value.cash.difference === value.cash.actualClosingCash - expectedClosingCash, "現金照合差額が一致しません。");
-  require(keepsLegacyCash || (expectedClosingCash >= 0 && value.cash.actualClosingCash === expectedClosingCash && value.cash.difference === 0),
+  require(expectedClosingCash >= 0 && value.cash.actualClosingCash === expectedClosingCash && value.cash.difference === 0,
     "現金差額が0円になるように営業終了時の現金残額を確認してください。");
   require((value.integrityIssues?.length || 0) === 0, "不完全な店舗データは送信できません。");
 }
@@ -1882,9 +1935,11 @@ export async function submitClosing(value: DailyClosing, user: User, expectedUpd
   await assertMonthOpen(value.businessDate.slice(0, 7));
   const cashLock = await acquireCashManagementLock(value.id, "submit", user);
   try {
-    const timestamp = now();
-    const [existingSnapshot, allSnapshot] = await Promise.all([get(rootRef(`history/${value.id}`)), get(rootRef("history"))]);
+    const [existingSnapshot, allSnapshot, monthStatesSnapshot] = await Promise.all([
+      get(rootRef(`history/${value.id}`)), get(rootRef("history")), get(rootRef("accountingMonthStates")),
+    ]);
     const before = existingSnapshot.val() as DailyClosing | null;
+    const timestamp = nextEventTimestamp(now(), before?.updatedAt);
     const canonicalId = `daily_${value.businessDate.replaceAll("-", "")}`;
     if (!before && value.id !== canonicalId) {
       throw new Error(`新規の日次データIDが営業日と一致しません。${value.businessDate}のJSONを読み込み直してください。`);
@@ -1894,7 +1949,15 @@ export async function submitClosing(value: DailyClosing, user: User, expectedUpd
     if (before && before.businessDate !== value.businessDate) throw new Error("再送時に営業日は変更できません。元の営業日データから再編集してください。");
     if (before && !["returned", "withdrawn"].includes(before.status)) throw new Error("差戻しまたは取下げ済みのデータだけ再送できます。");
     validateDailyClosingForSubmission(value, before);
-    assertCashLedgerChange(before ? { ...before, id: value.id } : null, value, asArray<DailyClosing>(allSnapshot.val()));
+    const monthStates = Object.entries((monthStatesSnapshot.val() || {}) as Record<string, AccountingMonthState>)
+      .map(([month, state]) => ({ ...state, month }));
+    assertCashLedgerChange(before ? { ...before, id: value.id } : null, value, asArray<DailyClosing>(allSnapshot.val()), monthStates);
+    const suppliedReason = value.cashRevisionReason?.trim() || "";
+    if (suppliedReason.length > 500) throw new Error("現金改訂理由は500文字以内で入力してください。");
+    if (before && !sameCashReconciliation(before.cash, value.cash) && !suppliedReason) {
+      throw new Error("保存済みの現金記録を変更する理由を入力してください。");
+    }
+    const revisionReason = suppliedReason || "店舗データ再送";
     const sameBusinessDate = asArray<DailyClosing>(allSnapshot.val()).find((row) => row.id !== value.id && row.businessDate === value.businessDate);
     if (sameBusinessDate) {
       throw new Error(`${value.businessDate}の店舗データはすでに存在します。既存データを開いて再編集してください。`);
@@ -1912,16 +1975,14 @@ export async function submitClosing(value: DailyClosing, user: User, expectedUpd
     }
     try {
       await assertCashManagementLockOwned(cashLock);
-      await runReadyTransaction(rootRef(`history/${value.id}`), (current) => {
-        const existing = current as DailyClosing | null;
-        if (before && !existing) throw new Error("再編集元データは完全削除されています。最新データを読み込んでください。");
-        if (existing && !expectedUpdatedAt) throw new Error("再編集元データが確認できません。最新データを読み込んでやり直してください。");
-        assertFresh(existing, expectedUpdatedAt);
-        if (existing && !["returned", "withdrawn"].includes(existing.status)) throw new Error("差戻しまたは取下げ済みのデータだけ再送できます。");
-        return clean({
+      const operationId = before ? crypto.randomUUID() : undefined;
+      const stored = clean({
           ...withoutId(value),
           cashManagementToken: cashLock.token,
-          legacyCashConfirmed: !value.cash.funding && value.legacyCashConfirmed === true ? true : undefined,
+          cashRevisionId: operationId,
+          previousUpdatedAt: before?.updatedAt,
+          cashRevisionReason: before ? revisionReason : undefined,
+          legacyCashConfirmed: undefined,
           businessMonth: value.businessDate.slice(0, 7),
           status: "submitted",
           approvedAt: undefined,
@@ -1935,10 +1996,23 @@ export async function submitClosing(value: DailyClosing, user: User, expectedUpd
           submittedAtMs: serverOrderTimestamp(),
           submittedBy: user.uid,
           updatedAt: timestamp,
-        });
-      }, { applyLocally: false });
+      });
+      if (before && operationId) {
+        const revision: CashRevision = {
+          schema: 1, dailyId: value.id, businessDate: value.businessDate, operationId,
+          cashManagementToken: cashLock.token, beforeCash: before.cash,
+          beforeRecordJson: oldRecordForCashRevision(before), beforeUpdatedAt: before.updatedAt,
+          beforeStatus: before.status, actor: user.uid, createdAtMs: serverOrderTimestamp(), reason: revisionReason,
+        };
+        await applyCashRevisionAtomically(value.id, stored, revision);
+      } else {
+        await runReadyTransaction(rootRef(`history/${value.id}`), (current) => {
+          if (current) throw new Error("同じ営業日が別の端末で保存されました。最新データを読み込んでください。");
+          return stored;
+        }, { applyLocally: false });
+      }
     } catch (error) {
-      if (newClaimHandle) await releasePendingClaim(newClaimHandle).catch(() => undefined);
+      if (!(error instanceof AmbiguousCashRevisionWriteError) && newClaimHandle) await releasePendingClaim(newClaimHandle).catch(() => undefined);
       throw error;
     }
     if (newClaimHandle) await commitClaimAfterEntitySaved(newClaimHandle, "店舗送信データ");
@@ -1986,8 +2060,10 @@ export async function deleteUnapprovedClosing(id: string, expected: ClosingRevis
     if (!isUnapprovedClosingStatus(current.status)) {
       throw new Error("承認済みデータは完全削除できません。経理またはOPが差し戻してから削除してください。");
     }
-    const allSnapshot = await get(rootRef("history"));
-    assertCashLedgerChange({ ...current, id }, null, asArray<DailyClosing>(allSnapshot.val()));
+    const [allSnapshot, monthStatesSnapshot] = await Promise.all([get(rootRef("history")), get(rootRef("accountingMonthStates"))]);
+    const monthStates = Object.entries((monthStatesSnapshot.val() || {}) as Record<string, AccountingMonthState>)
+      .map(([month, state]) => ({ ...state, month }));
+    assertCashLedgerChange({ ...current, id }, null, asArray<DailyClosing>(allSnapshot.val()), monthStates);
     const currentClaimKeys = [...new Set([
       posSubmissionClaimKey(current.checksum),
       claimKey(current.submissionId, current.checksum),
@@ -2025,23 +2101,37 @@ export async function deleteUnapprovedClosing(id: string, expected: ClosingRevis
 export async function approveClosing(id: string, expected: ClosingRevision, user: User) {
   await requireUser(user, ["accounting", "op"]);
   await assertMonthOpen(expected.businessDate.slice(0, 7));
-  const timestamp = now();
-  await runReadyTransaction(rootRef(`history/${id}`), (current) => {
-    const existing = current as DailyClosing | null;
-    if (!existing || existing.status !== "submitted") throw new Error("経理確認待ちのデータだけ承認できます。");
-    assertClosingRevision(existing, expected);
-    const issues = normalizeDailyClosing(existing).integrityIssues || [];
-    if (issues.length) throw new Error(`データ不備が${issues.length}件あるため承認できません。詳細を確認し、店舗へ差し戻してください。`);
-    return clean({
-      ...existing,
-      businessMonth: existing.businessDate.slice(0, 7),
-      status: "approved",
-      approvedAt: timestamp,
-      approvedBy: user.uid,
-      returnReason: undefined,
-      updatedAt: timestamp,
-    });
-  }, { applyLocally: false });
+  const cashLock = await acquireCashManagementLock(id, "approve", user);
+  try {
+    const all = asArray<DailyClosing>((await get(rootRef("history"))).val());
+    const selected = all.find((row) => row.id === id);
+    if (!selected || selected.status !== "submitted") throw new Error("経理確認待ちのデータだけ承認できます。");
+    assertClosingRevision(selected, expected);
+    const cashIssues = [...cashDayIssues(selected, all),
+      ...cashLedgerIssues(all.filter((row) => row.businessDate <= selected.businessDate), selected.businessDate.slice(0, 7))];
+    if (cashIssues.length) throw new Error(`現金記録を確認できないため承認できません。${[...new Set(cashIssues)].join("\n")}`);
+    const timestamp = nextEventTimestamp(now(), selected.updatedAt);
+    await assertCashManagementLockOwned(cashLock);
+    await runReadyTransaction(rootRef(`history/${id}`), (current) => {
+      const existing = current as DailyClosing | null;
+      if (!existing || existing.status !== "submitted") throw new Error("経理確認待ちのデータだけ承認できます。");
+      assertClosingRevision(existing, expected);
+      const issues = normalizeDailyClosing(existing).integrityIssues || [];
+      if (issues.length) throw new Error(`データ不備が${issues.length}件あるため承認できません。詳細を確認し、店舗へ差し戻してください。`);
+      return clean({
+        ...existing,
+        cashManagementToken: cashLock.token,
+        businessMonth: existing.businessDate.slice(0, 7),
+        status: "approved",
+        approvedAt: timestamp,
+        approvedBy: user.uid,
+        returnReason: undefined,
+        updatedAt: timestamp,
+      });
+    }, { applyLocally: false });
+  } finally {
+    await releaseCashManagementLock(cashLock).catch(() => undefined);
+  }
 }
 export async function returnClosing(id: string, expected: ClosingRevision, reason: string, user: User) {
   await requireUser(user, ["accounting", "op"]);
