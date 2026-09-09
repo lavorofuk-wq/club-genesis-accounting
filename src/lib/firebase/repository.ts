@@ -54,7 +54,7 @@ import {
   validateDriverPaySetting,
   validateStaffPaySetting,
 } from "@/domain/master-pay-validation";
-import { assertCashLedgerChange, cashFundingIssues } from "@/domain/cash-funding";
+import { assertCashLedgerChange, cashFundingIssues, preservesLegacyCash } from "@/domain/cash-funding";
 
 export type WorkspaceData = AccountingWorkspaceData;
 export type ClosingRevision = Pick<DailyClosing, "businessDate" | "updatedAt" | "checksum" | "submissionId">;
@@ -667,17 +667,19 @@ function validateDailyClosingForSubmission(value: DailyClosing, before: DailyClo
     + value.dispatchStaffPayment + value.dispatchCastPayment + value.dispatchFee;
   const cashProfit = value.sales.cashSales - paymentTotal;
   const funding = value.cash.funding;
-  require(Boolean(funding), "現金補充・返済を確認してから送信してください。");
+  const keepsLegacyCash = before !== null && preservesLegacyCash({ ...before, id: value.id }, value)
+    && value.legacyCashConfirmed === true;
+  require(Boolean(funding) || keepsLegacyCash, "現金補充・返済、または旧記録を変更せず保持することを確認してから送信してください。");
   const fundingErrors = cashFundingIssues(value.cash);
   require(fundingErrors.length === 0, fundingErrors.join("\n"));
-  require(funding?.confirmed === true, "営業終了時の現金を確認してから送信してください。");
+  require(funding?.confirmed === true || keepsLegacyCash, "営業終了時の現金を確認してから送信してください。");
   const expectedClosingCash = value.cash.cashFloat + cashProfit
     + (funding?.companyTransfer || 0) - (funding?.personalRepayment || 0);
   require(value.cash.cashSales === value.sales.cashSales && value.cash.cardSales === value.sales.cardSales && value.cash.totalSales === value.sales.totalSales, "現金照合の売上がPOS売上と一致しません。");
   require(value.cash.expenseAndPaymentTotal === paymentTotal, "経費・日払い・派遣支払の合計が現金照合と一致しません。");
   require(value.cash.expectedClosingCash === expectedClosingCash && value.cash.cashProfit === cashProfit, "計算上の現金残額が一致しません。");
   require(value.cash.difference === value.cash.actualClosingCash - expectedClosingCash, "現金照合差額が一致しません。");
-  require(expectedClosingCash >= 0 && value.cash.actualClosingCash === expectedClosingCash && value.cash.difference === 0,
+  require(keepsLegacyCash || (expectedClosingCash >= 0 && value.cash.actualClosingCash === expectedClosingCash && value.cash.difference === 0),
     "現金差額が0円になるように営業終了時の現金残額を確認してください。");
   require((value.integrityIssues?.length || 0) === 0, "不完全な店舗データは送信できません。");
 }
@@ -1919,6 +1921,7 @@ export async function submitClosing(value: DailyClosing, user: User, expectedUpd
         return clean({
           ...withoutId(value),
           cashManagementToken: cashLock.token,
+          legacyCashConfirmed: !value.cash.funding && value.legacyCashConfirmed === true ? true : undefined,
           businessMonth: value.businessDate.slice(0, 7),
           status: "submitted",
           approvedAt: undefined,

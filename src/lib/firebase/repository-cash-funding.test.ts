@@ -216,3 +216,65 @@ describe("後続営業日の現金実績と削除保護", () => {
     expect(memory.transaction.mock.calls.some(([reference]) => reference.path === "cashManagementLock")).toBe(false);
   });
 });
+
+describe("旧現金記録を変更しない再送の限定互換", () => {
+  function legacy(date = "2026-09-07") {
+    const value = fixture(date); delete value.cash.funding; value.status = "returned";
+    return value;
+  }
+
+  it("9/7再送後も9/8旧記録を管理開始後の欠落扱いにせず、2回目も保存できる", async () => {
+    const before = legacy(); store(before); const nextDay = legacy("2026-09-08"); nextDay.status = "withdrawn"; store(nextDay);
+    const candidate = { ...before, legacyCashConfirmed: true };
+    await submitClosing(candidate, user, stamp);
+    const first = memory.read(`history/${before.id}`) as DailyClosing & { cashManagementToken: string };
+    expect(first).toMatchObject({ cash: before.cash, legacyCashConfirmed: true, cashManagementToken: expect.any(String) });
+    expect(first.cash.funding).toBeUndefined();
+    const returned = { ...first, id: before.id, status: "returned" as const, updatedAt: "2026-09-10T01:00:00.000Z" };
+    store(returned);
+    await submitClosing({ ...returned, legacyCashConfirmed: true }, user, returned.updatedAt);
+    const second = memory.read(`history/${before.id}`) as DailyClosing & { cashManagementToken: string };
+    expect(second.cash).toEqual(before.cash); expect(second.cash.funding).toBeUndefined();
+    expect(second.cashManagementToken).not.toBe(first.cashManagementToken);
+    expect(memory.read(`history/${nextDay.id}`)).toEqual(nextDay);
+  });
+
+  it.each([undefined, false])("保存済み確認フラグがあっても今回の確認%sでは再送できない", async (confirmed) => {
+    const before = { ...legacy(), legacyCashConfirmed: true }; store(before);
+    const candidate = { ...before, legacyCashConfirmed: confirmed };
+    await expect(submitClosing(candidate, user, stamp)).rejects.toThrow("確認");
+    expect(historyWrites()).toHaveLength(0); expect(memory.read(`history/${before.id}`)).toEqual(before);
+  });
+
+  it("旧現金の実在高・差額は非0でも変更せず保持する", async () => {
+    const before = legacy(); before.cash.actualClosingCash -= 1000; before.cash.difference = -1000; store(before);
+    await submitClosing({ ...before, legacyCashConfirmed: true }, user, stamp);
+    expect(memory.read(`history/${before.id}`)).toMatchObject({ cash: before.cash, legacyCashConfirmed: true });
+  });
+
+  it("旧記録の現金支出と整合計算をすべて変更しても互換例外を使えない", async () => {
+    const before = legacy(); store(before); const candidate = structuredClone(before); candidate.legacyCashConfirmed = true;
+    candidate.dispatchFee += 100; candidate.cash.expenseAndPaymentTotal += 100;
+    candidate.cash.cashProfit -= 100; candidate.cash.expectedClosingCash -= 100; candidate.cash.actualClosingCash -= 100;
+    await expect(submitClosing(candidate, user, stamp)).rejects.toThrow("旧記録");
+    expect(historyWrites()).toHaveLength(0); expect(memory.read(`history/${before.id}`)).toEqual(before);
+  });
+
+  it("新規日次は確認フラグを付けてもfunding無しでは送信できない", async () => {
+    const candidate = legacy(); candidate.legacyCashConfirmed = true;
+    await expect(submitClosing(candidate, user)).rejects.toThrow("確認"); expect(historyWrites()).toHaveLength(0);
+  });
+
+  it("管理開始済み日次からfundingを削除して旧方式へ降格できない", async () => {
+    const before = fixture(); before.status = "returned"; store(before);
+    const candidate = structuredClone(before); delete candidate.cash.funding; candidate.legacyCashConfirmed = true;
+    await expect(submitClosing(candidate, user, stamp)).rejects.toThrow("確認");
+    expect(historyWrites()).toHaveLength(0); expect(memory.read(`history/${before.id}`)).toEqual(before);
+  });
+
+  it("新方式の送信では不要な旧記録確認フラグを保存しない", async () => {
+    const candidate = fixture(); candidate.legacyCashConfirmed = true; await submitClosing(candidate, user);
+    const saved = memory.read(`history/${candidate.id}`) as DailyClosing;
+    expect(saved.cash.funding).toEqual(candidate.cash.funding); expect(saved.legacyCashConfirmed).toBeUndefined();
+  });
+});

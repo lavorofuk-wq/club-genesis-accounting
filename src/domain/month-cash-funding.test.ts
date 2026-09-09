@@ -89,6 +89,21 @@ describe("経理月次の現金補充・返済", () => {
     expect(source).toEqual(before);
   });
 
+  it("旧9月7日の現金不変再送確認を、新方式開始と誤認せず旧9月8日も保全する", () => {
+    const seventh = day("2026-09-07", -33550);
+    const eighth = day("2026-09-08", 171750);
+    const source: WorkspaceData = { ...fixture().source, closings: [seventh, eighth] };
+    const before = calculateMonthlyAccounting(source, month, adjustments);
+    seventh.legacyCashConfirmed = true;
+    const snapshot = structuredClone(source);
+    const after = calculateMonthlyAccounting(source, month, adjustments);
+    expect(after.cashFunding).toEqual(before.cashFunding);
+    expect(after.cashFunding?.managedDays).toBe(0);
+    expect(after.balance).toEqual(before.balance);
+    expect(after.warnings.join("\n")).not.toContain("補充・返済の確認記録がありません");
+    expect(source).toEqual(snapshot);
+  });
+
   it("営業日0の月も前月からの借りを保持し、新たな現金移動0円のまま確定へ保存できる", () => {
     const { source } = fixture();
     const targetMonth = "2026-11";

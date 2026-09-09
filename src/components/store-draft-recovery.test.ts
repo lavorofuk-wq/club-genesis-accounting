@@ -116,7 +116,7 @@ describe("店舗フォームの更新時入力退避", () => {
     const markup = render();
     expect(markup).toContain(`${businessDate} 再編集`);
     expect(markup).not.toContain("234,567");
-    expect(markup).toContain("現金の一致確認が必要です");
+    expect(markup).toContain("保存済み現金照合を保持して再送する確認が必要です");
     expect(markup).not.toContain("確認済み・経理へ送信");
     expect(markup).not.toContain("999,999");
     expect(drafts.keys).not.toContain("store.workflow.new.stage");

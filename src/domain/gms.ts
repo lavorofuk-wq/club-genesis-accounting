@@ -401,6 +401,8 @@ export type DailyClosing = {
   dispatchFee: number;
   liquorDeliveryAmount: number;
   cash: CashReconciliation;
+  /** 旧日次の現金照合を変更せず再送する旨を、今回の操作で確認済み。新方式の現金確認とは別。 */
+  legacyCashConfirmed?: boolean;
   posSnapshot: PosClosingV3;
   submittedAt?: string;
   /** Firebaseサーバーが確定した店舗送信時刻（ミリ秒）。旧データでは未設定。 */

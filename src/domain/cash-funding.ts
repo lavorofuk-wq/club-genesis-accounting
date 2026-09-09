@@ -153,6 +153,26 @@ export function cashLedgerIssues(closings: DailyClosing[], month?: string): stri
   }
 }
 
+function sameCashValue(before: unknown, candidate: unknown): boolean {
+  if (Object.is(before, candidate)) return true;
+  if (!before || !candidate || typeof before !== "object" || typeof candidate !== "object") return false;
+  if (Array.isArray(before) !== Array.isArray(candidate)) return false;
+  if (Array.isArray(before) && Array.isArray(candidate) && before.length !== candidate.length) return false;
+  const original = before as Record<string, unknown>;
+  const next = candidate as Record<string, unknown>;
+  const keys = Object.keys(original);
+  return keys.length === Object.keys(next).length && keys.every((key) =>
+    Object.prototype.hasOwnProperty.call(next, key) && sameCashValue(original[key], next[key]));
+}
+
+/** 保存済みの旧現金だけを保持する例外。ロックtokenや保存日時を新旧判定には使わない。 */
+export function preservesLegacyCash(before: DailyClosing | null | undefined, candidate: DailyClosing): boolean {
+  return Boolean(before?.cash && candidate?.cash
+    && before.businessDate === candidate.businessDate
+    && before.cash.funding === undefined && candidate.cash.funding === undefined
+    && sameCashValue(before.cash, candidate.cash));
+}
+
 /** 後続の実績がある現金記録は、自動連鎖更新も削除も許可しない。 */
 export function assertCashLedgerChange(before: DailyClosing | null, candidate: DailyClosing | null, closings: DailyClosing[]) {
   const id = candidate?.id || before?.id;
@@ -168,7 +188,9 @@ export function assertCashLedgerChange(before: DailyClosing | null, candidate: D
     `${successors[0].businessDate}以降の補充・返済がこの日以前の現金残額を参照しています。実績を保護するため現金額の変更・過去日次の追加・削除はできません。`);
   }
   if (candidate) {
-    assert(candidate.cash.funding, "現金残額の一致確認と補充・返済の入力が必要です。");
+    const preservedLegacy = preservesLegacyCash(before, candidate);
+    assert(candidate.cash.funding || preservedLegacy, "現金残額の一致確認と補充・返済の入力が必要です。旧方式の日次は保存済みの現金記録を変更せずに再送してください。");
+    if (preservedLegacy) assert(candidate.legacyCashConfirmed === true, "保存済みの旧現金記録を変更していないことを確認してください。");
     const issues = cashLedgerIssues([...others, candidate]);
     assert(issues.length === 0, issues[0]);
   }
