@@ -58,11 +58,12 @@ export function createMonthlyBalanceWorkbook(input: BalanceExportInput, sourceLa
   const cash = total("cashSales");
   const sales = total("totalSales");
   const profit = sales - totalCosts;
+  const cashFunding = report.cashFunding && report.cashFunding.managedDays > 0 ? report.cashFunding : undefined;
   const meanCustomerUnitPrice = ratio(report.days.reduce((sum, day) => sum + (day.customers === 0 ? 0 : day.totalSales / day.customers), 0), report.approvedDays);
   const meanCastRatio = sales === 0 ? "" : ratio(report.days.reduce((sum, day) => sum + (day.totalSales === 0 ? 0 : (day.castHourly + day.castSalesReward + day.dispatchCastPayment) / day.totalSales), 0), report.approvedDays);
   const meanExpenseRatio = sales === 0 ? "" : ratio(report.days.reduce((sum, day) => sum + (day.totalSales === 0 ? 0 : day.expenses / day.totalSales), 0), report.approvedDays);
   const book = new ExcelJS.Workbook();
-  book.creator = "GENESIS Management System Ver2.20.0";
+  book.creator = "GENESIS Management System Ver2.21.0";
   book.created = new Date();
   book.calcProperties.fullCalcOnLoad = true;
   const sheet = book.addWorksheet("ジェネシス収支表");
@@ -154,9 +155,9 @@ export function createMonthlyBalanceWorkbook(input: BalanceExportInput, sourceLa
   merge(sheet, "M37:N37", formula("F37-D39-N36-P35-U42", report.castNet));
   label(sheet, "O37:T37", "キャスト総支給額＋総従業員給＋紹介料＋経費＝総支出");
   merge(sheet, "U37:V37", formula("SUM(M35:N35,P35,R35:T35)", totalCosts));
-  label(sheet, "A38:L38", "現金売上＋前期・後期カード入金－キャスト差引支給額－紹介者支払額－従業員差引支給額（送迎含む）－キャスト日払・立替－従業員日払－源泉所得税－派遣支払・手数料－変動費－固定費＝現状現金残高");
+  label(sheet, "A38:L38", "現金売上＋前期・後期カード入金－キャスト差引支給額－紹介者支払額－従業員差引支給額（送迎含む）－キャスト日払・立替－従業員日払－源泉所得税－派遣支払・手数料－変動費－固定費" + (cashFunding ? "＋会社補充＋個人補充＋会社送金－個人返済" : "") + "＝現状現金残高");
   // 総支出に含まれる日払い・源泉税は別途引かず、実際の支出ではない送迎控除だけを戻す。
-  merge(sheet, "M38:N38", formula("SUM(D35,J42,O42)-U37+N36", cash - totalCosts + report.castTransport));
+  merge(sheet, "M38:N38", formula("SUM(D35,J42,O42)-U37+N36" + (cashFunding ? "+SUM(J43,O43,J44)-O44" : ""), cash - totalCosts + report.castTransport + (cashFunding?.netCashMovement || 0)));
   label(sheet, "O38:U38", "現金売上－総支出＝現金残");
   merge(sheet, "V38:W38", formula("D35-U37", cash - totalCosts));
   label(sheet, "A39:C39", "キャスト（日払・立替）計");
@@ -184,6 +185,22 @@ export function createMonthlyBalanceWorkbook(input: BalanceExportInput, sourceLa
     cell.protection = { locked: false };
     cell.dataValidation = { type: "decimal", operator: "greaterThanOrEqual", formulae: [0], allowBlank: true, showErrorMessage: true, errorTitle: "入金額", error: "0円以上の数値を入力してください。" };
   }
+  if (cashFunding) {
+    // 見本の入出金欄直下の余白だけを利用し、損益列・印刷範囲は変えない。
+    const fundingCells: Array<[string, string, string, number]> = [
+      ["G43:I43", "会社補充", "J43:K43", cashFunding.companyReplenishment],
+      ["L43:N43", "個人補充", "O43:P43", cashFunding.personalReplenishment],
+      ["G44:I44", "会社送金", "J44:K44", cashFunding.companyTransfer],
+      ["L44:N44", "個人返済", "O44:P44", cashFunding.personalRepayment],
+      ["G45:I45", "期首未返済", "J45:K45", cashFunding.openingPersonalDebt],
+      ["L45:N45", "期末未返済", "O45:P45", cashFunding.closingPersonalDebt],
+    ];
+    for (const [labelRange, caption, amountRange, amount] of fundingCells) {
+      label(sheet, labelRange, caption);
+      merge(sheet, amountRange, amount);
+    }
+    sheet.getRow(45).height = 30;
+  }
   label(sheet, "C42", "本指売上");
   sheet.getCell("D42").value = report.honShimeiSales;
   label(sheet, "C43", "場内売上");
@@ -207,7 +224,7 @@ export function createMonthlyBalanceWorkbook(input: BalanceExportInput, sourceLa
   }
   for (const row of [36, 37, 38, 39, 40, 42, 44]) sheet.getRow(row).height = row === 37 || row === 38 ? 48 : 30;
   // 下段は見本に存在するラベル・数値範囲だけに罫線を引き、余白を保つ。
-  for (const range of ["C36:W36", "B37:V37", "A38:W38", "A39:L39", "O39:W39", "A40:L40", "G42:P42", "C42:D44", "R41:V44", "R46:W46"]) {
+  for (const range of ["C36:W36", "B37:V37", "A38:W38", "A39:L39", "O39:W39", "A40:L40", "G42:P42", "C42:D44", "R41:V44", "R46:W46", ...(cashFunding ? ["G43:P45"] : [])]) {
     const [start, end] = range.split(":").map((address) => sheet.getCell(address));
     for (let row = Number(start.row); row <= Number(end.row); row += 1) {
       for (let column = Number(start.col); column <= Number(end.col); column += 1) sheet.getCell(row, column).border = border;

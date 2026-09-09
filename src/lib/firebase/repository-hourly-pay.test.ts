@@ -12,7 +12,9 @@ vi.mock("firebase/database", () => ({
   get: memory.get,
   ref: (_database: unknown, path: string) => ({ path }),
   serverTimestamp: () => Date.now(),
-  onValue: vi.fn(), set: vi.fn(), update: vi.fn(),
+  onValue: (_reference: unknown, callback: (snapshot: { val: () => number }) => void) => {
+    callback({ val: () => 0 }); return () => undefined;
+  }, set: vi.fn(), update: vi.fn(),
 }));
 vi.mock("./client", () => ({ database: {}, rootRef: (path = "") => ({ path }) }));
 vi.mock("./ready-transaction", () => ({ runReadyTransaction: memory.transaction }));
@@ -45,7 +47,10 @@ function fixture(payment: number): DailyClosing {
     updatedAt: timestamp, sales, customers, nominations, casts: [], staffWork: [staff(payment)], drivers: [], expenses: [],
     staffDailyPaymentTotal: payment, dispatchStaffPayment: 0, dispatchCastPayment: 0, dispatchFee: 0, liquorDeliveryAmount: 0,
     cash: { ...sales, cashFloat: 200000, expenseAndPaymentTotal: payment, expectedClosingCash,
-      actualClosingCash: expectedClosingCash, cashProfit: expectedClosingCash - 200000, difference: 0 },
+      actualClosingCash: expectedClosingCash, cashProfit: expectedClosingCash - 200000, difference: 0,
+      funding: { schema: 1, previousClosingId: "", previousBusinessDate: "", previousClosingCash: 200000,
+        openingShortfall: 0, openingPersonalDebt: 0, companyReplenishment: 0, personalReplenishment: 0,
+        companyTransfer: 0, personalRepayment: 0, closingPersonalDebt: 0, confirmed: true } },
     posSnapshot: { schema: "club-genesis-pos-closing", schemaVersion: 3, businessDate: "2026-09-09", status: "closed",
       submissionId: "submission-1", checksum: "a".repeat(64), generatedAt: timestamp,
       checksumAlgorithm: "sha256", checksumCanonicalization: "recursive-key-sort-v1",
@@ -83,7 +88,7 @@ describe("体入スタッフの日別1円給与と既存実支払の送信検証
 
   it.each([1500, 1501, 1503.75, 1504])("新規送信の給与全額と異なる日払い%s円を拒否する", async (payment) => {
     await expect(submitClosing(fixture(payment), user)).rejects.toThrow("体入給与は当日の基本給与全額を日払いにしてください。");
-    expect(memory.transaction).not.toHaveBeenCalled();
+    expect(memory.transaction.mock.calls.some(([reference]) => reference.path.startsWith("history/"))).toBe(false);
   });
 
   it("再送ではサーバーに保存された旧1500円の実支払額と現金照合を維持できる", async () => {
@@ -117,13 +122,13 @@ describe("体入スタッフの日別1円給与と既存実支払の送信検証
     memory.values.set(path, before);
     await expect(submitClosing(fixture(1501), user, timestamp)).rejects.toThrow("体入給与は当日の基本給与全額を日払いにしてください。");
     expect(memory.values.get(path)).toEqual(before);
-    expect(memory.transaction).not.toHaveBeenCalled();
+    expect(memory.transaction.mock.calls.some(([reference]) => reference.path.startsWith("history/"))).toBe(false);
   });
 
   it("クライアント側が旧額を主張してもサーバーの保存実額と異なれば拒否する", async () => {
     memory.values.set(path, saved(1400));
     await expect(submitClosing(fixture(1500), user, timestamp)).rejects.toThrow("体入給与は当日の基本給与全額を日払いにしてください。");
-    expect(memory.transaction).not.toHaveBeenCalled();
+    expect(memory.transaction.mock.calls.some(([reference]) => reference.path.startsWith("history/"))).toBe(false);
   });
 
   it.each([
@@ -134,7 +139,7 @@ describe("体入スタッフの日別1円給与と既存実支払の送信検証
     before.staffWork[0] = { ...before.staffWork[0], ...override };
     memory.values.set(path, before);
     await expect(submitClosing(fixture(1500), user, timestamp)).rejects.toThrow("体入給与は当日の基本給与全額を日払いにしてください。");
-    expect(memory.transaction).not.toHaveBeenCalled();
+    expect(memory.transaction.mock.calls.some(([reference]) => reference.path.startsWith("history/"))).toBe(false);
   });
 
   it("同一IDの保存済み体入スタッフが重複する場合は旧額を推測して採用しない", async () => {
@@ -147,14 +152,14 @@ describe("体入スタッフの日別1円給与と既存実支払の送信検証
   it("他端末で更新された日次は旧実額を保持していても上書きしない", async () => {
     memory.values.set(path, { ...saved(), updatedAt: "2026-09-09T13:00:00.000Z" });
     await expect(submitClosing(fixture(1500), user, timestamp)).rejects.toThrow("別の端末で更新されています。");
-    expect(memory.transaction).not.toHaveBeenCalled();
+    expect(memory.transaction.mock.calls.some(([reference]) => reference.path.startsWith("history/"))).toBe(false);
   });
 
   it("日払いだけ変更して現金照合が不整合なデータを保存しない", async () => {
     const value = fixture(1503);
     value.cash = fixture(1500).cash;
     await expect(submitClosing(value, user)).rejects.toThrow("合計が現金照合と一致しません。");
-    expect(memory.transaction).not.toHaveBeenCalled();
+    expect(memory.transaction.mock.calls.some(([reference]) => reference.path.startsWith("history/"))).toBe(false);
   });
 });
 
@@ -182,6 +187,6 @@ describe("体入キャスト日払いの1円送信", () => {
 
   it("体入キャストの日払いに1円未満の端数を保存しない", async () => {
     await expect(submitClosing(castFixture(1503.75), user)).rejects.toThrow("体入即日支払いは1円単位で入力してください。");
-    expect(memory.transaction).not.toHaveBeenCalled();
+    expect(memory.transaction.mock.calls.some(([reference]) => reference.path.startsWith("history/"))).toBe(false);
   });
 });

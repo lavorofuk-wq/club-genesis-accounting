@@ -1,6 +1,7 @@
 import type { DailyClosing, StaffRecord } from "./gms";
 import { validateExpenseExport, type ExpenseExportInput } from "./expense-export";
 import { allocateBalancePayroll } from "./balance-allocation";
+import { summarizeCashFunding, type CashFundingSummary } from "./cash-funding";
 
 export type BalanceExportInput = ExpenseExportInput & {
   staff?: StaffRecord[];
@@ -40,6 +41,8 @@ export type BalanceExportReport = {
   employeeDaily: number;
   honShimeiSales: number;
   jonaiExtensionSales: number;
+  /** 損益には含めず、現状現金残高だけに加減する。旧確定分には後付けしない。 */
+  cashFunding?: CashFundingSummary;
 };
 
 function requireValue(condition: unknown, message: string): asserts condition {
@@ -152,6 +155,21 @@ export function buildBalanceExportReport(input: BalanceExportInput): BalanceExpo
   if (snapshot) {
     requireValue(JSON.stringify(canonical(results.castSalesReports)) === JSON.stringify(canonical(snapshot.castSalesReports)),
       "キャストの日別売上・勤務データが月次確定時と一致しません。");
+    requireValue(JSON.stringify(canonical(results.cashFunding)) === JSON.stringify(canonical(snapshot.cashFunding)),
+      "現金補充・返済の集計が月次確定時と一致しません。");
+  }
+  const hasFundingDays = input.closings.some((closing) => closing.businessDate.startsWith(`${month}-`) && closing.cash.funding !== undefined);
+  let cashFunding: CashFundingSummary | undefined;
+  if (snapshot && snapshot.cashFunding === undefined) {
+    requireValue(!hasFundingDays, "補充・返済の集計がない旧確定月へ、新しい現金移動を後付けして出力することはできません。");
+  } else {
+    const actualFunding = summarizeCashFunding(input.closings, month);
+    requireValue(results.cashFunding !== undefined || !hasFundingDays, "現金補充・返済の集計が未確定のため収支表を出力できません。未承認日次・警告を確認してください。");
+    if (results.cashFunding !== undefined) {
+      requireValue(JSON.stringify(canonical(results.cashFunding)) === JSON.stringify(canonical(actualFunding)),
+        "現金補充・返済・未返済残高が日次データと一致しません。");
+      cashFunding = results.cashFunding;
+    }
   }
   const approved = input.closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(`${month}-`))
     .sort((a, b) => a.businessDate.localeCompare(b.businessDate));
@@ -206,12 +224,13 @@ export function buildBalanceExportReport(input: BalanceExportInput): BalanceExpo
   const expandedCash = results.sales.cash - castNet - castWithholding - results.balance.introducer
     - employeeNet - castDailyAndAdvance - employeeDaily - results.expenses.dispatchCast
     - results.expenses.dispatchStaff - results.expenses.dispatchFee - results.expenses.dailyExpenseTotal
-    - monthlyExpenses;
-  same(expandedCash, results.sales.cash - totalCosts + castTransport, "現状現金残高の控除内訳");
+    - monthlyExpenses + (cashFunding?.netCashMovement || 0);
+  same(expandedCash, results.sales.cash - totalCosts + castTransport + (cashFunding?.netCashMovement || 0), "現状現金残高の控除内訳");
   return {
     month, days, approvedDays: results.approvedDays,
     castDailyAndAdvance, castTransport, castWithholding, castNet, employeeDaily,
     honShimeiSales: sum(results.castRewards, (row) => amount(row.honShimeiSales, "キャスト本指名売上")),
     jonaiExtensionSales: sum(results.castRewards, (row) => amount(row.jonaiExtensionSales, "キャスト場内延長売上")),
+    ...(cashFunding ? { cashFunding } : {}),
   };
 }

@@ -138,7 +138,7 @@ describe("店舗の時給1円単位と支払実績保全", () => {
     const markup = render();
     expect((draft.values[`${prefix}.staffWork`] as DailyStaffWork[])[0].dailyPayment).toBe(dailyPayment);
     expect(markup).toContain("保存済みの日払い額を保持");
-    expect(draft.values[`${prefix}.actualCash`]).toBe(source.cash.actualClosingCash);
+    expect(draft.values[`${prefix}.actualCash`]).toBe(0);
     expect(source).toEqual(before);
   });
 
@@ -176,7 +176,7 @@ describe("店舗の時給1円単位と支払実績保全", () => {
     render();
     click("照合を確定して店舗データ作成へ");
     expect((draft.values[`${prefix}.castRows`] as DailyCast[])[0].dailyPayment).toBe(8520);
-    expect(draft.values[`${prefix}.actualCash`]).toBe(source.cash.actualClosingCash);
+    expect(draft.values[`${prefix}.actualCash`]).toBe(0);
   });
 
   it("新規未送信の体入キャスト自動初期額は、照合時に最新時給で1円単位へ再算出する", () => {
