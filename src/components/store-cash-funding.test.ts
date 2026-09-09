@@ -114,6 +114,11 @@ function recordedManagedClosing(): DailyClosing {
         personalRepayment: 10000, closingPersonalDebt: 10000, confirmed: true } },
   };
 }
+function legacyClosing(businessDate = "2026-09-07"): DailyClosing {
+  return { ...previous(), id: `daily_${businessDate.replaceAll("-", "")}`, businessDate, status: "returned",
+    expenses: [{ id: "old-expense", category: "supplies", payee: "保存済み支払先", amount: 30000 }],
+    posSnapshot: { ...pos, businessDate }, submissionId: pos.submissionId, checksum: pos.checksum };
+}
 function restore(values: Record<string, unknown>, key = prefix) {
   for (const [field, value] of Object.entries(values)) harness.drafts[`${key}.${field}`] = value;
 }
@@ -298,5 +303,82 @@ describe("現金補充・返済の店舗確認", () => {
     expect(markup).toContain("￥179,000");
     expect(markup).toContain("旧照合差額");
     expect(source).toEqual(before);
+  });
+
+  it("旧9月7日を後続旧9月8日があるまま再送し、現金全体・実在高・差額を完全保持する", async () => {
+    const recorded = legacyClosing(); const before = structuredClone(recorded);
+    const source = { ...data, closings: [recorded, legacyClosing("2026-09-08")] };
+    harness.drafts["store.editing"] = recorded;
+    restore({ stage: "cash", companyReplenishment: 111, personalReplenishment: 222, companyTransfer: 333 }, `store.workflow.${recorded.id}`);
+    const markup = render(source);
+    expect(markup).toContain("保存済み現金照合を変更せず再送することを確認しました");
+    expect(markup).not.toContain("個人への返済額も確認済み");
+    expect(markup).not.toContain("開店前の個人立替補充");
+    expect(markup).not.toContain("現金管理を開始した後");
+    expect(harness.money).toEqual([]);
+    expect(button(nextLabel).disabled).toBe(true);
+    expect(harness.checks[0].disabled).toBe(false);
+    harness.checks[0].change(true); render(source); button(nextLabel).click();
+    expect(render(source)).toContain("新方式の現金一致確認ではありません");
+    button("確認済み・経理へ送信").click();
+    await vi.waitFor(() => expect(harness.submit).toHaveBeenCalledTimes(1));
+    const sent = harness.submit.mock.calls[0][0] as DailyClosing;
+    expect(sent.cash).toEqual(before.cash);
+    expect(sent.cash.funding).toBeUndefined();
+    expect(sent.legacyCashConfirmed).toBe(true);
+    expect(recorded).toEqual(before);
+  });
+
+  it("旧日次は二回連続の差戻し再送でも新方式に切り替えず、毎回明示確認を要求する", async () => {
+    let recorded = legacyClosing(); const originalCash = structuredClone(recorded.cash);
+    for (let count = 1; count <= 2; count++) {
+      harness.state = []; harness.effects = []; harness.drafts = {}; harness.pending = [];
+      harness.drafts["store.editing"] = recorded;
+      restore({ stage: "preview" }, `store.workflow.${recorded.id}`);
+      const source = { ...data, closings: [recorded, legacyClosing("2026-09-08")] };
+      const markup = render(source);
+      expect(markup).toContain("保存済み現金照合を変更せず再送することを確認しました");
+      expect(harness.checks[0].checked).toBe(false);
+      expect(button(nextLabel).disabled).toBe(true);
+      harness.checks[0].change(true); render(source);
+      button("確認済み・経理へ送信").click();
+      await vi.waitFor(() => expect(harness.submit).toHaveBeenCalledTimes(count));
+      const sent = harness.submit.mock.calls[count - 1][0] as DailyClosing;
+      expect(sent.cash).toEqual(originalCash);
+      expect(sent.cash.funding).toBeUndefined();
+      expect(sent.legacyCashConfirmed).toBe(true);
+      recorded = { ...sent, status: "returned", updatedAt: `second-return-${count}` };
+    }
+  });
+
+  it.each([
+    ["経費", { expenses: [{ id: "old-expense", category: "supplies", payee: "保存済み支払先", amount: 30001 }] }],
+    ["つり銭", { cashFloat: 210000 }],
+    ["現金売上", { pos: { ...pos, businessDate: "2026-09-07", sales: { cashSales: 10001, cardSales: 0, totalSales: 10001 } } }],
+    ["カード売上", { pos: { ...pos, businessDate: "2026-09-07", sales: { cashSales: 10000, cardSales: 1, totalSales: 10001 } } }],
+  ])("旧日次の%s変更は保存現金を更新せず送信を停止する", (_label, patch) => {
+    const recorded = legacyClosing(); const before = structuredClone(recorded);
+    harness.drafts["store.editing"] = recorded;
+    restore({ stage: "cash", ...patch }, `store.workflow.${recorded.id}`);
+    const markup = render({ ...data, closings: [recorded] });
+    expect(markup).toContain("過去の現金額を推測して再計算できないため送信できません");
+    expect(markup).toContain("￥179,000");
+    expect(harness.checks[0].disabled).toBe(true);
+    expect(button(nextLabel).disabled).toBe(true);
+    expect(recorded).toEqual(before);
+  });
+
+  it("旧日次の現金保持確認後に経費内訳を変更したら再確認を要求する", () => {
+    const recorded = legacyClosing();
+    harness.drafts["store.editing"] = recorded;
+    restore({ stage: "cash" }, `store.workflow.${recorded.id}`);
+    const source = { ...data, closings: [recorded] };
+    render(source); harness.checks[0].change(true); render(source);
+    expect(button(nextLabel).disabled).toBe(false);
+    restore({ expenses: [{ ...recorded.expenses[0], payee: "修正後の支払先" }] }, `store.workflow.${recorded.id}`);
+    render(source);
+    expect(harness.checks[0].checked).toBe(false);
+    expect(harness.checks[0].disabled).toBe(false);
+    expect(button(nextLabel).disabled).toBe(true);
   });
 });

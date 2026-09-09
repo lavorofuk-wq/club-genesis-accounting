@@ -125,6 +125,55 @@ test("新fundingの承認・差戻しでは補充返済の各値を変更でき�
   }
 });
 
+test("保存済み旧cashの確認済み再送はtokenの有無と再送回数に依存しない", () => {
+  for (const existingToken of [undefined, "previous-submission-token"]) {
+    const before = closing(); delete before.cash.funding; before.status = "returned";
+    before.cashManagementToken = existingToken; before.legacyCashConfirmed = true; before.updatedAt = "before";
+    const value = structuredClone(before); value.status = "submitted"; value.cashManagementToken = "current-token";
+    value.legacyCashConfirmed = true; value.updatedAt = "new"; value.submittedAt = "new";
+    assert.equal(cashAllowed(trees(value, before)), true);
+    const allowed = trees(value, before);
+    assert.equal(check(rules.history.$id[".write"], allowed.old, allowed.next, historyPath), true);
+    delete allowed.old["accounting-dev"].cashManagementLock;
+    assert.equal(check(rules.history.$id[".write"], allowed.old, allowed.next, historyPath), false);
+    delete value.legacyCashConfirmed; assert.equal(cashAllowed(trees(value, before)), false);
+  }
+});
+
+test("旧互換では営業日と全9現金プリミティブが不変でなければ再送できない", () => {
+  const before = closing(); delete before.cash.funding; before.status = "returned";
+  for (const field of Object.keys(before.cash)) {
+    const value = structuredClone(before); value.status = "submitted"; value.legacyCashConfirmed = true;
+    value.cash[field] += 1; assert.equal(cashAllowed(trees(value, before)), false, field);
+  }
+  const value = structuredClone(before); value.status = "submitted"; value.legacyCashConfirmed = true;
+  value.businessDate = "2026-09-10"; assert.equal(cashAllowed(trees(value, before)), false);
+});
+
+test("旧差額の非0は旧現金と同値の場合だけ確認済み再送で保持する", () => {
+  const before = closing(); delete before.cash.funding; before.status = "returned";
+  before.cash.actualClosingCash -= 1000; before.cash.difference = -1000;
+  const value = structuredClone(before); value.status = "submitted"; value.legacyCashConfirmed = true;
+  assert.equal(cashAllowed(trees(value, before)), true);
+  value.cash.difference = 0; assert.equal(cashAllowed(trees(value, before)), false);
+});
+
+test("確認フラグを偽装しても新規missingとmanagedからのfunding削除は拒否する", () => {
+  const value = closing(); delete value.cash.funding; value.legacyCashConfirmed = true;
+  assert.equal(cashAllowed(trees(value)), false);
+  const before = closing(); before.status = "returned";
+  assert.equal(cashAllowed(trees(value, before)), false);
+});
+
+test("旧記録確認フラグはtrueかつfunding無しの保存だけ許可する", () => {
+  const path = `${historyPath}/legacyCashConfirmed`;
+  for (const [confirmed, managed, allowed] of [[true, false, true], [false, false, false], ["true", false, false], [true, true, false]]) {
+    const value = closing(); value.legacyCashConfirmed = confirmed; if (!managed) delete value.cash.funding;
+    const result = trees(value);
+    assert.equal(check(rules.history.$id.legacyCashConfirmed[".validate"], result.old, result.next, path), allowed);
+  }
+});
+
 test("新送信は有効な対象id・owner・token一致のcash lockを要求する", () => {
   const original = trees(); assert.equal(check(rules.history.$id[".write"], original.old, original.next, historyPath), true);
   for (const change of [state => { delete state.cashManagementLock; },

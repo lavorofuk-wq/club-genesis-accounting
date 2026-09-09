@@ -30,7 +30,7 @@ import type {
 } from "./gms";
 import { cashLedgerIssues, summarizeCashFunding, type CashFundingSummary } from "./cash-funding";
 
-export const MONTHLY_CALCULATION_VERSION = "2.21.0";
+export const MONTHLY_CALCULATION_VERSION = "2.21.1";
 export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 3 as const;
 
 export type IntroducerEntryEvent = {
