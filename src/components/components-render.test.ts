@@ -54,6 +54,9 @@ const closing: DailyClosing = {
     cashSales: 60_000, cardSales: 40_000, totalSales: 100_000, cashFloat: 200_000,
     expenseAndPaymentTotal: 5_500, expectedClosingCash: 254_500, cashProfit: 54_500,
     actualClosingCash: 254_500, difference: 0,
+    funding: { schema: 2, previousClosingId: "", previousBusinessDate: "", previousClosingCash: 200_000,
+      openingShortfall: 0, openingPersonalDebt: 0, companyReplenishment: 0, personalReplenishment: 0,
+      companyTransfer: 0, personalRepayment: 0, closingPersonalDebt: 0, confirmed: true },
   },
   posSnapshot: {
     schema: "club-genesis-pos-closing", schemaVersion: 3, businessDate, status: "closed",
@@ -167,7 +170,7 @@ describe("主要ページのSSRスモーク", () => {
     expect(markup).toContain("月間の採用報酬方式を日別に配分");
     expect(markup).toContain("紹介料を独立列で出力");
     expect(markup).toContain("カード入金額はExcel内で入力してください");
-    expect(markup).toContain("未承認・差戻し中・店舗編集中の日次は含みません");
+    expect(markup).toContain("全営業日の現金補充・返済の確認と承認を済ませてください");
     expect(markup).not.toMatch(/<button[^>]*disabled[^>]*>収支表をXLSX出力/);
   });
 
@@ -184,13 +187,13 @@ describe("主要ページのSSRスモーク", () => {
     expect(markup).not.toMatch(/<button[^>]*disabled[^>]*>収支表をXLSX出力/);
   });
 
-  it("収支表XLSXは未承認日があっても承認済み部分を出力し、処理中・不整合時は止める", () => {
+  it("収支表XLSXは未承認日の現金が未照合なら停止し、承認済みで整合する場合に出力できる", () => {
     const source = balanceWorkspace();
     const render = (workspace: AccountingWorkspaceData, busy = false) => renderToStaticMarkup(createElement(AccountingForms, {
       section: "balance", data: workspace, user, busy, run,
     }));
     const partial = render({ ...source, closings: [source.closings[0], { ...source.closings[0], id: "unapproved", status: "submitted", businessDate: `${month}-03` }] });
-    expect(partial).not.toMatch(/<button[^>]*disabled[^>]*>収支表をXLSX出力/);
+    expect(partial).toMatch(/<button[^>]*disabled[^>]*>収支表をXLSX出力/);
     expect(render(source, true)).toMatch(/<button[^>]*disabled[^>]*>収支表をXLSX出力/);
     const invalid = render({ ...source, closings: [{ ...source.closings[0], integrityIssues: ["日次経費が破損しています。"] }] });
     expect(invalid).toMatch(/<button[^>]*disabled[^>]*>収支表をXLSX出力/);
@@ -250,7 +253,7 @@ describe("主要ページのSSRスモーク", () => {
     }));
     const markup = render(data);
     expect(markup).toContain("経費表をXLSX出力");
-    expect(markup).toContain("未承認・差戻し中・店舗編集中の日次は含みません");
+    expect(markup).toContain("全営業日の現金補充・返済の確認と承認を済ませてください");
     expect(markup).not.toMatch(/<button[^>]*disabled[^>]*>経費表をXLSX出力/);
     const fixedOnly = render({
       ...data, closings: [],
@@ -260,12 +263,12 @@ describe("主要ページのSSRスモーク", () => {
     expect(fixedOnly).toContain("￥100,000");
   });
 
-  it("経費表XLSXは未承認日があっても承認済み部分を出力し、処理中・不整合時は止める", () => {
+  it("経費表XLSXは未承認日の現金が未照合なら停止し、承認済みで整合する場合に出力できる", () => {
     const render = (source: AccountingWorkspaceData, busy = false) => renderToStaticMarkup(createElement(AccountingForms, {
       section: "expenses", data: source, user, busy, run,
     }));
     const partial = render({ ...data, closings: [closing, { ...closing, id: "unapproved", status: "submitted", businessDate: `${month}-03` }] });
-    expect(partial).not.toMatch(/<button[^>]*disabled[^>]*>経費表をXLSX出力/);
+    expect(partial).toMatch(/<button[^>]*disabled[^>]*>経費表をXLSX出力/);
     expect(render(data, true)).toMatch(/<button[^>]*disabled[^>]*>経費表をXLSX出力/);
     const invalid = render({ ...data, closings: [{ ...closing, integrityIssues: ["日次経費が破損しています。"] }] });
     expect(invalid).toMatch(/<button[^>]*disabled[^>]*>経費表をXLSX出力/);

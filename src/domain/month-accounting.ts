@@ -30,7 +30,7 @@ import type {
 } from "./gms";
 import { cashLedgerIssues, summarizeCashFunding, type CashFundingSummary } from "./cash-funding";
 
-export const MONTHLY_CALCULATION_VERSION = "2.21.1";
+export const MONTHLY_CALCULATION_VERSION = "2.22.0";
 export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 3 as const;
 
 export type IntroducerEntryEvent = {
@@ -194,6 +194,12 @@ const requiresCashFundingSnapshot = (value: string) => {
   if (!match) return false;
   const [major, minor] = match.slice(1).map(Number);
   return major > 2 || (major === 2 && minor >= 21);
+};
+export const requiresCompleteCashFundingSnapshot = (value: string) => {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(value);
+  if (!match) return false;
+  const [major, minor] = match.slice(1).map(Number);
+  return major > 2 || (major === 2 && minor >= 22);
 };
 const snapshotMillisecondsInstant = (value: unknown) => {
   if (!snapshotInteger(value)) return undefined;
@@ -375,6 +381,7 @@ export function normalizeMonthlyAccountingSnapshot(
     row.balance.expenses, row.balance.totalCosts, row.balance.profit].every(snapshotNumber)) return undefined;
   if ((row.schemaVersion === 3 && requiresCashFundingSnapshot(row.calculationVersion) || row.cashFunding !== undefined)
     && !validSnapshotCashFunding(row.cashFunding, row.approvedDays)) return undefined;
+  if (requiresCompleteCashFundingSnapshot(row.calculationVersion) && row.cashFunding?.managedDays !== row.approvedDays) return undefined;
 
   const requireTenYen = row.schemaVersion >= 2;
   const requireDailyHourlyYen = row.schemaVersion === 3;

@@ -27,7 +27,10 @@ function fixture(): ExpenseExportInput {
     dispatchCastPayment: 12_000, dispatchStaffPayment: 9_000, dispatchFee: 3_000, liquorDeliveryAmount: 30_000,
     cash: { cashSales: 100_000, cardSales: 50_000, totalSales: 150_000, cashFloat: 200_000,
       expenseAndPaymentTotal: 70_530, expectedClosingCash: 229_470, cashProfit: 29_470,
-      actualClosingCash: 229_470, difference: 0 },
+      actualClosingCash: 229_470, difference: 0,
+      funding: { schema: 2, previousClosingId: "", previousBusinessDate: "", previousClosingCash: 200_000,
+        openingShortfall: 0, openingPersonalDebt: 0, companyReplenishment: 0, personalReplenishment: 0,
+        companyTransfer: 0, personalRepayment: 0, closingPersonalDebt: 0, confirmed: true } },
     posSnapshot: {} as DailyClosing["posSnapshot"],
   };
   const data: WorkspaceData = { casts: [], staff: [], drivers: [], introducers: [], liquor: [], closings: [closing], adjustments: [adjustments], cashFloat: 200_000 };
@@ -63,13 +66,42 @@ function finalize(input: ExpenseExportInput) {
 }
 
 describe("経費XLSXの出力元検査", () => {
-  it("承認済みだけを検査し、未承認・差戻し・店舗編集中・別月を除外できる", () => {
+  it("承認済みだけを集計し、未来月の未承認・差戻し・店舗編集中を除外できる", () => {
     const input = fixture();
-    ["submitted", "returned", "withdrawn"].forEach((status) => input.closings.push({
-      ...input.closings[0], id: status, status: status as DailyClosing["status"], expenses: undefined as unknown as DailyClosing["expenses"],
+    ["submitted", "returned", "withdrawn"].forEach((status, index) => input.closings.push({
+      ...input.closings[0], id: status, businessDate: `2026-10-0${index + 1}`, status: status as DailyClosing["status"], expenses: undefined as unknown as DailyClosing["expenses"],
     }));
-    input.closings.push({ ...input.closings[0], id: "other-month", businessDate: "2026-08-31", expenses: [] });
+    input.closings.push({ ...input.closings[0], id: "other-month", businessDate: "2026-10-04", expenses: [] });
     expect(() => validateExpenseExport(input)).not.toThrow();
+  });
+
+  it("対象月の補充・返済未入力は結果の警告を消しても出力できない", () => {
+    const input = fixture();
+    delete input.closings[0].cash.funding;
+    input.results.warnings = [];
+    expect(() => validateExpenseExport(input)).toThrow(/確認記録がありません/);
+  });
+
+  it("当月の確認済みでも未承認の日次は、結果から除外して出力できない", () => {
+    const input = fixture();
+    const previous = input.closings[0];
+    const pending = { ...structuredClone(previous), id: "pending", businessDate: "2026-09-03", status: "submitted" as const };
+    pending.cash.funding = { ...pending.cash.funding!, previousClosingId: previous.id,
+      previousBusinessDate: previous.businessDate, previousClosingCash: previous.cash.expectedClosingCash };
+    input.closings.push(pending);
+    expect(() => validateExpenseExport(input)).toThrow(/未承認・差戻し・取下げ/);
+  });
+
+  it.each(["2.20.0", "2.21.0", "2.21.1"])("%sの確定済み経費は当時の結果を保持し、補充実績を後付けしない", (version) => {
+    const input = fixture();
+    delete input.closings[0].cash.funding;
+    finalize(input);
+    input.snapshot!.calculationVersion = version;
+    const before = structuredClone(input);
+    expect(() => validateExpenseExport(input)).not.toThrow();
+    expect(input).toEqual(before);
+    input.snapshot!.calculationVersion = "2.22.0";
+    expect(() => validateExpenseExport(input)).toThrow(/確認記録がありません/);
   });
 
   it("承認済み日次がない月でも固定費だけの出力を認める", () => {

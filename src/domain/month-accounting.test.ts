@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { calculateCashFunding, cashFundingContext } from "./cash-funding";
 import type {
   CastRecord,
   CastReward,
@@ -46,6 +47,17 @@ function adjustments(overrides: Partial<MonthlyAdjustments> = {}): MonthlyAdjust
 }
 
 function workspace(overrides: Partial<WorkspaceData> = {}): WorkspaceData {
+  // 給与・紹介料のテストでは、日次現金の明示確認が完了した状態を前提にする。
+  // 未入力を0円とみなさない検証はmonth-cash-funding.test.tsで独立して行う。
+  const previous: DailyClosing[] = [];
+  for (const row of [...(overrides.closings || [])].sort((a, b) => a.businessDate.localeCompare(b.businessDate))) {
+    if (!row.cash.funding && !previous.some((prior) => prior.businessDate === row.businessDate || prior.id === row.id)) {
+      const context = cashFundingContext(previous, row.businessDate, row.cash.cashFloat);
+      row.cash.funding = calculateCashFunding(context, { companyReplenishment: context.openingShortfall,
+        personalReplenishment: 0, companyTransfer: 0 }, row.cash.cashProfit, true);
+    }
+    previous.push(row);
+  }
   return {
     casts: [],
     staff: [],

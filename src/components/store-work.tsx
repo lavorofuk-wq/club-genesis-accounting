@@ -8,7 +8,7 @@ import type {
 } from "@/domain/gms";
 import { buildDailyCasts, calculateCash, canMapAsDispatch, deriveReeditCastMapping, floorTen, floorYen, hoursBetweenQuarter, invalidTrialBeautyExpensesForRows, isCastMappingComplete, isUnapprovedClosingStatus, mergeReconciledDailyCastInputs, parsePosClosingV3, posCastReferences, posItemOccurrenceKey, rateForMonth, requiresBottleCost, restoreDailyCastBackMetadata, staffCandidatesForBusinessDate } from "@/domain/gms";
 import type { AccountingWorkspaceData } from "@/domain/month-accounting";
-import { calculateCashFunding, cashFundingContext, cashFundingIssues } from "@/domain/cash-funding";
+import { calculateConfirmedCashFunding, cashFundingDraftContext, cashFundingIssues, recommendedPersonalRepayment, cashDayIssues, cashChangeImpacts, sameCashReconciliation, assertCashLedgerChange } from "@/domain/cash-funding";
 import type { CashFundingContext, CashFundingInputs } from "@/domain/cash-funding";
 import { deleteUnapprovedClosing, submitClosing, withdrawClosing } from "@/lib/firebase/repository";
 import { Card, Field, MoneyInput, StatusPill, Table, yen } from "./ui";
@@ -43,10 +43,9 @@ export function closingDeletionConfirmation(row: Pick<DailyClosing, "businessDat
   return `${row.businessDate}の送信済みデータ（${closingLabels[row.status]}）を完全削除しますか？\n\nPOS原本・店舗入力・現金照合・差戻し履歴を含む、この営業日の日次データがすべて削除されます。\n削除後は復元できません。`;
 }
 
-export function jsonReimportConfirmation(previousDate: string, nextDate: string, legacyCashMode = false) {
+export function jsonReimportConfirmation(previousDate: string, nextDate: string) {
   if (previousDate === nextDate) {
-    if (legacyCashMode) return `${nextDate}のJSONを再取込します。\n\n入力済みの店舗データと保存済み現金照合は保持し、勤務・指名本数・商品配賦などPOS由来の項目だけを再計算します。保存済み現金照合を変更せず再送する確認はやり直してください。続けますか？`;
-    return `${nextDate}のJSONを再取込します。\n\n入力済みの店舗データと補充・会社入金額は保持し、勤務・指名本数・商品配賦などPOS由来の項目だけを新しいJSONから再計算します。現金の一致確認はやり直してください。続けますか？`;
+    return `${nextDate}のJSONを再取込します。\n\n入力済みの店舗データと補充・会社入金額・返済実績は保持し、勤務・指名本数・商品配賦などPOS由来の項目だけを新しいJSONから再計算します。現金の一致確認はやり直してください。続けますか？`;
   }
   return `${previousDate}から${nextDate}へ営業日を変更します。\n\n別営業日のデータが混ざらないよう、入力済みの店舗データ・現金照合・今回のみの特別原価はすべて初期化されます。続けますか？`;
 }
@@ -132,8 +131,18 @@ export function StoreWork(props: Props) {
     props.onDirtyChange?.(workflowDirty);
     return () => props.onDirtyChange?.(false);
   }, [props.onDirtyChange, workflowDirty]);
+  const cashReviewRows = props.data.closings.map((row) => ({ row, issues: cashDayIssues(row, props.data.closings) }))
+    .filter(({ issues }) => issues.length > 0).sort((a, b) => a.row.businessDate.localeCompare(b.row.businessDate));
   return <div className="grid">
     <DailyWorkflow key={editing?.id || "new"} {...props} initial={editing} onFinished={() => setEditing(null)} onDirtyChange={setWorkflowDirty} />
+    {cashReviewRows.length > 0 && <Card title="現金管理の未入力・要確認営業日" description="日付順に記録を確認してください。後続日の実績は自動変更しません。">
+      <Table headers={["営業日", "状態", "確認内容", "操作"]}>{cashReviewRows.map(({ row, issues }) => {
+        const lock = lockedMonthMessage(props.data, row.businessDate);
+        return <tr key={row.id}><td>{row.businessDate}</td><td>{closingLabels[row.status]}</td><td className="wrap-cell">{issues.map((issue) => <div key={issue}>{issue}</div>)}</td><td>{lock ? <small>{lock}</small> : ["returned", "withdrawn"].includes(row.status)
+          ? <button className="button secondary mini" disabled={props.busy} onClick={() => beginEditing(row)}>この営業日の入力を確認</button>
+          : <small>{row.status === "approved" ? "経理またはOPが差し戻した後、再編集してください。" : "送信済み一覧から取下げた後、再編集してください。"}</small>}</td></tr>;
+      })}</Table>
+    </Card>}
     <Card title="送信済みデータ" description="店舗データと現金照合プレビューを営業日ごとに保管します。経理未承認のデータは完全削除できます。">
       <Table headers={["営業日", "状態", "売上", "現金残額", "現金確認", "個人立替未返済", "差戻し理由", "操作"]}>
         {props.data.closings.map((row) => {
@@ -143,9 +152,9 @@ export function StoreWork(props: Props) {
             <td>{row.businessDate}</td>
             <td><StatusPill tone={row.status === "approved" ? "good" : row.status === "returned" ? "danger" : row.status === "submitted" ? "warn" : "neutral"}>{closingLabels[row.status]}</StatusPill></td>
             <td>{yen.format(row.sales.totalSales)}</td>
-            <td>{yen.format(row.cash.funding ? row.cash.expectedClosingCash : row.cash.actualClosingCash)}<br /><small>{row.cash.funding ? "計算上残額" : "旧実在高"}</small></td>
-            <td>{row.cash.funding ? <StatusPill tone={row.cash.funding.confirmed ? "good" : "danger"}>{row.cash.funding.confirmed ? "現金確認済み" : "未確認"}</StatusPill> : <span className={row.cash.difference ? "text-danger" : "text-good"}>旧照合差額 {yen.format(row.cash.difference)}</span>}</td>
-            <td>{row.cash.funding ? yen.format(row.cash.funding.closingPersonalDebt) : "旧方式・管理対象外"}</td>
+            <td>{yen.format(row.cash.expectedClosingCash)}<br /><small>保存済み計算残額</small></td>
+            <td><StatusPill tone={cashDayIssues(row, props.data.closings).length === 0 ? "good" : "warn"}>{cashDayIssues(row, props.data.closings).length === 0 ? "現金確認済み" : "要確認"}</StatusPill></td>
+            <td>{row.cash.funding ? yen.format(row.cash.funding.closingPersonalDebt) : "未入力"}</td>
             <td className="wrap-cell">{row.returnReason || "—"}</td>
             <td><div className="row-actions">
               {["returned", "withdrawn"].includes(row.status) && <button className="button secondary mini" disabled={updateDisabled} title={monthLock || undefined} onClick={() => beginEditing(row)}>再編集</button>}
@@ -192,10 +201,18 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
   // 旧退避キーは消費するが、廃止した実在高を計算・確認・送信には使わない。
   const [, setLegacyActualCash] = useRecoverableState(`${draftKey}.actualCash`, 0);
   useEffect(() => { setLegacyActualCash(0); }, [setLegacyActualCash]);
-  const [companyReplenishment, setCompanyReplenishment] = useRecoverableState(`${draftKey}.companyReplenishment`, initial?.cash.funding?.companyReplenishment ?? 0);
-  const [personalReplenishment, setPersonalReplenishment] = useRecoverableState(`${draftKey}.personalReplenishment`, initial?.cash.funding?.personalReplenishment ?? 0);
-  const [companyTransfer, setCompanyTransfer] = useRecoverableState(`${draftKey}.companyTransfer`, initial?.cash.funding?.companyTransfer ?? 0);
+  // 過去版の退避0円は「実績未入力の初期値」と区別できないため、新しい実績へ自動転記しない。
+  const [previousCompanyDraft, setPreviousCompanyDraft] = useRecoverableState<number | undefined>(`${draftKey}.companyReplenishment`, undefined);
+  const [previousPersonalDraft, setPreviousPersonalDraft] = useRecoverableState<number | undefined>(`${draftKey}.personalReplenishment`, undefined);
+  const [previousTransferDraft, setPreviousTransferDraft] = useRecoverableState<number | undefined>(`${draftKey}.companyTransfer`, undefined);
+  const [companyReplenishment, setCompanyReplenishment] = useRecoverableState<number | null>(`${draftKey}.cashFunding2.companyReplenishment`, initial ? initial.cash.funding?.companyReplenishment ?? null : 0);
+  const [personalReplenishment, setPersonalReplenishment] = useRecoverableState<number | null>(`${draftKey}.cashFunding2.personalReplenishment`, initial ? initial.cash.funding?.personalReplenishment ?? null : 0);
+  const [companyTransfer, setCompanyTransfer] = useRecoverableState<number | null>(`${draftKey}.cashFunding2.companyTransfer`, initial ? initial.cash.funding?.companyTransfer ?? null : 0);
+  const [personalRepayment, setPersonalRepayment] = useRecoverableState<number | null>(`${draftKey}.personalRepayment`, initial?.cash.funding?.personalRepayment ?? null);
+  const [openingPersonalDebt, setOpeningPersonalDebt] = useRecoverableState<number | null>(`${draftKey}.openingPersonalDebt`, initial?.cash.funding?.openingPersonalDebt ?? null);
+  const [cashRevisionReason, setCashRevisionReason] = useRecoverableState(`${draftKey}.cashRevisionReason`, "");
   const [confirmedCashKey, setConfirmedCashKey] = useState("");
+  const [confirmedContextKey, setConfirmedContextKey] = useState("");
   const [error, setError] = useState("");
   const [jsonReading, setJsonReading] = useState(false);
   useUpdateDraftBusy(`${draftKey}.jsonReading`, jsonReading);
@@ -303,7 +320,14 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     setCompanyReplenishment(0);
     setPersonalReplenishment(0);
     setCompanyTransfer(0);
+    setPreviousCompanyDraft(undefined);
+    setPreviousPersonalDraft(undefined);
+    setPreviousTransferDraft(undefined);
+    setPersonalRepayment(null);
+    setOpeningPersonalDebt(null);
+    setCashRevisionReason("");
     setConfirmedCashKey("");
+    setConfirmedContextKey("");
   };
 
   const ensureCurrentReferences = () => {
@@ -406,49 +430,67 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
   const trialDailyPayments = castRows.filter((row) => row.kind === "trial").reduce((sum, row) => sum + row.dailyPayment, 0);
   const staffDailyPayments = staffWork.reduce((sum, row) => sum + row.dailyPayment, 0);
   const driverDailyPayments = driverWork.reduce((sum, row) => sum + row.dailyPayment, 0);
-  // 再送確認フラグではなく、保存済みの資金管理データの有無で方式を判定する。
-  const legacyCashMode = Boolean(initial && initial.cash.funding === undefined);
-  const fundingContextState = useMemo<{ context?: CashFundingContext; error: string }>(() => {
-    if (!pos || legacyCashMode) return { error: "" };
+  const fundingContextState = useMemo<{ context?: Omit<CashFundingContext, "openingPersonalDebt"> & { openingPersonalDebt: number | null }; error: string }>(() => {
+    if (!pos) return { error: "" };
     try {
-      const context = cashFundingContext(data.closings, pos.businessDate, cashFloat, initial?.id);
-      const recorded = initial?.cash.funding;
-      if (recorded && (Object.keys(context) as Array<keyof CashFundingContext>)
-        .some((key) => context[key] !== recorded[key])) {
-        return { error: "前営業日の現金残額または未返済残高が保存時と変わっています。保存済みの補充・返済額は変更していません。前営業日と後続データを経理またはOPへ確認してください。" };
-      }
+      const context = cashFundingDraftContext(data.closings, pos.businessDate, cashFloat, initial?.id);
       return { context, error: "" };
     } catch (caught) {
       return { error: caught instanceof Error ? caught.message : "前営業日の現金情報を確認できません。入力を保持しています。最新データを確認してください。" };
     }
-  }, [cashFloat, data.closings, initial, legacyCashMode, pos]);
+  }, [cashFloat, data.closings, initial, pos]);
   const cashInputs = pos ? { sales: pos.sales, cashFloat, expenses: expenseTotal, regularDailyPayments, trialDailyPayments, staffDailyPayments, driverDailyPayments, dispatchCastPayment, dispatchStaffPayment, dispatchFee, actualClosingCash: 0 } : null;
-  const fundingInputs: CashFundingInputs = { companyReplenishment, personalReplenishment, companyTransfer };
+  const fundingInputs = { companyReplenishment, personalReplenishment, companyTransfer };
   const calculatedCash: CashReconciliation | null = cashInputs ? calculateCash(cashInputs) : null;
-  let unconfirmedCash: CashReconciliation | null = legacyCashMode && initial ? initial.cash : calculatedCash;
+  let unconfirmedCash = calculatedCash;
   let fundingError = fundingContextState.error;
-  if (legacyCashMode && calculatedCash && initial) {
-    const unchanged = (["cashSales", "cardSales", "totalSales", "cashFloat", "expenseAndPaymentTotal", "expectedClosingCash", "cashProfit"] as const)
-      .every((key) => calculatedCash[key] === initial.cash[key]);
-    if (!unchanged) fundingError = "保存済みの現金照合に関わる売上・支払合計・つり銭が変更されています。過去の現金額を推測して再計算できないため送信できません。元の金額へ戻すか、経理またはOPへ確認してください。";
-  }
-  if (cashInputs && unconfirmedCash && fundingContextState.context) {
+  const draftContext = fundingContextState.context;
+  const effectiveOpeningDebt = draftContext?.openingPersonalDebt ?? openingPersonalDebt;
+  const resolvedContext = draftContext && effectiveOpeningDebt !== null
+    ? { ...draftContext, openingPersonalDebt: effectiveOpeningDebt } : undefined;
+  const enteredFunding = Object.values(fundingInputs).every((value) => value !== null)
+    ? fundingInputs as CashFundingInputs : undefined;
+  let recommendedRepayment: number | undefined;
+  if (cashInputs && calculatedCash && resolvedContext && enteredFunding) {
     try {
-      const recorded = initial?.cash.funding;
-      const unchangedRecordedAmounts = recorded && initial.cash.cashFloat === cashFloat
-        && initial.cash.cashProfit === unconfirmedCash.cashProfit
-        && (Object.keys(fundingInputs) as Array<keyof CashFundingInputs>).every((key) => fundingInputs[key] === recorded[key]);
-      const funding = unchangedRecordedAmounts
-        ? { ...recorded, confirmed: false }
-        : calculateCashFunding(fundingContextState.context, fundingInputs, unconfirmedCash.cashProfit);
-      unconfirmedCash = calculateCash({ ...cashInputs, funding });
+      recommendedRepayment = recommendedPersonalRepayment(resolvedContext, enteredFunding, calculatedCash.cashProfit);
+      if (personalRepayment !== null) {
+        const funding = calculateConfirmedCashFunding(resolvedContext, enteredFunding, personalRepayment, calculatedCash.cashProfit);
+        unconfirmedCash = calculateCash({ ...cashInputs, funding });
+      }
     } catch (caught) {
       fundingError = caught instanceof Error ? caught.message : "補充・返済額を計算できません。入力を確認してください。";
     }
   }
+  if (!fundingError && pos && (!enteredFunding || personalRepayment === null || effectiveOpeningDebt === null)) {
+    fundingError = "補充・会社入金・実際の返済額・開始未返済額を確認して入力してください。支払いや残高がない場合も0円を入力してください。";
+  }
+  const contextDifferences = draftContext && initial?.cash.funding
+    ? (Object.keys(draftContext) as Array<keyof CashFundingContext>).filter((key) => draftContext[key] !== initial.cash.funding![key]) : [];
+  const contextKey = JSON.stringify({ date: pos?.businessDate, draftContext, recorded: initial?.cash.funding });
+  useEffect(() => { setConfirmedContextKey(""); }, [contextKey]);
+  const contextConfirmed = contextDifferences.length === 0 || confirmedContextKey === contextKey;
+  const cashForValidation = unconfirmedCash?.funding ? { ...unconfirmedCash, funding: { ...unconfirmedCash.funding, confirmed: true } } : unconfirmedCash;
+  const cashChanged = Boolean(initial && cashForValidation?.funding && !sameCashReconciliation(initial.cash, cashForValidation));
+  const provisionalClosing: DailyClosing | undefined = pos && cashForValidation?.funding ? {
+    id: initial?.id || `daily_${pos.businessDate.replaceAll("-", "")}`, businessDate: pos.businessDate,
+    status: "submitted", submissionId: pos.submissionId, checksum: pos.checksum, sales: pos.sales,
+    customers: pos.customers, nominations: pos.nominations, casts: castRows, staffWork, drivers: driverWork,
+    expenses, staffDailyPaymentTotal: staffDailyPayments, dispatchStaffPayment, dispatchCastPayment,
+    dispatchFee, liquorDeliveryAmount, cash: cashForValidation, posSnapshot: pos, updatedAt: initial?.updatedAt || "",
+  } : undefined;
+  let impacts: ReturnType<typeof cashChangeImpacts> = [];
+  if (provisionalClosing) {
+    try {
+      impacts = cashChangeImpacts(initial, provisionalClosing, data.closings);
+      assertCashLedgerChange(initial, provisionalClosing, data.closings, data.monthStates);
+    }
+    catch (caught) { fundingError = caught instanceof Error ? caught.message : "後続営業日への影響を確認できません。"; }
+  }
   const confirmationKey = JSON.stringify({
-    businessDate: pos?.businessDate, checksum: pos?.checksum, legacyCashMode, cash: unconfirmedCash, calculatedCash, fundingError,
-    fundingInputs, castRows, staffWork, driverWork, expenses, liquorDeliveryAmount,
+    businessDate: pos?.businessDate, checksum: pos?.checksum, cash: unconfirmedCash, fundingError, impacts,
+    fundingInputs, personalRepayment, openingPersonalDebt, contextKey, contextConfirmed, cashRevisionReason,
+    castRows, staffWork, driverWork, expenses, liquorDeliveryAmount,
   });
   // 金額が同じでも入力が変更された後や、退避から復元した画面では再確認が必要。
   useEffect(() => { setConfirmedCashKey(""); }, [confirmationKey]);
@@ -456,10 +498,11 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
   const cash = unconfirmedCash?.funding
     ? { ...unconfirmedCash, funding: { ...unconfirmedCash.funding, confirmed: cashConfirmed } }
     : unconfirmedCash;
-  const cashInputIssues = fundingError ? [fundingError] : legacyCashMode ? [] : cash?.funding
+  const cashInputIssues = fundingError ? [fundingError] : cash?.funding
     ? cashFundingIssues({ ...cash, funding: { ...cash.funding, confirmed: true } })
     : pos ? ["補充・返済の計算前提を確認できません。"] : [];
-  const canConfirmCash = Boolean(cash && (legacyCashMode || (cash.funding && cash.expectedClosingCash >= 0)) && cashInputIssues.length === 0 && !workflowLock);
+  const canConfirmCash = Boolean(cash?.funding && cash.expectedClosingCash >= 0 && cashInputIssues.length === 0
+    && contextConfirmed && (!cashChanged || cashRevisionReason.trim()) && !workflowLock);
   const canSubmitCash = canConfirmCash && cashConfirmed;
   const visibleStage = stage === "preview" && !canSubmitCash ? "cash" : stage;
   const driverRows = driverWork;
@@ -468,7 +511,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     if (!pos || !cash) return;
     if (workflowLock) return setError(workflowLock);
     if (!canSubmitCash) {
-      setError(cashInputIssues[0] || (legacyCashMode ? "保存済み現金照合を変更せず再送することを確認してください。" : "実際の現金と計算上残額の一致および個人への返済額を確認してください。"));
+      setError(cashInputIssues[0] || "現金の実績・前営業日の前提と変更理由を確認してください。");
       setStage("cash");
       return;
     }
@@ -480,7 +523,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
       businessDate: pos.businessDate, status: "submitted", submissionId: pos.submissionId, checksum: pos.checksum,
       sales: pos.sales, customers: pos.customers, nominations: pos.nominations, casts: submissionCastRows, staffWork, drivers: driverRows, expenses,
       staffDailyPaymentTotal: staffWork.reduce((sum, row) => sum + row.dailyPayment, 0), dispatchStaffPayment, dispatchCastPayment, dispatchFee,
-      liquorDeliveryAmount, cash, ...(legacyCashMode ? { legacyCashConfirmed: cashConfirmed } : {}), posSnapshot: pos, updatedAt: new Date().toISOString()
+      liquorDeliveryAmount, cash, ...(cashChanged ? { cashRevisionReason: cashRevisionReason.trim() } : {}), posSnapshot: pos, updatedAt: new Date().toISOString()
     };
     const saved = await run(() => submitClosing(value, user, initial?.updatedAt), `${pos.businessDate}のデータを経理へ送信しました。`);
     if (saved) {
@@ -495,13 +538,13 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     }
   };
 
-  return <Card title={initial ? `${initial.businessDate} 再編集` : "当日営業データ作成"} description={legacyCashMode ? "POS JSONと店舗データを確認し、保存済み現金照合を変更せず再送します。" : "POS JSONの照合から現金の補充・返済・一致確認まで順番に確認します。"} action={initial ? <button className="button secondary" disabled={busy} onClick={() => { if (window.confirm("保存していない再編集内容を破棄して終了しますか？")) onFinished(); }}>再編集を終了</button> : null}>
+  return <Card title={initial ? `${initial.businessDate} 再編集` : "当日営業データ作成"} description="POS JSONの照合から現金の補充・返済実績・確認まで順番に入力します。" action={initial ? <button className="button secondary" disabled={busy} onClick={() => { if (window.confirm("保存していない再編集内容を破棄して終了しますか？")) onFinished(); }}>再編集を終了</button> : null}>
     <div className="stepper">{(["json", "details", "cash", "preview"] as Stage[]).map((value, index) => <span key={value} className={visibleStage === value ? "active" : ""}><b>{index + 1}</b>{["JSON取込", "店舗データ", "現金照合", "送信確認"][index]}</span>)}</div>
     {error && <div className="notice error">{error}</div>}
     {workflowLock && <div className="notice warn"><strong>この営業日は編集できません。</strong><br />{workflowLock}</div>}
     {stage === "json" && <div className="stack section-pad">
       {initial && !initial.posSnapshot && <div className="notice warn">この旧データにはPOS原本が保存されていません。再編集するには、同じ営業日のPOS JSONをもう一度取り込んでください。既存データは送信を完了するまで変更されません。商品との一致を検証できない今回のみの特別原価は、安全のため再入力が必要です。</div>}
-      {(initial || pos) && <div className="notice warn">{legacyCashMode ? "同じ営業日のJSONを再取込しても、入力済みの店舗データと保存済み現金照合は保持されます。勤務・指名本数・商品配賦などPOS由来の項目だけを再計算します。保存済み現金照合を変更せず再送する確認はやり直してください。" : "同じ営業日のJSONを再取込しても、入力済みの店舗データと補充・会社入金額は保持されます。勤務・指名本数・商品配賦などPOS由来の項目だけを再計算します。現金の一致確認はやり直してください。"}</div>}
+      {(initial || pos) && <div className="notice warn">同じ営業日のJSONを再取込しても、入力済みの店舗データと補充・会社入金額・返済実績は保持されます。勤務・指名本数・商品配賦などPOS由来の項目だけを再計算します。現金の一致確認はやり直してください。</div>}
       <Field label="POS営業終了JSON（schemaVersion 3）"><input className="input" type="file" accept=".json,application/json" disabled={busy || jsonReading || Boolean(workflowLock)} onChange={async (event) => {
         const input = event.currentTarget;
         const file = input.files?.[0];
@@ -514,7 +557,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
           if (initial && parsed.businessDate !== initial.businessDate) throw new Error(`再編集対象は${initial.businessDate}です。同じ営業日のPOS JSONを選択してください。`);
           const previousDate = pos?.businessDate || initial?.businessDate || "";
           if (initial || pos) {
-            if (!window.confirm(jsonReimportConfirmation(previousDate, parsed.businessDate, legacyCashMode))) return;
+            if (!window.confirm(jsonReimportConfirmation(previousDate, parsed.businessDate))) return;
           }
           const changedDate = shouldResetDailyInputsForJson(previousDate, parsed.businessDate);
           if (changedDate) resetDailyInputsForDifferentDate();
@@ -565,15 +608,25 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     {visibleStage === "cash" && pos && cash && <div className="stack section-pad">
       <h3>当日現金照合</h3>
       <div className="grid metrics"><Metric label="現金売上" value={cash.cashSales} /><Metric label="カード売上" value={cash.cardSales} /><Metric label="当日合計売上" value={cash.totalSales} /><Metric label="設定つり銭" value={cash.cashFloat} /></div>
-      {legacyCashMode ? <div className="notice">この営業日は旧方式で保存されています。保存済みの現金照合をそのまま保持して再送します。新しい補充・返済管理へは切り替えません。当時の実在高・差額も変更しません。</div> : <><h3>開店前の現金補充・個人立替</h3>
+      <h3>開店前の現金補充・個人立替</h3>
       <div className="notice">会社補充・個人立替・会社入金・個人への返済は現金移動です。売上・経費・利益には含めません。</div>
-      {fundingContextState.context && <div className="summary-strip"><span><small>前営業日</small><strong>{fundingContextState.context.previousBusinessDate || "初回（未返済残高0円）"}</strong></span><span><small>開店前の不足額</small><strong>{yen.format(fundingContextState.context.openingShortfall)}</strong></span><span><small>前営業日からの個人立替未返済</small><strong>{yen.format(fundingContextState.context.openingPersonalDebt)}</strong></span></div>}
+      {[previousCompanyDraft, previousPersonalDraft, previousTransferDraft].some((value) => value !== undefined) && <div className="notice warn"><strong>以前の画面で退避した入力が残っています。</strong><p>実際に入力した金額か自動初期値かを判別できないため、自動では適用していません。当時の記録を確認してください。</p><Table headers={["項目", "退避されていた金額"]}>{[["会社補充", previousCompanyDraft], ["個人補充", previousPersonalDraft], ["会社入金", previousTransferDraft]].map(([label, amount]) => <tr key={String(label)}><td>{label}</td><td>{typeof amount === "number" && Number.isSafeInteger(amount) && amount >= 0 ? yen.format(amount) : "未入力"}</td></tr>)}</Table><button className="button secondary mini" disabled={busy} onClick={() => {
+        if (typeof previousCompanyDraft === "number" && Number.isSafeInteger(previousCompanyDraft) && previousCompanyDraft >= 0) setCompanyReplenishment(previousCompanyDraft);
+        if (typeof previousPersonalDraft === "number" && Number.isSafeInteger(previousPersonalDraft) && previousPersonalDraft >= 0) setPersonalReplenishment(previousPersonalDraft);
+        if (typeof previousTransferDraft === "number" && Number.isSafeInteger(previousTransferDraft) && previousTransferDraft >= 0) setCompanyTransfer(previousTransferDraft);
+        setPreviousCompanyDraft(undefined); setPreviousPersonalDraft(undefined); setPreviousTransferDraft(undefined);
+      }}>退避金額を実績と確認して適用</button></div>}
+      {draftContext && <div className="summary-strip"><span><small>前営業日</small><strong>{draftContext.previousBusinessDate || "記録なし"}</strong></span><span><small>開店前の不足額</small><strong>{yen.format(draftContext.openingShortfall)}</strong></span><span><small>前営業日からの個人立替未返済</small><strong>{draftContext.openingPersonalDebt === null ? "実績入力が必要" : yen.format(draftContext.openingPersonalDebt)}</strong></span></div>}
+      {draftContext?.openingPersonalDebt === null && <Field label="営業開始時の個人未返済額"><CashAmountInput value={openingPersonalDebt} onChange={setOpeningPersonalDebt} /><small>過去の不足額からは推定しません。当時の記録を確認し、未返済がなければ0円を入力してください。</small></Field>}
+      {contextDifferences.length > 0 && <div className="notice warn"><strong>前営業日の前提が保存時から変わっています。返済実績は変更していません。</strong><CashContextTable before={initial?.cash.funding} after={draftContext} /><label className="check-row"><input type="checkbox" checked={contextConfirmed} disabled={busy} onChange={(event) => setConfirmedContextKey(event.target.checked ? contextKey : "")} />保存時と最新の前提の差分を確認しました</label></div>}
       <div className="grid form-row">
-        <Field label="開店前の会社補充（返済不要）"><MoneyInput value={companyReplenishment} onChange={setCompanyReplenishment} step={1} /></Field>
-        <Field label="開店前の個人立替補充"><MoneyInput value={personalReplenishment} onChange={setPersonalReplenishment} step={1} /></Field>
-        <Field label="会社入金（個人返済の原資）"><MoneyInput value={companyTransfer} onChange={setCompanyTransfer} step={1} /></Field>
+        <Field label="開店前の会社補充（返済不要）"><CashAmountInput value={companyReplenishment} onChange={setCompanyReplenishment} /></Field>
+        <Field label="開店前の個人立替補充"><CashAmountInput value={personalReplenishment} onChange={setPersonalReplenishment} /></Field>
+        <Field label="会社入金（個人返済の原資）"><CashAmountInput value={companyTransfer} onChange={setCompanyTransfer} /></Field>
+        <Field label="実際に個人へ返済した金額"><CashAmountInput value={personalRepayment} onChange={setPersonalRepayment} /></Field>
       </div>
-      <small>開店前の会社補充と個人立替補充の合計を、不足額と一致させてください。これらは設定つり銭に含まれるため、営業終了時の残額へ再加算しません。</small></>}
+      <div className="actions"><span>推奨返済額：{recommendedRepayment === undefined ? "必要な金額を入力してください" : yen.format(recommendedRepayment)}</span><button className="button secondary mini" disabled={busy || recommendedRepayment === undefined} onClick={() => { if (recommendedRepayment !== undefined) setPersonalRepayment(recommendedRepayment); }}>推奨返済額を入力</button></div>
+      <small>推奨額は自動反映しません。特に過去分は、当時実際に返済した金額を確認して入力してください。開店前の会社補充と個人立替補充の合計は不足額に合わせてください。</small>
       {cashInputIssues.length > 0 && <div className="notice error" role="alert">{cashInputIssues.map((issue, index) => <div key={index}>{issue}</div>)}<small>入力済みのデータは保持されています。確認が完了するまで送信できません。</small></div>}
       <Table headers={["計算項目", "金額"]}>
         <tr><td>経費総計</td><td>{yen.format(expenseTotal)}</td></tr>
@@ -586,24 +639,41 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
         <tr><td>派遣手数料</td><td>{yen.format(dispatchFee)}</td></tr>
         <tr className="total-row"><td>経費・日払い・派遣支払い・手数料 合計</td><td>{yen.format(cash.expenseAndPaymentTotal)}</td></tr>
         <tr><td>現金売上＋設定つり銭</td><td>{yen.format(cash.cashSales + cash.cashFloat)}</td></tr>
-        {legacyCashMode ? <>
-          <tr><td>保存済みの現金利益</td><td>{yen.format(cash.cashProfit)}</td></tr>
-          <tr><td>保存済みの計算上現金残額</td><td>{yen.format(cash.expectedClosingCash)}</td></tr>
-          <tr><td>旧実在高（保存済み）</td><td>{yen.format(cash.actualClosingCash)}</td></tr>
-          <tr><td>旧照合差額（保存済み）</td><td>{yen.format(cash.difference)}</td></tr>
-        </> : <><tr><td>営業による現金利益（補充・返済を含まない）</td><td>{yen.format(cash.cashProfit)}</td></tr>
-        <tr><td>会社入金（個人返済の原資）</td><td>{yen.format(companyTransfer)}</td></tr>
-        <tr><td>個人への返済額（自動計算）</td><td>{cash.funding ? yen.format(cash.funding.personalRepayment) : "確認不可"}</td></tr>
+        <tr><td>営業による現金利益（補充・返済を含まない）</td><td>{yen.format(cash.cashProfit)}</td></tr>
+        <tr><td>会社入金（個人返済の原資）</td><td>{companyTransfer === null ? "未入力" : yen.format(companyTransfer)}</td></tr>
+        <tr><td>個人への返済実績</td><td>{cash.funding ? yen.format(cash.funding.personalRepayment) : "未入力"}</td></tr>
         <tr><td>翌営業日へ繰り越す個人立替未返済額</td><td>{cash.funding ? yen.format(cash.funding.closingPersonalDebt) : "確認不可"}</td></tr>
         <tr className="total-row"><td><strong>営業終了時点の計算上現金残額（返済後）</strong></td><td><strong>{yen.format(cash.expectedClosingCash)}</strong></td></tr>
-        <tr><td>{cash.expectedClosingCash < cash.cashFloat ? "現金マイナス（設定つり銭までの不足額）" : "返済後の現金余剰"}</td><td>{yen.format(Math.abs(cash.expectedClosingCash - cash.cashFloat))}</td></tr></>}
+        <tr><td>{cash.expectedClosingCash < cash.cashFloat ? "現金マイナス（設定つり銭までの不足額）" : "返済後の現金余剰"}</td><td>{yen.format(Math.abs(cash.expectedClosingCash - cash.cashFloat))}</td></tr>
       </Table>
-      <label className="check-row"><input type="checkbox" checked={cashConfirmed} disabled={busy || !canConfirmCash} onChange={(event) => { setConfirmedCashKey(event.target.checked && canConfirmCash ? confirmationKey : ""); setError(""); }} />{legacyCashMode ? "保存済み現金照合を変更せず再送することを確認しました" : "実際の現金と計算上残額が一致していることを確認しました（個人への返済額も確認済み）"}</label>
-      {!cashConfirmed && <div className="notice warn">{legacyCashMode ? "保存済み現金照合を保持して再送する確認が必要です。" : "現金の一致確認が必要です。"}金額や入力内容の変更、画面の再読込・入力復元後は、もう一度確認してください。</div>}
+      {initial && <><h3>保存済みの現金記録との比較</h3><Table headers={["項目", "保存時", "今回の入力結果"]}><tr><td>計算上現金残額</td><td>{yen.format(initial.cash.expectedClosingCash)}</td><td>{cash.funding ? yen.format(cash.expectedClosingCash) : "入力完了後に表示"}</td></tr><tr><td>記録した現金・照合差額</td><td>{yen.format(initial.cash.actualClosingCash)} / {yen.format(initial.cash.difference)}</td><td>過去の記録は改訂履歴として保持します</td></tr><tr><td>個人返済実績</td><td>{initial.cash.funding ? yen.format(initial.cash.funding.personalRepayment) : "未入力"}</td><td>{personalRepayment === null ? "未入力" : yen.format(personalRepayment)}</td></tr></Table></>}
+      {cashChanged && <Field label="現金記録の追加・変更理由（必須）"><textarea className="input" maxLength={500} value={cashRevisionReason} onChange={(event) => setCashRevisionReason(event.target.value)} placeholder="当時の記録の確認内容や変更理由を入力" /></Field>}
+      {impacts.length > 0 && <div className="notice warn"><strong>保存後に確認が必要となる後続営業日</strong><p>下記の日次の実績は自動で変更しません。確定済み月は先に確定解除が必要です。</p><Table headers={["営業日", "状態", "確認内容・前提差分"]}>{impacts.map((impact) => {
+        const row = data.closings.find((day) => day.id === impact.id);
+        let latest: ReturnType<typeof cashFundingDraftContext> | undefined;
+        try { if (row && provisionalClosing) latest = cashFundingDraftContext([...data.closings.filter((day) => day.id !== provisionalClosing.id), provisionalClosing], row.businessDate, row.cash.cashFloat, row.id); } catch { /* 診断理由はissuesに表示し、不明な前提を推定しない。 */ }
+        return <tr key={impact.id}><td>{impact.businessDate}</td><td>{closingLabels[impact.status]}</td><td className="wrap-cell">{impact.issues.map((issue) => <div key={issue}>{issue}</div>)}<CashContextTable before={row?.cash.funding} after={latest} /></td></tr>;
+      })}</Table></div>}
+      <label className="check-row"><input type="checkbox" checked={cashConfirmed} disabled={busy || !canConfirmCash} onChange={(event) => { setConfirmedCashKey(event.target.checked && canConfirmCash ? confirmationKey : ""); setError(""); }} />{initial ? "入力した補充・返済実績と当時の記録、前営業日の前提、現金残額を確認しました" : "実際の現金と計算上残額が一致していることを確認しました（個人への返済額も確認済み）"}</label>
+      {!cashConfirmed && <div className="notice warn">現金の一致確認が必要です。入力・前提の変更や画面の再読込・復元後は、もう一度確認してください。</div>}
       <div className="actions spread"><button className="button secondary" onClick={() => setStage("details")}>店舗データへ戻る</button><button className="button" disabled={busy || !canSubmitCash} onClick={() => { if (canSubmitCash) setStage("preview"); }}>現金照合内容を確認して送信確認へ</button></div>
     </div>}
-    {visibleStage === "preview" && pos && cash && <div className="stack section-pad"><DailyPreview closing={{ id: initial?.id || "preview", businessDate: pos.businessDate, status: "submitted", submissionId: pos.submissionId, checksum: pos.checksum, sales: pos.sales, customers: pos.customers, nominations: pos.nominations, casts: castRows, staffWork, drivers: driverRows, expenses, staffDailyPaymentTotal: staffWork.reduce((sum, row) => sum + row.dailyPayment, 0), dispatchStaffPayment, dispatchCastPayment, dispatchFee, liquorDeliveryAmount, cash, ...(legacyCashMode ? { legacyCashConfirmed: cashConfirmed } : {}), posSnapshot: pos, updatedAt: new Date().toISOString() }} /><div className="actions spread"><button className="button secondary" onClick={() => setStage("cash")}>現金照合へ戻る</button><button className="button submit-button" disabled={busy || !canSubmitCash} onClick={() => void submit()}>{busy ? "送信中…" : "確認済み・経理へ送信"}</button></div></div>}
+    {visibleStage === "preview" && pos && cash && <div className="stack section-pad"><DailyPreview closing={{ id: initial?.id || "preview", businessDate: pos.businessDate, status: "submitted", submissionId: pos.submissionId, checksum: pos.checksum, sales: pos.sales, customers: pos.customers, nominations: pos.nominations, casts: castRows, staffWork, drivers: driverRows, expenses, staffDailyPaymentTotal: staffWork.reduce((sum, row) => sum + row.dailyPayment, 0), dispatchStaffPayment, dispatchCastPayment, dispatchFee, liquorDeliveryAmount, cash, ...(cashChanged ? { cashRevisionReason: cashRevisionReason.trim() } : {}), posSnapshot: pos, updatedAt: new Date().toISOString() }} /><div className="actions spread"><button className="button secondary" onClick={() => setStage("cash")}>現金照合へ戻る</button><button className="button submit-button" disabled={busy || !canSubmitCash} onClick={() => void submit()}>{busy ? "送信中…" : "確認済み・経理へ送信"}</button></div></div>}
   </Card>;
+}
+
+function CashAmountInput({ value, onChange }: { value: number | null; onChange: (value: number | null) => void }) {
+  return <input className="input money-input" type="number" min={0} step={1} value={value ?? ""} placeholder="未入力" onChange={(event) => {
+    if (event.target.value === "") return onChange(null);
+    const next = Number(event.target.value);
+    if (Number.isSafeInteger(next) && next >= 0) onChange(next);
+  }} />;
+}
+
+function CashContextTable({ before, after }: { before?: Partial<CashFundingContext>; after?: Omit<CashFundingContext, "openingPersonalDebt"> & { openingPersonalDebt: number | null } }) {
+  const labels: Array<[keyof CashFundingContext, string]> = [["previousBusinessDate", "前営業日"], ["previousClosingCash", "前営業日の現金残額"], ["openingShortfall", "開店前の不足額"], ["openingPersonalDebt", "開始時の個人未返済額"]];
+  const display = (value: string | number | null | undefined) => typeof value === "number" ? yen.format(value) : value || "未確認";
+  return <Table headers={["前提", "保存時", "最新"]}>{labels.map(([key, label]) => <tr key={key}><td>{label}</td><td>{display(before?.[key])}</td><td>{display(after?.[key])}</td></tr>)}</Table>;
 }
 
 export function DailyPreview({ closing }: { closing: DailyClosing }) {
@@ -667,8 +737,8 @@ export function DailyPreview({ closing }: { closing: DailyClosing }) {
       <tr key="liquor-delivery"><td>酒代納品書分</td><td>当日現金からの控除対象外</td><td>{yen.format(closing.liquorDeliveryAmount)}</td></tr>,
     ]}</Table>
     <h3>現金照合</h3>
-    {!closing.cash.funding && closing.legacyCashConfirmed && <p>保存済み現金照合を変更せず再送する確認済み。新方式の現金一致確認ではありません。</p>}
-    <div className="summary-strip"><span><small>支払合計</small><strong>{yen.format(closing.cash.expenseAndPaymentTotal)}</strong></span><span><small>計算上残額</small><strong>{yen.format(closing.cash.expectedClosingCash)}</strong></span>{closing.cash.funding ? <span><small>現金確認</small><strong>{closing.cash.funding.confirmed ? "現金確認済み" : "未確認"}</strong></span> : <><span><small>旧実在高</small><strong>{yen.format(closing.cash.actualClosingCash)}</strong></span><span><small>旧照合差額</small><strong>{yen.format(closing.cash.difference)}</strong></span></>}</div>
+    <div className="summary-strip"><span><small>支払合計</small><strong>{yen.format(closing.cash.expenseAndPaymentTotal)}</strong></span><span><small>計算上残額</small><strong>{yen.format(closing.cash.expectedClosingCash)}</strong></span><span><small>現金確認</small><strong>{closing.cash.funding?.confirmed ? "現金確認済み" : "補充・返済実績の入力が必要"}</strong></span><span><small>保存済み現金記録・差額</small><strong>{yen.format(closing.cash.actualClosingCash)} / {yen.format(closing.cash.difference)}</strong></span></div>
+    {closing.cashRevisionReason && <p>現金記録の追加・変更理由：{closing.cashRevisionReason}</p>}
     {closing.cash.funding && <><p>補充・会社入金・個人への返済は現金移動であり、利益には含めません。</p><Table headers={["補充・返済の内訳", "金額"]}>
       <tr><td>前営業日からの個人立替未返済</td><td>{yen.format(closing.cash.funding.openingPersonalDebt)}</td></tr>
       <tr><td>開店前の不足額</td><td>{yen.format(closing.cash.funding.openingShortfall)}</td></tr>

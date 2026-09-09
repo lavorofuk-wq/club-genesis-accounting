@@ -2,6 +2,7 @@ import type { DailyClosing, StaffRecord } from "./gms";
 import { validateExpenseExport, type ExpenseExportInput } from "./expense-export";
 import { allocateBalancePayroll } from "./balance-allocation";
 import { summarizeCashFunding, type CashFundingSummary } from "./cash-funding";
+import { requiresCompleteCashFundingSnapshot } from "./month-accounting";
 
 export type BalanceExportInput = ExpenseExportInput & {
   staff?: StaffRecord[];
@@ -161,7 +162,17 @@ export function buildBalanceExportReport(input: BalanceExportInput): BalanceExpo
   const hasFundingDays = input.closings.some((closing) => closing.businessDate.startsWith(`${month}-`) && closing.cash.funding !== undefined);
   let cashFunding: CashFundingSummary | undefined;
   if (snapshot && snapshot.cashFunding === undefined) {
+    requireValue(!requiresCompleteCashFundingSnapshot(snapshot.calculationVersion), "確定時の補充・返済集計が不足しています。");
     requireValue(!hasFundingDays, "補充・返済の集計がない旧確定月へ、新しい現金移動を後付けして出力することはできません。");
+  } else if (snapshot && !requiresCompleteCashFundingSnapshot(snapshot.calculationVersion)
+    && !hasFundingDays && snapshot.cashFunding?.managedDays === 0) {
+    // Ver2.21系で管理対象0日として確定した実績は、統一処理導入後も再計算しない。
+    const preserved = snapshot.cashFunding;
+    requireValue([preserved.companyReplenishment, preserved.personalReplenishment, preserved.companyTransfer,
+      preserved.personalRepayment, preserved.netCashMovement].every((value) => value === 0)
+      && Number.isSafeInteger(preserved.openingPersonalDebt) && preserved.openingPersonalDebt >= 0
+      && preserved.closingPersonalDebt === preserved.openingPersonalDebt, "確定時の現金補充・返済集計が不正です。");
+    cashFunding = preserved;
   } else {
     const actualFunding = summarizeCashFunding(input.closings, month);
     requireValue(results.cashFunding !== undefined || !hasFundingDays, "現金補充・返済の集計が未確定のため収支表を出力できません。未承認日次・警告を確認してください。");

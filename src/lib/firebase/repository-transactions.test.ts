@@ -54,7 +54,7 @@ vi.mock("firebase/database", () => ({
   get: async (reference: { path: string }) => fakeDatabase.snapshot(reference.path),
   onValue: fakeDatabase.onValue,
   runTransaction: fakeDatabase.runTransaction,
-  serverTimestamp: () => ({ ".sv": "timestamp" }),
+  serverTimestamp: () => Date.now(),
   set: vi.fn(),
   update: vi.fn(),
 }));
@@ -126,10 +126,13 @@ describe("日次処理のコールドキャッシュ回帰", () => {
 
   it("承認は初回操作で成功する", async () => {
     const current = closing();
+    current.cash.funding = { schema: 2, previousClosingId: "", previousBusinessDate: "", previousClosingCash: 200000,
+      openingShortfall: 0, openingPersonalDebt: 0, companyReplenishment: 0, personalReplenishment: 0,
+      companyTransfer: 0, personalRepayment: 0, closingPersonalDebt: 0, confirmed: true };
     store("history/closing-1", current);
     await approveClosing(current.id, current, user);
     expect(stored("history/closing-1")).toMatchObject({ status: "approved", approvedBy: user.uid });
-    expect(fakeDatabase.runTransaction).toHaveBeenCalledTimes(1);
+    expect(fakeDatabase.runTransaction.mock.calls.filter(([reference]) => reference.path.includes("/history/"))).toHaveLength(1);
   });
 
   it.each(["submitted", "returned"] as const)("%s の取下げは初回操作で成功する", async (status) => {

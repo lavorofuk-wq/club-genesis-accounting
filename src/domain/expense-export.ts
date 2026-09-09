@@ -1,5 +1,7 @@
 import type { DailyClosing, ExpenseCategory, MonthlyAdjustments } from "./gms";
 import type { IntroducerPaymentRow, MonthlyAccountingResults, MonthlyAccountingSnapshot } from "./month-accounting";
+import { requiresCompleteCashFundingSnapshot } from "./month-accounting";
+import { cashLedgerIssues } from "./cash-funding";
 
 export type ExpenseExportInput = {
   results: MonthlyAccountingResults;
@@ -278,4 +280,11 @@ export function validateExpenseExport({ results, closings, adjustments, month, s
       "出力する月次データが確定時の金額と一致しません。"));
   }
   summarizeExpenseIntroducers(results);
+  if (!snapshot || requiresCompleteCashFundingSnapshot(snapshot.calculationVersion)) {
+    const cashIssues = cashLedgerIssues(closings, month);
+    requireValue(cashIssues.length === 0, cashIssues.join("\n"));
+    const unapproved = closings.filter((row) => row.businessDate.startsWith(`${month}-`) && row.status !== "approved");
+    requireValue(unapproved.length === 0,
+      `未承認・差戻し・取下げの日次があるため出力できません。経理承認後に確認してください：${unapproved.map((row) => row.businessDate).join("、")}`);
+  }
 }

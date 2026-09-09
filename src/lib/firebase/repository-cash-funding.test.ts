@@ -41,6 +41,7 @@ function fixture(date = "2026-09-09", cashSales = 10000, payment = 0, previous: 
   const nominations = { honShimeiCount: 0, jonaiCount: 0 };
   const cashProfit = cashSales - payment;
   const funding = calculateCashFunding(cashFundingContext(previous, date, 200000, id), inputs, cashProfit, true);
+  funding.schema = 2;
   const expectedClosingCash = 200000 + cashProfit + funding.companyTransfer - funding.personalRepayment;
   return {
     id, businessDate: date, status: "submitted", submissionId: `submission-${date}`, checksum, updatedAt: stamp,
@@ -76,6 +77,16 @@ beforeEach(() => {
     return { committed: value !== undefined, snapshot: { val: () => memory.read(reference.path) } };
   });
   memory.update.mockImplementation(async (_reference: unknown, plan: Record<string, unknown>) => {
+    for (const [path, value] of Object.entries(plan)) {
+      if (!path.startsWith("history/") || !value) continue;
+      const next = value as DailyClosing;
+      if (!next.cashRevisionId) continue;
+      const current = memory.read(path) as DailyClosing | null;
+      const revisionPath = `cashRevisions/${path.slice("history/".length)}/${next.cashRevisionId}`;
+      if (!current || current.updatedAt !== next.previousUpdatedAt || memory.read(revisionPath) || !plan[revisionPath]) {
+        throw new Error("PERMISSION_DENIED");
+      }
+    }
     for (const [path, value] of Object.entries(plan)) {
       if (value === null) memory.values.delete(path);
       else memory.values.set(path, structuredClone(value));
@@ -166,11 +177,14 @@ describe("現金補充・返済の直列化と確認済み送信", () => {
 });
 
 describe("後続営業日の現金実績と削除保護", () => {
-  it("後続日が参照する過去の現金額は変更できない", async () => {
+  it("未確定の後続日が参照する過去の変更は理由と監査を伴い保存できる", async () => {
     const before = fixture("2026-09-08"); before.status = "returned"; store(before);
     const successor = fixture("2026-09-09", 10000, 0, [before]); store(successor);
     const changed = fixture("2026-09-08", 20000);
-    await expect(submitClosing(changed, user, stamp)).rejects.toThrow("現金額の変更"); expect(historyWrites()).toHaveLength(0);
+    changed.cashRevisionReason = "実績確認による訂正";
+    await submitClosing(changed, user, stamp);
+    expect(memory.read(`history/${before.id}`)).toMatchObject({ cash: changed.cash, cashRevisionId: expect.any(String) });
+    expect(memory.read(`history/${successor.id}`)).toEqual(successor);
   });
 
   it("後続日が参照していても現金不変の再送は許可する", async () => {
@@ -209,72 +223,134 @@ describe("後続営業日の現金実績と削除保護", () => {
     expect(memory.read("cashManagementLock")).toBeNull(); expect(memory.read("dailyClosingDeletionLock")).toBeNull();
   });
 
-  it("旧funding無しデータの承認では現金の再計算やcashロックを行わない", async () => {
+  it("旧funding無しデータは承認を拒否し、現金を自動変更しない", async () => {
     const value = fixture(); delete value.cash.funding; store(value);
-    await approveClosing(value.id, value, user);
-    expect(memory.read(`history/${value.id}`)).toMatchObject({ status: "approved", cash: value.cash });
-    expect(memory.transaction.mock.calls.some(([reference]) => reference.path === "cashManagementLock")).toBe(false);
+    await expect(approveClosing(value.id, value, user)).rejects.toThrow("現金");
+    expect(memory.read(`history/${value.id}`)).toEqual(value);
+    expect(memory.read("cashManagementLock")).toBeNull();
   });
 });
 
-describe("旧現金記録を変更しない再送の限定互換", () => {
+describe("全日次の現金確認と原子的な改訂履歴", () => {
   function legacy(date = "2026-09-07") {
     const value = fixture(date); delete value.cash.funding; value.status = "returned";
     return value;
   }
+  const revisions = () => [...memory.values].filter(([path]) => path.startsWith("cashRevisions/"))
+    .map(([, value]) => value as { operationId: string; beforeCash: DailyClosing["cash"]; beforeRecordJson: string; beforeUpdatedAt: string; reason: string });
 
-  it("9/7再送後も9/8旧記録を管理開始後の欠落扱いにせず、2回目も保存できる", async () => {
+  it("旧9/7をschema2へ確認移行し、後続旧9/8は自動変更しない", async () => {
     const before = legacy(); store(before); const nextDay = legacy("2026-09-08"); nextDay.status = "withdrawn"; store(nextDay);
-    const candidate = { ...before, legacyCashConfirmed: true };
+    const candidate = fixture("2026-09-07"); candidate.cashRevisionReason = "旧日の実際の補充・返済を確認";
     await submitClosing(candidate, user, stamp);
-    const first = memory.read(`history/${before.id}`) as DailyClosing & { cashManagementToken: string };
-    expect(first).toMatchObject({ cash: before.cash, legacyCashConfirmed: true, cashManagementToken: expect.any(String) });
-    expect(first.cash.funding).toBeUndefined();
-    const returned = { ...first, id: before.id, status: "returned" as const, updatedAt: "2026-09-10T01:00:00.000Z" };
-    store(returned);
-    await submitClosing({ ...returned, legacyCashConfirmed: true }, user, returned.updatedAt);
-    const second = memory.read(`history/${before.id}`) as DailyClosing & { cashManagementToken: string };
-    expect(second.cash).toEqual(before.cash); expect(second.cash.funding).toBeUndefined();
-    expect(second.cashManagementToken).not.toBe(first.cashManagementToken);
+    const saved = memory.read(`history/${before.id}`) as DailyClosing;
+    expect(saved.cash.funding?.schema).toBe(2); expect(saved.previousUpdatedAt).toBe(stamp);
+    expect(revisions()).toHaveLength(1);
+    expect(revisions()[0]).toMatchObject({ operationId: saved.cashRevisionId, beforeCash: before.cash, beforeUpdatedAt: stamp });
+    expect(JSON.parse(revisions()[0].beforeRecordJson)).toEqual(before);
     expect(memory.read(`history/${nextDay.id}`)).toEqual(nextDay);
   });
 
-  it.each([undefined, false])("保存済み確認フラグがあっても今回の確認%sでは再送できない", async (confirmed) => {
-    const before = { ...legacy(), legacyCashConfirmed: true }; store(before);
-    const candidate = { ...before, legacyCashConfirmed: confirmed };
-    await expect(submitClosing(candidate, user, stamp)).rejects.toThrow("確認");
-    expect(historyWrites()).toHaveLength(0); expect(memory.read(`history/${before.id}`)).toEqual(before);
-  });
-
-  it("旧現金の実在高・差額は非0でも変更せず保持する", async () => {
-    const before = legacy(); before.cash.actualClosingCash -= 1000; before.cash.difference = -1000; store(before);
-    await submitClosing({ ...before, legacyCashConfirmed: true }, user, stamp);
-    expect(memory.read(`history/${before.id}`)).toMatchObject({ cash: before.cash, legacyCashConfirmed: true });
-  });
-
-  it("旧記録の現金支出と整合計算をすべて変更しても互換例外を使えない", async () => {
-    const before = legacy(); store(before); const candidate = structuredClone(before); candidate.legacyCashConfirmed = true;
-    candidate.dispatchFee += 100; candidate.cash.expenseAndPaymentTotal += 100;
-    candidate.cash.cashProfit -= 100; candidate.cash.expectedClosingCash -= 100; candidate.cash.actualClosingCash -= 100;
-    await expect(submitClosing(candidate, user, stamp)).rejects.toThrow("旧記録");
-    expect(historyWrites()).toHaveLength(0); expect(memory.read(`history/${before.id}`)).toEqual(before);
-  });
-
-  it("新規日次は確認フラグを付けてもfunding無しでは送信できない", async () => {
-    const candidate = legacy(); candidate.legacyCashConfirmed = true;
-    await expect(submitClosing(candidate, user)).rejects.toThrow("確認"); expect(historyWrites()).toHaveLength(0);
-  });
-
-  it("管理開始済み日次からfundingを削除して旧方式へ降格できない", async () => {
+  it("同額2回目の再送も別UUIDで旧日次を保存し、既存監査を上書きしない", async () => {
     const before = fixture(); before.status = "returned"; store(before);
-    const candidate = structuredClone(before); delete candidate.cash.funding; candidate.legacyCashConfirmed = true;
-    await expect(submitClosing(candidate, user, stamp)).rejects.toThrow("確認");
-    expect(historyWrites()).toHaveLength(0); expect(memory.read(`history/${before.id}`)).toEqual(before);
+    await submitClosing(before, user, stamp);
+    const first = memory.read(`history/${before.id}`) as DailyClosing;
+    const firstAudit = structuredClone(revisions()[0]);
+    const returned = { ...first, id: before.id, status: "returned" as const, updatedAt: "2026-09-10T01:00:00.000Z" }; store(returned);
+    await submitClosing(returned, user, returned.updatedAt);
+    const second = memory.read(`history/${before.id}`) as DailyClosing;
+    expect(second.cashRevisionId).not.toBe(first.cashRevisionId); expect(revisions()).toHaveLength(2);
+    expect(revisions()[0]).toEqual(firstAudit); expect(revisions()[1].reason).toBe("店舗データ再送");
   });
 
-  it("新方式の送信では不要な旧記録確認フラグを保存しない", async () => {
-    const candidate = fixture(); candidate.legacyCashConfirmed = true; await submitClosing(candidate, user);
-    const saved = memory.read(`history/${candidate.id}`) as DailyClosing;
-    expect(saved.cash.funding).toEqual(candidate.cash.funding); expect(saved.legacyCashConfirmed).toBeUndefined();
+  it("旧本文のPOS・給与・経費を監査JSONへ保存するが監査本文を再帰埋込しない", async () => {
+    const before = fixture(); before.status = "returned";
+    const raw = { ...before, cashRevisions: { embedded: "exclude" }, beforeRecordJson: "exclude" }; store(raw);
+    await submitClosing(before, user, stamp);
+    const archived = JSON.parse(revisions()[0].beforeRecordJson);
+    expect(archived.posSnapshot).toEqual(before.posSnapshot); expect(archived.staffWork).toEqual(before.staffWork);
+    expect(archived.expenses).toEqual(before.expenses); expect(archived.cashRevisions).toBeUndefined();
+    expect(archived.beforeRecordJson).toBeUndefined();
+    const current = memory.read(`history/${before.id}`) as Record<string, unknown>;
+    expect(current.beforeRecordJson).toBeUndefined(); expect(current.cashRevisions).toBeUndefined();
+  });
+
+  it("旧確認flagを付けてもfunding無し再送は許可しない", async () => {
+    const before = legacy(); store(before);
+    await expect(submitClosing({ ...before, legacyCashConfirmed: true }, user, stamp)).rejects.toThrow("現金補充");
+    expect(memory.update).not.toHaveBeenCalled();
+  });
+
+  it("cash変更の理由がなければ監査も本体も作成しない", async () => {
+    const before = legacy(); store(before);
+    await expect(submitClosing(fixture("2026-09-07"), user, stamp)).rejects.toThrow("理由");
+    expect(memory.update).not.toHaveBeenCalled(); expect(revisions()).toHaveLength(0);
+  });
+
+  it("新規schema1を拒否し、保存済みschema1の全値不変再送だけ許可する", async () => {
+    const before = fixture(); before.cash.funding!.schema = 1; before.status = "returned";
+    await expect(submitClosing(before, user)).rejects.toThrow("新しい補充");
+    store(before); await submitClosing(before, user, stamp);
+    expect(revisions()).toHaveLength(1); expect(memory.read(`history/${before.id}`)).toMatchObject({ cash: before.cash });
+  });
+
+  it("schema2では実際の返済0円と、初回の明示された未返済12300円を保持できる", async () => {
+    const value = fixture(); value.cash.funding!.openingPersonalDebt = 12300;
+    value.cash.funding!.closingPersonalDebt = 12300; value.cash.funding!.personalRepayment = 0;
+    await submitClosing(value, user);
+    expect(memory.read(`history/${value.id}`)).toMatchObject({ cash: value.cash });
+  });
+
+  it("先読み後に日次の状態と版が変わればCASで本体・監査とも拒否する", async () => {
+    const before = fixture(); before.status = "returned"; store(before);
+    const original = memory.update.getMockImplementation()!;
+    memory.update.mockImplementationOnce(async (reference, plan) => {
+      store({ ...before, status: "withdrawn", updatedAt: "2026-09-10T00:00:00.000Z" });
+      return original(reference, plan);
+    });
+    await expect(submitClosing(before, user, stamp)).rejects.toThrow("PERMISSION_DENIED");
+    expect(revisions()).toHaveLength(0); expect(memory.read(`history/${before.id}`)).toMatchObject({ status: "withdrawn" });
+  });
+
+  it("原子的保存の応答だけ失われても同じUUIDの履歴と本体を確認して成功する", async () => {
+    const before = fixture(); before.status = "returned"; store(before);
+    const original = memory.update.getMockImplementation()!;
+    memory.update.mockImplementationOnce(async (reference, plan) => { await original(reference, plan); throw new Error("response lost"); });
+    await submitClosing(before, user, stamp);
+    expect(memory.update).toHaveBeenCalledTimes(1); expect(revisions()).toHaveLength(1);
+    expect(memory.read("cashManagementLock")).toBeNull();
+  });
+
+  it("保存結果の読取も失敗した場合は不明を伝え、pending claimを消さずに残す", async () => {
+    const before = fixture(); before.status = "returned"; store(before);
+    const original = memory.update.getMockImplementation()!;
+    memory.update.mockImplementationOnce(async (reference, plan) => {
+      await original(reference, plan); memory.get.mockRejectedValue(new Error("offline")); throw new Error("response lost");
+    });
+    await expect(submitClosing(before, user, stamp)).rejects.toThrow("保存結果を確認できません");
+    expect(revisions()).toHaveLength(1);
+    expect(memory.read(`posSubmissionClaims/${before.checksum}`)).toMatchObject({ state: "pending" });
+  });
+
+  it("後続の空月が確定済みなら未返済額の発生を伴う過去移行を拒否する", async () => {
+    const before = legacy(); store(before);
+    memory.values.set("accountingMonthStates/2026-10", { month: "2026-10", status: "closed", revision: 1 });
+    const value = fixture("2026-09-07"); value.cashRevisionReason = "旧日を確認";
+    await expect(submitClosing(value, user, stamp)).rejects.toThrow("確定");
+    expect(revisions()).toHaveLength(0);
+  });
+
+  it("前日cash変更で当日参照が古くなった場合は承認を拒否する", async () => {
+    const before = fixture("2026-09-08"); const value = fixture("2026-09-09", 10000, 0, [before]);
+    store(fixture("2026-09-08", 20000)); store(value);
+    await expect(approveClosing(value.id, value, user)).rejects.toThrow("現金");
+    expect(memory.read(`history/${value.id}`)).toEqual(value); expect(memory.read("cashManagementLock")).toBeNull();
+  });
+
+  it("整合したschema2の承認もcash lockで直列化し、そのtokenで確定する", async () => {
+    const value = fixture(); store(value); await approveClosing(value.id, value, user);
+    expect(memory.read(`history/${value.id}`)).toMatchObject({ status: "approved", cashManagementToken: expect.any(String), cash: value.cash });
+    expect(memory.transaction.mock.calls[0][0]).toEqual({ path: "cashManagementLock" });
+    expect(memory.read("cashManagementLock")).toBeNull();
   });
 });

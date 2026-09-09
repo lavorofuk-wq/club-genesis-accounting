@@ -34,6 +34,9 @@ function closing(): DailyClosing {
     cash: {
       cashSales: 100000, cardSales: 200000, totalSales: 300000, cashFloat: 200000,
       expenseAndPaymentTotal: 0, expectedClosingCash: 300000, cashProfit: 100000, actualClosingCash: 300000, difference: 0,
+      funding: { schema: 2, previousClosingId: "", previousBusinessDate: "", previousClosingCash: 200000,
+        openingShortfall: 0, openingPersonalDebt: 0, companyReplenishment: 0, personalReplenishment: 0,
+        companyTransfer: 0, personalRepayment: 0, closingPersonalDebt: 0, confirmed: true },
     },
     posSnapshot: { transactions: [] } as unknown as DailyClosing["posSnapshot"],
     approvedAt: "2026-09-03T03:00:00.000Z", approvedBy: "accounting-user", updatedAt: "2026-09-03T03:00:00.000Z",
@@ -252,12 +255,12 @@ describe("見本形式の月次経費XLSX", () => {
     expect(sheet.pageSetup.printArea).toBe(`A1:R${sheet.rowCount}`);
   });
 
-  it("未承認・差戻し・別月の日次を出力しない", () => {
+  it("未来月の未承認・差戻しの日次を出力しない", () => {
     const data = input();
     data.closings.push(
-      { ...structuredClone(data.closings[0]), id: "submitted", businessDate: "2026-09-03", status: "submitted" },
-      { ...structuredClone(data.closings[0]), id: "returned", businessDate: "2026-09-04", status: "returned" },
-      { ...structuredClone(data.closings[0]), id: "other-month", businessDate: "2026-08-02" },
+      { ...structuredClone(data.closings[0]), id: "submitted", businessDate: "2026-10-03", status: "submitted" },
+      { ...structuredClone(data.closings[0]), id: "returned", businessDate: "2026-10-04", status: "returned" },
+      { ...structuredClone(data.closings[0]), id: "other-month", businessDate: "2026-10-02" },
     );
     const sheet = createMonthlyExpenseWorkbook(data, "未確定").worksheets[0];
     expect(value(sheet, "C34")).toBe(101);
@@ -265,6 +268,14 @@ describe("見本形式の月次経費XLSX", () => {
     expect([0, null]).toContain(value(sheet, "C5"));
     expect([0, null]).toContain(value(sheet, "C6"));
     expect(value(sheet, "P45")).toBe(data.results.balance.totalCosts);
+  });
+
+  it("対象月の未入力日次を帳票から除外して出力を続けることはできない", () => {
+    const data = input();
+    const pending = { ...structuredClone(data.closings[0]), id: "pending", businessDate: "2026-09-03", status: "submitted" as const };
+    delete pending.cash.funding;
+    data.closings.push(pending);
+    expect(() => createMonthlyExpenseWorkbook(data, "未確定")).toThrow(/2026-09-03の補充・返済の確認記録がありません/);
   });
 
   it.each([["2026-02", 28], ["2028-02", 29], ["2026-04", 30], ["2026-12", 31]])("%sの実在日を表示し月末日へ経費を計上する", (targetMonth, lastDay) => {

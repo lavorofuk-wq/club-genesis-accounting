@@ -97,6 +97,16 @@ function fullInput(): BalanceExportInput {
   second.businessDate = "2026-09-04";
   second.posSnapshot.businessDate = second.businessDate;
   second.updatedAt = "2026-09-05T12:00:00.000Z";
+  const prior: DailyClosing[] = [];
+  for (const row of [first, second]) {
+    const cashInput = { sales: row.sales, cashFloat: 200000,
+      expenses: 1234, regularDailyPayments: 1000, trialDailyPayments: 0, staffDailyPayments: 2000,
+      driverDailyPayments: 1000, dispatchCastPayment: 6000, dispatchStaffPayment: 7000, dispatchFee: 800, actualClosingCash: 0 };
+    const funding = calculateCashFunding(cashFundingContext(prior, row.businessDate, 200000),
+      { companyReplenishment: 0, personalReplenishment: 0, companyTransfer: 0 }, calculateCash(cashInput).cashProfit, true);
+    row.cash = calculateCash({ ...cashInput, funding });
+    prior.push(row);
+  }
   const adjustments: MonthlyAdjustments = {
     month: "2026-09", withholdingByCast: { regular: 333 }, staffSalesAllowance: { staff: 1200 },
     staffBottleAllowance: { staff: 300 }, driverRemoteAllowance: { driver: 500 },
@@ -120,6 +130,7 @@ function fundingInput(): BalanceExportInput {
   const previous = structuredClone(data.closings[0]);
   previous.id = "previous-month";
   previous.businessDate = "2026-08-31";
+  delete previous.cash.funding;
   previous.cash.expectedClosingCash = previous.cash.actualClosingCash = 150000;
   const earlier = [previous];
   data.closings.sort((a, b) => a.businessDate.localeCompare(b.businessDate)).forEach((closing, index) => {
@@ -149,6 +160,10 @@ describe("収支帳票の月次突合", () => {
     legacy.closings.forEach((closing) => { delete closing.cash.funding; });
     legacy.results = calculateMonthlyAccounting({ casts: [], staff: [], drivers: [], introducers: [], liquor: [], closings: legacy.closings,
       adjustments: [legacy.adjustments], cashFloat: 200000 }, legacy.month, legacy.adjustments);
+    expect(legacy.results.warnings.some((warning) => warning.includes("確認記録がありません"))).toBe(true);
+    legacy.results.warnings = [];
+    legacy.snapshot = buildMonthlySnapshot(legacy.month, 1, "b".repeat(64), legacy.adjustments, structuredClone(legacy.results), legacy.closings, "accounting", "2026-09-30T12:00:00.000Z");
+    legacy.snapshot.calculationVersion = "2.20.0";
     expect(report.days).toEqual(buildBalanceExportReport(legacy).days);
     expect(report.castDailyAndAdvance).toBe(5000);
     expect(report.employeeDaily).toBe(6000);
@@ -179,12 +194,34 @@ describe("収支帳票の月次突合", () => {
 
   it("補充集計のない旧確定月には新summaryを後付けしない", () => {
     const data = fullInput();
+    data.closings.forEach((row) => { delete row.cash.funding; });
     delete data.results.cashFunding;
     data.snapshot = buildMonthlySnapshot(data.month, 1, "b".repeat(64), data.adjustments, structuredClone(data.results), data.closings, "accounting", "2026-09-30T12:00:00.000Z");
     data.snapshot.calculationVersion = "2.20.0";
     const report = buildBalanceExportReport(data);
     expect(Object.hasOwn(report, "cashFunding")).toBe(false);
     expect(Object.hasOwn(data.snapshot, "cashFunding")).toBe(false);
+  });
+
+  it.each(["2.21.0", "2.21.1"])("%sで対象0日として確定した月は当時の集計を保持し、新しい確認を後付けしない", (version) => {
+    const data = fullInput();
+    data.closings.forEach((row) => { delete row.cash.funding; });
+    data.results.cashFunding = { managedDays: 0, openingPersonalDebt: 0, closingPersonalDebt: 0,
+      companyReplenishment: 0, personalReplenishment: 0, companyTransfer: 0, personalRepayment: 0, netCashMovement: 0 };
+    data.snapshot = buildMonthlySnapshot(data.month, 1, "b".repeat(64), data.adjustments, structuredClone(data.results), data.closings, "accounting", "2026-09-30T12:00:00.000Z");
+    data.snapshot.calculationVersion = version;
+    const before = structuredClone(data);
+    expect(buildBalanceExportReport(data).cashFunding).toEqual(data.snapshot.cashFunding);
+    expect(data).toEqual(before);
+    data.snapshot.calculationVersion = "2.22.0";
+    expect(() => buildBalanceExportReport(data)).toThrow(/確認記録がありません/);
+  });
+
+  it("未確定月の未入力を、結果警告を消しても0円集計として出力しない", () => {
+    const data = fullInput();
+    delete data.closings[0].cash.funding;
+    data.results.warnings = [];
+    expect(() => buildBalanceExportReport(data)).toThrow(/確認記録がありません/);
   });
 
   it("新しい日別1円時給を月次・帳票に一致させ、支払済み日払いと現金照合は保持する", () => {
@@ -247,16 +284,17 @@ describe("収支帳票の月次突合", () => {
       - employeeNet - report.castDailyAndAdvance - report.employeeDaily - result.expenses.total;
     expect(expanded).toBe(result.sales.cash - result.balance.totalCosts + report.castTransport);
   });
-  it("承認操作順や一覧順ではなく営業日順を使い、後日の未承認・差戻し・取下げ・別月は計上先にしない", () => {
+  it("承認操作順や一覧順は計上先を変えず、対象月の未確認日次追加は出力を停止する", () => {
     const data = fullInput();
     const expected = buildBalanceExportReport(data);
     data.closings.reverse();
     data.closings[0].approvedAt = "2026-09-30T12:00:00.000Z";
+    expect(buildBalanceExportReport(data)).toEqual(expected);
     for (const status of ["submitted", "returned", "withdrawn"] as const) {
       data.closings.push({ ...data.closings[0], id: status, businessDate: "2026-09-30", status });
     }
     data.closings.push({ ...data.closings[0], id: "next-month", businessDate: "2026-10-01" });
-    expect(buildBalanceExportReport(data)).toEqual(expected);
+    expect(() => buildBalanceExportReport(data)).toThrow();
   });
   it("承認済み営業日がない月の費用を架空の日次へ計上せず、理由を表示する", () => {
     const data = fullInput();
@@ -276,14 +314,14 @@ describe("収支帳票の月次突合", () => {
     expect(buildBalanceExportReport(data).days).toEqual([]);
     expect(buildBalanceExportReport(data).approvedDays).toBe(0);
   });
-  it("承認前・別月の日次を含めず、月次確定時の日次の保存世代を突合する", () => {
+  it("未来月の承認前日次は含めず、月次確定時の日次の保存世代を突合する", () => {
     const data = fullInput();
     const report = buildBalanceExportReport(data);
     data.snapshot = buildMonthlySnapshot(data.month, 1, "b".repeat(64), data.adjustments,
       structuredClone(data.results), data.closings, "user", "2026-09-30T12:00:00.000Z");
-    data.closings.push({ ...data.closings[0], id: "pending", status: "submitted" });
-    data.closings.push({ ...data.closings[0], id: "returned", status: "returned" });
-    data.closings.push({ ...data.closings[0], id: "draft", status: "withdrawn" });
+    data.closings.push({ ...data.closings[0], businessDate: "2026-10-01", id: "pending", status: "submitted" });
+    data.closings.push({ ...data.closings[0], businessDate: "2026-10-02", id: "returned", status: "returned" });
+    data.closings.push({ ...data.closings[0], businessDate: "2026-10-03", id: "draft", status: "withdrawn" });
     expect(buildBalanceExportReport(data)).toEqual(report);
     data.closings[0].updatedAt = "2026-09-05T13:00:00.000Z";
     expect(() => buildBalanceExportReport(data)).toThrow("保存世代");
