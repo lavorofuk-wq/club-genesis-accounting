@@ -54,6 +54,7 @@ import {
   validateDriverPaySetting,
   validateStaffPaySetting,
 } from "@/domain/master-pay-validation";
+import { assertCashLedgerChange, cashFundingIssues } from "@/domain/cash-funding";
 
 export type WorkspaceData = AccountingWorkspaceData;
 export type ClosingRevision = Pick<DailyClosing, "businessDate" | "updatedAt" | "checksum" | "submissionId">;
@@ -94,8 +95,19 @@ type DailyClosingDeletionLock = ClosingRevision & {
   owner: string;
   acquiredAtMs: number;
   expiresAt: number;
+  cashManagementToken: string;
 };
 const DAILY_CLOSING_DELETION_LOCK_TTL_MS = 120_000;
+
+type CashManagementLock = {
+  id: string;
+  operation: "submit" | "delete";
+  token: string;
+  owner: string;
+  acquiredAtMs: number;
+  expiresAt: number;
+};
+const CASH_MANAGEMENT_LOCK_TTL_MS = 120_000;
 
 type ConversionLock = {
   operationId: string;
@@ -317,6 +329,7 @@ async function acquireDailyClosingDeletionLock(
   id: string,
   expected: ClosingRevision,
   user: User,
+  cashLock: CashManagementLock,
 ): Promise<DailyClosingDeletionLock> {
   const serverClock = await firebaseServerNow();
   const pending: DailyClosingDeletionLock = {
@@ -326,6 +339,7 @@ async function acquireDailyClosingDeletionLock(
     claimKey: posSubmissionClaimKey(expected.checksum),
     token: crypto.randomUUID(),
     owner: user.uid,
+    cashManagementToken: cashLock.token,
     acquiredAtMs: serverOrderTimestamp(),
     expiresAt: serverClock.milliseconds + DAILY_CLOSING_DELETION_LOCK_TTL_MS,
   };
@@ -342,6 +356,46 @@ async function acquireDailyClosingDeletionLock(
     throw new Error("送信済みデータの削除ロックを取得できませんでした。最新データを読み込んでやり直してください。");
   }
   return stored;
+}
+
+async function acquireCashManagementLock(id: string, operation: CashManagementLock["operation"], user: User) {
+  const serverClock = await firebaseServerNow();
+  const pending: CashManagementLock = {
+    id, operation, token: crypto.randomUUID(), owner: user.uid,
+    acquiredAtMs: serverOrderTimestamp(),
+    expiresAt: serverClock.milliseconds + CASH_MANAGEMENT_LOCK_TTL_MS,
+  };
+  const result = await runReadyTransaction(rootRef("cashManagementLock"), (current) => {
+    const existing = current as CashManagementLock | null;
+    if (existing && existing.expiresAt > serverClock.milliseconds) {
+      throw new Error("別の端末で現金データを送信・削除しています。完了後に最新データを読み込んでください。");
+    }
+    return pending;
+  }, { applyLocally: false });
+  const stored = result.snapshot.val() as CashManagementLock | null;
+  if (!result.committed || !stored || stored.token !== pending.token || stored.owner !== user.uid
+    || stored.id !== id || stored.operation !== operation || !Number.isSafeInteger(stored.acquiredAtMs)) {
+    throw new Error("現金データの更新ロックを取得できませんでした。最新データを読み込んでやり直してください。");
+  }
+  return stored;
+}
+
+async function releaseCashManagementLock(lock: CashManagementLock) {
+  await runReadyTransaction(rootRef("cashManagementLock"), (current) => {
+    const existing = current as CashManagementLock | null;
+    // 期限切れ後に別処理が取得したロックには触れない。
+    if (!existing || existing.token !== lock.token || existing.owner !== lock.owner) return;
+    return null;
+  }, { applyLocally: false });
+}
+
+async function assertCashManagementLockOwned(lock: CashManagementLock) {
+  const [snapshot, serverClock] = await Promise.all([get(rootRef("cashManagementLock")), firebaseServerNow()]);
+  const existing = snapshot.val() as CashManagementLock | null;
+  if (!existing || existing.token !== lock.token || existing.owner !== lock.owner
+    || existing.id !== lock.id || existing.operation !== lock.operation || existing.expiresAt <= serverClock.milliseconds) {
+    throw new Error("現金データの更新ロックが期限切れまたは更新済みです。最新データを読み込み、現金を再確認してください。");
+  }
 }
 
 async function releaseDailyClosingDeletionLock(lock: DailyClosingDeletionLock) {
@@ -611,11 +665,20 @@ function validateDailyClosingForSubmission(value: DailyClosing, before: DailyClo
   const driverDaily = value.drivers.reduce((sum, row) => sum + row.dailyPayment, 0);
   const paymentTotal = expenseTotal + castDaily + staffDaily + driverDaily
     + value.dispatchStaffPayment + value.dispatchCastPayment + value.dispatchFee;
-  const expectedClosingCash = value.sales.cashSales + value.cash.cashFloat - paymentTotal;
+  const cashProfit = value.sales.cashSales - paymentTotal;
+  const funding = value.cash.funding;
+  require(Boolean(funding), "現金補充・返済を確認してから送信してください。");
+  const fundingErrors = cashFundingIssues(value.cash);
+  require(fundingErrors.length === 0, fundingErrors.join("\n"));
+  require(funding?.confirmed === true, "営業終了時の現金を確認してから送信してください。");
+  const expectedClosingCash = value.cash.cashFloat + cashProfit
+    + (funding?.companyTransfer || 0) - (funding?.personalRepayment || 0);
   require(value.cash.cashSales === value.sales.cashSales && value.cash.cardSales === value.sales.cardSales && value.cash.totalSales === value.sales.totalSales, "現金照合の売上がPOS売上と一致しません。");
   require(value.cash.expenseAndPaymentTotal === paymentTotal, "経費・日払い・派遣支払の合計が現金照合と一致しません。");
-  require(value.cash.expectedClosingCash === expectedClosingCash && value.cash.cashProfit === expectedClosingCash - value.cash.cashFloat, "計算上の現金残額が一致しません。");
+  require(value.cash.expectedClosingCash === expectedClosingCash && value.cash.cashProfit === cashProfit, "計算上の現金残額が一致しません。");
   require(value.cash.difference === value.cash.actualClosingCash - expectedClosingCash, "現金照合差額が一致しません。");
+  require(expectedClosingCash >= 0 && value.cash.actualClosingCash === expectedClosingCash && value.cash.difference === 0,
+    "現金差額が0円になるように営業終了時の現金残額を確認してください。");
   require((value.integrityIssues?.length || 0) === 0, "不完全な店舗データは送信できません。");
 }
 
@@ -1815,65 +1878,73 @@ export async function submitClosing(value: DailyClosing, user: User, expectedUpd
   await parsePosClosingV3(value.posSnapshot);
   if (!validDate(value.businessDate)) throw new Error("営業日が正しくありません。");
   await assertMonthOpen(value.businessDate.slice(0, 7));
-  const timestamp = now();
-  const [existingSnapshot, allSnapshot] = await Promise.all([get(rootRef(`history/${value.id}`)), get(rootRef("history"))]);
-  const before = existingSnapshot.val() as DailyClosing | null;
-  const canonicalId = `daily_${value.businessDate.replaceAll("-", "")}`;
-  if (!before && value.id !== canonicalId) {
-    throw new Error(`新規の日次データIDが営業日と一致しません。${value.businessDate}のJSONを読み込み直してください。`);
-  }
-  if (before && !expectedUpdatedAt) throw new Error("再編集元データが確認できません。最新データを読み込んでやり直してください。");
-  assertFresh(before, expectedUpdatedAt);
-  if (before && before.businessDate !== value.businessDate) throw new Error("再送時に営業日は変更できません。元の営業日データから再編集してください。");
-  if (before && !["returned", "withdrawn"].includes(before.status)) throw new Error("差戻しまたは取下げ済みのデータだけ再送できます。");
-  validateDailyClosingForSubmission(value, before);
-  const sameBusinessDate = asArray<DailyClosing>(allSnapshot.val()).find((row) => row.id !== value.id && row.businessDate === value.businessDate);
-  if (sameBusinessDate) {
-    throw new Error(`${value.businessDate}の店舗データはすでに存在します。既存データを開いて再編集してください。`);
-  }
-  const duplicate = asArray<DailyClosing>(allSnapshot.val()).find((row) => row.id !== value.id && row.submissionId === value.submissionId && row.checksum === value.checksum);
-  if (duplicate) throw new Error(`${duplicate.businessDate}に同じPOS JSONが送信済みです。`);
-  const oldClaim = before ? posSubmissionClaimKey(before.checksum) : "";
-  const oldLegacyClaim = before ? claimKey(before.submissionId, before.checksum) : "";
-  const newClaim = posSubmissionClaimKey(value.checksum);
-  let newClaimHandle: ClaimHandle | undefined;
+  const cashLock = await acquireCashManagementLock(value.id, "submit", user);
   try {
-    newClaimHandle = await acquireClaim("posSubmissionClaims", newClaim, value.id);
-  } catch (error) {
-    throw claimAcquisitionError(error, "同じPOS JSONがすでに送信されています。最新データを読み込んで確認してください。");
-  }
-  try {
-    await runReadyTransaction(rootRef(`history/${value.id}`), (current) => {
-      const existing = current as DailyClosing | null;
-      if (before && !existing) throw new Error("再編集元データは完全削除されています。最新データを読み込んでください。");
-      if (existing && !expectedUpdatedAt) throw new Error("再編集元データが確認できません。最新データを読み込んでやり直してください。");
-      assertFresh(existing, expectedUpdatedAt);
-      if (existing && !["returned", "withdrawn"].includes(existing.status)) throw new Error("差戻しまたは取下げ済みのデータだけ再送できます。");
-      return clean({
-        ...withoutId(value),
-        businessMonth: value.businessDate.slice(0, 7),
-        status: "submitted",
-        approvedAt: undefined,
-        approvedBy: undefined,
-        withdrawnAt: undefined,
-        returnedAt: undefined,
-        returnedBy: undefined,
-        returnedFromStatus: undefined,
-        returnReason: undefined,
-        submittedAt: timestamp,
-        submittedAtMs: serverOrderTimestamp(),
-        submittedBy: user.uid,
-        updatedAt: timestamp,
-      });
-    }, { applyLocally: false });
-  } catch (error) {
-    if (newClaimHandle) await releasePendingClaim(newClaimHandle).catch(() => undefined);
-    throw error;
-  }
-  if (newClaimHandle) await commitClaimAfterEntitySaved(newClaimHandle, "店舗送信データ");
-  if (oldClaim && oldClaim !== newClaim) await releaseClaimAfterEntitySaved("posSubmissionClaims", oldClaim, value.id, "店舗送信データ");
-  if (oldLegacyClaim && oldLegacyClaim !== newClaim && oldLegacyClaim !== oldClaim) {
-    await releaseClaimAfterEntitySaved("posSubmissionClaims", oldLegacyClaim, value.id, "店舗送信データ");
+    const timestamp = now();
+    const [existingSnapshot, allSnapshot] = await Promise.all([get(rootRef(`history/${value.id}`)), get(rootRef("history"))]);
+    const before = existingSnapshot.val() as DailyClosing | null;
+    const canonicalId = `daily_${value.businessDate.replaceAll("-", "")}`;
+    if (!before && value.id !== canonicalId) {
+      throw new Error(`新規の日次データIDが営業日と一致しません。${value.businessDate}のJSONを読み込み直してください。`);
+    }
+    if (before && !expectedUpdatedAt) throw new Error("再編集元データが確認できません。最新データを読み込んでやり直してください。");
+    assertFresh(before, expectedUpdatedAt);
+    if (before && before.businessDate !== value.businessDate) throw new Error("再送時に営業日は変更できません。元の営業日データから再編集してください。");
+    if (before && !["returned", "withdrawn"].includes(before.status)) throw new Error("差戻しまたは取下げ済みのデータだけ再送できます。");
+    validateDailyClosingForSubmission(value, before);
+    assertCashLedgerChange(before ? { ...before, id: value.id } : null, value, asArray<DailyClosing>(allSnapshot.val()));
+    const sameBusinessDate = asArray<DailyClosing>(allSnapshot.val()).find((row) => row.id !== value.id && row.businessDate === value.businessDate);
+    if (sameBusinessDate) {
+      throw new Error(`${value.businessDate}の店舗データはすでに存在します。既存データを開いて再編集してください。`);
+    }
+    const duplicate = asArray<DailyClosing>(allSnapshot.val()).find((row) => row.id !== value.id && row.submissionId === value.submissionId && row.checksum === value.checksum);
+    if (duplicate) throw new Error(`${duplicate.businessDate}に同じPOS JSONが送信済みです。`);
+    const oldClaim = before ? posSubmissionClaimKey(before.checksum) : "";
+    const oldLegacyClaim = before ? claimKey(before.submissionId, before.checksum) : "";
+    const newClaim = posSubmissionClaimKey(value.checksum);
+    let newClaimHandle: ClaimHandle | undefined;
+    try {
+      newClaimHandle = await acquireClaim("posSubmissionClaims", newClaim, value.id);
+    } catch (error) {
+      throw claimAcquisitionError(error, "同じPOS JSONがすでに送信されています。最新データを読み込んで確認してください。");
+    }
+    try {
+      await assertCashManagementLockOwned(cashLock);
+      await runReadyTransaction(rootRef(`history/${value.id}`), (current) => {
+        const existing = current as DailyClosing | null;
+        if (before && !existing) throw new Error("再編集元データは完全削除されています。最新データを読み込んでください。");
+        if (existing && !expectedUpdatedAt) throw new Error("再編集元データが確認できません。最新データを読み込んでやり直してください。");
+        assertFresh(existing, expectedUpdatedAt);
+        if (existing && !["returned", "withdrawn"].includes(existing.status)) throw new Error("差戻しまたは取下げ済みのデータだけ再送できます。");
+        return clean({
+          ...withoutId(value),
+          cashManagementToken: cashLock.token,
+          businessMonth: value.businessDate.slice(0, 7),
+          status: "submitted",
+          approvedAt: undefined,
+          approvedBy: undefined,
+          withdrawnAt: undefined,
+          returnedAt: undefined,
+          returnedBy: undefined,
+          returnedFromStatus: undefined,
+          returnReason: undefined,
+          submittedAt: timestamp,
+          submittedAtMs: serverOrderTimestamp(),
+          submittedBy: user.uid,
+          updatedAt: timestamp,
+        });
+      }, { applyLocally: false });
+    } catch (error) {
+      if (newClaimHandle) await releasePendingClaim(newClaimHandle).catch(() => undefined);
+      throw error;
+    }
+    if (newClaimHandle) await commitClaimAfterEntitySaved(newClaimHandle, "店舗送信データ");
+    if (oldClaim && oldClaim !== newClaim) await releaseClaimAfterEntitySaved("posSubmissionClaims", oldClaim, value.id, "店舗送信データ");
+    if (oldLegacyClaim && oldLegacyClaim !== newClaim && oldLegacyClaim !== oldClaim) {
+      await releaseClaimAfterEntitySaved("posSubmissionClaims", oldLegacyClaim, value.id, "店舗送信データ");
+    }
+  } finally {
+    await releaseCashManagementLock(cashLock).catch(() => undefined);
   }
 }
 export async function withdrawClosing(id: string, expected: ClosingRevision, user: User) {
@@ -1902,40 +1973,49 @@ export async function deleteUnapprovedClosing(id: string, expected: ClosingRevis
   if (!validDate(expected.businessDate)) throw new Error("営業日が正しくありません。");
   const month = expected.businessDate.slice(0, 7);
   await assertMonthOpen(month);
-  const currentSnapshot = await get(rootRef(`history/${id}`));
-  const current = currentSnapshot.val() as DailyClosing | null;
-  if (!current) throw new Error("この送信済みデータはすでに削除されています。最新データを読み込んでください。");
-  assertClosingRevision(current, expected);
-  if (!isUnapprovedClosingStatus(current.status)) {
-    throw new Error("承認済みデータは完全削除できません。経理またはOPが差し戻してから削除してください。");
-  }
-  const currentClaimKeys = [...new Set([
-    posSubmissionClaimKey(current.checksum),
-    claimKey(current.submissionId, current.checksum),
-  ])];
-  const currentClaimOwners = await Promise.all(currentClaimKeys.map(async (key) =>
-    claimId((await get(rootRef(`posSubmissionClaims/${key}`))).val())));
-  if (currentClaimOwners.some((owner) => owner && owner !== id)) {
-    throw new Error("POS重複防止情報が別の営業日データを参照しています。削除せず管理者へ連絡してください。");
-  }
-
-  let deletionLock: DailyClosingDeletionLock;
+  // 取得順は必ず現金ロック → 個別削除ロック。逆順では待たない。
+  const cashLock = await acquireCashManagementLock(id, "delete", user);
   try {
-    deletionLock = await acquireDailyClosingDeletionLock(id, expected, user);
-  } catch (error) {
-    const detail = `${String((error as { code?: unknown } | null)?.code || "")} ${error instanceof Error ? error.message : String(error || "")}`;
-    if (/permission.?denied/i.test(detail)) {
-      throw new Error("削除対象の状態または月次状態が別の端末で更新されました。最新データを読み込んでからやり直してください。");
+    const currentSnapshot = await get(rootRef(`history/${id}`));
+    const current = currentSnapshot.val() as DailyClosing | null;
+    if (!current) throw new Error("この送信済みデータはすでに削除されています。最新データを読み込んでください。");
+    assertClosingRevision(current, expected);
+    if (!isUnapprovedClosingStatus(current.status)) {
+      throw new Error("承認済みデータは完全削除できません。経理またはOPが差し戻してから削除してください。");
     }
-    throw error;
-  }
+    const allSnapshot = await get(rootRef("history"));
+    assertCashLedgerChange({ ...current, id }, null, asArray<DailyClosing>(allSnapshot.val()));
+    const currentClaimKeys = [...new Set([
+      posSubmissionClaimKey(current.checksum),
+      claimKey(current.submissionId, current.checksum),
+    ])];
+    const currentClaimOwners = await Promise.all(currentClaimKeys.map(async (key) =>
+      claimId((await get(rootRef(`posSubmissionClaims/${key}`))).val())));
+    if (currentClaimOwners.some((owner) => owner && owner !== id)) {
+      throw new Error("POS重複防止情報が別の営業日データを参照しています。削除せず管理者へ連絡してください。");
+    }
 
-  let deleted = false;
-  try {
-    await applyDailyClosingDeletionPlan(deletionLock);
-    deleted = true;
+    let deletionLock: DailyClosingDeletionLock;
+    try {
+      deletionLock = await acquireDailyClosingDeletionLock(id, expected, user, cashLock);
+    } catch (error) {
+      const detail = `${String((error as { code?: unknown } | null)?.code || "")} ${error instanceof Error ? error.message : String(error || "")}`;
+      if (/permission.?denied/i.test(detail)) {
+        throw new Error("削除対象の状態または月次状態が別の端末で更新されました。最新データを読み込んでからやり直してください。");
+      }
+      throw error;
+    }
+
+    let deleted = false;
+    try {
+      await assertCashManagementLockOwned(cashLock);
+      await applyDailyClosingDeletionPlan(deletionLock);
+      deleted = true;
+    } finally {
+      if (!deleted) await releaseDailyClosingDeletionLock(deletionLock).catch(() => undefined);
+    }
   } finally {
-    if (!deleted) await releaseDailyClosingDeletionLock(deletionLock).catch(() => undefined);
+    await releaseCashManagementLock(cashLock).catch(() => undefined);
   }
 }
 

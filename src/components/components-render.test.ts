@@ -367,7 +367,8 @@ describe("主要ページのSSRスモーク", () => {
     expect(shouldResetDailyInputsForJson("2026-09-02", "2026-09-02")).toBe(false);
     expect(message).toContain("2026-09-02");
     expect(message).toContain("入力済みの店舗データ");
-    expect(message).toContain("現金実在高");
+    expect(message).toContain("補充・会社入金額");
+    expect(message).toContain("現金の一致確認はやり直してください");
     expect(message).toContain("保持");
     expect(message).toContain("POS由来");
     expect(message).toContain("再計算");

@@ -1,3 +1,6 @@
+import { cashFundingIssues } from "./cash-funding";
+import type { CashFunding } from "./cash-funding";
+
 export type Role = "shop" | "accounting" | "op";
 export type PersonStatus = "active" | "trial" | "departed";
 export type CastKind = "regular" | "trial" | "dispatch";
@@ -366,6 +369,8 @@ export type DailyExpense = {
 };
 
 export type CashReconciliation = {
+  /** 未設定は旧日次。過去の実在高・照合差額はそのまま保管する。 */
+  funding?: CashFunding;
   cashSales: number;
   cardSales: number;
   totalSales: number;
@@ -526,6 +531,7 @@ export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
   if (!hasFiniteNumbers(value.cash, ["cashSales", "cardSales", "totalSales", "cashFloat", "expenseAndPaymentTotal", "expectedClosingCash", "cashProfit", "actualClosingCash", "difference"])) {
     integrityIssues.push("現金照合データが不完全です。店舗送信データを確認してください。");
   }
+  if (value.cash?.funding !== undefined) integrityIssues.push(...cashFundingIssues(value.cash));
   const normalizeNumericFields = (
     source: Record<string, unknown>,
     keys: string[],
@@ -750,6 +756,7 @@ export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
       jonaiCount: storedNumber(value.nominations?.jonaiCount),
     },
     cash: {
+      ...(value.cash?.funding === undefined ? {} : { funding: value.cash.funding }),
       cashSales: storedNumber(value.cash?.cashSales),
       cardSales: storedNumber(value.cash?.cardSales),
       totalSales: storedNumber(value.cash?.totalSales),
@@ -2334,6 +2341,7 @@ export function calculateDriverPayroll(
 }
 
 export function calculateCash(input: {
+  funding?: CashFunding;
   sales: PosClosingV3["sales"];
   cashFloat: number;
   expenses: number;
@@ -2349,9 +2357,12 @@ export function calculateCash(input: {
   const expenseAndPaymentTotal = input.expenses + input.regularDailyPayments + input.trialDailyPayments
     + input.staffDailyPayments + input.driverDailyPayments
     + input.dispatchCastPayment + input.dispatchStaffPayment + input.dispatchFee;
-  const expectedClosingCash = input.sales.cashSales + input.cashFloat - expenseAndPaymentTotal;
-  const cashProfit = expectedClosingCash - input.cashFloat;
+  // 営業の現金収支と資金移動を分離。開店時の補充はcashFloatに含まれる。
+  const cashProfit = input.sales.cashSales - expenseAndPaymentTotal;
+  const expectedClosingCash = input.cashFloat + cashProfit
+    + (input.funding?.companyTransfer || 0) - (input.funding?.personalRepayment || 0);
   return {
+    ...(input.funding === undefined ? {} : { funding: input.funding }),
     cashSales: input.sales.cashSales,
     cardSales: input.sales.cardSales,
     totalSales: input.sales.totalSales,
@@ -2359,7 +2370,7 @@ export function calculateCash(input: {
     expenseAndPaymentTotal,
     expectedClosingCash,
     cashProfit,
-    actualClosingCash: input.actualClosingCash,
-    difference: input.actualClosingCash - expectedClosingCash
+    actualClosingCash: input.funding ? expectedClosingCash : input.actualClosingCash,
+    difference: input.funding ? 0 : input.actualClosingCash - expectedClosingCash
   };
 }

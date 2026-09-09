@@ -270,7 +270,7 @@ describe("月次会計ドメイン", () => {
     const before = structuredClone(saved);
     const restored = normalizeMonthlyAccountingSnapshot(saved, month, 1)!;
     expect(restored.schemaVersion).toBe(3);
-    expect(restored.calculationVersion).toBe("2.20.0");
+    expect(restored.calculationVersion).toBe(MONTHLY_CALCULATION_VERSION);
     expect(restored.castRewards[0].hourlyByDay).toEqual(snapshot.castRewards[0].hourlyByDay);
     expect(restored.staffPayroll[0].hourlyByDay).toEqual(snapshot.staffPayroll[0].hourlyByDay);
     expect(saved).toEqual(before);

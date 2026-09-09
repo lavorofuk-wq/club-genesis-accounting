@@ -40,6 +40,54 @@ beforeEach(() => {
 });
 
 describe("見本形式の月次収支XLSX", () => {
+  it("空き入出金欄に補充・返済・借り繰越を表示し、現金残高だけを加減する", async () => {
+    const data = report();
+    data.cashFunding = { managedDays: 2, openingPersonalDebt: 10000, companyReplenishment: 20000, personalReplenishment: 30000,
+      companyTransfer: 5000, personalRepayment: 15000, closingPersonalDebt: 25000, netCashMovement: 40000 };
+    mockedBuild.mockReturnValue(data);
+    const restored = new ExcelJS.Workbook();
+    await restored.xlsx.load(await createMonthlyBalanceWorkbook(input, "現金補充・返済確認済み").xlsx.writeBuffer());
+    const sheet = restored.worksheets[0];
+    const expected = { G43: "会社補充", J43: 20000, L43: "個人補充", O43: 30000, G44: "会社送金", J44: 5000,
+      L44: "個人返済", O44: 15000, G45: "期首未返済", J45: 10000, L45: "期末未返済", O45: 25000 };
+    for (const [address, amount] of Object.entries(expected)) expect(value(sheet, address)).toBe(amount);
+    expect(sheet.getCell("M38").value).toEqual({ formula: "SUM(D35,J42,O42)-U37+N36+SUM(J43,O43,J44)-O44", result: 75000 });
+    expect(value(sheet, "V38")).toBe(34500);
+    expect(value(sheet, "V39")).toBe(94500);
+    expect(value(sheet, "V35")).toBe(94500);
+    expect(value(sheet, "U37")).toBe(85500);
+    expect(value(sheet, "J42")).toBeNull();
+    expect(value(sheet, "O42")).toBeNull();
+    expect(sheet.getCell("J43").font.name).toBe("Yu Gothic");
+    expect(sheet.getCell("J43").border.bottom?.style).toBe("thin");
+    expect(sheet.getCell("P45").master.address).toBe("O45");
+    expect(sheet.pageSetup.printArea).toBe("A1:W46");
+  });
+
+  it("個人返済が当月補充額を超える場合は現金残高を減らし、利益は変更しない", () => {
+    const data = report();
+    data.cashFunding = { managedDays: 2, openingPersonalDebt: 10000, companyReplenishment: 0, personalReplenishment: 0,
+      companyTransfer: 0, personalRepayment: 5000, closingPersonalDebt: 5000, netCashMovement: -5000 };
+    mockedBuild.mockReturnValue(data);
+    const sheet = createMonthlyBalanceWorkbook(input, "翌月返済").worksheets[0];
+    expect(value(sheet, "M38")).toBe(30000);
+    expect(value(sheet, "V39")).toBe(94500);
+  });
+
+  it.each([false, true])("旧確定・管理対象0件（ゼロsummary=%s）は見本の空欄・既存現金式を維持する", (zeroSummary) => {
+    const data = report();
+    if (zeroSummary) data.cashFunding = { managedDays: 0, openingPersonalDebt: 0, companyReplenishment: 0, personalReplenishment: 0,
+      companyTransfer: 0, personalRepayment: 0, closingPersonalDebt: 0, netCashMovement: 0 };
+    mockedBuild.mockReturnValue(data);
+    const sheet = createMonthlyBalanceWorkbook(input, "旧表示維持").worksheets[0];
+    for (const address of ["G43", "J43", "L43", "O43", "G44", "J44", "L44", "O44", "G45", "J45", "L45", "O45"]) {
+      expect(value(sheet, address)).toBeNull();
+      expect(sheet.getCell(address).isMerged).toBe(false);
+    }
+    expect(sheet.getCell("M38").value).toEqual({ formula: "SUM(D35,J42,O42)-U37+N36", result: 35000 });
+    expect(sheet.pageSetup.printArea).toBe("A1:W46");
+  });
+
   it("日別時給の1円額を再丸めせず数値セル・月合計・収支へ反映する", async () => {
     const data = report();
     data.days[0].castHourly = 11529;
@@ -78,7 +126,7 @@ describe("見本形式の月次収支XLSX", () => {
   it("検証済み日別データを紹介料列追加後の正しい列へ出力する", () => {
     const book = createMonthlyBalanceWorkbook(input, "承認済みデータ（未確定）");
     expect(mockedBuild).toHaveBeenCalledWith(input);
-    expect(book.creator).toBe("GENESIS Management System Ver2.20.0");
+    expect(book.creator).toBe("GENESIS Management System Ver2.21.0");
     expect(book.worksheets).toHaveLength(1);
     const sheet = book.worksheets[0];
     expect(sheet.name).toBe("ジェネシス収支表");

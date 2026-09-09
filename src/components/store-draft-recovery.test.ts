@@ -82,7 +82,8 @@ describe("店舗フォームの更新時入力退避", () => {
       ...["stage", "pos", "mapping", "allowInitialSnapshotMapping", "specialCosts", "castRows",
         "castRowsSourcePos", "unmatchedCastDrafts", "staffWork", "staffId", "staffStart", "staffEnd",
         "driverWork", "expenses", "expenseCategory", "expensePayee", "expensePersonId", "expenseAmount",
-        "dispatchStaffPayment", "dispatchCastPayment", "dispatchFee", "liquorDeliveryAmount", "cashFloat", "actualCash"]
+        "dispatchStaffPayment", "dispatchCastPayment", "dispatchFee", "liquorDeliveryAmount", "cashFloat", "actualCash",
+        "companyReplenishment", "personalReplenishment", "companyTransfer"]
         .map((field) => `store.workflow.new.${field}`),
     ]);
     expect(drafts.busyKeys).toEqual(["store.workflow.new.jsonReading"]);
@@ -107,15 +108,16 @@ describe("店舗フォームの更新時入力退避", () => {
     }
   });
 
-  it("再編集対象と同じキーのプレビューを復元し、新規下書きの金額を混ぜない", () => {
+  it("再編集対象の入力を復元し、新規下書きや旧実在高を混ぜず現金一致の再確認を求める", () => {
     drafts.values["store.editing"] = closing;
     drafts.values["store.workflowDirty"] = true;
     restoreWorkflow("new", { stage: "details", actualCash: 999999 });
     restoreWorkflow(closing.id, { stage: "preview", actualCash: 234567, cashFloat: 210000 });
     const markup = render();
     expect(markup).toContain(`${businessDate} 再編集`);
-    expect(markup).toContain("234,567");
-    expect(markup).toContain("確認済み・経理へ送信");
+    expect(markup).not.toContain("234,567");
+    expect(markup).toContain("現金の一致確認が必要です");
+    expect(markup).not.toContain("確認済み・経理へ送信");
     expect(markup).not.toContain("999,999");
     expect(drafts.keys).not.toContain("store.workflow.new.stage");
     expect(drafts.values["store.editing"]).toMatchObject({ updatedAt: closing.updatedAt });

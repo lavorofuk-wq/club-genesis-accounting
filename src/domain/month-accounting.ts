@@ -28,8 +28,9 @@ import type {
   StaffRecord,
   WorkspaceData,
 } from "./gms";
+import { cashLedgerIssues, summarizeCashFunding, type CashFundingSummary } from "./cash-funding";
 
-export const MONTHLY_CALCULATION_VERSION = "2.20.0";
+export const MONTHLY_CALCULATION_VERSION = "2.21.0";
 export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 3 as const;
 
 export type IntroducerEntryEvent = {
@@ -121,6 +122,8 @@ export type MonthlyAccountingResults = {
   expenses: MonthlyExpenseSummary;
   sales: MonthlySalesSummary;
   balance: MonthlyBalanceSummary;
+  /** 補充・返済・個人未返済残高。損益の売上・経費・利益へは含めない。旧確定月には存在しない。 */
+  cashFunding?: CashFundingSummary;
   warnings: string[];
 };
 
@@ -185,6 +188,12 @@ const supportsDailyHourlyYenSnapshot = (value: string) => {
   if (!match) return false;
   const [major, minor] = match.slice(1).map(Number);
   return major > 2 || (major === 2 && minor >= 20);
+};
+const requiresCashFundingSnapshot = (value: string) => {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(value);
+  if (!match) return false;
+  const [major, minor] = match.slice(1).map(Number);
+  return major > 2 || (major === 2 && minor >= 21);
 };
 const snapshotMillisecondsInstant = (value: unknown) => {
   if (!snapshotInteger(value)) return undefined;
@@ -330,6 +339,17 @@ function normalizeSnapshotHourlyRows(
   return normalized;
 }
 
+function validSnapshotCashFunding(value: unknown, approvedDays: number): value is CashFundingSummary {
+  if (!snapshotObject(value)) return false;
+  const nonNegativeKeys = ["managedDays", "openingPersonalDebt", "companyReplenishment", "personalReplenishment", "companyTransfer", "personalRepayment", "closingPersonalDebt"];
+  if (!nonNegativeKeys.every((key) => snapshotInteger(value[key])) || !Number.isSafeInteger(value.netCashMovement)
+    || Number(value.managedDays) > approvedDays) return false;
+  if (value.managedDays === 0 && ["companyReplenishment", "personalReplenishment", "companyTransfer", "personalRepayment"].some((key) => value[key] !== 0)) return false;
+  return value.netCashMovement === Number(value.companyReplenishment) + Number(value.personalReplenishment)
+    + Number(value.companyTransfer) - Number(value.personalRepayment)
+    && value.closingPersonalDebt === Number(value.openingPersonalDebt) + Number(value.personalReplenishment) - Number(value.personalRepayment);
+}
+
 /** Firebase境界で月次スナップショットを検証し、空配列がオブジェクト化された場合も復元する。 */
 export function normalizeMonthlyAccountingSnapshot(
   value: unknown,
@@ -353,6 +373,8 @@ export function normalizeMonthlyAccountingSnapshot(
     row.sales.cash, row.sales.card, row.sales.total,
     row.balance.cast, row.balance.introducer, row.balance.staff, row.balance.driver,
     row.balance.expenses, row.balance.totalCosts, row.balance.profit].every(snapshotNumber)) return undefined;
+  if ((row.schemaVersion === 3 && requiresCashFundingSnapshot(row.calculationVersion) || row.cashFunding !== undefined)
+    && !validSnapshotCashFunding(row.cashFunding, row.approvedDays)) return undefined;
 
   const requireTenYen = row.schemaVersion >= 2;
   const requireDailyHourlyYen = row.schemaVersion === 3;
@@ -1156,6 +1178,10 @@ export function calculateMonthlyAccounting(
     expenses: expenses.total,
   };
   const totalCosts = Object.values(balanceWithoutProfit).reduce((sum, value) => sum + value, 0);
+  let cashFunding: CashFundingSummary | undefined;
+  const cashFundingWarnings: string[] = [];
+  try { cashFunding = summarizeCashFunding(calculationData.closings, month); }
+  catch (error) { cashFundingWarnings.push(error instanceof Error ? error.message : "現金補充・返済の月次集計を確認できません。"); }
   return {
     approvedDays: new Set(approved.map((row) => row.businessDate)).size,
     castSalesReports,
@@ -1166,8 +1192,11 @@ export function calculateMonthlyAccounting(
     expenses,
     sales,
     balance: { ...balanceWithoutProfit, totalCosts, profit: sales.total - totalCosts },
+    cashFunding,
     warnings: [...new Set([
       ...monthlyAccountingWarnings(approved, calculationData.casts, month),
+      ...cashLedgerIssues(calculationData.closings, month),
+      ...cashFundingWarnings,
       ...effectiveIntroducerIssues(castRewards),
     ])],
   };
@@ -1201,6 +1230,13 @@ export async function monthlySourceFingerprint(
     // updatedAtだけでなく計算へ入力される実値を含め、同一ミリ秒の更新や直接書込みも検出する。
     closings: calculationData.closings.filter((row) => row.businessDate.startsWith(month))
       .sort((left, right) => left.id.localeCompare(right.id)),
+    // 営業日0の月も前月以前の未返済残高を繰り越す。現金管理開始前の
+    // legacy残額も翌営業日の不足額を決めるため、確定時の競合検知へ含める。
+    // 未来月はこの月の残高に影響しないので含めない。
+    cashLedger: calculationData.closings.filter((row) => row.businessDate.slice(0, 7) <= month)
+      .map((row) => ({ id: row.id, businessDate: row.businessDate, expectedClosingCash: row.cash.expectedClosingCash,
+        ...(row.cash.funding === undefined ? {} : { funding: row.cash.funding }) }))
+      .sort((left, right) => left.businessDate.localeCompare(right.businessDate) || left.id.localeCompare(right.id)),
     casts: [...calculationData.casts].sort((left, right) => left.id.localeCompare(right.id)),
     introducers: [...calculationData.introducers].sort((left, right) => left.id.localeCompare(right.id)),
     staff: [...calculationData.staff].sort((left, right) => left.id.localeCompare(right.id)),
@@ -1255,6 +1291,7 @@ export function canFinalizeMonthlyAccounting(
     .map(([businessDate]) => `${businessDate}の承認済み日次データが複数あります。重複データを差し戻してから確定してください。`);
   const integrityIssues = [
     ...approved.flatMap((row) => row.integrityIssues || []),
+    ...cashLedgerIssues(calculationData.closings, month),
     ...duplicateBusinessDates,
     ...effectiveIntroducerIssues(castRewards),
     ...introducerSaveOrderIssues(calculationData, month, resolvedMonthEvents, resolvedDeletionCommits),
