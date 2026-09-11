@@ -13,6 +13,13 @@ Firebaseプロジェクト: `club-genesis-gms`
 ローカルとVercelプレビューはRealtime Databaseの `accounting-dev` を使用する。
 本番ドメインだけが `accounting` を使用する。
 
+## iPadからLAN接続
+
+PCとiPadを同じWi-Fiへ接続し、PCで `npm run dev:lan` を実行する。
+iPadのSafariから `http://192.168.0.121:3000` を開く。
+LANのIPアドレスが変わった場合は、`GMS_ALLOWED_DEV_ORIGINS` に新しいIPを指定する。
+プライベートLANのIPはローカル環境として扱い、Realtime Databaseの `accounting-dev` のみを使用する。
+
 ## 検証
 
 - `npm test`

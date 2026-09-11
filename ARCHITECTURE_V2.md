@@ -1,4 +1,11 @@
-# GMS Ver2.22.0 アーキテクチャ
+# GMS Ver2.23.0 アーキテクチャ
+
+## iPad向けLAN開発環境（Ver2.23.0）
+
+- `npm run dev:lan` はNext.jsを `0.0.0.0:3000` で起動し、同一LAN内のiPadから接続できるようにする。
+- RFC1918のプライベートIPv4アドレスはローカル環境として最新版確認を許可する。
+- LAN経由でもFirebaseの接続先は `accounting-dev` とし、本番ルート `accounting` には接続しない。
+- Next.jsの開発Originは `GMS_ALLOWED_DEV_ORIGINS` で明示的に制限する。
 
 ## 全営業日の補充・返済確認と現金改訂（Ver2.22.0）
 

@@ -13,10 +13,20 @@ describe("最新版確認の環境判定", () => {
     [DEVELOPMENT_ORIGIN, "development"],
     ["http://localhost:3000", "local"],
     ["http://127.0.0.1:3001", "local"],
+    ["http://0.0.0.0:3000", "local"],
     ["http://[::1]:3000", "local"],
+    ["http://192.168.0.121:3000", "local"],
+    ["http://10.0.0.8:3000", "local"],
+    ["http://172.16.0.8:3000", "local"],
+    ["http://172.31.255.254:3000", "local"],
   ])("%s は正規環境として扱う", (origin, environment) => {
     expect(releaseLocation(origin)).toEqual({ supported: true, environment, updateUrl: origin });
   });
+
+  it.each(["http://172.32.0.1:3000", "http://192.169.0.1:3000", "http://8.8.8.8:3000"])(
+    "プライベートLAN外のIP %s はローカル環境として許可しない",
+    (origin) => expect(releaseLocation(origin)).toEqual({ supported: false, environment: "development", updateUrl: DEVELOPMENT_ORIGIN }),
+  );
 
   it.each([
     "https://club-genesis-accounting-abc123-lavorofuk-wqs-projects.vercel.app",
@@ -67,6 +77,7 @@ describe("リリース確認API", () => {
 
   it.each([
     [PRODUCTION_ORIGIN, "production"], [DEVELOPMENT_ORIGIN, "development"], ["http://localhost:3000", "local"],
+    ["http://0.0.0.0:3000", "local"], ["http://192.168.0.121:3000", "local"],
   ])("%s のversion/build/environmentと全cache無効化ヘッダーを返す", async (origin, environment) => {
     const response = GET(new Request(`${origin}/api/release?check=123`));
     expect(response.status).toBe(200);
