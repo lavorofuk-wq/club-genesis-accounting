@@ -5,6 +5,7 @@ import type { User } from "firebase/auth";
 import type { CastRecord, DriverRecord, IntroducerFeeType, IntroducerRecord, LiquorRecord, StaffRecord, WorkspaceData } from "@/domain/gms";
 import { dayAfterIsoDate, rateForMonth } from "@/domain/gms";
 import { monthlyRatesForSave } from "@/domain/master-pay-validation";
+import { STAFF_MONTHLY_RATES_START_MONTH, staffMonthlyRateForMonth, staffMonthlyRates, staffMonthlyRatesStartMonth } from "@/domain/staff-rates";
 import {
   convertTrialCast, convertTrialStaff, deleteCast, deleteDriver, deleteIntroducer, deleteLiquor, deleteStaff,
   departCast, departStaff, restoreCast, restoreStaff, saveCashFloat, saveCast, saveDriver, saveIntroducer, saveLiquor, saveStaff
@@ -111,14 +112,71 @@ function StaffManager({ data, user, busy, run, onDirtyChange }: Props) {
   const [tab, setTab] = useRecoverableState<StaffRecord["status"]>("common.staff.tab", "active");
   const [editing, setEditing] = useRecoverableState<Partial<StaffRecord> | null>("common.staff.editing", null);
   const [sourceTrialId, setSourceTrialId] = useRecoverableState("common.staff.sourceTrialId", "");
+  const defaultMonth = currentMonth() < STAFF_MONTHLY_RATES_START_MONTH ? STAFF_MONTHLY_RATES_START_MONTH : currentMonth();
+  const [month, setMonth] = useRecoverableState("common.staff.month", defaultMonth);
+  const [rate, setRate] = useRecoverableState("common.staff.rate", () => editing?.status !== "trial" && editing
+    ? staffMonthlyRateForMonth(editing, month) : 0);
   useCommonDirty(onDirtyChange, Boolean(editing));
   const rows = data.staff.filter((row) => row.status === tab);
   const sourceTrial = sourceTrialId ? data.staff.find((row) => row.id === sourceTrialId) : undefined;
   const minimumHireDate = dayAfterIsoDate(sourceTrial?.trialDate);
-  const begin = (status: StaffRecord["status"], row?: StaffRecord) => { setSourceTrialId(""); setEditing(row ? { ...row } : { status, name: "", hourlyRate: 0, trialHourlyRate: 0, hiredAt: today(), trialDate: today(), note: "" }); };
+  const minimumPayMonth = staffMonthlyRatesStartMonth(editing || undefined);
+  const begin = (status: StaffRecord["status"], row?: StaffRecord) => {
+    const selectedMonth = [defaultMonth, staffMonthlyRatesStartMonth(row)].sort().at(-1)!;
+    setSourceTrialId(""); setMonth(selectedMonth);
+    setRate(row && status !== "trial" ? staffMonthlyRateForMonth(row, selectedMonth) : 0);
+    setEditing(row ? { ...row, ...(status === "trial" ? {} : { hourlyRates: staffMonthlyRates(row) }) }
+      : { status, name: "", hourlyRates: {}, hourlyRate: 0, trialHourlyRate: 0, hiredAt: today(), trialDate: today(), note: "" });
+  };
   return <div className="grid"><div className="tabs">{(["active", "trial", "departed"] as const).map((value) => <button key={value} className={tab === value ? "active" : ""} onClick={() => setTab(value)}>{value === "active" ? "在籍スタッフ" : value === "trial" ? "体入スタッフ" : "退店スタッフ"}<b>{data.staff.filter((row) => row.status === value).length}</b></button>)}</div>
-    <Card title="スタッフデータ" action={tab !== "departed" ? <button className="button" disabled={busy} onClick={() => begin(tab)}>新規登録</button> : null}><Table headers={["名前", "時給", "日付", "備考", "操作"]}>{rows.map((row) => <tr key={row.id}><td><strong>{row.name}</strong></td><td>{yen.format(row.status === "trial" ? row.trialHourlyRate || 0 : row.hourlyRate || 0)}</td><td>{row.status === "trial" ? row.trialDate : row.status === "departed" ? row.departedAt : row.hiredAt}</td><td>{row.note || "—"}</td><td><div className="row-actions"><button className="button secondary mini" disabled={busy} onClick={() => begin(row.status, row)}>編集</button>{row.status === "trial" && (row.convertedToStaffId ? <StatusPill tone="good">入店済み</StatusPill> : <button className="button secondary mini" disabled={busy} onClick={() => { const firstHireDate = dayAfterIsoDate(row.trialDate); begin("active"); setSourceTrialId(row.id); setEditing({ ...row, status: "active", hiredAt: firstHireDate && today() < firstHireDate ? firstHireDate : today(), hourlyRate: 0 }); }}>入店</button>)}{row.status === "trial" && <button className="button danger mini" disabled={busy} onClick={() => { if (window.confirm(`体入スタッフ「${row.name}」を完全削除しますか？\n過去の送信済み日次データは削除されません。`)) void run(() => deleteStaff(row.id, row.updatedAt, user), "体入スタッフを完全削除しました。"); }}>完全削除</button>}{row.status === "active" && <button className="button secondary mini" disabled={busy} onClick={() => { const date = promptDepartureDate(); if (date) void run(() => departStaff(row.id, date, row.updatedAt, user), "退店スタッフへ移管しました。"); }}>退店</button>}{row.status === "departed" && <button className="button secondary mini" disabled={busy} onClick={() => void run(() => restoreStaff(row.id, row.updatedAt, user), "退店登録を取り消しました。")}>退店取消</button>}{row.status === "departed" && <button className="button danger mini" disabled={busy} onClick={() => { if (window.confirm(`「${row.name}」を完全削除しますか？`)) void run(() => deleteStaff(row.id, row.updatedAt, user), "スタッフを完全削除しました。"); }}>完全削除</button>}</div></td></tr>)}</Table></Card>
-    {editing && <Modal title={sourceTrialId ? "体入スタッフを入店登録" : "スタッフ登録・編集"} disabled={busy} onClose={() => setEditing(null)}><form className="stack" onSubmit={async (event) => { event.preventDefault(); const row = editing as StaffRecord; const saved = sourceTrialId ? await run(() => convertTrialStaff(sourceTrialId, { ...row, hiredAt: row.hiredAt || today(), hourlyRate: row.hourlyRate || 0 }, user), "体入スタッフを在籍登録しました。") : await run(() => saveStaff(row, user), row.id ? "スタッフを更新しました。" : "スタッフを登録しました。"); if (saved) setEditing(null); }}><Field label="名前"><input className="input" required value={editing.name || ""} onChange={(e) => setEditing({ ...editing, name: e.target.value })} /></Field><div className="grid two"><Field label={editing.status === "trial" ? "体入時給" : "時給"}><MoneyInput min={1} value={editing.status === "trial" ? editing.trialHourlyRate || 0 : editing.hourlyRate || 0} onChange={(value) => setEditing(editing.status === "trial" ? { ...editing, trialHourlyRate: value } : { ...editing, hourlyRate: value })} /></Field><Field label={editing.status === "trial" ? "体入日" : "採用日"}><input className="input" type="date" required min={sourceTrialId ? minimumHireDate : undefined} value={(editing.status === "trial" ? editing.trialDate : editing.hiredAt) || ""} onChange={(e) => setEditing(editing.status === "trial" ? { ...editing, trialDate: e.target.value } : { ...editing, hiredAt: e.target.value })} />{sourceTrialId && <small>採用日は体入日の翌日以降を指定してください。</small>}</Field></div><Field label="備考"><textarea className="input" rows={3} value={editing.note || ""} onChange={(e) => setEditing({ ...editing, note: e.target.value })} /></Field><div className="actions"><button className="button" disabled={busy}>保存</button><button type="button" className="button secondary" onClick={() => setEditing(null)}>取消</button></div></form></Modal>}
+    <Card title="スタッフデータ" description="2026年9月以降の在籍時給は月度ごとに設定し、未設定月は直前の設定を引き継ぎます。" action={tab !== "departed" ? <button className="button" disabled={busy} onClick={() => begin(tab)}>新規登録</button> : null}>
+      <Table headers={["名前", tab === "trial" ? "体入時給" : "当月時給", "日付", "備考", "操作"]}>{rows.map((row) => <tr key={row.id}>
+        <td><strong>{row.name}</strong></td><td>{yen.format(row.status === "trial" ? row.trialHourlyRate || 0 : staffMonthlyRateForMonth(row, currentMonth()))}</td>
+        <td>{row.status === "trial" ? row.trialDate : row.status === "departed" ? row.departedAt : row.hiredAt}</td><td>{row.note || "—"}</td><td><div className="row-actions">
+          <button className="button secondary mini" disabled={busy} onClick={() => begin(row.status, row)}>編集</button>
+          {row.status === "trial" && (row.convertedToStaffId ? <StatusPill tone="good">入店済み</StatusPill> : <button className="button secondary mini" disabled={busy} onClick={() => {
+            const firstHireDate = dayAfterIsoDate(row.trialDate);
+            const hiredAt = firstHireDate && today() < firstHireDate ? firstHireDate : today();
+            begin("active"); setSourceTrialId(row.id); setMonth([defaultMonth, hiredAt.slice(0, 7)].sort().at(-1)!);
+            setEditing({ ...row, status: "active", hiredAt, hourlyRates: {}, hourlyRate: 0 });
+          }}>入店</button>)}
+          {row.status === "trial" && <button className="button danger mini" disabled={busy} onClick={() => { if (window.confirm(`体入スタッフ「${row.name}」を完全削除しますか？\n過去の送信済み日次データは削除されません。`)) void run(() => deleteStaff(row.id, row.updatedAt, user), "体入スタッフを完全削除しました。"); }}>完全削除</button>}
+          {row.status === "active" && <button className="button secondary mini" disabled={busy} onClick={() => { const date = promptDepartureDate(); if (date) void run(() => departStaff(row.id, date, row.updatedAt, user), "退店スタッフへ移管しました。"); }}>退店</button>}
+          {row.status === "departed" && <button className="button secondary mini" disabled={busy} onClick={() => void run(() => restoreStaff(row.id, row.updatedAt, user), "退店登録を取り消しました。")}>退店取消</button>}
+          {row.status === "departed" && <button className="button danger mini" disabled={busy} onClick={() => { if (window.confirm(`「${row.name}」を完全削除しますか？`)) void run(() => deleteStaff(row.id, row.updatedAt, user), "スタッフを完全削除しました。"); }}>完全削除</button>}
+        </div></td>
+      </tr>)}</Table>
+    </Card>
+    {editing && <Modal title={sourceTrialId ? "体入スタッフを入店登録" : "スタッフ登録・編集"} disabled={busy} onClose={() => setEditing(null)}><form className="stack" onSubmit={async (event) => {
+      event.preventDefault();
+      const row = editing as StaffRecord;
+      const value = row.status === "trial" ? row : {
+        ...row,
+        hourlyRates: monthlyRatesForSave(staffMonthlyRates(row), month, rate, !row.id || Boolean(sourceTrialId)),
+        // 8月以前の互換単価は維持し、9月以降は月度設定を使用する。
+        hourlyRate: row.id && !sourceTrialId ? row.hourlyRate : rate,
+      };
+      const saved = sourceTrialId
+        ? await run(() => convertTrialStaff(sourceTrialId, { ...value, hiredAt: row.hiredAt || today(), hourlyRate: rate }, user), "体入スタッフを在籍登録しました。")
+        : await run(() => saveStaff(value, user), row.id ? "スタッフを更新しました。" : "スタッフを登録しました。");
+      if (saved) setEditing(null);
+    }}>
+      <Field label="名前"><input className="input" required value={editing.name || ""} onChange={(e) => setEditing({ ...editing, name: e.target.value })} /></Field>
+      <div className="grid two"><Field label={editing.status === "trial" ? "体入日" : "採用日"}><input className="input" type="date" required min={sourceTrialId ? minimumHireDate : undefined} value={(editing.status === "trial" ? editing.trialDate : editing.hiredAt) || ""} onChange={(e) => {
+        if (editing.status === "trial") setEditing({ ...editing, trialDate: e.target.value });
+        else {
+          setEditing({ ...editing, hiredAt: e.target.value });
+          const nextMinimum = staffMonthlyRatesStartMonth({ hiredAt: e.target.value });
+          if (month < nextMinimum) setMonth(nextMinimum);
+        }
+      }} />{sourceTrialId && <small>採用日は体入日の翌日以降を指定してください。</small>}</Field>
+        {editing.status === "trial" ? <Field label="体入時給"><MoneyInput min={1} value={editing.trialHourlyRate || 0} onChange={(value) => setEditing({ ...editing, trialHourlyRate: value })} /></Field>
+          : <Field label="時給の対象月"><input className="input" type="month" required min={minimumPayMonth} value={month} onChange={(e) => { setMonth(e.target.value); setRate(staffMonthlyRateForMonth(editing, e.target.value)); }} /></Field>}
+      </div>
+      {editing.status !== "trial" && <Field label={`${month} 月度時給`} hint="保存すると表示中の対象月・時給を登録します。未確定月は対象月の全勤務へ反映し、確定済み月と保存済みの日払い・現金照合は変更しません。"><MoneyInput min={1} value={rate} onChange={setRate} /></Field>}
+      <Field label="備考"><textarea className="input" rows={3} value={editing.note || ""} onChange={(e) => setEditing({ ...editing, note: e.target.value })} /></Field>
+      <div className="actions"><button className="button" disabled={busy}>保存</button><button type="button" className="button secondary" onClick={() => setEditing(null)}>取消</button></div>
+    </form></Modal>}
   </div>;
 }
 

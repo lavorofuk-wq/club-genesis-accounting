@@ -53,7 +53,10 @@ export type StaffRecord = {
   hiredAt?: string;
   trialDate?: string;
   departedAt?: string;
+  /** 月度時給導入前の単一時給。過去日の互換用に保持し、月度編集では上書きしない。 */
   hourlyRate?: number;
+  /** 在籍スタッフの月度時給。未設定月は直近の過去月から引き継ぐ。 */
+  hourlyRates?: MonthlyRates;
   trialHourlyRate?: number;
   convertedFromTrialId?: string;
   convertedToStaffId?: string;

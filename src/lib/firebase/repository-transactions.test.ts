@@ -201,7 +201,7 @@ describe("共通フォーム保存のコールドキャッシュ回帰", () => {
 
   it("新規スタッフは取得完了後の null を有効な新規登録として扱う", async () => {
     const { id: _id, updatedAt: _updatedAt, ...newStaff } = staff;
-    const id = await saveStaff(newStaff, user);
+    const id = await saveStaff({ ...newStaff, hourlyRates: { "2026-09": 2000 } }, user);
     expect(stored(`staff/${id}`)).toMatchObject({ name: staff.name, hourlyRate: 2000 });
   });
 });

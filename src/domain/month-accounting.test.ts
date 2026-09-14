@@ -16,10 +16,12 @@ import {
   buildMonthlySnapshot,
   calculateIntroducerPayments,
   calculateMonthlyAccounting,
+  calculateStaffPayroll,
   canFinalizeMonthlyAccounting,
   MONTHLY_CALCULATION_VERSION,
   MONTHLY_SNAPSHOT_SCHEMA_VERSION,
   monthlySourceFingerprint,
+  monthlyAccountingWarnings,
   normalizeIntroducerDeletionCommit,
   normalizeIntroducerMonthEvent,
   normalizeMonthlyAccountingSnapshot,
@@ -249,16 +251,100 @@ describe("月次会計ドメイン", () => {
     expect(normalizeMonthlyAccountingSnapshot(snapshot, month, 1)?.staffPayroll).toEqual(results.staffPayroll);
   });
 
-  it("スタッフ時給も日ごとに1円未満を切り捨て、現在マスタ単価に置換しない", () => {
+  it("スタッフ時給は月度単価を適用して日ごとに1円未満を切り捨てる", () => {
     const closings = ["02", "03"].map((day) => approvedClosing({
       id: `day-${day}`, businessDate: `${month}-${day}`,
       staffWork: [{ staffId: "staff-1", name: "スタッフ", kind: "regular", startTime: "20:00", endTime: "20:15", hours: 0.25, hourlyRate: 1503, dailyPayment: 0 }],
     }));
-    const results = calculateMonthlyAccounting(workspace({ staff: [staff({ hourlyRate: 9999 })], closings }), month, adjustments());
+    const results = calculateMonthlyAccounting(workspace({ staff: [staff({ hourlyRate: 9999, hourlyRates: { [month]: 1503 } })], closings }), month, adjustments());
     expect(results.staffPayroll[0]).toMatchObject({ hourly: 750, gross: 750, net: 750, hourlyByDay: [
       { businessDate: "2026-09-02", hours: 0.25, amount: 375 },
       { businessDate: "2026-09-03", hours: 0.25, amount: 375 },
     ] });
+  });
+
+  it("中村の月途中訂正は9月の全勤務へ1400円を適用し、支払済み日払い・現金は保持する", () => {
+    const hours = [5.5, 6.5, 6, 6, 6, 6, 6, 6.25];
+    const closings = hours.map((worked, index) => approvedClosing({
+      id: `day-${index + 1}`, businessDate: `${month}-${String(index + 1).padStart(2, "0")}`,
+      staffWork: [{ staffId: "staff-1", name: "中村", kind: "regular", startTime: "20:00", endTime: "02:00",
+        hours: worked, hourlyRate: index < 2 ? 1300 : 1400, dailyPayment: index === 0 ? 3000 : 0 }],
+    }));
+    const member = staff({ name: "中村", hiredAt: "2026-08-01", hourlyRate: 1400 });
+    const before = structuredClone(closings);
+    const result = calculateStaffPayroll(closings, adjustments(), [member], month)[0];
+    expect(result).toMatchObject({ hours: 48.25, hourly: 67550, gross: 67550, daily: 3000, net: 64550 });
+    expect(result.hourlySources?.map((source) => source.hourlyRate)).toEqual(hours.map(() => 1400));
+    expect(closings).toEqual(before);
+    member.hourlyRates = { [month]: 1500 };
+    expect(calculateStaffPayroll(closings, adjustments(), [member], month)[0].hourly).toBe(72375);
+    expect(closings).toEqual(before);
+  });
+
+  it("スタッフは8月以前・体入・マスタ削除時の保存単価を守り、10月は9月月度単価を引き継ぐ", () => {
+    const makeClosing = (date: string, kind: "regular" | "trial" = "regular") => approvedClosing({
+      businessDate: date,
+      staffWork: [{ staffId: "staff-1", name: "スタッフ", kind, startTime: "20:00", endTime: "20:15", hours: .25, hourlyRate: 1303, dailyPayment: 300 }],
+    });
+    const member = staff({ hiredAt: "2026-08-01", hourlyRate: 1400 });
+    expect(calculateStaffPayroll([makeClosing("2026-08-31")], adjustments(), [member], "2026-08")[0].hourly).toBe(325);
+    expect(calculateStaffPayroll([makeClosing("2026-09-01", "trial")], adjustments(), [member], month)[0].hourly).toBe(325);
+    expect(calculateStaffPayroll([makeClosing("2026-09-01")], adjustments(), [], month)[0].hourly).toBe(325);
+    expect(calculateStaffPayroll([makeClosing("2026-10-01")], adjustments(), [member], "2026-10")[0].hourly).toBe(350);
+  });
+
+  it("2.25確定のスタッフ適用単価はFirebase配列復元と日額突合を行い、後のマスタ変更から独立する", () => {
+    const { snapshot, source } = hourlyYenSnapshot();
+    const saved = JSON.parse(JSON.stringify(snapshot));
+    saved.staffPayroll[0].hourlySources = { 0: saved.staffPayroll[0].hourlySources[0] };
+    source.staff[0].name = "変更後";
+    source.staff[0].hourlyRate = 9000;
+    expect(normalizeMonthlyAccountingSnapshot(saved, month, 1)?.staffPayroll).toEqual(snapshot.staffPayroll);
+    for (const corrupt of [
+      (row: MonthlyAccountingSnapshot) => { delete row.staffPayroll[0].hourlySources; },
+      (row: MonthlyAccountingSnapshot) => { row.staffPayroll[0].hourlySources![0].hourlyRate += 1; },
+      (row: MonthlyAccountingSnapshot) => { row.staffPayroll[0].hourlySources![0].hours += .25; },
+      (row: MonthlyAccountingSnapshot) => { row.staffPayroll[0].hourlySources![0].businessDate = "2026-10-02"; },
+      (row: MonthlyAccountingSnapshot) => { row.staffPayroll[0].hourlySources!.push({ ...row.staffPayroll[0].hourlySources![0] }); },
+    ]) {
+      const invalid = structuredClone(snapshot);
+      corrupt(invalid);
+      expect(normalizeMonthlyAccountingSnapshot(invalid, month, 1)).toBeUndefined();
+    }
+    const legacy = structuredClone(snapshot);
+    legacy.calculationVersion = "2.24.0";
+    delete legacy.staffPayroll[0].hourlySources;
+    expect(normalizeMonthlyAccountingSnapshot(legacy, month, 1)?.staffPayroll).toEqual(legacy.staffPayroll);
+  });
+
+  it("スタッフ勤務時間の不整合・不正単価は対象者と営業日を警告し、推測で補正せず月次確定を禁止する", () => {
+    const closing = approvedClosing({ staffWork: [{ staffId: "staff-1", name: "対象スタッフ", kind: "regular",
+      startTime: "20:00", endTime: "02:00", hours: 5, hourlyRate: 0, dailyPayment: 3000 }] });
+    const source = workspace({ closings: [closing] });
+    const before = structuredClone(closing);
+    const warnings = monthlyAccountingWarnings([closing], [], month);
+    expect(warnings.join("\n")).toContain("2026-09-02・対象スタッフ（スタッフID: staff-1）の勤務時間");
+    expect(warnings.join("\n")).toContain("適用時給が未設定または不正");
+    expect(canFinalizeMonthlyAccounting(source, month, adjustments(), true).allowed).toBe(false);
+    expect(closing).toEqual(before);
+    closing.staffWork[0].hours = 6;
+    const member = staff({ hourlyRates: { [month]: 1400 } });
+    expect(monthlyAccountingWarnings([closing], [], month, [member])).toEqual([]);
+    closing.staffWork[0].kind = "trial";
+    expect(monthlyAccountingWarnings([closing], [], month, [member]).join("\n")).toContain("適用時給");
+  });
+
+  it("在籍マスタに対象月の単価がなければ、日次保存単価へ黙って戻さず警告して確定を禁止する", () => {
+    const closing = approvedClosing({ staffWork: [{ staffId: "staff-1", name: "月度未設定", kind: "regular",
+      startTime: "20:00", endTime: "02:00", hours: 6, hourlyRate: 1500, dailyPayment: 3000 }] });
+    const source = workspace({ closings: [closing], staff: [staff({ hourlyRate: 1500, hourlyRates: { "2026-10": 1800 } })] });
+    const before = structuredClone(source);
+    const result = calculateMonthlyAccounting(source, month, adjustments());
+    expect(result.warnings.join("\n")).toContain("月度未設定（スタッフID: staff-1）の適用時給が未設定");
+    expect(result.staffPayroll[0].hourlySources![0].hourlyRate).toBe(0);
+    expect(result.staffPayroll[0].hourly).not.toBe(9000);
+    expect(canFinalizeMonthlyAccounting(source, month, adjustments(), true).allowed).toBe(false);
+    expect(source).toEqual(before);
   });
 
   it("未確定月の在籍時給は月度単価を全日へ適用し、日払いを再計算しない", () => {
@@ -793,6 +879,10 @@ describe("月次会計ドメイン", () => {
       hourlyByDay: [
         { businessDate: "2026-09-05", hours: 4, amount: 6_000 },
         { businessDate: "2026-09-12", hours: 4, amount: 8_000 },
+      ],
+      hourlySources: [
+        { businessDate: "2026-09-05", staffId: "trial-staff", kind: "trial", hours: 4, hourlyRate: 1500 },
+        { businessDate: "2026-09-12", staffId: activeStaff.id, kind: "regular", hours: 4, hourlyRate: 2000 },
       ],
       sales: 0,
       bottle: 0,

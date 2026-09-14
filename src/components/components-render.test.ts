@@ -153,6 +153,40 @@ describe("主要ページのSSRスモーク", () => {
     expect(renderToStaticMarkup(createElement(CastReceiptExport, { rows: [{ ...rows[0], grossPay: NaN }], month, sourceLabel: "未確定", disabledReason: "" }))).toMatch(button);
   });
 
+  it("スタッフ給与の日別内訳は保存単価でなく月度時給と日額を表示する", () => {
+    const source = structuredClone(data);
+    source.staff[0].hourlyRates = { [month]: 1_400 };
+    source.closings[0].staffWork[0].hourlyRate = 1_300;
+    const html = renderToStaticMarkup(createElement(AccountingForms, {
+      section: "staffPayroll", data: source, user, busy: false, run,
+    }));
+    expect(html).toContain("日別内訳");
+    expect(html).toContain("適用時給（区分・時間）");
+    expect(html).toContain("￥1,400（在籍・6時間）");
+    expect(html).toContain("￥8,400");
+    expect(html).toContain("￥7,400");
+    expect(html).not.toContain("￥1,300");
+  });
+
+  it("スタッフ給与の確定済み日別内訳は現在マスタ変更後も保存基準を表示する", () => {
+    const source = structuredClone(data);
+    const result = calculateMonthlyAccounting(source, month, source.adjustments[0]);
+    const snapshot = buildMonthlySnapshot(month, 1, "a".repeat(64), source.adjustments[0], result, source.closings, user.uid, new Date().toISOString());
+    source.monthStates = [{ month, status: "closed", revision: 1, currentSnapshotRevision: 1, updatedAt: "", updatedBy: user.uid }];
+    source.monthSnapshots = [snapshot];
+    source.staff[0].hourlyRates = { [month]: 9_999 };
+    const render = () => renderToStaticMarkup(createElement(AccountingForms, {
+      section: "staffPayroll", data: source, user, busy: false, run,
+    }));
+    expect(render()).toContain("￥2,000（在籍・6時間）");
+    expect(render()).not.toContain("￥9,999");
+    snapshot.calculationVersion = "2.24.0";
+    delete snapshot.staffPayroll[0].hourlySources;
+    expect(render()).toContain("確定時の単価記録なし");
+    expect(render()).toContain("￥12,000");
+    expect(render()).not.toContain("￥9,999");
+  });
+
   it("受領書は確定時の報酬を使い、現在マスタ・日次の変更や削除に影響されない", () => {
     const source = balanceWorkspace();
     const result = calculateMonthlyAccounting(source, month, source.adjustments[0]);

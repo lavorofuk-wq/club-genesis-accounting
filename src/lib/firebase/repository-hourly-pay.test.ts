@@ -83,6 +83,25 @@ beforeEach(() => {
 });
 
 describe("体入スタッフの日別1円給与と既存実支払の送信検証", () => {
+  it.each(["regular", "trial"] as const)("%sスタッフの0円時給勤務は新規・再送とも保存しない", async (kind) => {
+    const value = fixture(0);
+    value.staffWork = [staff(0, { kind, hourlyRate: 0 })];
+    await expect(submitClosing(value, user)).rejects.toThrow("スタッフ時給を1円以上");
+    const before = { ...value, status: "returned" as const };
+    memory.values.set(path, before);
+    await expect(submitClosing(value, user, timestamp)).rejects.toThrow("スタッフ時給を1円以上");
+    expect(memory.values.get(path)).toEqual(before);
+  });
+
+  it.each([
+    { hours: 1 }, { startTime: "99:00" }, { endTime: "02:99" }, { startTime: "" },
+  ])("スタッフの出退勤と保存時間の不整合は送信前に拒否する %#", async (override) => {
+    const value = fixture(1503);
+    Object.assign(value.staffWork[0], override);
+    await expect(submitClosing(value, user)).rejects.toThrow("スタッフ勤務時間が出退勤時刻と一致しません");
+    expect(memory.transaction.mock.calls.some(([reference]) => reference.path.startsWith("history/"))).toBe(false);
+  });
+
   it("新規送信は当日1203円×1.25時間の1円未満切捨て1503円を許可する", async () => {
     const value = fixture(1503);
     await submitClosing(value, user);

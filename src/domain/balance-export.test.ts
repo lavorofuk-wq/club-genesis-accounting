@@ -231,6 +231,7 @@ describe("収支帳票の月次突合", () => {
       closing.casts[0].hours = hours;
       closing.casts[0].hourlyRate = 2007;
       closing.staffWork[0].hours = hours;
+      closing.staffWork[0].endTime = hours === 4.25 ? "00:15" : "22:15";
       closing.staffWork[0].hourlyRate = 1507;
     }
     const before = structuredClone(data.closings);

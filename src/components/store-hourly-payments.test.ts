@@ -4,7 +4,7 @@ import type { User } from "firebase/auth";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DailyCast, DailyClosing, DailyStaffWork, PosClosingV3 } from "@/domain/gms";
 import type { AccountingWorkspaceData } from "@/domain/month-accounting";
-import { StoreWork } from "./store-work";
+import { DailyPreview, StoreWork } from "./store-work";
 
 const draft = vi.hoisted(() => ({
   values: {} as Record<string, unknown>,
@@ -157,6 +157,85 @@ describe("店舗の時給1円単位と支払実績保全", () => {
     render();
     click("追加");
     expect((draft.values[`${prefix}.staffWork`] as DailyStaffWork[])[0]).toMatchObject({ hours: 5.25, dailyPayment: 6400 });
+  });
+
+  it("新規未送信の在籍スタッフを追加し直しても入力済み日払いを保持する", () => {
+    const regular = { ...staff, kind: "regular" as const, dailyPayment: 5000, hourlyRate: 1400 };
+    const source = { ...data, staff: [{ ...data.staff[0], status: "active" as const, hiredAt: "2026-09-01",
+      hourlyRate: 1200, hourlyRates: { "2026-09": 1400, "2026-10": 1500 } }] };
+    const prefix = workflow({ stage: "details", pos, staffId: staff.staffId, staffStart: "20:00", staffEnd: "01:15", staffWork: [regular] });
+    render(source);
+    click("追加");
+    expect((draft.values[`${prefix}.staffWork`] as DailyStaffWork[])[0]).toMatchObject({ hours: 5.25, hourlyRate: 1400, dailyPayment: 5000 });
+  });
+
+  it("スタッフ追加は営業月の月度時給を使い、翌月の設定を先取りしない", () => {
+    const source = { ...data, staff: [{ ...data.staff[0], status: "active" as const, hiredAt: "2026-09-01",
+      hourlyRate: 1200, hourlyRates: { "2026-09": 1400, "2026-10": 1500 } }] };
+    const prefix = workflow({ stage: "details", pos, staffId: staff.staffId, staffStart: "20:00", staffEnd: "00:15" });
+    render(source);
+    click("追加");
+    expect((draft.values[`${prefix}.staffWork`] as DailyStaffWork[])[0]).toMatchObject({ hourlyRate: 1400, hours: 4.25 });
+  });
+
+  it("共通フォームの月度時給変更だけでは保存済み勤務単価と日払いを変更しない", () => {
+    const regular = { ...staff, kind: "regular" as const, hourlyRate: 1200, dailyPayment: 5000 };
+    const initial = closing({ staffWork: [regular] });
+    const source = { ...data, staff: [{ ...data.staff[0], status: "active" as const, hiredAt: "2026-09-01",
+      hourlyRate: 1200, hourlyRates: { "2026-09": 1400 } }] };
+    const prefix = workflow({}, initial);
+    const markup = render(source);
+    expect(markup).toContain("登録時時給");
+    expect(markup).toContain("月度時給で給与計算します");
+    expect(draft.values[`${prefix}.staffWork`]).toEqual([regular]);
+    expect(initial.staffWork).toEqual([regular]);
+  });
+
+  it("日次プレビューは保存時の単価であることを明示する", () => {
+    const markup = renderToStaticMarkup(createElement(DailyPreview, { closing: closing() }));
+    expect(markup).toContain("登録時時給");
+    expect(markup).toContain("月度時給で給与計算します");
+    expect(markup).toContain("1,507");
+  });
+
+  it("8月以前の保存済み勤務を再追加しても月度時給を逆適用しない", () => {
+    const regular = { ...staff, kind: "regular" as const, hourlyRate: 1200, dailyPayment: 5000 };
+    const previousPos = { ...pos, businessDate: "2026-08-31" };
+    const initial = closing({ businessDate: previousPos.businessDate, posSnapshot: previousPos, staffWork: [regular] });
+    const source = { ...data, staff: [{ ...data.staff[0], status: "active" as const, hiredAt: "2026-08-01",
+      hourlyRate: 1400, hourlyRates: { "2026-09": 1500 } }] };
+    const prefix = workflow({ staffId: staff.staffId, staffStart: "20:00", staffEnd: "01:15" }, initial);
+    render(source);
+    click("追加");
+    expect((draft.values[`${prefix}.staffWork`] as DailyStaffWork[])[0]).toMatchObject({ hours: 5.25, hourlyRate: 1200, dailyPayment: 5000 });
+  });
+
+  it("8月以前の新規勤務は旧単価を使用し9月の月度単価を使用しない", () => {
+    const source = { ...data, staff: [{ ...data.staff[0], status: "active" as const, hiredAt: "2026-08-01",
+      hourlyRate: 1200, hourlyRates: { "2026-09": 1400 } }] };
+    const prefix = workflow({ stage: "details", pos: { ...pos, businessDate: "2026-08-31" }, staffId: staff.staffId,
+      staffStart: "20:00", staffEnd: "00:15" });
+    render(source);
+    click("追加");
+    expect((draft.values[`${prefix}.staffWork`] as DailyStaffWork[])[0]).toMatchObject({ hourlyRate: 1200 });
+  });
+
+  it.each(["0円時給", "不正な時刻", "適用前月", "8月以前の旧単価不明"])("%sのスタッフ勤務は追加しない", (scenario) => {
+    const source: AccountingWorkspaceData = { ...data, staff: [{ ...data.staff[0], status: "active" as const, hiredAt: "2026-08-01",
+      hourlyRate: scenario === "8月以前の旧単価不明" ? undefined : 1200,
+      hourlyRates: scenario === "0円時給" ? { "2026-09": 0 } : { "2026-10": 1400 } }] };
+    const prefix = workflow({ stage: "details", pos: scenario === "8月以前の旧単価不明" ? { ...pos, businessDate: "2026-08-31" } : pos,
+      staffId: staff.staffId, staffStart: scenario === "不正な時刻" ? "25:00" : "20:00", staffEnd: "02:00" });
+    render(source);
+    click("追加");
+    expect(draft.values[`${prefix}.staffWork`]).toEqual([]);
+  });
+
+  it("新規未送信の体入スタッフは時刻変更後の給与全額を即日額へ反映する", () => {
+    const prefix = workflow({ stage: "details", pos, staffId: staff.staffId, staffStart: "20:00", staffEnd: "01:15", staffWork: [staff] });
+    render();
+    click("追加");
+    expect((draft.values[`${prefix}.staffWork`] as DailyStaffWork[])[0]).toMatchObject({ hours: 5.25, hourlyRate: 1507, dailyPayment: 7911 });
   });
 
   it("体入キャスト日払いは1円入力を許容し、現金照合へ進んでも既存整数額を変えない", () => {

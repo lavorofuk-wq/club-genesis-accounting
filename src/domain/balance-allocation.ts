@@ -1,6 +1,8 @@
 import type { CastReward, CastSalesDay, CastSalesReport, DailyClosing, DailyHourlyPay, DailyStaffWork, StaffRecord } from "./gms";
 import { floorYen } from "./gms";
-import type { MonthlyAccountingResults, MonthlyAccountingSnapshot } from "./month-accounting";
+import type { MonthlyAccountingResults, MonthlyAccountingSnapshot, StaffHourlySource } from "./month-accounting";
+import { supportsMonthlyStaffRatesSnapshot } from "./month-accounting";
+import { STAFF_MONTHLY_RATES_START_MONTH, staffMonthlyRateForMonth } from "./staff-rates";
 
 export type BalancePayrollAllocationInput = {
   results: MonthlyAccountingResults;
@@ -250,6 +252,7 @@ function staffSourceId(work: DailyStaffWork, payrollIds: ReadonlySet<string>, ma
 export function allocateBalancePayroll({ results, closings, month, staff = [], archivedStaff = [], snapshot }: BalancePayrollAllocationInput): { byDate: BalancePayrollDay[] } {
   requireValue(/^\d{4}-(0[1-9]|1[0-2])$/.test(month), "給与配分の対象月が不正です。");
   const legacyHourly = snapshot?.schemaVersion === 1 || snapshot?.schemaVersion === 2;
+  const monthlyStaffRates = !snapshot || (!legacyHourly && supportsMonthlyStaffRatesSnapshot(snapshot.calculationVersion));
   if (snapshot && !legacyHourly) {
     const version = /^(\d+)\.(\d+)\.(\d+)$/.exec(snapshot.calculationVersion);
     requireValue(Number(snapshot.schemaVersion) === 3 && version
@@ -297,7 +300,38 @@ export function allocateBalancePayroll({ results, closings, month, staff = [], a
     const entries = (staffWork.get(payroll.id) || []).sort((left, right) => left.businessDate.localeCompare(right.businessDate));
     requireValue(entries.length > 0, `${payroll.name}のスタッフ給与を計上する最終出勤日がありません。`);
     const hours = entries.reduce((sum, { work }) => sum + amount(work.hours, `${payroll.name}の勤務時間`), 0);
-    const raw = entries.map(({ work }) => amount(work.hourlyRate, `${payroll.name}の保存時給`) * work.hours);
+    const hourlySources = new Map<string, StaffHourlySource>();
+    if (monthlyStaffRates) {
+      requireValue(Array.isArray(payroll.hourlySources), `${payroll.name}の時給計算基準がありません。保存形式を確認してください。`);
+      for (const source of payroll.hourlySources) {
+        requireValue(source && typeof source.businessDate === "string" && typeof source.staffId === "string"
+          && (source.kind === "regular" || source.kind === "trial") && Number.isSafeInteger(source.hourlyRate)
+          && source.hourlyRate > 0 && Number.isSafeInteger(source.hours * 4) && source.hours >= 0,
+        `${payroll.name}の保存済み時給計算基準が不正です。`);
+        const key = `${source.businessDate}/${source.staffId}`;
+        requireValue(!hourlySources.has(key), `${payroll.name}の時給計算基準が重複しています。`);
+        hourlySources.set(key, source);
+      }
+      requireValue(hourlySources.size === entries.length, `${payroll.name}の時給計算基準と勤務記録が一致しません。`);
+    }
+    const raw = entries.map(({ businessDate, work }) => {
+      const savedRate = amount(work.hourlyRate, `${payroll.name}の保存時給`);
+      if (!monthlyStaffRates) return savedRate * work.hours;
+      const source = hourlySources.get(`${businessDate}/${work.staffId}`);
+      requireValue(source && source.kind === work.kind && source.hours === work.hours,
+        `${payroll.name}の時給計算基準と勤務記録が一致しません。`);
+      // 新確定月は保存された適用単価を使う。後日のマスタ訂正を持ち込まない。
+      // 未確定月は現行の月度単価とも突合し、古い集計値の出力を防ぐ。
+      if (!snapshot || work.kind === "trial" || month < STAFF_MONTHLY_RATES_START_MONTH) {
+        const master = masters.get(work.staffId);
+        const expectedRate = work.kind === "regular" && month >= STAFF_MONTHLY_RATES_START_MONTH && master
+          ? staffMonthlyRateForMonth(master, month) : savedRate;
+        requireValue(Number.isSafeInteger(expectedRate) && expectedRate > 0,
+          `${payroll.name}の${month}月度の適用時給が未設定または不正です。`);
+        same(source.hourlyRate, expectedRate, `${payroll.name}の適用時給`);
+      }
+      return source.hourlyRate * work.hours;
+    });
     const rawTotal = raw.reduce((sum, value) => sum + amount(value, `${payroll.name}の日別基本給与`), 0);
     same(payroll.hours, hours, `${payroll.name}の月間勤務時間`);
     same(payroll.daily, entries.reduce((sum, { work }) => sum + amount(work.dailyPayment, `${payroll.name}の日払い`), 0), `${payroll.name}の日払い合計`);

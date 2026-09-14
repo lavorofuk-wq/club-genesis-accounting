@@ -73,6 +73,38 @@ export function validateStaffPaySetting(
   }
 }
 
+/** 在籍スタッフの月度単価。体入の支払済み単価とは独立して管理する。 */
+export function validateStaffMonthlyPaySetting(
+  status: StaffRecord["status"],
+  hourlyRates: MonthlyRates | undefined,
+  trialHourlyRate: unknown,
+  hiredAt: string | undefined,
+  before: Pick<StaffRecord, "status" | "hourlyRate" | "trialHourlyRate" | "hourlyRates"> | null = null,
+) {
+  if (status === "trial") {
+    validateStaffPaySetting(status, undefined, trialHourlyRate, before);
+    return;
+  }
+  if (!hourlyRates || Array.isArray(hourlyRates) || typeof hourlyRates !== "object"
+    || Object.keys(hourlyRates).length === 0) {
+    // 旧0円レコードの備考編集などだけは維持する。勤務登録・新規登録には使えない。
+    if (before && before.status !== "trial" && before.hourlyRate === 0
+      && !before.hourlyRates && hourlyRates === undefined) return;
+    throw new Error("スタッフの月度時給を1円以上で入力してください。");
+  }
+  for (const [month, amount] of Object.entries(hourlyRates)) {
+    if (!validMonth(month) || month < "2026-09") {
+      throw new Error("スタッフの月度時給は2026-09以降の正しい対象月を指定してください。");
+    }
+    if (hiredAt && month < hiredAt.slice(0, 7)) {
+      throw new Error("採用月より前のスタッフ月度時給は登録できません。");
+    }
+    if (!isPositivePayAmount(amount) || !Number.isSafeInteger(amount)) {
+      throw new Error(`${month}月度のスタッフ時給は1円以上の整数で入力してください。`);
+    }
+  }
+}
+
 export function validateDriverPaySetting(
   dailyRate: DriverRecord["dailyRate"] | unknown,
   before: Pick<DriverRecord, "dailyRate"> | null = null,

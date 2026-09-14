@@ -110,8 +110,9 @@ function ClosingDetail({ closing, closings, reviewed, disabled, onReviewed }: { 
       {closing.casts.map((row) => <tr key={row.posCastId}><td><strong>{row.name}</strong><br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td><td>{row.startTime}–{row.endTime}<br />{row.hours}時間</td><td>{row.honShimeiCount} / {row.banaiShimeiCount} / {row.dohanCount}</td><td>{yen.format(row.honShimeiSales)}</td><td>{yen.format(row.jonaiExtensionSales)}</td><td className="wrap-cell"><ClosingCastProductDetails row={row} pos={closing.posSnapshot} /></td><td className="wrap-cell">美容室 {yen.format(row.beautyAllowance)}<br />日払い {yen.format(row.dailyPayment)}<br />立替 {yen.format(row.advancePayment)}<br />送迎 {yen.format(row.transportFee)}</td></tr>)}
     </Table>
     <h3>スタッフ・送迎ドライバー</h3>
+    <p className="muted compact-text">登録時時給は店舗入力時の保存値です。在籍スタッフの未確定月（2026年9月以降）は月度時給で給与計算します。</p>
     <Table headers={["区分", "名前", "勤務・給与基準", "日払い"]}>{[
-      ...closing.staffWork.map((row) => <tr key={`staff-${row.staffId}`}><td>{row.kind === "trial" ? "体入スタッフ" : "スタッフ"}</td><td>{row.name}</td><td>{row.startTime}–{row.endTime}（{row.hours}時間）<br /><small>時給 {yen.format(row.hourlyRate)}</small></td><td>{yen.format(row.dailyPayment)}</td></tr>),
+      ...closing.staffWork.map((row) => <tr key={`staff-${row.staffId}`}><td>{row.kind === "trial" ? "体入スタッフ" : "スタッフ"}</td><td>{row.name}</td><td>{row.startTime}–{row.endTime}（{row.hours}時間）<br /><small>登録時時給 {yen.format(row.hourlyRate)}</small></td><td>{yen.format(row.dailyPayment)}</td></tr>),
       ...closing.drivers.map((row) => <tr key={`driver-${row.driverId}`}><td>送迎ドライバー</td><td>{row.name}</td><td>日給 {yen.format(row.dailyRate)}</td><td>{yen.format(row.dailyPayment)}</td></tr>),
     ]}</Table>
     <h3>現金照合データプレビュー</h3>
@@ -451,7 +452,26 @@ function CastRewards({ rows, disabled, onWithholding }: { rows: CastReward[]; di
     <td><strong>{yen.format(row.netPay)}</strong></td>
   </tr>)}</Table></Card>;
 }
-function StaffPayroll({ rows, disabled, onSales, onBottle }: { rows: StaffPayrollRow[]; disabled: boolean; onSales: (id: string, value: number) => void; onBottle: (id: string, value: number) => void }) { return <Card title="スタッフ給与データ"><Table headers={["スタッフ", "勤務時間", "基本給与", "売上手当", "ボトル手当", "総支給", "日払い", "差引支給"]}>{rows.map((row) => <tr key={row.id}><td>{row.name}</td><td>{row.hours}時間</td><td>{yen.format(row.hourly)}</td><td><MoneyInput value={row.sales} disabled={disabled} onChange={(value) => onSales(row.id, value)} /></td><td><MoneyInput value={row.bottle} disabled={disabled} onChange={(value) => onBottle(row.id, value)} /></td><td>{yen.format(row.gross)}</td><td>{yen.format(row.daily)}</td><td><strong>{yen.format(row.net)}</strong></td></tr>)}</Table></Card>; }
+function StaffPayroll({ rows, disabled, onSales, onBottle }: { rows: StaffPayrollRow[]; disabled: boolean; onSales: (id: string, value: number) => void; onBottle: (id: string, value: number) => void }) {
+  return <Card title="スタッフ給与データ" description="日別内訳で計算に使った時給を確認できます。日払いは支払済みの記録を保持し、給与との差額は差引支給額に反映します。">
+    <Table headers={["スタッフ", "勤務時間", "基本給与", "売上手当", "ボトル手当", "総支給", "日払い", "差引支給"]}>
+      {rows.map((row) => <tr key={row.id}><td>{row.name}</td><td>{row.hours}時間</td><td>{yen.format(row.hourly)}</td><td><MoneyInput value={row.sales} disabled={disabled} onChange={(value) => onSales(row.id, value)} /></td><td><MoneyInput value={row.bottle} disabled={disabled} onChange={(value) => onBottle(row.id, value)} /></td><td>{yen.format(row.gross)}</td><td>{yen.format(row.daily)}</td><td><strong>{yen.format(row.net)}</strong></td></tr>)}
+    </Table>
+    {rows.map((row) => <details key={row.id} className="cast-sales-card">
+      <summary className="cast-sales-summary"><strong>{row.name}</strong><span>日別内訳</span><span>基本給与 {yen.format(row.hourly)}</span></summary>
+      <div className="cast-sales-content">
+        {row.hourlyByDay ? <Table headers={["営業日", "勤務時間", "適用時給（区分・時間）", "基本給与"]}>
+          {row.hourlyByDay.map((day) => {
+            const sources = row.hourlySources?.filter((source) => source.businessDate === day.businessDate);
+            return <tr key={day.businessDate}><td>{businessDateLabel(day.businessDate)}</td><td>{day.hours}時間</td>
+              <td>{sources?.length ? sources.map((source) => <div key={`${source.staffId}-${source.kind}`}>{yen.format(source.hourlyRate)}（{source.kind === "trial" ? "体入" : "在籍"}・{source.hours}時間）</div>) : "確定時の単価記録なし"}</td>
+              <td>{yen.format(day.amount)}</td></tr>;
+          })}
+        </Table> : <p className="muted">この確定データには日別内訳が保存されていません。確定時の月額を表示しています。</p>}
+      </div>
+    </details>)}
+  </Card>;
+}
 function DriverPayroll({ rows, disabled, onRemote }: { rows: MonthlyAccountingResults["driverPayroll"]; disabled: boolean; onRemote: (id: string, value: number) => void }) { return <Card title="送迎ドライバー給与データ"><Table headers={["ドライバー", "出勤日数", "基本給与", "遠方手当", "総支給", "日払い", "差引支給"]}>{rows.map((row) => <tr key={row.id}><td>{row.name}</td><td>{row.days}日</td><td>{yen.format(row.basic)}</td><td><MoneyInput value={row.remote} disabled={disabled} onChange={(value) => onRemote(row.id, value)} /></td><td>{yen.format(row.gross)}</td><td>{yen.format(row.dailyPayment)}</td><td><strong>{yen.format(row.net)}</strong></td></tr>)}</Table></Card>; }
 
 function Expenses({ results, adjustments, setAdjustments, disabled }: { results: MonthlyAccountingResults; adjustments: MonthlyAdjustments; setAdjustments: (value: MonthlyAdjustments | ((row: MonthlyAdjustments) => MonthlyAdjustments)) => void; disabled: boolean }) {
