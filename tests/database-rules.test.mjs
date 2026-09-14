@@ -34,6 +34,49 @@ test("スタッフ時給ルールは在籍・体入それぞれの使用項目�
   assert.match(trialRule, /data\.parent\(\).*status.*=== 'trial'/);
 });
 
+test("スタッフ月度時給ルールは9月以降・採用月以降の正数と旧画面の防御を要求する", () => {
+  const rules = databaseRules.staff.$id;
+  assert.match(rules.status[".validate"], /hourlyRates'\)\.hasChildren\(\)/);
+  assert.match(rules.hourlyRates.$month[".validate"], /\$month >= '2026-09'/);
+  assert.match(rules.hourlyRates.$month[".validate"], /\$month \+ '-31' >=.*hiredAt/);
+  assert.match(rules.hourlyRates.$month[".validate"], /newData\.val\(\) > 0/);
+  assert.match(rules[".validate"], /!data\.child\('hourlyRates'\)\.exists\(\) \|\| newData\.child\('hourlyRates'\)\.hasChildren\(\)/);
+  assert.match(rules[".validate"], /newData\.child\('hourlyRate'\)\.val\(\) === data\.child\('hourlyRate'\)\.val\(\)/);
+});
+
+test("スタッフ月度時給ルールの条件を新規・移行・旧画面で実行検証する", () => {
+  const snap = (tree, path = []) => {
+    const value = path.reduce((parent, key) => parent?.[key], tree) ?? null;
+    return { val: () => value, exists: () => value !== null,
+      isString: () => typeof value === "string", isNumber: () => typeof value === "number" && Number.isFinite(value),
+      hasChildren: (keys) => value !== null && typeof value === "object" && Object.keys(value).length > 0
+        && (!keys || keys.every((key) => value[key] !== undefined && value[key] !== null)),
+      child: (key) => snap(tree, [...path, key]), parent: () => snap(tree, path.slice(0, -1)) };
+  };
+  const evaluate = (rule, before, after, path = [], month) => Boolean(new Function("data", "newData", "auth", "$month",
+    `return (${rule.replaceAll(".matches(", ".match(")});`)(snap(before, path), snap(after, path), { uid: "op" }, month));
+  const rules = databaseRules.staff.$id;
+  const old = { name: "スタッフ", status: "active", hiredAt: "2026-08-01", hourlyRate: 1500, createdAt: "a", updatedAt: "b" };
+  const migrated = { ...old, hourlyRates: { "2026-09": 1500 }, updatedAt: "c" };
+  assert.equal(evaluate(rules[".validate"], old, migrated), true);
+  assert.equal(evaluate(rules.status[".validate"], old, migrated, ["status"]), true);
+  assert.equal(evaluate(rules[".validate"], old, { ...old, hourlyRate: 1800, updatedAt: "c" }), false);
+  assert.equal(evaluate(rules[".validate"], migrated, { ...old, updatedAt: "d" }), false);
+  const monthlyOnly = { name: "新規", status: "active", hiredAt: "2026-09-01", hourlyRates: { "2026-09": 1800 }, createdAt: "a", updatedAt: "b" };
+  assert.equal(evaluate(rules[".validate"], null, monthlyOnly), true);
+  assert.equal(evaluate(rules.status[".validate"], null, monthlyOnly, ["status"]), true);
+  assert.equal(evaluate(rules.status[".validate"], null, old, ["status"]), false);
+  for (const [month, amount, hiredAt, allowed] of [
+    ["2026-09", 1500, "2026-09-30", true], ["2026-08", 1500, "2026-08-01", false],
+    ["2026-09", 1500, "2026-10-01", false], ["2026-13", 1500, "2026-09-01", false],
+    ["2026-09", 0, "2026-09-01", false], ["2026-10", 1800, "2026-09-01", true],
+    ["2026-09", 1500.5, "2026-09-01", false], ["2026-09", Number.MAX_SAFE_INTEGER + 1, "2026-09-01", false],
+  ]) {
+    assert.equal(evaluate(rules.hourlyRates.$month[".validate"], null,
+      { ...monthlyOnly, hiredAt, hourlyRates: { [month]: amount } }, ["hourlyRates", month], month), allowed);
+  }
+});
+
 test("送迎ドライバー日給ルールは正数または旧レコードの不変値だけを許容する", () => {
   const driverRule = databaseRules.drivers.$id[".validate"];
   assert.match(driverRule, /dailyRate'\)\.val\(\) > 0/);

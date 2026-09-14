@@ -10,6 +10,7 @@ import {
   bottleBackAmountFromPosItem,
   compareIntroducerMonthEventEffectiveOrder,
   floorYen,
+  hoursBetweenQuarter,
   invalidTrialBeautyExpensesForRows,
   isUnapprovedClosingStatus,
   isStaffHireDateAfterTrial,
@@ -52,8 +53,9 @@ import type {
 import {
   validateCastPaySetting,
   validateDriverPaySetting,
-  validateStaffPaySetting,
+  validateStaffMonthlyPaySetting,
 } from "@/domain/master-pay-validation";
+import { staffMonthlyRates } from "@/domain/staff-rates";
 import { assertCashLedgerChange, cashDayIssues, cashFundingIssues, cashLedgerIssues, sameCashReconciliation } from "@/domain/cash-funding";
 
 export type WorkspaceData = AccountingWorkspaceData;
@@ -691,6 +693,11 @@ function validateDailyClosingForSubmission(value: DailyClosing, before: DailyClo
   value.staffWork.forEach((row) => {
     require((row.kind === "regular" || row.kind === "trial") && Boolean(row.staffId) && Boolean(row.name) && money(row.hours) && row.hours > 0 && Number.isInteger(row.hours * 4), `${row.name}のスタッフ勤務が正しくありません。`);
     require(money(row.hourlyRate) && money(row.dailyPayment), `${row.name}のスタッフ給与金額が正しくありません。`);
+    require(row.hourlyRate > 0, `${row.name}のスタッフ時給を1円以上に設定してください。`);
+    require(/^([01]\d|2[0-3]):[0-5]\d$/.test(row.startTime)
+      && /^([01]\d|2[0-3]):[0-5]\d$/.test(row.endTime)
+      && hoursBetweenQuarter(row.startTime, row.endTime) === row.hours,
+    `${row.name}のスタッフ勤務時間が出退勤時刻と一致しません。勤務を登録し直してください。`);
     if (row.kind === "trial") {
       const savedPayments = Object.values(before?.staffWork || {})
         .filter((saved) => saved && saved.staffId === row.staffId && saved.kind === "trial");
@@ -1578,18 +1585,37 @@ export async function saveStaff(value: Partial<StaffRecord> & Pick<StaffRecord, 
       && !isStaffHireDateAfterTrial(trialDate, hiredAt)) {
       throw new Error("採用日は体入日の翌日以降にしてください。");
     }
-    validateStaffPaySetting(
+    if (existing && value.hourlyRate !== undefined && value.hourlyRate !== existing.hourlyRate) {
+      throw new Error("スタッフ時給は月度時給から変更してください。最新画面を読み込んでください。");
+    }
+    if (value.hourlyRates !== undefined && (!value.hourlyRates
+      || Array.isArray(value.hourlyRates) || typeof value.hourlyRates !== "object")) {
+      throw new Error("スタッフの月度時給の形式が正しくありません。");
+    }
+    const baseline = existing?.status !== "trial" && existing ? staffMonthlyRates(existing) : {};
+    const hourlyRates = value.status === "trial" ? undefined
+      : value.hourlyRates === undefined && Object.keys(baseline).length === 0 ? undefined
+      : { ...baseline, ...(value.hourlyRates || {}) };
+    // 単一単価だけの旧画面から新規在籍登録や単価変更を行わせない。
+    if (!existing && value.status !== "trial" && !value.hourlyRates) {
+      throw new Error("スタッフの月度時給を入力してください。最新画面を読み込んでください。");
+    }
+    validateStaffMonthlyPaySetting(
       value.status,
-      value.hourlyRate ?? existing?.hourlyRate,
+      hourlyRates,
       value.trialHourlyRate ?? existing?.trialHourlyRate,
+      hiredAt,
       existing,
     );
-    return clean({ ...withoutInternalFields(existing || {}), ...withoutInternalFields(value), name, note: value.note ?? "", createdAt: existing?.createdAt || timestamp, updatedAt: timestamp });
+    return clean({ ...withoutInternalFields(existing || {}), ...withoutInternalFields(value), hourlyRates,
+      // 旧単価は移行前の参照値。月度変更で書き換えない。
+      hourlyRate: existing?.hourlyRate ?? value.hourlyRate,
+      name, note: value.note ?? "", createdAt: existing?.createdAt || timestamp, updatedAt: timestamp });
   }, { applyLocally: false });
   return id;
 }
 
-export async function convertTrialStaff(trialId: string, value: Partial<StaffRecord> & Pick<StaffRecord, "hiredAt" | "hourlyRate">, user: User) {
+export async function convertTrialStaff(trialId: string, value: Partial<StaffRecord> & Pick<StaffRecord, "hiredAt">, user: User) {
   await requireUser(user);
   const activeId = entityId("staff");
   const timestamp = now();
@@ -1602,7 +1628,7 @@ export async function convertTrialStaff(trialId: string, value: Partial<StaffRec
   const hiredAt = incoming.hiredAt || "";
   if (!validDate(hiredAt)) throw new Error("採用日が正しくありません。");
   if (!isStaffHireDateAfterTrial(initialTrial.trialDate, hiredAt)) throw new Error("採用日は体入日の翌日以降にしてください。");
-  validateStaffPaySetting("active", incoming.hourlyRate, incoming.trialHourlyRate);
+  validateStaffMonthlyPaySetting("active", incoming.hourlyRates, initialTrial.trialHourlyRate, hiredAt);
   const name = String(incoming.name || initialTrial.name || "").trim();
   if (!name) throw new Error("スタッフ名を入力してください。");
   let conversionLock: ConversionLockHandle<StaffRecord> | undefined;
@@ -1620,6 +1646,7 @@ export async function convertTrialStaff(trialId: string, value: Partial<StaffRec
     await assertConversionLockOwned(conversionLock);
     const storedActive = clean({
       ...withoutInternalFields(trial), ...incoming, name, status: "active", trialDate: trial.trialDate, convertedFromTrialId: trialId,
+      trialHourlyRate: trial.trialHourlyRate,
       convertedToStaffId: undefined, departedAt: undefined, createdAt: timestamp, updatedAt: timestamp,
     }) as Record<string, unknown>;
     const conversionPlan = {

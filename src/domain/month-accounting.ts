@@ -10,6 +10,7 @@ import {
   dailyClosingSubmissionOrderValue,
   findUnclassifiedLegacyBottles,
   hasDailyClosingSubmissionOrder,
+  hoursBetweenQuarter,
   introducerMonthEventEffectiveOrderValue,
   introducerSalesBase,
   japanMonthFromTimestamp,
@@ -29,8 +30,9 @@ import type {
   WorkspaceData,
 } from "./gms";
 import { cashLedgerIssues, summarizeCashFunding, type CashFundingSummary } from "./cash-funding";
+import { STAFF_MONTHLY_RATES_START_MONTH, staffMonthlyRateForMonth } from "./staff-rates";
 
-export const MONTHLY_CALCULATION_VERSION = "2.22.0";
+export const MONTHLY_CALCULATION_VERSION = "2.25.0";
 export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 3 as const;
 
 export type IntroducerEntryEvent = {
@@ -69,6 +71,14 @@ export type IntroducerPaymentRow = {
   total: number;
 };
 
+export type StaffHourlySource = {
+  businessDate: string;
+  staffId: string;
+  kind: "regular" | "trial";
+  hours: number;
+  hourlyRate: number;
+};
+
 export type StaffPayrollRow = {
   id: string;
   name: string;
@@ -76,6 +86,8 @@ export type StaffPayrollRow = {
   hourly: number;
   /** 旧確定月では未保存。新形式では当日勤務から算出した1円単位の日額を保持する。 */
   hourlyByDay?: DailyHourlyPay[];
+  /** 2.25以降は月度単価適用後の計算基準も保存し、確定後のマスタ変更から独立させる。 */
+  hourlySources?: StaffHourlySource[];
   sales: number;
   bottle: number;
   gross: number;
@@ -200,6 +212,12 @@ export const requiresCompleteCashFundingSnapshot = (value: string) => {
   if (!match) return false;
   const [major, minor] = match.slice(1).map(Number);
   return major > 2 || (major === 2 && minor >= 22);
+};
+export const supportsMonthlyStaffRatesSnapshot = (value: string) => {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(value);
+  if (!match) return false;
+  const [major, minor] = match.slice(1).map(Number);
+  return major > 2 || (major === 2 && minor >= 25);
 };
 const snapshotMillisecondsInstant = (value: unknown) => {
   if (!snapshotInteger(value)) return undefined;
@@ -345,6 +363,29 @@ function normalizeSnapshotHourlyRows(
   return normalized;
 }
 
+/** 確定済み月度時給は現在マスタで再計算せず、保存した適用単価と日額だけを突合する。 */
+function normalizeSnapshotStaffHourlySources(values: Record<string, unknown>[] | undefined, month: string) {
+  if (!values) return undefined;
+  const normalized: Record<string, unknown>[] = [];
+  for (const item of values) {
+    if (!Array.isArray(item.hourlySources) && !snapshotObject(item.hourlySources)) return undefined;
+    const sources = snapshotList<unknown>(item.hourlySources);
+    if (!sources.length || sources.some((source) => !snapshotObject(source)
+      || !snapshotDateInMonth(source.businessDate, month) || !snapshotString(source.staffId)
+      || (source.kind !== "regular" && source.kind !== "trial")
+      || !snapshotNonNegative(source.hours) || !Number.isSafeInteger(Number(source.hours) * 4)
+      || !snapshotInteger(source.hourlyRate) || Number(source.hourlyRate) <= 0)) return undefined;
+    const hourlySources = (sources as StaffHourlySource[]).map((source) => ({ ...source }));
+    if (new Set(hourlySources.map((source) => `${source.businessDate}/${source.staffId}`)).size !== hourlySources.length) return undefined;
+    const calculated = calculateDailyHourlyPay(hourlySources);
+    const saved = item.hourlyByDay as DailyHourlyPay[];
+    if (calculated.length !== saved.length || !calculated.every((day) => saved.some((value) =>
+      value.businessDate === day.businessDate && value.hours === day.hours && value.amount === day.amount))) return undefined;
+    normalized.push({ ...item, hourlySources });
+  }
+  return normalized;
+}
+
 function validSnapshotCashFunding(value: unknown, approvedDays: number): value is CashFundingSummary {
   if (!snapshotObject(value)) return false;
   const nonNegativeKeys = ["managedDays", "openingPersonalDebt", "companyReplenishment", "personalReplenishment", "companyTransfer", "personalRepayment", "closingPersonalDebt"];
@@ -403,8 +444,10 @@ export function normalizeMonthlyAccountingSnapshot(
     ["id", "introducer", "cast", "feeType", "adopted"],
     ["honShimeiLiquorCost", "salesBase", "salesFee", "grossBase", "grossFee", "attendanceAdvisory", "entryAdvisory", "advisory", "total"]);
   const storedStaffPayroll = validSnapshotRows(row.staffPayroll, ["id", "name"], ["hours", "hourly", "sales", "bottle", "gross", "daily"], { allowNegativeKeys: ["net"] });
-  const staffPayroll = requireDailyHourlyYen
+  const dailyStaffPayroll = requireDailyHourlyYen
     ? normalizeSnapshotHourlyRows(storedStaffPayroll, pathMonth, "hourly") : storedStaffPayroll;
+  const staffPayroll = requireDailyHourlyYen && supportsMonthlyStaffRatesSnapshot(row.calculationVersion)
+    ? normalizeSnapshotStaffHourlySources(dailyStaffPayroll as Record<string, unknown>[] | undefined, pathMonth) : dailyStaffPayroll;
   const driverPayroll = validSnapshotRows(row.driverPayroll, ["id", "name"], ["basic", "remote", "gross", "dailyPayment"], { integerKeys: ["days"], allowNegativeKeys: ["net"] });
   const approvedClosings = validSnapshotRows(row.approvedClosings, ["id", "checksum", "updatedAt"], []);
   const warnings = snapshotList<unknown>(row.warnings);
@@ -562,7 +605,7 @@ export function calculateStaffPayroll(
   month = "",
 ): StaffPayrollRow[] {
   const map = new Map<string, StaffPayrollRow>();
-  const hourlyEntries = new Map<string, Array<{ businessDate: string; hours: number; hourlyRate: number }>>();
+  const hourlyEntries = new Map<string, StaffHourlySource[]>();
   const staffById = new Map(staff.map((member) => [member.id, member]));
   const monthWorkIds = new Set(closings.flatMap((closing) => (closing.staffWork ?? [])
     .filter((work) => work.kind === "regular")
@@ -592,16 +635,22 @@ export function calculateStaffPayroll(
     };
     row.hours += work.hours;
     const entries = hourlyEntries.get(staffId) || [];
-    entries.push({ businessDate: closing.businessDate, hours: work.hours, hourlyRate: work.hourlyRate });
+    const master = staffById.get(work.staffId);
+    const hourlyRate = work.kind === "regular" && month >= STAFF_MONTHLY_RATES_START_MONTH && master
+      ? staffMonthlyRateForMonth(master, month) : work.hourlyRate;
+    entries.push({ businessDate: closing.businessDate, staffId: work.staffId, kind: work.kind,
+      hours: work.hours, hourlyRate });
     hourlyEntries.set(staffId, entries);
     row.daily += work.dailyPayment;
     map.set(staffId, row);
   }));
   return [...map.values()].map((row) => {
-    const hourlyByDay = calculateDailyHourlyPay(hourlyEntries.get(row.id) || []);
+    const hourlySources = [...(hourlyEntries.get(row.id) || [])].sort((left, right) =>
+      left.businessDate.localeCompare(right.businessDate) || left.staffId.localeCompare(right.staffId));
+    const hourlyByDay = calculateDailyHourlyPay(hourlySources);
     const hourly = hourlyByDay.reduce((sum, day) => sum + day.amount, 0);
     const gross = hourly + row.sales + row.bottle;
-    return { ...row, hourly, hourlyByDay, gross, net: gross - row.daily };
+    return { ...row, hourly, hourlyByDay, hourlySources, gross, net: gross - row.daily };
   });
 }
 
@@ -833,7 +882,28 @@ export function calculateIntroducerPayments(
   }).sort((left, right) => left.introducer.localeCompare(right.introducer, "ja") || left.cast.localeCompare(right.cast, "ja"));
 }
 
-export function monthlyAccountingWarnings(rows: DailyClosing[], casts: CastRecord[] = [], month = "") {
+function staffPayrollInputWarnings(rows: DailyClosing[], staff: StaffRecord[], month: string) {
+  const masters = new Map(staff.map((member) => [member.id, member]));
+  return rows.flatMap((closing) => (closing.staffWork ?? []).flatMap((work) => {
+    const warnings: string[] = [];
+    const label = `${closing.businessDate}・${work.name}（スタッフID: ${work.staffId}）`;
+    if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(work.startTime)
+      || !/^([01]\d|2[0-3]):[0-5]\d$/.test(work.endTime)
+      || !Number.isSafeInteger(work.hours * 4) || work.hours < 0
+      || hoursBetweenQuarter(work.startTime, work.endTime) !== work.hours) {
+      warnings.push(`${label}の勤務時間が出退勤時刻と一致しません。日次勤務を確認してください。`);
+    }
+    const master = masters.get(work.staffId);
+    const rate = work.kind === "regular" && month >= STAFF_MONTHLY_RATES_START_MONTH && master
+      ? staffMonthlyRateForMonth(master, month) : work.hourlyRate;
+    if (!Number.isSafeInteger(rate) || rate <= 0) {
+      warnings.push(`${label}の適用時給が未設定または不正です。1円以上の整数で設定してください。`);
+    }
+    return warnings;
+  }));
+}
+
+export function monthlyAccountingWarnings(rows: DailyClosing[], casts: CastRecord[] = [], month = "", staff: StaffRecord[] = []) {
   const yen = new Intl.NumberFormat("ja-JP", { style: "currency", currency: "JPY", maximumFractionDigits: 0 });
   const warnings: string[] = [];
   rows.forEach((closing) => {
@@ -844,8 +914,7 @@ export function monthlyAccountingWarnings(rows: DailyClosing[], casts: CastRecor
   });
   // 紹介者条件の月途中変更は、最後に保存された日次条件へ統一して算出する。
   void casts;
-  void month;
-  return [...new Set(warnings)];
+  return [...new Set([...warnings, ...staffPayrollInputWarnings(rows, staff, month)])];
 }
 
 function effectiveIntroducerIssues(rewards: CastReward[]) {
@@ -1201,7 +1270,7 @@ export function calculateMonthlyAccounting(
     balance: { ...balanceWithoutProfit, totalCosts, profit: sales.total - totalCosts },
     cashFunding,
     warnings: [...new Set([
-      ...monthlyAccountingWarnings(approved, calculationData.casts, month),
+      ...monthlyAccountingWarnings(approved, calculationData.casts, month, calculationData.staff),
       ...cashLedgerIssues(calculationData.closings, month),
       ...cashFundingWarnings,
       ...effectiveIntroducerIssues(castRewards),
@@ -1300,6 +1369,7 @@ export function canFinalizeMonthlyAccounting(
     ...approved.flatMap((row) => row.integrityIssues || []),
     ...cashLedgerIssues(calculationData.closings, month),
     ...duplicateBusinessDates,
+    ...staffPayrollInputWarnings(approved, calculationData.staff, month),
     ...effectiveIntroducerIssues(castRewards),
     ...introducerSaveOrderIssues(calculationData, month, resolvedMonthEvents, resolvedDeletionCommits),
     ...introducerMonthEventConsistencyIssues(calculationData, month, resolvedMonthEvents, resolvedDeletionCommits),

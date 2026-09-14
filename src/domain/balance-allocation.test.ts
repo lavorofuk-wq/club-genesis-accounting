@@ -152,6 +152,49 @@ describe("収支表の日別給与配分", () => {
     expect(output.reduce((sum, day) => sum + day.employeeGross, 0)).toBe(22_619);
   });
 
+  it("在籍スタッフの月度訂正単価を全日へ配分し、確定後の名前変更・単価変更・削除を持ち込まない", () => {
+    const input = fixture([
+      closing(1, { staffWork: [staffWork({ hours: 5.5, hourlyRate: 1300 })] }),
+      closing(2, { staffWork: [staffWork({ hours: 6.5, hourlyRate: 1300 })] }),
+    ], { staff: [staffMaster({ hourlyRate: 1400, hourlyRates: { [month]: 1400 } })] });
+    expect(input.results.staffPayroll[0].hourly).toBe(16800);
+    expect(allocateBalancePayroll(input).byDate.map((day) => day.employeeGross)).toEqual([7700, 9100]);
+    const before = structuredClone(input.closings);
+    input.snapshot = { schemaVersion: 3, calculationVersion: "2.25.0" };
+    input.staff![0].name = "変更後の名前";
+    input.staff![0].hourlyRates = { [month]: 9000 };
+    expect(allocateBalancePayroll(input).byDate.map((day) => day.employeeGross)).toEqual([7700, 9100]);
+    input.staff = [];
+    expect(allocateBalancePayroll(input).byDate.map((day) => day.employeeGross)).toEqual([7700, 9100]);
+    expect(input.closings).toEqual(before);
+  });
+
+  it("未確定の月度単価訂正後に古い集計値を出力せず、日額は保存適用単価とも突合する", () => {
+    const input = fixture([closing(1, { staffWork: [staffWork({ hourlyRate: 1300 })] })],
+      { staff: [staffMaster({ hourlyRates: { [month]: 1400 } })] });
+    input.staff![0].hourlyRates = { [month]: 1500 };
+    expect(() => allocateBalancePayroll(input)).toThrow("適用時給");
+    input.snapshot = { schemaVersion: 3, calculationVersion: "2.25.0" };
+    input.results.staffPayroll[0].hourlySources![0].hourlyRate += 1;
+    expect(() => allocateBalancePayroll(input)).toThrow("日別基本給与");
+    delete input.results.staffPayroll[0].hourlySources;
+    expect(() => allocateBalancePayroll(input)).toThrow("時給計算基準がありません");
+  });
+
+  it("2.24以前の確定月は月度単価を後付けせず、旧保存勤務単価で帳票突合する", () => {
+    const input = fixture([closing(1, { staffWork: [staffWork({ hours: 4.25, hourlyRate: 1303 })] })]);
+    input.snapshot = { schemaVersion: 3, calculationVersion: "2.24.0" };
+    delete input.results.staffPayroll[0].hourlySources;
+    input.staff = [staffMaster({ hourlyRates: { [month]: 9000 } })];
+    expect(allocateBalancePayroll(input).byDate[0].employeeGross).toBe(5537);
+  });
+
+  it("未確定月に対象月のスタッフ単価がない場合、保存済み勤務単価で帳票を出力しない", () => {
+    const input = fixture([closing(1, { staffWork: [staffWork()] })]);
+    input.staff = [staffMaster({ hourlyRates: { "2026-10": 1800 } })];
+    expect(() => allocateBalancePayroll(input)).toThrow("2026-09月度の適用時給が未設定");
+  });
+
   it("同月体入→在籍スタッフは明示IDのみを使い、退店・削除済みアーカイブでも配分できる", () => {
     const staff = staffMaster({ convertedFromTrialId: "trial-staff", hourlyRate: 2_000 });
     const input = fixture([
@@ -213,7 +256,7 @@ describe("収支表の日別給与配分", () => {
   it("日次の変更で保存済みスタッフ月額・日払いと一致しなければ停止する", () => {
     const input = fixture([closing(1, { staffWork: [staffWork()] })]);
     input.closings[0].staffWork[0].hourlyRate += 100;
-    expect(() => allocateBalancePayroll(input)).toThrow("日別基本給与");
+    expect(() => allocateBalancePayroll(input)).toThrow("適用時給");
     input.closings[0].staffWork[0].hourlyRate -= 100;
     input.closings[0].staffWork[0].dailyPayment += 10;
     expect(() => allocateBalancePayroll(input)).toThrow("日払い合計");

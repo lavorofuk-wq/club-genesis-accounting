@@ -5,9 +5,27 @@ import {
   validateCastPaySetting,
   validateDriverPaySetting,
   validateStaffPaySetting,
+  validateStaffMonthlyPaySetting,
 } from "./master-pay-validation";
 
 describe("マスタ報酬額の保存検証", () => {
+  it("スタッフ月度時給は9月以降・採用月以降の正数を要求する", () => {
+    expect(() => validateStaffMonthlyPaySetting("active", { "2026-09": 1500, "2026-10": 1800 }, undefined, "2026-08-01")).not.toThrow();
+    const invalidRates: Array<Record<string, number>> = [{}, { "2026-08": 1500 }, { "2026-13": 1500 }, { "2026-09": 0 }, { "2026-09": -1 }, { "2026-09": Number.NaN }, { "2026-09": 1500.5 }, { "2026-09": Number.MAX_SAFE_INTEGER + 1 }];
+    for (const rates of invalidRates) {
+      expect(() => validateStaffMonthlyPaySetting("active", rates, undefined, "2026-08-01")).toThrow();
+    }
+    expect(() => validateStaffMonthlyPaySetting("active", { "2026-09": 1500 }, undefined, "2026-10-01")).toThrow("採用月より前");
+    expect(() => validateStaffMonthlyPaySetting("trial", undefined, 1500, undefined)).not.toThrow();
+    expect(() => validateStaffMonthlyPaySetting("trial", undefined, 0, undefined)).toThrow();
+  });
+
+  it("月度未登録の旧0円マスタは非金額編集のみ許容し、新規0円月度は作らない", () => {
+    const before = { status: "active" as const, hourlyRate: 0, trialHourlyRate: undefined };
+    expect(() => validateStaffMonthlyPaySetting("active", undefined, undefined, "2026-08-01", before)).not.toThrow();
+    expect(() => validateStaffMonthlyPaySetting("active", { "2026-09": 0 }, undefined, "2026-08-01", before)).toThrow();
+    expect(() => validateStaffMonthlyPaySetting("active", undefined, undefined, "2026-08-01")).toThrow();
+  });
   it("既存キャストの未登録月へ画面初期値の0円を追加しない", () => {
     const legacy = { "2026-08": 0 };
     expect(monthlyRatesForSave(legacy, "2026-09", 0, false)).toEqual(legacy);
