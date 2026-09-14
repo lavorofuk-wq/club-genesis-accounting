@@ -1,4 +1,11 @@
-# GMS Ver2.26.0 アーキテクチャ
+# GMS Ver2.26.1 アーキテクチャ
+
+## LAN HTTP開発環境のチェックサム・ID生成（Ver2.26.1、devのみ反映）
+
+- LANのHTTP接続では `crypto.subtle` と `crypto.randomUUID` が公開されないため、ブラウザー互換処理を `src/lib/crypto-compat.ts` に集約する。WebCryptoがある場合は従来の処理を使い、ない場合だけ固定依存の `@noble/hashes` で同じUTF-8バイト列のSHA-256を計算する。
+- POSチェックサムと月次データ照合はそれぞれの既存JSON正規化を維持する。チェックサムの省略・不一致の受入れ・計算仕様の変更・確定結果の書換えは行わない。WebCryptoが存在して処理が失敗した場合はエラーを隠さない。
+- 取込後の店舗入力・保存・マスタ登録・各ロックも、HTTPで利用可能な `crypto.getRandomValues` によるUUID v4へフォールバックする。`Math.random` や日時は使わず、安全な乱数がない場合は明示的に停止する。ID形式・権限・Firebase接続先・認証・Rulesは変更しない。
+- 今回はdevブランチのみcommit/pushし、mainへのマージ・本番デプロイは行わない。POS側や保存済み業務データは変更しない。
 
 ## スタッフ月度時給（Ver2.25.0）
 

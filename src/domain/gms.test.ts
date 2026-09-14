@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildDailyCasts,
   calculateCash,
@@ -37,6 +37,8 @@ import {
   type PosClosingV3,
   type StaffRecord,
 } from "./gms";
+
+afterEach(() => vi.unstubAllGlobals());
 
 function pos(): PosClosingV3 {
   return {
@@ -1280,6 +1282,29 @@ describe("GMS報酬・日次計算", () => {
 });
 
 describe("POS schemaVersion 3", () => {
+  it("HTTP LAN環境でもHTTPS環境で生成したPOSのSHA-256を検証して取り込む", async () => {
+    const browserCrypto = globalThis.crypto;
+    expect(typeof browserCrypto.subtle.digest).toBe("function");
+    const value = await signedPos(pos());
+    const original = structuredClone(value);
+
+    // HTTP LAN接続では乱数生成は利用できてもsubtle・randomUUIDは公開されない。
+    vi.stubGlobal("crypto", { getRandomValues: browserCrypto.getRandomValues.bind(browserCrypto) });
+
+    await expect(sha256Checksum(value as unknown as Record<string, unknown>)).resolves.toBe(original.checksum);
+    await expect(parsePosClosingV3(value)).resolves.toMatchObject({ schemaVersion: 3, submissionId: "submission-1" });
+    expect(value).toEqual(original);
+  });
+
+  it("HTTP LAN環境でも改変されたPOS JSONをチェックサム不一致で拒否する", async () => {
+    const browserCrypto = globalThis.crypto;
+    const value = await signedPos(pos());
+    vi.stubGlobal("crypto", { getRandomValues: browserCrypto.getRandomValues.bind(browserCrypto) });
+    value.sales.totalSales += 1;
+
+    await expect(parsePosClosingV3(value)).rejects.toThrow("チェックサムが一致しません");
+  });
+
   it("SHA-256を検証して取り込む", async () => {
     const value = await signedPos(pos()) as unknown as Record<string, unknown>;
     await expect(parsePosClosingV3(value)).resolves.toMatchObject({ schemaVersion: 3, submissionId: "submission-1" });

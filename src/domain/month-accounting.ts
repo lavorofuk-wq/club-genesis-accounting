@@ -31,6 +31,7 @@ import type {
 } from "./gms";
 import { cashLedgerIssues, summarizeCashFunding, type CashFundingSummary } from "./cash-funding";
 import { STAFF_MONTHLY_RATES_START_MONTH, staffMonthlyRateForMonth } from "./staff-rates";
+import { sha256Hex } from "../lib/crypto-compat";
 
 export const MONTHLY_CALCULATION_VERSION = "2.25.0";
 export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 3 as const;
@@ -1330,9 +1331,7 @@ export async function monthlySourceFingerprint(
     introducerDeletionCommits: deletionCommits.filter((row) => row.month === month)
       .sort((left, right) => left.id.localeCompare(right.id)),
   });
-  const bytes = new TextEncoder().encode(JSON.stringify(source));
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return sha256Hex(JSON.stringify(source));
 }
 
 export function canFinalizeMonthlyAccounting(

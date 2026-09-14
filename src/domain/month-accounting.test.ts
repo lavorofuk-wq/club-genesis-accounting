@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { calculateCashFunding, cashFundingContext } from "./cash-funding";
 import type {
   CastRecord,
@@ -28,6 +28,8 @@ import {
   type IntroducerEntryEvent,
   type MonthlyAccountingSnapshot,
 } from "./month-accounting";
+
+afterEach(() => vi.unstubAllGlobals());
 
 const month = "2026-09";
 
@@ -988,6 +990,21 @@ describe("月次会計ドメイン", () => {
     const result = calculateMonthlyAccounting(workspace({ staff: [trial], closings: [closing] }), month, adjustments());
 
     expect(result.staffPayroll.map((row) => row.id).sort()).toEqual(["source-trial-staff", "target-trial-staff"]);
+  });
+
+  it("HTTP LAN環境でもHTTPSと同じ月次fingerprintを算出し、計算元の変更を検出する", async () => {
+    const browserCrypto = globalThis.crypto;
+    expect(typeof browserCrypto.subtle.digest).toBe("function");
+    const source = workspace({ casts: [cast()], staff: [staff()], closings: [approvedClosing()] });
+    const original = structuredClone(source);
+    const expected = await monthlySourceFingerprint(source, month, adjustments());
+
+    vi.stubGlobal("crypto", { getRandomValues: browserCrypto.getRandomValues.bind(browserCrypto) });
+
+    await expect(monthlySourceFingerprint(source, month, adjustments())).resolves.toBe(expected);
+    expect(source).toEqual(original);
+    const edited = workspace({ ...source, casts: [cast({ hourlyRates: { [month]: 4_000 } })] });
+    expect(await monthlySourceFingerprint(edited, month, adjustments())).not.toBe(expected);
   });
 
   it("月次ソースの配列順が違っても同じfingerprintを返す", async () => {

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { User } from "firebase/auth";
+import { secureRandomUUID } from "@/lib/crypto-compat";
 import type {
   BottleAllocation, CashReconciliation, CastKind, DailyCast, DailyClosing, DailyDriverWork, DailyExpense, DailyStaffWork, ExpenseCategory,
   PosClosingV3, PosItem, PosTransaction, ReconciledDailyCastInputs
@@ -429,7 +430,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     const trial = castRows.find((row) => row.posCastId === expensePersonId && row.kind === "trial");
     const payee = expenseCategory === "beautyTrial" ? trial?.name || "" : expensePayee.trim();
     if (!payee || expenseAmount <= 0) return setError("経費の支払先と金額を入力してください。");
-    setExpenses((rows) => [...rows, { id: crypto.randomUUID(), category: expenseCategory, payee, amount: expenseAmount, personId: trial?.masterId, personName: trial?.name }]);
+    setExpenses((rows) => [...rows, { id: secureRandomUUID(), category: expenseCategory, payee, amount: expenseAmount, personId: trial?.masterId, personName: trial?.name }]);
     setExpensePayee(""); setExpensePersonId(""); setExpenseAmount(0); setError("");
   };
   const expenseTotal = expenses.reduce((sum, row) => sum + row.amount, 0);
