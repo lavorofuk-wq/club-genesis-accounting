@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { User } from "firebase/auth";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DailyClosing, PosClosingV3 } from "@/domain/gms";
 import type { AccountingWorkspaceData } from "@/domain/month-accounting";
 import { StoreWork, DailyPreview } from "./store-work";
@@ -13,6 +13,8 @@ const harness = vi.hoisted(() => ({
   buttons: [] as Array<{ label: string; disabled: boolean; click: () => unknown }>,
   checks: [] as Array<{ disabled: boolean; checked: boolean; change: (checked: boolean) => void }>,
   money: [] as Array<{ label: string; value: number | null; change: (amount: number | null) => void }>,
+  files: [] as Array<{ disabled: boolean; change: (input: unknown) => unknown }>,
+  parse: vi.fn(async (value: unknown) => value),
   submit: vi.fn(async (..._args: unknown[]) => undefined),
 }));
 
@@ -51,6 +53,11 @@ vi.mock("@/lib/firebase/repository", () => ({
   submitClosing: (...args: unknown[]) => harness.submit(...args),
   deleteUnapprovedClosing: vi.fn(), withdrawClosing: vi.fn(),
 }));
+// JSON自体の妥当性はdomain側で検証済み。ここでは検証完了後の画面遷移と入力保持を確認する。
+vi.mock("@/domain/gms", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/domain/gms")>(),
+  parsePosClosingV3: (value: unknown) => harness.parse(value),
+}));
 vi.mock("./ui", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./ui")>();
   const react = await import("react");
@@ -64,6 +71,9 @@ vi.mock("./ui", async (importOriginal) => {
     }
     if (node.type === "input" && node.props.type === "checkbox" && node.props.onChange) {
       harness.checks.push({ disabled: Boolean(node.props.disabled), checked: Boolean(node.props.checked), change: (checked) => node.props.onChange!({ target: { checked } }) });
+    }
+    if (node.type === "input" && node.props.type === "file" && node.props.onChange) {
+      harness.files.push({ disabled: Boolean(node.props.disabled), change: (input) => node.props.onChange!({ currentTarget: input }) });
     }
     if (node.type === actual.MoneyInput || (typeof node.type === "function" && node.type.name === "CashAmountInput")) harness.money.push({ label, value: node.props.value!, change: (amount) => node.props.onChange!(amount) });
     collect(node.props.children, node.props.label || label);
@@ -127,7 +137,7 @@ function restore(values: Record<string, unknown>, key = prefix) {
 }
 function render(source = data) {
   harness.stateIndex = 0; harness.effectIndex = 0;
-  harness.buttons = []; harness.checks = []; harness.money = []; harness.keys = [];
+  harness.buttons = []; harness.checks = []; harness.money = []; harness.files = []; harness.keys = [];
   const markup = renderToStaticMarkup(createElement(StoreWork, {
     data: source, user, busy: false, run: async (action) => { await action(); return true; },
   }));
@@ -148,8 +158,95 @@ const nextLabel = "現金照合内容を確認して送信確認へ";
 
 beforeEach(() => {
   harness.drafts = {}; harness.keys = []; harness.state = []; harness.effects = []; harness.pending = [];
-  harness.submit.mockClear();
+  harness.submit.mockClear(); harness.parse.mockClear();
   restore({ pos, stage: "cash", openingPersonalDebt: 0, personalRepayment: 0 });
+});
+afterEach(() => vi.unstubAllGlobals());
+
+describe("新規店舗入力と送信済み営業日の重複防止", () => {
+  const sameDay = (status: DailyClosing["status"]): DailyClosing => ({ ...recordedManagedClosing(), status });
+  const sourceFor = (status: DailyClosing["status"]): AccountingWorkspaceData => ({ ...data, closings: [sameDay(status)] });
+  const importJson = async (value: PosClosingV3) => {
+    const file = harness.files[0];
+    expect(file).toBeDefined(); expect(file.disabled).toBe(false);
+    const input = { files: [{ text: async () => JSON.stringify(value) }], value: "closing.json" };
+    await file.change(input);
+    expect(input.value).toBe("");
+  };
+
+  it.each(["submitted", "returned", "withdrawn", "approved"] as const)("%s済み営業日の新規下書きは保持し、照合の確定を停止する", (status) => {
+    restore({ stage: "json", expenses: [{ id: "draft-expense", category: "supplies", payee: "下書き支払先", amount: 1234 }] });
+    const source = sourceFor(status);
+    const markup = render(source);
+    expect(markup).toContain("この営業日の送信済みデータがあります。");
+    expect(markup).toContain('href="#store-sent-data"');
+    expect(markup).toContain('id="store-sent-data"');
+    expect(harness.files[0].disabled).toBe(false);
+    const before = structuredClone(harness.drafts);
+    const next = button("照合を確定して店舗データ作成へ");
+    expect(next.disabled).toBe(true); next.click();
+    expect(harness.drafts).toEqual(before);
+    expect(harness.submit).not.toHaveBeenCalled();
+  });
+
+  it("店舗入力中に同営業日が他端末から追加されても入力は消さず、次へだけ停止する", () => {
+    restore({ stage: "details", expenses: [{ id: "draft-expense", category: "supplies", payee: "保持する支払先", amount: 1234 }], dispatchFee: 4567 });
+    render(); expect(button("店舗データを確認して現金照合へ").disabled).toBe(false);
+    const markup = render(sourceFor("returned"));
+    expect(markup).toContain("保持する支払先"); expect(markup).toContain('value="4567"');
+    const before = structuredClone(harness.drafts);
+    const next = button("店舗データを確認して現金照合へ");
+    expect(next.disabled).toBe(true); next.click(); expect(harness.drafts).toEqual(before);
+    button("入力を保持してキャスト照合へ戻る").click(); render(sourceFor("returned"));
+    expect(harness.files[0].disabled).toBe(false);
+    expect(harness.drafts[prefix + ".expenses"]).toEqual(before[prefix + ".expenses"]);
+  });
+
+  it("現金確認後に同営業日が追加されても送信確認へ進ませない", () => {
+    render(); harness.checks.at(-1)!.change(true); render();
+    expect(button(nextLabel).disabled).toBe(false);
+    const markup = render(sourceFor("submitted"));
+    expect(markup).toContain("現在は経理確認待ちです");
+    expect(harness.checks.at(-1)!.disabled).toBe(true);
+    expect(button(nextLabel).disabled).toBe(true); button(nextLabel).click();
+    expect(harness.drafts[prefix + ".stage"]).toBe("cash");
+    expect(harness.drafts[prefix + ".pos"]).toEqual(pos);
+    expect(harness.submit).not.toHaveBeenCalled();
+  });
+
+  it.each(["submitted", "returned", "withdrawn", "approved"] as const)("%s済みのJSON取込は元の入力を変更する前に拒否する", async (status) => {
+    restore({ stage: "json", pos: { ...pos, businessDate: "2026-09-11" }, specialCosts: { draft: 4567 }, expenses: [{ id: "draft-expense", category: "supplies", payee: "保持する支払先", amount: 1234 }] });
+    const source = sourceFor(status); render(source);
+    const before = structuredClone(harness.drafts);
+    await importJson(pos);
+    expect(harness.parse).toHaveBeenCalledTimes(1);
+    expect(harness.drafts).toEqual(before);
+    expect(render(source)).toContain(`${date}の店舗データはすでに保存されています`);
+    expect(harness.submit).not.toHaveBeenCalled();
+  });
+
+  it("同営業日の送信済みデータがなければ新規JSONを取り込める", async () => {
+    restore({ stage: "json", pos: null }); render();
+    await importJson(pos);
+    expect(harness.drafts[prefix + ".pos"]).toEqual(pos);
+    expect(render()).not.toContain("この営業日の送信済みデータがあります。");
+    expect(button("照合を確定して店舗データ作成へ").disabled).toBe(false);
+  });
+
+  it.each(["returned", "withdrawn"] as const)("%sの一覧から開いた正式再編集では同営業日のJSON再取込を許可する", async (status) => {
+    const recorded = sameDay(status); const source = sourceFor(status);
+    const key = "store.workflow." + recorded.id;
+    const expense = { id: "draft-expense", category: "supplies", payee: "保持する支払先", amount: 1234 };
+    harness.drafts["store.editing"] = recorded; restore({ stage: "json", expenses: [expense] }, key);
+    const confirm = vi.fn(() => true); vi.stubGlobal("window", { confirm });
+    expect(render(source)).not.toContain("この営業日の送信済みデータがあります。");
+    await importJson({ ...pos, submissionId: "updated-json" });
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(harness.drafts[key + ".pos"]).toMatchObject({ submissionId: "updated-json" });
+    expect(harness.drafts[key + ".expenses"]).toEqual([expense]);
+    expect(button("照合を確定して店舗データ作成へ").disabled).toBe(false);
+    expect(harness.submit).not.toHaveBeenCalled();
+  });
 });
 
 describe("全営業日の現金実績入力", () => {
