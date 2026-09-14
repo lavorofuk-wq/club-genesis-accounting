@@ -10,6 +10,7 @@ import { AccountingForms, BalanceExport, ClosingCastProductDetails, ExpenseExpor
 import { CommonForms, introducerDeletionConfirmation } from "./common-forms";
 import { CastProductSummary, closingDeletionConfirmation, DailyPreview, jsonReimportConfirmation, reconcileTrialBeautyExpenses, retainCurrentCastMappingForJson, retainMatchingSpecialCosts, shouldResetDailyInputsForJson, StoreWork, summarizeCastDrinksByPrice } from "./store-work";
 import { Modal, currentMonth } from "./ui";
+import { CastReceiptExport } from "./cast-receipt-export";
 
 const month = currentMonth();
 const businessDate = `${month}-02`;
@@ -130,6 +131,46 @@ function balanceWorkspace(): AccountingWorkspaceData {
 }
 
 describe("主要ページのSSRスモーク", () => {
+  it("キャスト報酬に受領書の全員一括ボタンを表示し、未保存・処理中・不整合では停止する", () => {
+    const source = balanceWorkspace();
+    const render = (workspace = source, busy = false) => renderToStaticMarkup(createElement(AccountingForms, {
+      section: "castRewards", data: workspace, user, busy, run,
+    }));
+    const button = /<button[^>]*disabled[^>]*>全員分の受領書をXLSX出力/;
+    expect(render()).toContain("全員分の受領書をXLSX出力");
+    expect(render()).toContain("受領日・氏名の署名欄は空欄");
+    expect(render()).not.toMatch(button);
+    expect(render(source, true)).toMatch(button);
+    expect(render({ ...source, closings: [] })).toMatch(button);
+    expect(render({ ...source, closings: [{ ...source.closings[0], status: "submitted" }] })).toMatch(button);
+    expect(render({ ...source, closings: [{ ...source.closings[0], integrityIssues: ["欠損"] }] })).toMatch(button);
+    const rows = calculateMonthlyAccounting(source, month, source.adjustments[0]).castRewards;
+    for (const reason of ["未保存の経理入力を保存してください。", "ボトル区分を確認して保存してください。", "月次確定処理中です。"]) {
+      const markup = renderToStaticMarkup(createElement(CastReceiptExport, { rows, month, sourceLabel: "未確定", disabledReason: reason }));
+      expect(markup).toContain(reason);
+      expect(markup).toMatch(button);
+    }
+    expect(renderToStaticMarkup(createElement(CastReceiptExport, { rows: [{ ...rows[0], grossPay: NaN }], month, sourceLabel: "未確定", disabledReason: "" }))).toMatch(button);
+  });
+
+  it("受領書は確定時の報酬を使い、現在マスタ・日次の変更や削除に影響されない", () => {
+    const source = balanceWorkspace();
+    const result = calculateMonthlyAccounting(source, month, source.adjustments[0]);
+    result.castRewards[0].name = "確定時キャスト名";
+    const snapshot = buildMonthlySnapshot(month, 3, "a".repeat(64), source.adjustments[0], result, source.closings, user.uid, new Date().toISOString());
+    const closed: AccountingWorkspaceData = { ...source, monthSnapshots: [snapshot],
+      monthStates: [{ month, status: "closed", revision: 1, currentSnapshotRevision: 3, updatedAt: "", updatedBy: user.uid }] };
+    const render = (workspace: AccountingWorkspaceData) => renderToStaticMarkup(createElement(AccountingForms, {
+      section: "castRewards", data: workspace, user, busy: false, run,
+    }));
+    const original = render(closed);
+    expect(original).toContain("月次確定済み 第3版");
+    expect(original).toContain("確定時キャスト名");
+    expect(original).not.toMatch(/<button[^>]*disabled[^>]*>全員分の受領書をXLSX出力/);
+    expect(render({ ...closed, closings: [], casts: [] })).toBe(original);
+    expect(render({ ...closed, monthSnapshots: [] })).toMatch(/<button[^>]*disabled[^>]*>全員分の受領書をXLSX出力/);
+  });
+
   it.each([false, true])("紹介者ページは現在データの変更・削除後も確定時の紹介者名と支払額を表示する（旧ID形式=%s）", (legacyIds) => {
     const result = calculateMonthlyAccounting(data, month, data.adjustments[0]);
     expect(result.introducerPayments).toHaveLength(1);
