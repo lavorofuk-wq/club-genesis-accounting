@@ -14,16 +14,30 @@ const reward: CastReward = {
 
 describe("キャスト報酬から受領書への転記", () => {
   it("時給・全5種類のバック・美容室・日払立替送迎・源泉・差引を指定欄へ出す", () => {
-    expect(buildCastReceiptSheets([reward], "2026-09")).toEqual([{ name: "花子", cells: {
+    expect(buildCastReceiptSheets([reward], "2026-09")).toEqual([{ template: "hourlyAndBack", name: "花子", cells: {
       G1: "9月報酬分", G2: 12750, G3: 8832, G4: 500, G5: 22082, G6: 3500, G7: 1000, G8: 17582, G10: "花子",
     } }]);
   });
-  it("売上報酬採用時は①の見出しと金額を変更し、②を0円とする", () => {
-    const saved = { ...reward, adoptedSystem: "salesReward" as const, salesReward: 100000, adoptedReward: 100000, grossPay: 100500, netPay: 96000 };
+  it("売上報酬採用時は専用様式の6項目へ転記し、保存された採用率を見出しに記載する", () => {
+    const saved = { ...reward, adoptedSystem: "salesReward" as const, rewardRate: .65, salesReward: 100000, adoptedReward: 100000, grossPay: 100500, netPay: 96000 };
     const sheet = buildCastReceiptSheets([saved], "2026-12")[0];
-    expect(sheet.cells).toMatchObject({ B2: "①　売上報酬　計", G1: "12月報酬分", G2: 100000, G3: 0, G5: 100500, G8: 96000 });
+    expect(sheet).toEqual({ template: "salesReward", name: "花子", cells: {
+      B2: "①　日売上－酒代（50％）×65％", G1: "12月報酬分", G2: 100000, G3: 500, G4: 100500, G5: 3500, G6: 1000, G7: 96000, G9: "花子",
+    } });
     expect(saved.hourlyPay).toBe(12750);
     expect(saved.bottleBack).toBe(1999);
+  });
+  it.each([.5, .6, .7, .8, .655])("旧確定を含む保存率%sを表示し、現在の基準率で再計算しない", (rewardRate) => {
+    const saved = { ...reward, id: "sales-cast", adoptedSystem: "salesReward" as const, rewardRate, salesReward: 123456, adoptedReward: 123456, grossPay: 123956, netPay: 119456 };
+    const sheets = buildCastReceiptSheets([saved, reward], "2026-09");
+    expect(sheets[0].template).toBe("salesReward");
+    expect(sheets[1].template).toBe("hourlyAndBack");
+    expect(sheets[0].cells.B2).toBe(`①　日売上－酒代（50％）×${rewardRate * 100}％`);
+    expect(sheets[0].cells.G2).toBe(123456);
+    expect(sheets[0].cells.G7).toBe(119456);
+  });
+  it.each([undefined, NaN, 0, -1, 1.01])("売上報酬の保存率%sが不正なら50％等で補完せず停止する", (rewardRate) => {
+    expect(() => buildCastReceiptSheets([{ ...reward, adoptedSystem: "salesReward", rewardRate } as CastReward], "2026-09")).toThrow("不一致");
   });
   it("旧確定の1円・小数端数や0円・マイナスの保存金額を丸め直さない", () => {
     const saved = { ...reward, hourlyPay: 12750.5, hourlyAndBack: 21582.5, adoptedReward: 21582.5, grossPay: 22082.5, netPay: 17582.5 };
