@@ -437,9 +437,9 @@ export function normalizeMonthlyAccountingSnapshot(
     booleanKeys: ["trialOnly"],
     allowNegativeKeys: ["netPay"],
   });
-  const castRewards = requireDailyHourlyYen
+  const castRewards = (requireDailyHourlyYen
     ? normalizeSnapshotHourlyRows(storedCastRewards, pathMonth, "hourlyPay", castSalesReports)
-    : storedCastRewards;
+    : storedCastRewards)?.map((item) => snapshotObject(item) ? { ...item } : item);
   const introducerPayments = validSnapshotRows(row.introducerPayments,
     ["id", "introducer", "cast", "feeType", "adopted"],
     ["honShimeiLiquorCost", "salesBase", "salesFee", "grossBase", "grossFee", "attendanceAdvisory", "entryAdvisory", "advisory", "total"]);
@@ -454,6 +454,12 @@ export function normalizeMonthlyAccountingSnapshot(
   const categoryValues = snapshotObject(row.expenses.byCategory) ? Object.values(row.expenses.byCategory) : [];
   const castRewardsValid = Boolean(castRewards?.every((item) => {
     if (!snapshotObject(item)) return false;
+    if (item.appliedHourlyRates !== undefined) {
+      if (!Array.isArray(item.appliedHourlyRates) && !snapshotObject(item.appliedHourlyRates)) return false;
+      const rates = snapshotList<unknown>(item.appliedHourlyRates);
+      if (!rates.length || rates.some((rate) => !snapshotNonNegative(rate)) || new Set(rates).size !== rates.length) return false;
+      item.appliedHourlyRates = rates;
+    }
     return (item.adoptedSystem === "hourlyAndBack" || item.adoptedSystem === "salesReward")
       && Number(item.rewardRate) <= 1
       && (!requireTenYen || [

@@ -255,7 +255,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
         : !results.castSalesReports.length ? "対象月の承認済みキャスト売上がありません。" : ""}
     />}
     {section === "castRewards" && <CastReceiptExport
-      rows={results?.castRewards} month={month}
+      rows={results?.castRewards} casts={data.casts} month={month}
       sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
       disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"
         : adjustmentsDirty ? "未保存の経理入力を保存してください。"

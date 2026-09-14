@@ -1,16 +1,29 @@
 import JSZip from "jszip";
+import receiptLayouts from "./receipt-layouts.json";
 
-export type ReceiptSheet = { template: "hourlyAndBack" | "salesReward"; name: string; cells: Record<string, string | number> };
-export const RECEIPT_TEMPLATE_URL = "/templates/cast-receipt-v2.xlsx";
+export type ReceiptSheet = { template: "hourlyAndBack" | "salesReward"; name: string; cells: Record<string, string | number>; statementCells: Record<string, string | number> };
+export const RECEIPT_TEMPLATE_URL = "/templates/cast-receipt-v3.xlsx";
 
 const declaration = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
 const spreadsheetNs = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const relationshipNs = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const invalidXml = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/u;
 const layouts = {
-  hourlyAndBack: { source: 1, nameCell: "G10", printArea: "$A$1:$H$18", cells: new Set(["G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G10"]) },
-  salesReward: { source: 2, nameCell: "G9", printArea: "$A$1:$H$17", cells: new Set(["B2", "G1", "G2", "G3", "G4", "G5", "G6", "G7", "G9"]) },
+  hourlyAndBack: { ...receiptLayouts.hourlyAndBack, nameCell: "G10", cells: new Set(["G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G10"]) },
+  salesReward: { ...receiptLayouts.salesReward, nameCell: "G9", cells: new Set(["B2", "G1", "G2", "G3", "G4", "G5", "G6", "G7", "G9"]) },
 } as const;
+const statementCells = new Set(["D3", "F4", "E5", "F6", "F7", "F8", "F9", "F10", "F11", "F12", "F13", "F14", "F15", "F18", "F19", "F20", "F21", "F22", "F25", "F26"]);
+
+/** 元様式のセル名から、左右の行高を保持するため分割した出力行へ対応付ける。 */
+export function receiptCellAddress(template: ReceiptSheet["template"], section: "receipt" | "statement", address: string) {
+  const layout = layouts[template];
+  const match = /^([A-K])(\d+)$/.exec(address);
+  if (!layout || !match) throw new Error("受領書・明細書の記入対象セルが正しくありません。");
+  const row = (section === "receipt" ? layout.receiptRows : layout.statementRows)[Number(match[2]) - 1];
+  if (!row) throw new Error("受領書・明細書の記入対象行が正しくありません。");
+  const col = String.fromCharCode(match[1].charCodeAt(0) + (section === "statement" ? layout.statementColumnOffset : 0));
+  return `${col}${row}`;
+}
 
 function escapeXml(value: string) {
   if (invalidXml.test(value) || /[\uD800-\uDFFF]/u.test(value)) throw new Error("キャスト名に使用できない文字が含まれています。");
@@ -51,7 +64,8 @@ export async function fillReceiptTemplate(template: ArrayBuffer | Uint8Array, sh
       const [sheet, rels] = await Promise.all([
         readPart(zip, `xl/worksheets/sheet${index}.xml`), readPart(zip, `xl/worksheets/_rels/sheet${index}.xml.rels`),
       ]);
-      if (!zip.file(`xl/printerSettings/printerSettings${index}.bin`) || !sheet.includes('paperSize="281"')) {
+      if (!zip.file(`xl/printerSettings/printerSettings${index}.bin`) || !sheet.includes('paperSize="281"')
+        || !sheet.includes('fitToWidth="1"') || !sheet.includes('fitToHeight="1"') || !sheet.includes('fitToPage="1"')) {
         throw new Error("受領書テンプレートの印刷設定が正しくありません。");
       }
       return { sheet, rels };
@@ -70,6 +84,7 @@ export async function fillReceiptTemplate(template: ArrayBuffer | Uint8Array, sh
   const addedStyles: string[] = [];
   const addedFonts: string[] = [];
   const styleIds = new Map<string, number>();
+  const decimalFormatId = Math.max(163, ...Array.from(sourceStyles.matchAll(/<numFmt\b[^>]*\bnumFmtId="(\d+)"/g), (match) => Number(match[1]))) + 1;
   function fittedStyle(id: number, decimal: boolean, nameSize?: number) {
     const key = `${id}:${nameSize || ""}:${decimal}`;
     const previous = styleIds.get(key);
@@ -79,7 +94,8 @@ export async function fillReceiptTemplate(template: ArrayBuffer | Uint8Array, sh
     let fitted = original.replace(/<alignment\b([^>]*)\/>/, (_match, attrs: string) =>
       `<alignment${attrs.replace(/ shrinkToFit="[^"]*"/g, "")} shrinkToFit="1"/>`);
     // 旧確定値に端数がある場合も、表示を整数へ丸めて保存金額を隠さない。
-    if (decimal) fitted = fitted.replace(/numFmtId="\d+"/, 'numFmtId="164"');
+    if (decimal) fitted = fitted.replace(/numFmtId="\d+"/, `numFmtId="${decimalFormatId}"`);
+    else if (fitted.includes('numFmtId="176"')) fitted = fitted.replace('numFmtId="176"', 'numFmtId="3"');
     if (nameSize) {
       const fontId = Number(original.match(/fontId="(\d+)"/)?.[1]);
       const resized = fonts![fontId].replace(/<sz val="[^"]*"\/>/, `<sz val="${nameSize}"/>`);
@@ -97,21 +113,29 @@ export async function fillReceiptTemplate(template: ArrayBuffer | Uint8Array, sh
     if (!layout) throw new Error("受領書の報酬方式が正しくありません。");
     const source = sources[layout.source - 1];
     let xml = source.sheet;
-    for (const [address, value] of Object.entries(sheet.cells)) {
-      if (!layout.cells.has(address)) throw new Error("受領書の記入対象セルが正しくありません。");
+    const entries = [
+      ...Object.entries(sheet.cells).map(([logical, value]) => ({ section: "receipt" as const, logical, value })),
+      ...Object.entries(sheet.statementCells).map(([logical, value]) => ({ section: "statement" as const, logical, value })),
+    ];
+    for (const { section, logical, value } of entries) {
+      if (!(section === "receipt" ? layout.cells.has(logical) : statementCells.has(logical) || logical === "B11" && sheet.template === "salesReward")) throw new Error("受領書・明細書の記入対象セルが正しくありません。");
+      const address = receiptCellAddress(sheet.template, section, logical);
       const pattern = new RegExp(`<c\\b([^>]*\\br="${address}"[^>]*?)(?:\\/>|>[\\s\\S]*?<\\/c>)`, "g");
       let count = 0;
       xml = xml.replace(pattern, (_match, attributes: string) => {
         count += 1;
         const style = Number(attributes.match(/\bs="(\d+)"/)?.[1]);
         if (!Number.isInteger(style)) throw new Error("受領書のセル書式を読み込めません。");
-        // B2の長い見出しは空のC:Fへ表示するため、縮小しない。
         let attrs = attributes.replace(/\s+t="[^"]*"/g, "");
         // 結合セルの縮小表示に対応しないビューアでも名前が欠けないよう文字数に合わせる。
-        const nameUnits = address === layout.nameCell && typeof value === "string"
+        const textWidth = section === "receipt" && logical === layout.nameCell ? 47
+          : section === "statement" && logical === "F4" ? 62
+          : section === "statement" && logical === "E5" ? 100
+          : section === "statement" && logical === "F8" ? 88 : 0;
+        const nameUnits = textWidth && typeof value === "string"
           ? Array.from(value).reduce((sum, char) => sum + (/^[\x20-\x7E]$/.test(char) ? .6 : 1), 0) : 0;
-        const nameSize = nameUnits > 4.3 ? Math.max(1, Math.floor(47 / nameUnits * 10) / 10) : undefined;
-        if (address !== "B2") attrs = attrs.replace(/\bs="\d+"/, `s="${fittedStyle(style, typeof value === "number" && !Number.isInteger(value), nameSize)}"`);
+        const nameSize = nameUnits * 11 > textWidth ? Math.max(1, Math.floor(textWidth / nameUnits * 10) / 10) : undefined;
+        attrs = attrs.replace(/\bs="\d+"/, `s="${fittedStyle(style, typeof value === "number" && !Number.isInteger(value), nameSize)}"`);
         if (typeof value === "number") {
           if (!Number.isFinite(value) || Math.abs(value) > Number.MAX_SAFE_INTEGER) throw new Error("受領書の金額が正しくありません。");
           return `<c${attrs}><v>${value}</v></c>`;
@@ -132,8 +156,10 @@ export async function fillReceiptTemplate(template: ArrayBuffer | Uint8Array, sh
   outputStyles = outputStyles.replace(/<fonts\b[^>]*>[\s\S]*?<\/fonts>/,
     `<fonts count="${fonts.length + addedFonts.length}">${originalFonts}${addedFonts.join("")}</fonts>`);
   if ([...styleIds.keys()].some((key) => key.endsWith(":true"))) {
-    outputStyles = outputStyles.replace(/(<styleSheet\b[^>]*>)/,
-      '$1<numFmts count="1"><numFmt numFmtId="164" formatCode="#,##0.###############;[Red]-#,##0.###############;0"/></numFmts>');
+    const format = `<numFmt numFmtId="${decimalFormatId}" formatCode="#,##0.###############;[Red]-#,##0.###############;0"/>`;
+    outputStyles = /<numFmts\b/.test(outputStyles)
+      ? outputStyles.replace(/<numFmts\b[^>]*>([\s\S]*?)<\/numFmts>/, (_match, content: string) => `<numFmts count="${(content.match(/<numFmt\b/g) || []).length + 1}">${content}${format}</numFmts>`)
+      : outputStyles.replace(/(<styleSheet\b[^>]*>)/, `$1<numFmts count="1">${format}</numFmts>`);
   }
   zip.file("xl/styles.xml", outputStyles);
   zip.file("xl/sharedStrings.xml", sharedStrings.replace(/(<sst\b[^>]*\bcount=")\d+("[^>]*>)/, `$1${stringReferences}$2`));
