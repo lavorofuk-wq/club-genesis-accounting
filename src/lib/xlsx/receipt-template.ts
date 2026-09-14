@@ -1,13 +1,16 @@
 import JSZip from "jszip";
 
-export type ReceiptSheet = { name: string; cells: Record<string, string | number> };
-export const RECEIPT_TEMPLATE_URL = "/templates/cast-receipt-v1.xlsx";
+export type ReceiptSheet = { template: "hourlyAndBack" | "salesReward"; name: string; cells: Record<string, string | number> };
+export const RECEIPT_TEMPLATE_URL = "/templates/cast-receipt-v2.xlsx";
 
 const declaration = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
 const spreadsheetNs = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const relationshipNs = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const invalidXml = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/u;
-const editableCells = new Set(["B2", "G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G10"]);
+const layouts = {
+  hourlyAndBack: { source: 1, nameCell: "G10", printArea: "$A$1:$H$18", cells: new Set(["G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G10"]) },
+  salesReward: { source: 2, nameCell: "G9", printArea: "$A$1:$H$17", cells: new Set(["B2", "G1", "G2", "G3", "G4", "G5", "G6", "G7", "G9"]) },
+} as const;
 
 function escapeXml(value: string) {
   if (invalidXml.test(value) || /[\uD800-\uDFFF]/u.test(value)) throw new Error("キャスト名に使用できない文字が含まれています。");
@@ -42,12 +45,21 @@ async function readPart(zip: JSZip, path: string) {
 export async function fillReceiptTemplate(template: ArrayBuffer | Uint8Array, sheets: ReceiptSheet[]) {
   if (!sheets.length) throw new Error("出力するキャスト報酬がありません。");
   const zip = await JSZip.loadAsync(template);
-  const [sourceSheet, sheetRels, contentTypes, sharedStrings, sourceStyles] = await Promise.all([
-    readPart(zip, "xl/worksheets/sheet1.xml"), readPart(zip, "xl/worksheets/_rels/sheet1.xml.rels"),
-    readPart(zip, "[Content_Types].xml"), readPart(zip, "xl/sharedStrings.xml"), readPart(zip, "xl/styles.xml"),
+  // 出力中にsheet1/sheet2を上書きする前に、両様式とそれぞれのプリンター参照を退避する。
+  const [sources, contentTypes, sharedStrings, sourceStyles] = await Promise.all([
+    Promise.all([1, 2].map(async (index) => {
+      const [sheet, rels] = await Promise.all([
+        readPart(zip, `xl/worksheets/sheet${index}.xml`), readPart(zip, `xl/worksheets/_rels/sheet${index}.xml.rels`),
+      ]);
+      if (!zip.file(`xl/printerSettings/printerSettings${index}.bin`) || !sheet.includes('paperSize="281"')) {
+        throw new Error("受領書テンプレートの印刷設定が正しくありません。");
+      }
+      return { sheet, rels };
+    })), readPart(zip, "[Content_Types].xml"), readPart(zip, "xl/sharedStrings.xml"), readPart(zip, "xl/styles.xml"),
   ]);
-  if (!zip.file("xl/printerSettings/printerSettings1.bin") || !sourceSheet.includes('paperSize="281"')) {
-    throw new Error("受領書テンプレートの印刷設定が正しくありません。");
+  for (const index of [1, 2]) {
+    zip.remove(`xl/worksheets/sheet${index}.xml`);
+    zip.remove(`xl/worksheets/_rels/sheet${index}.xml.rels`);
   }
   const names = sheetNames(sheets);
   const originalXfs = sourceStyles.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/)?.[1];
@@ -81,9 +93,12 @@ export async function fillReceiptTemplate(template: ArrayBuffer | Uint8Array, sh
   }
   let stringReferences = 0;
   sheets.forEach((sheet, index) => {
-    let xml = sourceSheet;
+    const layout = layouts[sheet.template];
+    if (!layout) throw new Error("受領書の報酬方式が正しくありません。");
+    const source = sources[layout.source - 1];
+    let xml = source.sheet;
     for (const [address, value] of Object.entries(sheet.cells)) {
-      if (!editableCells.has(address)) throw new Error("受領書の記入対象セルが正しくありません。");
+      if (!layout.cells.has(address)) throw new Error("受領書の記入対象セルが正しくありません。");
       const pattern = new RegExp(`<c\\b([^>]*\\br="${address}"[^>]*?)(?:\\/>|>[\\s\\S]*?<\\/c>)`, "g");
       let count = 0;
       xml = xml.replace(pattern, (_match, attributes: string) => {
@@ -93,7 +108,7 @@ export async function fillReceiptTemplate(template: ArrayBuffer | Uint8Array, sh
         // B2の長い見出しは空のC:Fへ表示するため、縮小しない。
         let attrs = attributes.replace(/\s+t="[^"]*"/g, "");
         // 結合セルの縮小表示に対応しないビューアでも名前が欠けないよう文字数に合わせる。
-        const nameUnits = address === "G10" && typeof value === "string"
+        const nameUnits = address === layout.nameCell && typeof value === "string"
           ? Array.from(value).reduce((sum, char) => sum + (/^[\x20-\x7E]$/.test(char) ? .6 : 1), 0) : 0;
         const nameSize = nameUnits > 4.3 ? Math.max(1, Math.floor(47 / nameUnits * 10) / 10) : undefined;
         if (address !== "B2") attrs = attrs.replace(/\bs="\d+"/, `s="${fittedStyle(style, typeof value === "number" && !Number.isInteger(value), nameSize)}"`);
@@ -110,7 +125,7 @@ export async function fillReceiptTemplate(template: ArrayBuffer | Uint8Array, sh
     if (index > 0) xml = xml.replace(/ tabSelected="1"/g, "");
     stringReferences += (xml.match(/<c\b[^>]*\bt="s"/g) || []).length;
     zip.file(`xl/worksheets/sheet${index + 1}.xml`, xml);
-    zip.file(`xl/worksheets/_rels/sheet${index + 1}.xml.rels`, sheetRels);
+    zip.file(`xl/worksheets/_rels/sheet${index + 1}.xml.rels`, source.rels);
   });
   let outputStyles = sourceStyles.replace(/<cellXfs\b[^>]*>[\s\S]*?<\/cellXfs>/,
     `<cellXfs count="${styles.length + addedStyles.length}">${originalXfs}${addedStyles.join("")}</cellXfs>`);
@@ -122,7 +137,7 @@ export async function fillReceiptTemplate(template: ArrayBuffer | Uint8Array, sh
   }
   zip.file("xl/styles.xml", outputStyles);
   zip.file("xl/sharedStrings.xml", sharedStrings.replace(/(<sst\b[^>]*\bcount=")\d+("[^>]*>)/, `$1${stringReferences}$2`));
-  zip.file("xl/workbook.xml", `${declaration}<workbook xmlns="${spreadsheetNs}" xmlns:r="${relationshipNs}"><bookViews><workbookView activeTab="0"/></bookViews><sheets>${names.map((name, i) => `<sheet name="${escapeXml(name)}" sheetId="${i + 1}" r:id="sheet${i + 1}"/>`).join("")}</sheets><definedNames>${names.map((name, i) => `<definedName name="_xlnm.Print_Area" localSheetId="${i}">${escapeXml(`'${name.replace(/'/g, "''")}'!$A$1:$H$18`)}</definedName>`).join("")}</definedNames></workbook>`);
+  zip.file("xl/workbook.xml", `${declaration}<workbook xmlns="${spreadsheetNs}" xmlns:r="${relationshipNs}"><bookViews><workbookView activeTab="0"/></bookViews><sheets>${names.map((name, i) => `<sheet name="${escapeXml(name)}" sheetId="${i + 1}" r:id="sheet${i + 1}"/>`).join("")}</sheets><definedNames>${names.map((name, i) => `<definedName name="_xlnm.Print_Area" localSheetId="${i}">${escapeXml(`'${name.replace(/'/g, "''")}'!${layouts[sheets[i].template].printArea}`)}</definedName>`).join("")}</definedNames></workbook>`);
   zip.file("xl/_rels/workbook.xml.rels", `${declaration}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="styles" Type="${relationshipNs}/styles" Target="styles.xml"/><Relationship Id="theme" Type="${relationshipNs}/theme" Target="theme/theme1.xml"/><Relationship Id="strings" Type="${relationshipNs}/sharedStrings" Target="sharedStrings.xml"/>${names.map((_, i) => `<Relationship Id="sheet${i + 1}" Type="${relationshipNs}/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join("")}</Relationships>`);
   zip.file("[Content_Types].xml", contentTypes.replace(/<Override\b[^>]*PartName="\/xl\/worksheets\/sheet\d+\.xml"[^>]*\/>/g, "")
     .replace("</Types>", `${names.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("")}</Types>`));

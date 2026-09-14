@@ -64,7 +64,7 @@ export function CastReceiptExport({ rows, month, sourceLabel, disabledReason }: 
 
   return <Card title="受領書XLSX" description={`${month}・${sourceLabel}。全員分をキャスト別シートにまとめます。金額・キャスト名を記入し、受領日・氏名の署名欄は空欄にします。`}
     action={<button className="button" disabled={Boolean(validation.error) || exporting} title={validation.error || undefined} onClick={() => void exportAll()}>{exporting ? "受領書出力中…" : "全員分の受領書をXLSX出力"}</button>}>
-    <p className="muted compact-text">添付テンプレートのセルサイズ・用紙設定で出力します。全員分を印刷するときは、Excelで「ブック全体を印刷」を選択してください。</p>
+    <p className="muted compact-text">採用された報酬方式に応じて、時給用・売上報酬用の受領書を使います。各様式のセルサイズ・用紙設定を保持します。全員分を印刷するときは、Excelで「ブック全体を印刷」を選択してください。</p>
     {validation.error && <p className="muted compact-text">{validation.error}</p>}
     {notice?.month === month && <div role="status" className={`notice${notice.error ? " error" : ""}`}>{notice.text}</div>}
   </Card>;
