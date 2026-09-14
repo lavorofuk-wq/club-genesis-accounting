@@ -7,11 +7,20 @@ export const DEVELOPMENT_ORIGIN = "https://club-genesis-accounting-git-dev-lavor
 export type ReleaseEnvironment = "production" | "development" | "local";
 export type AppRelease = { schema: 1; version: string; buildId: string; environment: ReleaseEnvironment };
 
+function isPrivateLanHostname(hostname: string) {
+  const octets = hostname.split(".").map(Number);
+  if (octets.length !== 4 || octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) return false;
+  const [first, second] = octets;
+  return first === 10 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168);
+}
+
 export function releaseLocation(origin: string): { supported: boolean; environment: ReleaseEnvironment; updateUrl: string } {
   const url = new URL(origin);
   if (url.origin === PRODUCTION_ORIGIN) return { supported: true, environment: "production", updateUrl: url.origin };
   if (url.origin === DEVELOPMENT_ORIGIN) return { supported: true, environment: "development", updateUrl: url.origin };
-  if (["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) return { supported: true, environment: "local", updateUrl: url.origin };
+  if (["localhost", "127.0.0.1", "0.0.0.0", "[::1]"].includes(url.hostname) || isPrivateLanHostname(url.hostname)) {
+    return { supported: true, environment: "local", updateUrl: url.origin };
+  }
   const productionAlias = ["club-genesis-gms.web.app", "club-genesis-gms.firebaseapp.com"].includes(url.hostname);
   return { supported: false, environment: productionAlias ? "production" : "development", updateUrl: productionAlias ? PRODUCTION_ORIGIN : DEVELOPMENT_ORIGIN };
 }

@@ -16,6 +16,7 @@ import { summarizeCastDrinksByPrice } from "./store-work";
 import { useRecoverableState, useUpdateDraftBusy } from "./update-drafts";
 import { cashDayIssues, cashFundingIssues, cashLedgerIssues, type CashFundingSummary } from "@/domain/cash-funding";
 import { IntroducerPayments } from "./introducer-payments";
+import { CastReceiptExport } from "./cast-receipt-export";
 
 type Props = { data: AccountingWorkspaceData; user: User; busy: boolean; run: (action: () => Promise<unknown>, message: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void };
 type Section = "approval" | "castSales" | "castRewards" | "introducers" | "staffPayroll" | "driverPayroll" | "expenses" | "balance";
@@ -251,6 +252,15 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
         : !results ? "出力する月次データを読み込めません。"
         : results.warnings.length || (!closed && finalizeCheck.integrityIssues.length) ? "データの警告を解消してから出力してください。"
         : !results.castSalesReports.length ? "対象月の承認済みキャスト売上がありません。" : ""}
+    />}
+    {section === "castRewards" && <CastReceiptExport
+      rows={results?.castRewards} month={month}
+      sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
+      disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"
+        : adjustmentsDirty ? "未保存の経理入力を保存してください。"
+        : calculationsBlocked ? "ボトル区分を確認して保存してください。"
+        : !results ? "出力する月次データを読み込めません。"
+        : results.warnings.length || (!closed && finalizeCheck.integrityIssues.length) ? "データの警告を解消してから出力してください。" : ""}
     />}
     {section === "expenses" && <ExpenseExport
       input={results ? { results, closings: data.closings, adjustments, month, snapshot: currentSnapshot } : undefined}
