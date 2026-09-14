@@ -136,8 +136,8 @@ describe("主要ページのSSRスモーク", () => {
     const render = (workspace = source, busy = false) => renderToStaticMarkup(createElement(AccountingForms, {
       section: "castRewards", data: workspace, user, busy, run,
     }));
-    const button = /<button[^>]*disabled[^>]*>全員分の受領書をXLSX出力/;
-    expect(render()).toContain("全員分の受領書をXLSX出力");
+    const button = /<button[^>]*disabled[^>]*>全員分の受領書・明細書をXLSX出力/;
+    expect(render()).toContain("全員分の受領書・明細書をXLSX出力");
     expect(render()).toContain("受領日・氏名の署名欄は空欄");
     expect(render()).not.toMatch(button);
     expect(render(source, true)).toMatch(button);
@@ -200,9 +200,9 @@ describe("主要ページのSSRスモーク", () => {
     const original = render(closed);
     expect(original).toContain("月次確定済み 第3版");
     expect(original).toContain("確定時キャスト名");
-    expect(original).not.toMatch(/<button[^>]*disabled[^>]*>全員分の受領書をXLSX出力/);
+    expect(original).not.toMatch(/<button[^>]*disabled[^>]*>全員分の受領書・明細書をXLSX出力/);
     expect(render({ ...closed, closings: [], casts: [] })).toBe(original);
-    expect(render({ ...closed, monthSnapshots: [] })).toMatch(/<button[^>]*disabled[^>]*>全員分の受領書をXLSX出力/);
+    expect(render({ ...closed, monthSnapshots: [] })).toMatch(/<button[^>]*disabled[^>]*>全員分の受領書・明細書をXLSX出力/);
   });
 
   it.each([false, true])("紹介者ページは現在データの変更・削除後も確定時の紹介者名と支払額を表示する（旧ID形式=%s）", (legacyIds) => {

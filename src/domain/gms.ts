@@ -868,6 +868,8 @@ export type DailyHourlyPay = { businessDate: string; hours: number; amount: numb
 export type CastReward = {
   id: string;
   name: string;
+  /** 明細書用の実適用時給。旧確定月は未保存のため推測しない。 */
+  appliedHourlyRates?: number[];
   days: number;
   advisoryDays: number;
   hours: number;
@@ -2179,10 +2181,12 @@ export function calculateCastRewards(
     const trialOnly = rows.every((row) => row.kind === "trial") && !convertedMember;
     const sum = (key: keyof DailyCast) => rows.reduce((total, row) => total + asNumber(row[key]), 0);
     const monthlyRate = rateForMonth(member?.hourlyRates || {}, month);
-    const hourlyByDay = calculateDailyHourlyPay(entries.map(({ businessDate, row }) => ({
+    const hourlySources = entries.map(({ businessDate, row }) => ({
       businessDate, hours: row.hours,
       hourlyRate: row.kind === "regular" && monthlyRate > 0 ? monthlyRate : row.hourlyRate,
-    })));
+    }));
+    const hourlyByDay = calculateDailyHourlyPay(hourlySources);
+    const appliedHourlyRates = [...new Set(hourlySources.map((source) => source.hourlyRate))].sort((a, b) => a - b);
     const hourlyPay = hourlyByDay.reduce((total, day) => total + day.amount, 0);
     const honShimeiSales = rows.reduce((total, row) => total + floorTen(asNumber(row.honShimeiSales)), 0);
     const jonaiExtensionSales = rows.reduce((total, row) => total + floorTen(asNumber(row.jonaiExtensionSales)), 0);
@@ -2266,6 +2270,7 @@ export function calculateCastRewards(
     return {
       id,
       name: member?.name || rows[0]?.name || "名称未設定",
+      appliedHourlyRates,
       days: new Set(entries.map((entry) => entry.businessDate)).size,
       advisoryDays: new Set(entries.filter((entry) => entry.row.kind === "regular").map((entry) => entry.businessDate)).size,
       hours: rows.reduce((total, row) => total + row.hours, 0),

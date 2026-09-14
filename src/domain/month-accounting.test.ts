@@ -374,6 +374,33 @@ describe("月次会計ドメイン", () => {
     expect(saved).toEqual(before);
   });
 
+  it("明細書用の実適用時給を月次確定へ保存し、旧確定の未保存を推定しない", () => {
+    const { snapshot, source, input } = hourlyYenSnapshot();
+    expect(snapshot.castRewards[0].appliedHourlyRates).toEqual([source.casts[0].hourlyRates[month]]);
+    const saved = JSON.parse(JSON.stringify(snapshot));
+    saved.castRewards[0].appliedHourlyRates = { 0: snapshot.castRewards[0].appliedHourlyRates![0] };
+    const before = structuredClone(saved);
+    source.casts[0].hourlyRates[month] = 9000;
+    expect(normalizeMonthlyAccountingSnapshot(saved, month, 1)?.castRewards[0].appliedHourlyRates).toEqual(snapshot.castRewards[0].appliedHourlyRates);
+    expect(saved).toEqual(before);
+    expect(calculateMonthlyAccounting(source, month, input).castRewards[0].appliedHourlyRates).toEqual([9000]);
+    delete saved.castRewards[0].appliedHourlyRates;
+    expect(normalizeMonthlyAccountingSnapshot(saved, month, 1)?.castRewards[0].appliedHourlyRates).toBeUndefined();
+    for (const rates of [[], [-1], [NaN], [3000, 3000], "3000"]) {
+      saved.castRewards[0].appliedHourlyRates = rates;
+      expect(normalizeMonthlyAccountingSnapshot(saved, month, 1)).toBeUndefined();
+    }
+  });
+
+  it("当月内の保存時給が複数ある場合は全適用値を保存し、未承認の単価を混ぜない", () => {
+    const source = workspace({ closings: [
+      approvedClosing({ id: "one", casts: [dailyCast({ hourlyRate: 3000 })] }),
+      approvedClosing({ id: "two", businessDate: "2026-09-03", casts: [dailyCast({ hourlyRate: 4000 })] }),
+      approvedClosing({ id: "pending", businessDate: "2026-09-04", status: "submitted", casts: [dailyCast({ hourlyRate: 9000 })] }),
+    ] });
+    expect(calculateMonthlyAccounting(source, month, adjustments()).castRewards[0].appliedHourlyRates).toEqual([3000, 4000]);
+  });
+
   it("同一人物・同営業日の複数POS勤務も日別合算して確定保存できる", () => {
     const closing = approvedClosing({ casts: [
       dailyCast({ posCastId: "pos-a", hours: 0.25, hourlyRate: 1503 }),
