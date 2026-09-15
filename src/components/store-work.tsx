@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { User } from "firebase/auth";
+import { secureRandomUUID } from "@/lib/crypto-compat";
 import type {
   BottleAllocation, CashReconciliation, CastKind, DailyCast, DailyClosing, DailyDriverWork, DailyExpense, DailyStaffWork, ExpenseCategory,
   PosClosingV3, PosItem, PosTransaction, ReconciledDailyCastInputs
@@ -11,9 +12,11 @@ import type { AccountingWorkspaceData } from "@/domain/month-accounting";
 import { STAFF_MONTHLY_RATES_START_MONTH, staffMonthlyRateForMonth } from "@/domain/staff-rates";
 import { calculateConfirmedCashFunding, cashFundingDraftContext, cashFundingIssues, recommendedPersonalRepayment, cashDayIssues, cashChangeImpacts, sameCashReconciliation, assertCashLedgerChange } from "@/domain/cash-funding";
 import type { CashFundingContext, CashFundingInputs } from "@/domain/cash-funding";
+import { duplicateClosingForNewWorkflow, existingClosingSubmissionMessage } from "@/domain/daily-edit-source";
 import { deleteUnapprovedClosing, submitClosing, withdrawClosing } from "@/lib/firebase/repository";
 import { Card, Field, MoneyInput, StatusPill, Table, yen } from "./ui";
 import { useRecoverableState, useUpdateDraftBusy } from "./update-drafts";
+import { PrintPreview } from "./print-preview";
 
 type Props = { data: AccountingWorkspaceData; user: User; busy: boolean; run: (action: () => Promise<unknown>, message: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void };
 type Stage = "json" | "details" | "cash" | "preview";
@@ -101,6 +104,7 @@ export function reconcileTrialBeautyExpenses(
 }
 
 export function StoreWork(props: Props) {
+  const [preview, setPreview] = useState<DailyClosing | null>(null);
   const [editing, setEditing] = useRecoverableState<DailyClosing | null>("store.editing", null);
   const [workflowDirty, setWorkflowDirty] = useRecoverableState("store.workflowDirty", false);
   const beginEditing = (row: DailyClosing) => {
@@ -144,7 +148,7 @@ export function StoreWork(props: Props) {
           : <small>{row.status === "approved" ? "経理またはOPが差し戻した後、再編集してください。" : "送信済み一覧から取下げた後、再編集してください。"}</small>}</td></tr>;
       })}</Table>
     </Card>}
-    <Card title="送信済みデータ" description="店舗データと現金照合プレビューを営業日ごとに保管します。経理未承認のデータは完全削除できます。">
+    <div id="store-sent-data"><Card title="送信済みデータ" description="店舗データと現金照合プレビューを営業日ごとに保管します。経理未承認のデータは完全削除できます。">
       <Table headers={["営業日", "状態", "売上", "現金残額", "現金確認", "個人立替未返済", "差戻し理由", "操作"]}>
         {props.data.closings.map((row) => {
           const monthLock = lockedMonthMessage(props.data, row.businessDate);
@@ -161,13 +165,14 @@ export function StoreWork(props: Props) {
               {["returned", "withdrawn"].includes(row.status) && <button className="button secondary mini" disabled={updateDisabled} title={monthLock || undefined} onClick={() => beginEditing(row)}>再編集</button>}
               {["submitted", "returned"].includes(row.status) && <button className="button secondary mini" disabled={updateDisabled} title={monthLock || undefined} onClick={() => { if (window.confirm(`${row.businessDate}の送信を取り下げますか？`)) void props.run(() => withdrawClosing(row.id, { businessDate: row.businessDate, updatedAt: row.updatedAt, checksum: row.checksum, submissionId: row.submissionId }, props.user), "送信を取り下げました。再編集できます。"); }}>取下げ</button>}
               {isUnapprovedClosingStatus(row.status) && <button className="button danger mini" disabled={updateDisabled} title={monthLock || undefined} onClick={() => void deleteClosing(row)}>完全削除</button>}
-              <details><summary className="text-button">プレビュー</summary><div className="popover-preview"><DailyPreview closing={row} /></div></details>
+              <button type="button" className="text-button" onClick={() => setPreview(row)}>プレビュー</button>
               {monthLock && <small className="text-danger">{monthLock}</small>}
             </div></td>
           </tr>;
         })}
       </Table>
-    </Card>
+    </Card></div>
+    {preview && <PrintPreview title={`GMS 営業日次データ ${preview.businessDate}`} onClose={() => setPreview(null)}><DailyPreview closing={preview} /></PrintPreview>}
   </div>;
 }
 
@@ -218,6 +223,8 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
   const [jsonReading, setJsonReading] = useState(false);
   useUpdateDraftBusy(`${draftKey}.jsonReading`, jsonReading);
   const jsonImportSequence = useRef(0);
+  const latestClosings = useRef(data.closings);
+  latestClosings.current = data.closings;
   const hasUnsavedDailyData = Boolean(initial || pos);
   useEffect(() => {
     onDirtyChange(hasUnsavedDailyData);
@@ -258,6 +265,8 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
   });
   const invalidTrialBeautyExpenses = invalidTrialBeautyExpensesForRows(expenses, castRows);
   const workflowLock = lockedMonthMessage(data, pos?.businessDate || initial?.businessDate || "");
+  const duplicateClosing = duplicateClosingForNewWorkflow(pos?.businessDate || "", initial, data.closings);
+  const duplicateMessage = duplicateClosing ? existingClosingSubmissionMessage(duplicateClosing) : "";
   useEffect(() => {
     if (workflowLock && stage !== "json") setStage("json");
   }, [stage, workflowLock]);
@@ -358,6 +367,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
   const createRows = () => {
     if (!pos) return;
     if (workflowLock) return setError(workflowLock);
+    if (duplicateMessage) return setError(duplicateMessage);
     if (!mappingComplete) return setError("未照合、または現在の営業日・名前・区分と一致しないキャストがあります。再照合してください。");
     if (!costsComplete) return setError("今回のみの酒代原価をすべて入力してください。");
     const details = Object.fromEntries(references.map((source) => {
@@ -429,7 +439,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     const trial = castRows.find((row) => row.posCastId === expensePersonId && row.kind === "trial");
     const payee = expenseCategory === "beautyTrial" ? trial?.name || "" : expensePayee.trim();
     if (!payee || expenseAmount <= 0) return setError("経費の支払先と金額を入力してください。");
-    setExpenses((rows) => [...rows, { id: crypto.randomUUID(), category: expenseCategory, payee, amount: expenseAmount, personId: trial?.masterId, personName: trial?.name }]);
+    setExpenses((rows) => [...rows, { id: secureRandomUUID(), category: expenseCategory, payee, amount: expenseAmount, personId: trial?.masterId, personName: trial?.name }]);
     setExpensePayee(""); setExpensePersonId(""); setExpenseAmount(0); setError("");
   };
   const expenseTotal = expenses.reduce((sum, row) => sum + row.amount, 0);
@@ -509,7 +519,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     ? cashFundingIssues({ ...cash, funding: { ...cash.funding, confirmed: true } })
     : pos ? ["補充・返済の計算前提を確認できません。"] : [];
   const canConfirmCash = Boolean(cash?.funding && cash.expectedClosingCash >= 0 && cashInputIssues.length === 0
-    && contextConfirmed && (!cashChanged || cashRevisionReason.trim()) && !workflowLock);
+    && contextConfirmed && (!cashChanged || cashRevisionReason.trim()) && !workflowLock && !duplicateMessage);
   const canSubmitCash = canConfirmCash && cashConfirmed;
   const visibleStage = stage === "preview" && !canSubmitCash ? "cash" : stage;
   const driverRows = driverWork;
@@ -517,6 +527,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
   const submit = async () => {
     if (!pos || !cash) return;
     if (workflowLock) return setError(workflowLock);
+    if (duplicateMessage) return setError(duplicateMessage);
     if (!canSubmitCash) {
       setError(cashInputIssues[0] || "現金の実績・前営業日の前提と変更理由を確認してください。");
       setStage("cash");
@@ -549,6 +560,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     <div className="stepper">{(["json", "details", "cash", "preview"] as Stage[]).map((value, index) => <span key={value} className={visibleStage === value ? "active" : ""}><b>{index + 1}</b>{["JSON取込", "店舗データ", "現金照合", "送信確認"][index]}</span>)}</div>
     {error && <div className="notice error">{error}</div>}
     {workflowLock && <div className="notice warn"><strong>この営業日は編集できません。</strong><br />{workflowLock}</div>}
+    {duplicateMessage && <div className="notice warn" role="alert"><strong>この営業日の送信済みデータがあります。</strong><p>{duplicateMessage}</p><p>現在の入力は保持していますが、この新規作成画面からは送信できません。</p><a className="text-button" href="#store-sent-data">送信済みデータを確認</a></div>}
     {stage === "json" && <div className="stack section-pad">
       {initial && !initial.posSnapshot && <div className="notice warn">この旧データにはPOS原本が保存されていません。再編集するには、同じ営業日のPOS JSONをもう一度取り込んでください。既存データは送信を完了するまで変更されません。商品との一致を検証できない今回のみの特別原価は、安全のため再入力が必要です。</div>}
       {(initial || pos) && <div className="notice warn">同じ営業日のJSONを再取込しても、入力済みの店舗データと補充・会社入金額・返済実績は保持されます。勤務・指名本数・商品配賦などPOS由来の項目だけを再計算します。現金の一致確認はやり直してください。</div>}
@@ -562,6 +574,8 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
           const parsed = await parsePosClosingV3(JSON.parse((await file.text()).replace(/^\uFEFF/, "")));
           if (sequence !== jsonImportSequence.current) return;
           if (initial && parsed.businessDate !== initial.businessDate) throw new Error(`再編集対象は${initial.businessDate}です。同じ営業日のPOS JSONを選択してください。`);
+          const existing = duplicateClosingForNewWorkflow(parsed.businessDate, initial, latestClosings.current);
+          if (existing) throw new Error(existingClosingSubmissionMessage(existing));
           const previousDate = pos?.businessDate || initial?.businessDate || "";
           if (initial || pos) {
             if (!window.confirm(jsonReimportConfirmation(previousDate, parsed.businessDate))) return;
@@ -600,7 +614,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
           const current = specialCostValue(specialCosts, bottle);
           return <tr key={bottle.sourceKey}><td>{bottle.transaction.tableLabel || bottle.transaction.transactionId}</td><td>{bottle.item.category === "champagneWine" ? "シャンパン・ワイン" : "キープボトル"}</td><td>{bottle.item.label}</td><td>{bottle.item.quantity}</td><td>{yen.format(bottle.item.price * bottle.item.quantity)}</td><td><MoneyInput value={current ?? 0} onChange={(value) => setSpecialCosts((costs) => ({ ...costs, [bottle.sourceKey]: value }))} /></td></tr>;
         })}</Table></>}
-        <button className="button wide-button" disabled={busy || Boolean(workflowLock) || !mappingComplete || !costsComplete} title={workflowLock || undefined} onClick={createRows}>照合を確定して店舗データ作成へ</button></>}
+        <button className="button wide-button" disabled={busy || Boolean(workflowLock) || Boolean(duplicateMessage) || !mappingComplete || !costsComplete} title={workflowLock || duplicateMessage || undefined} onClick={createRows}>照合を確定して店舗データ作成へ</button></>}
     </div>}
     {stage === "details" && pos && !workflowLock && <div className="stack section-pad">
       {unmatchedCastDrafts.length > 0 && <div className="notice error"><strong>引継ぎ保留のキャスト入力があります</strong><p>POSキャストID・名前・区分の一致を確認できなかったため、別人への誤転記を防いで元の入力を保留しています。正しいJSONまたは照合内容を確認してください。</p><Table headers={["キャスト", "本指名売上", "場内延長売上", "美容室", "日払い", "立替", "送迎"]}>{unmatchedCastDrafts.map((row) => <tr key={`${row.posCastId}-${row.name}-${row.kind}`}><td>{row.name}<br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td><td>{yen.format(row.honShimeiSales)}</td><td>{yen.format(row.jonaiExtensionSales)}</td><td>{yen.format(row.beautyAllowance)}</td><td>{yen.format(row.dailyPayment)}</td><td>{yen.format(row.advancePayment)}</td><td>{yen.format(row.transportFee)}</td></tr>)}</Table><button className="button danger mini" onClick={() => { if (window.confirm("引継ぎ保留のキャスト入力を破棄しますか？破棄した値は現在の再編集画面へ戻せません。")) { setUnmatchedCastDrafts([]); setError(""); } }}>保留入力を確認済みとして破棄</button></div>}
@@ -610,7 +624,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
       <h3>送迎ドライバー・日払い</h3><div className="check-grid">{data.drivers.filter((row) => activeOnBusinessDate(row.hiredAt, row.departedAt)).map((row) => { const selected = driverWork.some((item) => item.driverId === row.id); return <label className="select-card" key={row.id}><input type="checkbox" checked={selected} onChange={(e) => setDriverWork(e.target.checked ? [...driverWork.filter((item) => item.driverId !== row.id), { driverId: row.id, name: row.name, dailyRate: row.dailyRate, dailyPayment: 0 }] : driverWork.filter((item) => item.driverId !== row.id))} /><span>{row.name}<small>日給 {yen.format(row.dailyRate)}</small></span></label>; })}</div><Table headers={["ドライバー", "日給", "日払い", "操作"]}>{driverWork.map((row) => <tr key={row.driverId}><td>{row.name}</td><td>{yen.format(row.dailyRate)}</td><td><MoneyInput value={row.dailyPayment} onChange={(value) => setDriverWork((rows) => rows.map((item) => item.driverId === row.driverId ? { ...item, dailyPayment: value } : item))} /></td><td><button className="button danger mini" onClick={() => setDriverWork((rows) => rows.filter((item) => item.driverId !== row.driverId))}>削除</button></td></tr>)}</Table>
       <h3>当日経費</h3><div className="grid form-row expense-row"><Field label="勘定科目"><select className="input" value={expenseCategory} onChange={(e) => { setExpenseCategory(e.target.value as ExpenseCategory); setExpensePayee(""); setExpensePersonId(""); }}>{Object.entries(expenseLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>{expenseCategory === "beautyTrial" ? <Field label="対象の体入キャスト"><select className="input" value={expensePersonId} onChange={(e) => setExpensePersonId(e.target.value)}><option value="">選択</option>{castRows.filter((row) => row.kind === "trial").map((row) => <option key={row.posCastId} value={row.posCastId}>{row.name}</option>)}</select></Field> : <Field label="支払先"><input className="input" value={expensePayee} onChange={(e) => setExpensePayee(e.target.value)} /></Field>}<Field label="金額"><MoneyInput value={expenseAmount} onChange={setExpenseAmount} /></Field><button className="button compact" onClick={addExpense}>追加</button></div><Table headers={["勘定科目", "支払先", "金額", "操作"]}>{expenses.map((row) => <tr key={row.id}><td>{expenseLabels[row.category]}</td><td>{row.payee}</td><td>{yen.format(row.amount)}</td><td><button className="button danger mini" onClick={() => setExpenses((rows) => rows.filter((item) => item.id !== row.id))}>削除</button></td></tr>)}</Table><div className="right-total">経費総計 <strong>{yen.format(expenseTotal)}</strong></div>
       <h3>派遣・納品書</h3><div className="grid four"><Field label="派遣スタッフ支払"><MoneyInput value={dispatchStaffPayment} onChange={setDispatchStaffPayment} /></Field><Field label="派遣キャスト支払"><MoneyInput value={dispatchCastPayment} onChange={setDispatchCastPayment} /></Field><Field label="派遣手数料"><MoneyInput value={dispatchFee} onChange={setDispatchFee} /></Field><Field label="酒代納品書分"><MoneyInput value={liquorDeliveryAmount} onChange={setLiquorDeliveryAmount} /></Field></div>
-      <div className="actions spread"><button className="button secondary" onClick={() => { setError(""); setStage("json"); }}>入力を保持してキャスト照合へ戻る</button><button className="button" onClick={() => { if (!ensureCurrentReferences()) return; setCastRows((rows) => rows.map((row) => ({ ...row, honShimeiSales: floorTen(row.honShimeiSales), jonaiExtensionSales: floorTen(row.jonaiExtensionSales), dailyPayment: row.kind === "trial" ? floorYen(row.dailyPayment) : row.dailyPayment, transportFee: Math.floor(row.transportFee / 500) * 500 }))); setError(""); setStage("cash"); }}>店舗データを確認して現金照合へ</button></div>
+      <div className="actions spread"><button className="button secondary" onClick={() => { setError(""); setStage("json"); }}>入力を保持してキャスト照合へ戻る</button><button className="button" disabled={busy || Boolean(duplicateMessage)} title={duplicateMessage || undefined} onClick={() => { if (duplicateMessage) return setError(duplicateMessage); if (!ensureCurrentReferences()) return; setCastRows((rows) => rows.map((row) => ({ ...row, honShimeiSales: floorTen(row.honShimeiSales), jonaiExtensionSales: floorTen(row.jonaiExtensionSales), dailyPayment: row.kind === "trial" ? floorYen(row.dailyPayment) : row.dailyPayment, transportFee: Math.floor(row.transportFee / 500) * 500 }))); setError(""); setStage("cash"); }}>店舗データを確認して現金照合へ</button></div>
     </div>}
     {visibleStage === "cash" && pos && cash && <div className="stack section-pad">
       <h3>当日現金照合</h3>

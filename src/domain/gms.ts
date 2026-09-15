@@ -1,5 +1,6 @@
 import { cashFundingIssues } from "./cash-funding";
 import type { CashFunding } from "./cash-funding";
+import { sha256Hex } from "../lib/crypto-compat";
 
 export type Role = "shop" | "accounting" | "op";
 export type PersonStatus = "active" | "trial" | "departed";
@@ -1105,9 +1106,7 @@ function canonicalize(value: unknown): unknown {
 export async function sha256Checksum(value: Record<string, unknown>) {
   const copy = { ...value };
   delete copy.checksum;
-  const bytes = new TextEncoder().encode(JSON.stringify(canonicalize(copy)));
-  const hash = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(hash)).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return sha256Hex(JSON.stringify(canonicalize(copy)));
 }
 
 function assert(condition: unknown, message: string): asserts condition {

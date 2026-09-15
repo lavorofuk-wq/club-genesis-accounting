@@ -6,6 +6,8 @@ import { database, rootRef } from "./client";
 import { readOneShotValue } from "./one-shot-value";
 import { runReadyTransaction } from "./ready-transaction";
 import { assertCurrentClientRelease } from "../client-release";
+import { secureRandomUUID } from "../crypto-compat";
+import { existingClosingSubmissionMessage } from "@/domain/daily-edit-source";
 import {
   bottleBackAmountFromPosItem,
   compareIntroducerMonthEventEffectiveOrder,
@@ -176,7 +178,7 @@ const nextEventTimestamp = (candidate: string, previous?: string) => {
   const previousTime = Date.parse(previous);
   return Number.isFinite(previousTime) ? new Date(previousTime + 1).toISOString() : candidate;
 };
-const entityId = (prefix: string) => `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`;
+const entityId = (prefix: string) => `${prefix}_${secureRandomUUID().replaceAll("-", "")}`;
 const validDate = (value: unknown) => {
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const [year, month, day] = value.split("-").map(Number);
@@ -219,7 +221,7 @@ const CLAIM_PENDING_TTL_MS = 120_000;
 async function acquireIntroducerDeletionLock(introducerId: string, user: User): Promise<IntroducerDeletionLock> {
   const serverClock = await firebaseServerNow();
   const pendingLock: IntroducerDeletionLock = {
-    token: crypto.randomUUID(),
+    token: secureRandomUUID(),
     owner: user.uid,
     acquiredAtMs: serverOrderTimestamp(),
     expiresAt: serverClock.milliseconds + INTRODUCER_DELETION_LOCK_TTL_MS,
@@ -253,7 +255,7 @@ function claimId(value: unknown) {
 }
 
 async function acquireClaim(path: string, key: string, id: string): Promise<ClaimHandle> {
-  const token = crypto.randomUUID();
+  const token = secureRandomUUID();
   const expiresAt = Date.now() + CLAIM_PENDING_TTL_MS;
   let created = false;
   await runReadyTransaction(rootRef(`${path}/${key}`), (current) => {
@@ -354,7 +356,7 @@ async function acquireDailyClosingDeletionLock(
     ...expected,
     month: expected.businessDate.slice(0, 7),
     claimKey: posSubmissionClaimKey(expected.checksum),
-    token: crypto.randomUUID(),
+    token: secureRandomUUID(),
     owner: user.uid,
     cashManagementToken: cashLock.token,
     acquiredAtMs: serverOrderTimestamp(),
@@ -378,7 +380,7 @@ async function acquireDailyClosingDeletionLock(
 async function acquireCashManagementLock(id: string, operation: CashManagementLock["operation"], user: User) {
   const serverClock = await firebaseServerNow();
   const pending: CashManagementLock = {
-    id, operation, token: crypto.randomUUID(), owner: user.uid,
+    id, operation, token: secureRandomUUID(), owner: user.uid,
     acquiredAtMs: serverOrderTimestamp(),
     expiresAt: serverClock.milliseconds + CASH_MANAGEMENT_LOCK_TTL_MS,
   };
@@ -514,8 +516,8 @@ async function acquireConversionLock<T extends { status: string; updatedAt?: str
   missingMessage: string,
   user: User,
 ): Promise<ConversionLockHandle<T>> {
-  const operationId = crypto.randomUUID();
-  const token = crypto.randomUUID();
+  const operationId = secureRandomUUID();
+  const token = secureRandomUUID();
   const expiresAt = Date.now() + CONVERSION_LOCK_TTL_MS;
   const result = await runReadyTransaction(rootRef(path), (current) => {
     const row = current as (T & ConversionLockCarrier) | null;
@@ -1968,10 +1970,13 @@ export async function submitClosing(value: DailyClosing, user: User, expectedUpd
     const before = existingSnapshot.val() as DailyClosing | null;
     const timestamp = nextEventTimestamp(now(), before?.updatedAt);
     const canonicalId = `daily_${value.businessDate.replaceAll("-", "")}`;
+    if (!before && expectedUpdatedAt) {
+      throw new Error(`${value.businessDate}の再編集元データは削除されたか、確認できなくなっています。新規データとして再作成せず、最新データを読み込んで確認してください。`);
+    }
     if (!before && value.id !== canonicalId) {
       throw new Error(`新規の日次データIDが営業日と一致しません。${value.businessDate}のJSONを読み込み直してください。`);
     }
-    if (before && !expectedUpdatedAt) throw new Error("再編集元データが確認できません。最新データを読み込んでやり直してください。");
+    if (before && !expectedUpdatedAt) throw new Error(existingClosingSubmissionMessage(before));
     assertFresh(before, expectedUpdatedAt);
     if (before && before.businessDate !== value.businessDate) throw new Error("再送時に営業日は変更できません。元の営業日データから再編集してください。");
     if (before && !["returned", "withdrawn"].includes(before.status)) throw new Error("差戻しまたは取下げ済みのデータだけ再送できます。");
@@ -1987,7 +1992,7 @@ export async function submitClosing(value: DailyClosing, user: User, expectedUpd
     const revisionReason = suppliedReason || "店舗データ再送";
     const sameBusinessDate = asArray<DailyClosing>(allSnapshot.val()).find((row) => row.id !== value.id && row.businessDate === value.businessDate);
     if (sameBusinessDate) {
-      throw new Error(`${value.businessDate}の店舗データはすでに存在します。既存データを開いて再編集してください。`);
+      throw new Error(existingClosingSubmissionMessage(sameBusinessDate));
     }
     const duplicate = asArray<DailyClosing>(allSnapshot.val()).find((row) => row.id !== value.id && row.submissionId === value.submissionId && row.checksum === value.checksum);
     if (duplicate) throw new Error(`${duplicate.businessDate}に同じPOS JSONが送信済みです。`);
@@ -2002,7 +2007,7 @@ export async function submitClosing(value: DailyClosing, user: User, expectedUpd
     }
     try {
       await assertCashManagementLockOwned(cashLock);
-      const operationId = before ? crypto.randomUUID() : undefined;
+      const operationId = before ? secureRandomUUID() : undefined;
       const stored = clean({
           ...withoutId(value),
           cashManagementToken: cashLock.token,
@@ -2391,7 +2396,7 @@ export async function finalizeAccountingMonth(
     .map(Number)
     .filter((revision) => Number.isSafeInteger(revision) && revision > 0);
   const highestStoredRevision = storedRevisions.length ? Math.max(...storedRevisions) : 0;
-  const operationId = crypto.randomUUID();
+  const operationId = secureRandomUUID();
   const startedAt = now();
   let snapshotRevision = 0;
   let lockAcquired = false;

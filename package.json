@@ -1,6 +1,6 @@
 {
   "name": "club-genesis-accounting",
-  "version": "2.26.0",
+  "version": "2.27.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -10,6 +10,7 @@
     "test": "vitest run && node --test tests/*.test.mjs"
   },
   "dependencies": {
+    "@noble/hashes": "2.4.0",
     "firebase": "^12.2.1",
     "jszip": "3.10.1",
     "next": "16.2.12",

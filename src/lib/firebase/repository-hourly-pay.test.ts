@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { User } from "firebase/auth";
-import type { DailyCast, DailyClosing, DailyStaffWork } from "@/domain/gms";
+import { posSubmissionClaimKey, type DailyCast, type DailyClosing, type DailyStaffWork } from "@/domain/gms";
 
 const memory = vi.hoisted(() => ({
   values: new Map<string, unknown>(),
@@ -79,6 +79,75 @@ beforeEach(() => {
   });
   memory.update.mockImplementation(async (_reference: unknown, plan: Record<string, unknown>) => {
     for (const [path, value] of Object.entries(plan)) memory.values.set(path, structuredClone(value));
+  });
+});
+
+describe("日次送信の再編集元と重複営業日の保護", () => {
+  function protectedRecords() {
+    // 送信中の排他ロック以外は、エラー時に支払実績・履歴・重複防止記録を含めて不変。
+    return structuredClone([...memory.values.entries()].filter(([key]) => key !== "cashManagementLock"));
+  }
+
+  function seedExisting(before: DailyClosing) {
+    memory.values.set(`history/${before.id}`, before);
+    memory.values.set("history", { [before.id]: before });
+    memory.values.set(`posSubmissionClaims/${posSubmissionClaimKey(before.checksum)}`, {
+      id: before.id, state: "committed", token: "existing-claim-token",
+    });
+    memory.values.set(`cashRevisions/${before.id}/existing-revision`, {
+      dailyId: before.id, beforeCash: before.cash, beforeUpdatedAt: before.updatedAt,
+    });
+  }
+
+  function expectNoBusinessWrites(before: ReturnType<typeof protectedRecords>) {
+    expect(protectedRecords()).toEqual(before);
+    expect(memory.update).not.toHaveBeenCalled();
+    expect(memory.transaction.mock.calls.every(([reference]) => reference.path === "cashManagementLock")).toBe(true);
+  }
+
+  it.each([
+    { status: "returned" as const, operation: /再編集/ },
+    { status: "withdrawn" as const, operation: /再編集/ },
+    { status: "submitted" as const, operation: /取下げ/ },
+    { status: "approved" as const, operation: /差し?戻/ },
+  ])("$status の同営業日を新規送信しても上書きせず、営業日と必要な操作を案内する", async ({ status, operation }) => {
+    const before = { ...saved(), status };
+    seedExisting(before);
+    const snapshot = protectedRecords();
+    const result = await submitClosing(fixture(1503), user).then(() => null, (error: unknown) => error);
+    expect(result).toBeInstanceOf(Error);
+    expect((result as Error).message).toContain(before.businessDate);
+    expect((result as Error).message).toMatch(operation);
+    expect((result as Error).message).not.toContain("再編集元データが確認できません");
+    expectNoBusinessWrites(snapshot);
+    expect(memory.values.get(path)).toMatchObject({ staffWork: before.staffWork, cash: before.cash });
+  });
+
+  it.each([id, "old-daily-record"])("削除された再編集元 %s を新規データとして復活させない", async (deletedId) => {
+    const otherDay = { ...saved(), id: "daily_20260908", businessDate: "2026-09-08" };
+    seedExisting(otherDay);
+    const snapshot = protectedRecords();
+    const value = { ...fixture(1503), id: deletedId };
+    const result = await submitClosing(value, user, timestamp).then(() => null, (error: unknown) => error);
+    expect(result).toBeInstanceOf(Error);
+    expect((result as Error).message).toContain(value.businessDate);
+    expect((result as Error).message).toMatch(/再編集元/);
+    expect((result as Error).message).toMatch(/削除|見つかりません|存在しません/);
+    expectNoBusinessWrites(snapshot);
+    expect(memory.values.has(`history/${deletedId}`)).toBe(false);
+  });
+
+  it("以前の形式のIDで保存された同営業日も新規送信せず再編集へ案内する", async () => {
+    const before = { ...saved(), id: "legacy-daily-record" };
+    seedExisting(before);
+    const snapshot = protectedRecords();
+    const result = await submitClosing(fixture(1503), user).then(() => null, (error: unknown) => error);
+    expect(result).toBeInstanceOf(Error);
+    expect((result as Error).message).toContain(before.businessDate);
+    expect((result as Error).message).toContain("再編集");
+    expect((result as Error).message).toContain("すでに保存されています");
+    expectNoBusinessWrites(snapshot);
+    expect(memory.values.has(path)).toBe(false);
   });
 });
 
