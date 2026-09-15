@@ -16,6 +16,7 @@ import { duplicateClosingForNewWorkflow, existingClosingSubmissionMessage } from
 import { deleteUnapprovedClosing, submitClosing, withdrawClosing } from "@/lib/firebase/repository";
 import { Card, Field, MoneyInput, StatusPill, Table, yen } from "./ui";
 import { useRecoverableState, useUpdateDraftBusy } from "./update-drafts";
+import { PrintPreview } from "./print-preview";
 
 type Props = { data: AccountingWorkspaceData; user: User; busy: boolean; run: (action: () => Promise<unknown>, message: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void };
 type Stage = "json" | "details" | "cash" | "preview";
@@ -103,6 +104,7 @@ export function reconcileTrialBeautyExpenses(
 }
 
 export function StoreWork(props: Props) {
+  const [preview, setPreview] = useState<DailyClosing | null>(null);
   const [editing, setEditing] = useRecoverableState<DailyClosing | null>("store.editing", null);
   const [workflowDirty, setWorkflowDirty] = useRecoverableState("store.workflowDirty", false);
   const beginEditing = (row: DailyClosing) => {
@@ -163,13 +165,14 @@ export function StoreWork(props: Props) {
               {["returned", "withdrawn"].includes(row.status) && <button className="button secondary mini" disabled={updateDisabled} title={monthLock || undefined} onClick={() => beginEditing(row)}>再編集</button>}
               {["submitted", "returned"].includes(row.status) && <button className="button secondary mini" disabled={updateDisabled} title={monthLock || undefined} onClick={() => { if (window.confirm(`${row.businessDate}の送信を取り下げますか？`)) void props.run(() => withdrawClosing(row.id, { businessDate: row.businessDate, updatedAt: row.updatedAt, checksum: row.checksum, submissionId: row.submissionId }, props.user), "送信を取り下げました。再編集できます。"); }}>取下げ</button>}
               {isUnapprovedClosingStatus(row.status) && <button className="button danger mini" disabled={updateDisabled} title={monthLock || undefined} onClick={() => void deleteClosing(row)}>完全削除</button>}
-              <details><summary className="text-button">プレビュー</summary><div className="popover-preview"><DailyPreview closing={row} /></div></details>
+              <button type="button" className="text-button" onClick={() => setPreview(row)}>プレビュー</button>
               {monthLock && <small className="text-danger">{monthLock}</small>}
             </div></td>
           </tr>;
         })}
       </Table>
     </Card></div>
+    {preview && <PrintPreview title={`GMS 営業日次データ ${preview.businessDate}`} onClose={() => setPreview(null)}><DailyPreview closing={preview} /></PrintPreview>}
   </div>;
 }
 

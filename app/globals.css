@@ -19,6 +19,73 @@
   --red-soft: #fff0f0;
 }
 
+/* 送信済み日次の用紙プレビュー。通常の入力・経理画面には適用しない。 */
+.daily-print-preview {
+  inset: 0; margin: 0; width: 100vw; max-width: none; height: 100dvh; max-height: none;
+  position: fixed; z-index: 1000; display: flex; flex-direction: column;
+  padding: 0; border: 0; background: #dce1e4; color: var(--ink); overflow: hidden;
+}
+.print-preview-toolbar { flex: none; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 20px; padding: 16px 24px; background: #fff; border-bottom: 1px solid var(--line-dark); }
+.print-preview-toolbar h2 { font-size: 17px; }
+.print-preview-toolbar p { margin: 4px 0 0; color: #46525a; font-size: 12px; }
+.print-preview-toolbar .print-preview-help, .print-preview-toolbar .notice { flex-basis: 100%; }
+.print-preview-scroll { flex: 1; min-height: 0; overflow: auto; padding: 24px; }
+.print-preview-scroll:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.print-preview-paper { width: 297mm; min-height: 210mm; margin: 0 auto; padding: 10mm; background: #fff; box-shadow: 0 2px 12px #18212726; }
+.daily-print-preview .preview-sheet { display: block; border: 0; padding: 0; font-size: 9pt; line-height: 1.5; }
+.daily-print-preview .preview-sheet > * { margin-top: 0; margin-bottom: 3mm; }
+.daily-print-preview .preview-sheet > h3 { margin-top: 5mm; margin-bottom: 2mm; font-size: 11pt; break-after: avoid; }
+.daily-print-preview .preview-sheet > header { padding-bottom: 3mm; }
+.daily-print-preview .preview-sheet .table-wrap { overflow: visible; }
+.daily-print-preview .preview-sheet table { table-layout: fixed; width: 100%; font-size: 8pt; }
+.daily-print-preview .preview-sheet th, .daily-print-preview .preview-sheet td { min-width: 0; max-width: none; padding: 1.3mm; white-space: normal; overflow-wrap: anywhere; line-height: 1.5; }
+.daily-print-preview .preview-sheet th { font-size: 8pt; }
+.daily-print-preview .preview-sheet td { vertical-align: top; }
+.daily-print-preview .preview-sheet .total-row td { font-size: 8pt; }
+.daily-print-preview .preview-sheet small { color: #46525a; font-size: 7.5pt; }
+.daily-print-preview .preview-product-list { display: block; }
+.daily-print-preview .preview-product-item { padding-bottom: 1.5mm; margin-bottom: 1.5mm; break-inside: avoid; }
+.daily-print-preview .preview-product-cell { min-width: 0; max-width: none; }
+.daily-print-preview .preview-sheet .grid.metrics, .daily-print-preview .summary-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 3mm; break-inside: avoid; }
+.daily-print-preview .metric-card { padding: 2.5mm; }
+.daily-print-preview .metric-card strong { font-size: 16pt; }
+.daily-print-preview .summary-strip { padding: 3mm; }
+.daily-print-preview .summary-strip strong { font-size: 11pt; }
+.daily-print-preview table:has(th:nth-child(13)) th:nth-child(1) { width: 6%; }
+.daily-print-preview table:has(th:nth-child(13)) th:nth-child(2) { width: 8%; }
+.daily-print-preview table:has(th:nth-child(13)) th:nth-child(3),
+.daily-print-preview table:has(th:nth-child(13)) th:nth-child(4),
+.daily-print-preview table:has(th:nth-child(13)) th:nth-child(5) { width: 4%; }
+.daily-print-preview table:has(th:nth-child(13)) th:nth-child(6),
+.daily-print-preview table:has(th:nth-child(13)) th:nth-child(7) { width: 9%; }
+.daily-print-preview table:has(th:nth-child(13)) th:nth-child(8) { width: 18%; }
+.daily-print-preview table:has(th:nth-child(13)) th:nth-child(9) { width: 13%; }
+.daily-print-preview table:has(th:nth-child(13)) th:nth-child(10),
+.daily-print-preview table:has(th:nth-child(13)) th:nth-child(11),
+.daily-print-preview table:has(th:nth-child(13)) th:nth-child(12) { width: 6%; }
+.daily-print-preview table:has(th:nth-child(13)) th:nth-child(13) { width: 7%; }
+
+@media print {
+  @page daily-closing {
+    size: A4 landscape; margin: 10mm;
+    @bottom-left { content: "GMS / 営業日次データ"; font: 8pt "Yu Gothic", "游ゴシック", sans-serif; color: #647078; }
+    @bottom-right { content: counter(page) " / " counter(pages); font: 8pt "Yu Gothic", "游ゴシック", sans-serif; color: #647078; }
+  }
+  html:has(body.daily-print-preview-open) { background: #fff; }
+  body.daily-print-preview-open { display: block !important; background: #fff; overflow: visible !important; min-height: 0; }
+  body.daily-print-preview-open > :not(.daily-print-preview) { display: none !important; }
+  .daily-print-preview { page: daily-closing; display: block; position: static; width: auto; height: auto; max-height: none; overflow: visible; background: #fff; }
+  .daily-print-preview .print-preview-toolbar { display: none !important; }
+  .daily-print-preview .print-preview-scroll { display: block; overflow: visible; padding: 0; outline: none; }
+  .daily-print-preview .print-preview-paper { width: auto; min-height: 0; margin: 0; padding: 0; box-shadow: none; }
+  .daily-print-preview .preview-sheet { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  .daily-print-preview thead { display: table-header-group; }
+  .daily-print-preview tr { break-inside: avoid; }
+  .daily-print-preview tr:has(.preview-product-item:nth-child(n+4)) { break-inside: auto; }
+  .daily-print-preview .preview-sheet > h3:has(+ .summary-strip) { break-before: page; }
+  .daily-print-preview p { orphans: 3; widows: 3; }
+}
+
 * { box-sizing: border-box; }
 html { background: var(--wash); }
 body { margin: 0; min-height: 100vh; background: var(--wash); color: var(--ink); font-family: var(--font); font-size: 14px; }
@@ -163,7 +230,6 @@ tbody tr:hover { background: #f8f9f9; }
 .preview-product-item { border-bottom: 1px solid var(--line); padding-bottom: 7px; line-height: 1.55; }
 .preview-product-item:last-child { border-bottom: 0; padding-bottom: 0; }
 .preview-product-item strong, .preview-product-item small { display: block; }
-.popover-preview { position: absolute; right: 20px; z-index: 20; width: min(920px, calc(100vw - 300px)); padding: 12px; border: 1px solid var(--line-dark); background: #fff; box-shadow: 0 7px 25px rgba(0,0,0,.18); }
 details { position: relative; }
 details summary { list-style: none; cursor: pointer; }
 .detail-panel { margin-top: 16px; border-top: 1px solid var(--line-dark); padding-top: 16px; display: grid; gap: 13px; }
@@ -208,7 +274,6 @@ details summary { list-style: none; cursor: pointer; }
   .grid.metrics, .grid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .role-panels { grid-template-columns: 1fr; }
   .form-row, .expense-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .popover-preview { width: calc(100vw - 250px); }
 }
 
 @media (max-width: 760px) {
@@ -242,5 +307,4 @@ details summary { list-style: none; cursor: pointer; }
   .cast-sales-summary span { grid-column: 2; }
   .modal-backdrop { padding: 10px; }
   .modal { max-height: calc(100vh - 20px); }
-  .popover-preview { position: static; width: calc(100vw - 42px); max-height: 72vh; overflow: auto; }
 }
