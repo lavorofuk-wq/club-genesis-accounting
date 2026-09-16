@@ -13,13 +13,12 @@ Firebaseプロジェクト: `club-genesis-gms`
 ローカルとVercelプレビューはRealtime Databaseの `accounting-dev` を使用する。
 本番ドメインだけが `accounting` を使用する。
 
-## iPadからLAN接続
+## PCからファイルで起動
 
-PCとiPadを同じWi-Fiへ接続し、PCで `iPad開発環境を起動.cmd` をダブルクリックする。
-起動時に現在のWi-Fi IPを自動検出し、プロジェクト直下の `iPad開発環境.html` とNext.jsの許可Originを更新する。
-iPadのOneDriveから `デスクトップ/club-genesis-accounting/iPad開発環境.html` を開く。IPアドレスの手入力は不要。
-HTMLが自動で遷移しない場合は、ファイル内の「開発環境を開く」を押す。
-プライベートLANのIPはローカル環境として扱い、Realtime Databaseの `accounting-dev` のみを使用する。
+PCで `開発環境を起動.cmd` をダブルクリックする。
+開発サーバーを `127.0.0.1:3000` で起動し、ブラウザーで `http://localhost:3000` を自動的に開く。
+IPアドレスの入力は不要。PC外からは接続できず、Realtime Databaseの `accounting-dev` のみを使用する。
+開発中は起動したコマンド画面を閉じない。終了時はその画面を閉じる。
 
 ## 検証
 
