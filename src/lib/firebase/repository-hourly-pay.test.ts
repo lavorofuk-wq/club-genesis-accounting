@@ -105,6 +105,20 @@ describe("日次送信の再編集元と重複営業日の保護", () => {
     expect(memory.transaction.mock.calls.every(([reference]) => reference.path === "cashManagementLock")).toBe(true);
   }
 
+  it("店舗原本へ経理訂正専用の計算射影を混入できない", async () => {
+    const value = fixture(1500);
+    value.casts = [{
+      masterId: "cast-1", posCastId: "pos-cast-1", name: "テストキャスト", kind: "regular",
+      startTime: "20:00", endTime: "21:00", hours: 1, hourlyRate: 3000,
+      honShimeiCount: 0, banaiShimeiCount: 0, dohanCount: 0, dohanBack: 0,
+      honShimeiSales: 0, jonaiExtensionSales: 0, drinkSales: 0, bottles: [], liquorCost: 0,
+      beautyAllowance: 0, dailyPayment: 0, advancePayment: 0, transportFee: 0,
+      accountingCorrection: { sourceClosingId: id, sourceEntryId: "entry-1", productClassifications: {} },
+    } as DailyCast];
+    await expect(submitClosing(value, user)).rejects.toThrow("経理訂正専用の情報");
+    expect(memory.update).not.toHaveBeenCalled();
+  });
+
   it.each([
     { status: "returned" as const, operation: /再編集/ },
     { status: "withdrawn" as const, operation: /再編集/ },

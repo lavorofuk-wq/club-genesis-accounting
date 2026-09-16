@@ -1,10 +1,12 @@
 import type { DailyClosing, StaffRecord } from "./gms";
 import { validateExpenseExport, type ExpenseExportInput } from "./expense-export";
-import { allocateBalancePayroll } from "./balance-allocation";
+import { allocateBalancePayroll, balanceCastClosingSources } from "./balance-allocation";
 import { summarizeCashFunding, type CashFundingSummary } from "./cash-funding";
 import { requiresCompleteCashFundingSnapshot } from "./month-accounting";
 
 export type BalanceExportInput = ExpenseExportInput & {
+  /** キャストの報酬・本数・人数だけに使う対象月の承認済み経理修正日次。 */
+  castClosings?: DailyClosing[];
   staff?: StaffRecord[];
   archivedStaff?: StaffRecord[];
 };
@@ -71,7 +73,7 @@ function same(actual: number, expected: number, label: string) {
 }
 
 /** 人数・本数は店舗全体の保存POSから取得し、派遣の欠落を0人として隠さない。 */
-export function balanceDailyCounts(closing: DailyClosing) {
+export function balanceDailyCounts(closing: DailyClosing, castClosing?: DailyClosing) {
   const label = closing.businessDate;
   const pos = closing.posSnapshot;
   requireValue(pos && pos.businessDate === label && Array.isArray(pos.castWork)
@@ -133,10 +135,41 @@ export function balanceDailyCounts(closing: DailyClosing) {
   same(count(pos.nominations.honShimeiCount, `${label}のPOS本指名本数`), honShimeiCount, `${label}のPOS本指名本数`);
   same(count(pos.nominations.jonaiCount, `${label}のPOS場内本数`), jonaiCount, `${label}のPOS場内本数`);
   requireValue(closing.customers, `${label}の組数・客数を読み込めません。`);
+  let castCount = saved.size;
+  if (castClosing) {
+    requireValue(castClosing.id === closing.id && castClosing.businessDate === label
+      && castClosing.status === "approved" && Array.isArray(castClosing.casts),
+    `${label}のキャスト経理修正の営業日・IDが承認済み原本と一致しません。`);
+    const correctedPosIds = new Set<string>();
+    const correctedMasterIds = new Set<string>();
+    for (const cast of castClosing.casts) {
+      requireValue(cast && typeof cast.posCastId === "string" && cast.posCastId.length > 0
+        && typeof cast.masterId === "string" && cast.masterId.length > 0
+        && (cast.kind === "regular" || cast.kind === "trial")
+        && !correctedPosIds.has(cast.posCastId) && !correctedMasterIds.has(cast.masterId),
+      `${label}のキャスト経理修正の人物ID・区分が不正または重複しています。`);
+      correctedPosIds.add(cast.posCastId);
+      correctedMasterIds.add(cast.masterId);
+    }
+    const correctedCount = (total: number, key: "honShimeiCount" | "banaiShimeiCount" | "dohanCount", name: string) => {
+      const before = sum(closing.casts, (cast) => count(cast[key], `${label} ${cast.name}の修正前${name}`));
+      const after = sum(castClosing.casts, (cast) => count(cast[key], `${label} ${cast.name}の修正後${name}`));
+      requireValue(Number.isSafeInteger(before) && Number.isSafeInteger(after), `${label}の${name}合計が不正です。`);
+      const result = total + (after - before);
+      requireValue(Number.isSafeInteger(result) && result >= 0,
+        `${label}の経理修正後の${name}がマイナスまたは不正です。原本POS本数とキャスト修正の内訳を確認してください。`);
+      return result;
+    };
+    // POS全体本数へ在籍・体入の差分だけを加算する。派遣由来の人数・本数は原本に残す。
+    honShimeiCount = correctedCount(honShimeiCount, "honShimeiCount", "本指名本数");
+    jonaiCount = correctedCount(jonaiCount, "banaiShimeiCount", "場内本数");
+    dohanCount = correctedCount(dohanCount, "dohanCount", "同伴本数");
+    castCount = castClosing.casts.length;
+  }
   return {
     groups: count(closing.customers.groupCount, `${label}の組数`),
     customers: count(closing.customers.totalCustomers, `${label}の客数`),
-    honShimeiCount, jonaiCount, dohanCount, castCount: saved.size, dispatchCastCount,
+    honShimeiCount, jonaiCount, dohanCount, castCount, dispatchCastCount,
   };
 }
 
@@ -184,6 +217,7 @@ export function buildBalanceExportReport(input: BalanceExportInput): BalanceExpo
   }
   const approved = input.closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(`${month}-`))
     .sort((a, b) => a.businessDate.localeCompare(b.businessDate));
+  const castApproved = balanceCastClosingSources(approved, input.castClosings, snapshot, results.castAccountingDays);
   const payroll = new Map(allocateBalancePayroll(input).byDate.map((day) => [day.businessDate, day]));
   const monthlyExpenses = results.expenses.fixed + results.expenses.liquorDelivery + results.expenses.cardFee;
   // 月額費用は営業日順で最後の承認済み日へまとめる。承認操作の順番や暦の月末ではない。
@@ -201,7 +235,7 @@ export function buildBalanceExportReport(input: BalanceExportInput): BalanceExpo
       cashSales: closing.sales.cashSales,
       cardSales: closing.sales.cardSales,
       totalSales: closing.sales.totalSales,
-      ...balanceDailyCounts(closing),
+      ...balanceDailyCounts(closing, input.castClosings ? castApproved.get(closing.businessDate) : undefined),
       castHourly: dailyPayroll.castHourly,
       castSalesReward: dailyPayroll.castSalesReward,
       dispatchCastPayment: closing.dispatchCastPayment,

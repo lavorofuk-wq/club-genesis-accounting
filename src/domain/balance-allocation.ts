@@ -6,11 +6,16 @@ import { STAFF_MONTHLY_RATES_START_MONTH, staffMonthlyRateForMonth } from "./sta
 
 export type BalancePayrollAllocationInput = {
   results: MonthlyAccountingResults;
+  /** 店舗送信の原本。現金・スタッフ・ドライバーの計算元は常にこちらを使う。 */
   closings: DailyClosing[];
+  /** 対象月の承認済み全営業日。経理修正後の casts だけを採用する。 */
+  castClosings?: DailyClosing[];
   month: string;
   staff?: StaffRecord[];
   archivedStaff?: StaffRecord[];
-  snapshot?: Pick<MonthlyAccountingSnapshot, "schemaVersion" | "calculationVersion">;
+  snapshot?: Pick<MonthlyAccountingSnapshot, "schemaVersion" | "calculationVersion"> & {
+    castAccountingDays?: Array<{ businessDate: string; casts: DailyClosing["casts"] }>;
+  };
 };
 
 export type BalancePayrollDay = {
@@ -41,6 +46,58 @@ function same(actual: number, expected: number, label: string) {
 function rows<T>(value: T[], label: string): T[] {
   requireValue(Array.isArray(value), `${label}を読み込めません。`);
   return value;
+}
+
+function canonicalCastSource(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalCastSource);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).filter(([, child]) => child !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => [key, canonicalCastSource(child)]));
+  }
+  return value;
+}
+
+/** 訂正日次から取り込むのは casts のみ。元の営業日や現金・スタッフ等は置き換えない。 */
+export function balanceCastClosingSources(
+  approved: DailyClosing[],
+  castClosings: DailyClosing[] | undefined,
+  snapshot?: BalancePayrollAllocationInput["snapshot"],
+  accountingDays?: MonthlyAccountingResults["castAccountingDays"],
+): Map<string, DailyClosing> {
+  const original = new Map(approved.map((closing) => [closing.businessDate, closing]));
+  requireValue(original.size === approved.length, "キャスト配分元の承認済み営業日が重複しています。");
+  if (!castClosings) {
+    requireValue(snapshot?.castAccountingDays === undefined && accountingDays === undefined,
+      "月次結果に対応するキャスト経理修正データがありません。原本だけでは出力できません。");
+    return original;
+  }
+  requireValue(rows(castClosings, "キャスト経理修正日次").length === original.size,
+    "キャスト経理修正日次と承認済み営業日の件数が一致しません。");
+  const result = new Map<string, DailyClosing>();
+  for (const projected of castClosings) {
+    const source = projected && original.get(projected.businessDate);
+    requireValue(source && projected.id === source.id && projected.status === "approved"
+      && !result.has(projected.businessDate), "キャスト経理修正日次の営業日・IDが承認済み原本と一致しないか重複しています。");
+    rows(projected.casts, `${source.businessDate}のキャスト経理修正勤務`);
+    result.set(source.businessDate, { ...source, casts: projected.casts });
+  }
+  const expectedDays: Array<{ label: string; days: NonNullable<MonthlyAccountingResults["castAccountingDays"]> }> = [];
+  if (accountingDays !== undefined) expectedDays.push({ label: "月次集計時", days: accountingDays });
+  if (snapshot) expectedDays.push({ label: "月次確定時", days:
+    snapshot.castAccountingDays ?? approved.map(({ businessDate, casts }) => ({ businessDate, casts })) });
+  for (const { label, days } of expectedDays) {
+    const savedByDate = new Map<string, DailyClosing["casts"]>();
+    for (const day of rows(days, `${label}のキャスト経理修正日次`)) {
+      requireValue(day && original.has(day.businessDate) && !savedByDate.has(day.businessDate),
+        `${label}のキャスト経理修正日次の営業日が不正または重複しています。`);
+      savedByDate.set(day.businessDate, rows(day.casts, `${day.businessDate}の${label}キャスト勤務`));
+    }
+    requireValue(savedByDate.size === result.size && [...result.values()].every((closing) =>
+      JSON.stringify(canonicalCastSource(closing.casts)) === JSON.stringify(canonicalCastSource(savedByDate.get(closing.businessDate)))),
+    `キャスト経理修正日次が${label}と一致しません。集計・確定した根拠と異なる修正は出力できません。`);
+  }
+  return result;
 }
 
 function indexed<T extends { id: string }>(values: T[], label: string) {
@@ -249,7 +306,7 @@ function staffSourceId(work: DailyStaffWork, payrollIds: ReadonlySet<string>, ma
 }
 
 /** 保存済み月次給与を日次へ配分する。給与再計算・現在の時給への置換は行わない。 */
-export function allocateBalancePayroll({ results, closings, month, staff = [], archivedStaff = [], snapshot }: BalancePayrollAllocationInput): { byDate: BalancePayrollDay[] } {
+export function allocateBalancePayroll({ results, closings, castClosings, month, staff = [], archivedStaff = [], snapshot }: BalancePayrollAllocationInput): { byDate: BalancePayrollDay[] } {
   requireValue(/^\d{4}-(0[1-9]|1[0-2])$/.test(month), "給与配分の対象月が不正です。");
   const legacyHourly = snapshot?.schemaVersion === 1 || snapshot?.schemaVersion === 2;
   const monthlyStaffRates = !snapshot || (!legacyHourly && supportsMonthlyStaffRatesSnapshot(snapshot.calculationVersion));
@@ -274,7 +331,8 @@ export function allocateBalancePayroll({ results, closings, month, staff = [], a
   const rewards = indexed(results.castRewards, "キャスト報酬");
   const reports = indexed(results.castSalesReports, "キャスト売上明細");
   requireValue(rewards.size === reports.size && [...reports.keys()].every((id) => rewards.has(id)), "キャスト報酬と売上明細の人物IDが一致しません。");
-  rewards.forEach((reward) => allocateCast(reward, reports.get(reward.id)!, approved, output, legacyHourly));
+  const castApproved = balanceCastClosingSources([...approved.values()], castClosings, snapshot, results.castAccountingDays);
+  rewards.forEach((reward) => allocateCast(reward, reports.get(reward.id)!, castApproved, output, legacyHourly));
 
   const staffPayroll = indexed(results.staffPayroll, "スタッフ給与");
   const payrollIds = new Set(staffPayroll.keys());

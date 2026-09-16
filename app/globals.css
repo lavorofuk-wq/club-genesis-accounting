@@ -308,3 +308,11 @@ details summary { list-style: none; cursor: pointer; }
   .modal-backdrop { padding: 10px; }
   .modal { max-height: calc(100vh - 20px); }
 }
+.correction-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.correction-entry { border: 1px solid var(--border, #d8dce2); border-radius: 6px; padding: 16px; margin-top: 12px; }
+.correction-entry summary { cursor: pointer; padding-bottom: 12px; }
+.correction-entry .form-row { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); align-items: start; }
+.correction-entry h4 { margin-bottom: 8px; }
+.correction-entry output { display: block; padding: 9px 0; }
+.cast-correction-panel { scroll-margin-top: 24px; }
+.correction-history { max-width: 720px; max-height: 360px; overflow: auto; white-space: pre-wrap; font-size: 12px; }

@@ -33,7 +33,14 @@ import {
   normalizeIntroducerMonthEvent,
   normalizeMonthlyAccountingSnapshot,
 } from "@/domain/month-accounting";
+import {
+  normalizeCastDailyCorrectionDocument,
+  sealCastCorrectionDraft,
+  validateCastCorrectionDraft,
+} from "@/domain/cast-corrections";
 import type {
+  CastCorrectionDraft,
+  CastDailyCorrectionDocument,
   CastRecord,
   DailyClosing,
   DriverRecord,
@@ -86,6 +93,7 @@ export function introducerDeletionLinkedCastSignature(rows: IntroducerDeletionLi
 const emptyData: AccountingWorkspaceData = {
   casts: [], staff: [], drivers: [], introducers: [], liquor: [], closings: [], adjustments: [], cashFloat: 200000,
   archivedCasts: [], archivedStaff: [], introducerEntryEvents: [], introducerDeletionCommits: [], introducerMonthEvents: [], monthStates: [], monthSnapshots: [],
+  castCorrections: [],
 };
 
 type AccountingFinalizeLock = {
@@ -96,6 +104,11 @@ type AccountingFinalizeLock = {
   expiresAt: number;
 };
 const ACCOUNTING_FINALIZE_LOCK_TTL_MS = 10 * 60 * 1000;
+
+type CastDailyCorrectionClaim = {
+  sourceClosingId: string;
+  revision: number;
+};
 
 type IntroducerDeletionLock = {
   token: string;
@@ -146,6 +159,7 @@ const asArray = <T extends { id: string }>(value: unknown): T[] => {
 const clean = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const now = () => new Date().toISOString();
 const serverOrderTimestamp = () => serverTimestamp() as unknown as number;
+const isDevelopmentWorkspace = () => rootRef().key === "accounting-dev";
 const JAPAN_UTC_OFFSET_MS = 9 * 60 * 60 * 1000;
 const INTRODUCER_MONTH_BOUNDARY_GUARD_MS = 5 * 60 * 1000;
 async function firebaseServerNow() {
@@ -616,6 +630,7 @@ function validateDailyClosingForSubmission(value: DailyClosing, before: DailyClo
     .filter((work) => work.castType === "regular")
     .every((work) => castPosIds.has(work.castId)), "POS原本の在籍キャスト勤務が店舗データから欠落しています。JSONを再取込してください。");
   value.casts.forEach((row) => {
+    require(row.accountingCorrection === undefined, `${row.name}の店舗原本に経理訂正専用の情報を保存することはできません。`);
     require((row.kind === "regular" || row.kind === "trial") && Boolean(row.masterId) && Boolean(row.posCastId) && Boolean(row.name), "キャストデータの識別情報が正しくありません。");
     const sourceWork = workByPosId.get(row.posCastId);
     require(Boolean(sourceWork) && sourceWork!.castType === row.kind && sourceWork!.castName === row.name, `${row.name}の勤務区分がPOS原本と一致しません。JSONを再取込してください。`);
@@ -1015,7 +1030,8 @@ export async function userRole(user: User): Promise<Role> {
 
 export async function loadWorkspaceData(role?: Role): Promise<AccountingWorkspaceData> {
   const accountingAccess = role === "accounting" || role === "op";
-  const [casts, staff, drivers, introducers, liquor, closings, cashFloat, adjustments, entryEvents, introducerDeletionCommits, introducerMonthEvents, monthStates, monthSnapshots] = await Promise.all([
+  const correctionAccess = accountingAccess && isDevelopmentWorkspace();
+  const [casts, staff, drivers, introducers, liquor, closings, cashFloat, adjustments, entryEvents, introducerDeletionCommits, introducerMonthEvents, monthStates, monthSnapshots, castCorrections] = await Promise.all([
     get(rootRef("casts")), get(rootRef("staff")), get(rootRef("drivers")), get(rootRef("introducers")),
     get(rootRef("liquorCosts")), get(rootRef("history")), get(rootRef("config/cashFloat")),
     accountingAccess ? get(rootRef("accountingAdjustments")) : Promise.resolve(null),
@@ -1024,6 +1040,7 @@ export async function loadWorkspaceData(role?: Role): Promise<AccountingWorkspac
     accountingAccess ? get(rootRef("introducerMonthEvents")) : Promise.resolve(null),
     get(rootRef("accountingMonthStates")),
     accountingAccess ? get(rootRef("accountingMonthSnapshots")) : Promise.resolve(null),
+    correctionAccess ? get(rootRef("castDailyCorrections")) : Promise.resolve(null),
   ]);
   const allCastRows = asArray<CastRecord & { deletedAt?: string }>(casts.val());
   const allStaffRows = asArray<StaffRecord & { deletedAt?: string }>(staff.val());
@@ -1046,6 +1063,8 @@ export async function loadWorkspaceData(role?: Role): Promise<AccountingWorkspac
       const normalized = normalizeMonthlyAccountingSnapshot(row, month, Number(revision));
       return normalized ? [normalized] : [];
     }));
+  const castCorrectionRows = Object.entries((castCorrections?.val() || {}) as Record<string, unknown>)
+    .map(([sourceClosingId, row]) => normalizeCastDailyCorrectionDocument(row, sourceClosingId));
   return {
     casts: allCastRows.filter((row) => !row.deletedAt).sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ja")),
     staff: allStaffRows.filter((row) => !row.deletedAt).sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ja")),
@@ -1063,6 +1082,7 @@ export async function loadWorkspaceData(role?: Role): Promise<AccountingWorkspac
     introducerMonthEvents: introducerMonthEventRows,
     monthStates: monthStateRows,
     monthSnapshots: monthSnapshotRows,
+    castCorrections: castCorrectionRows,
   };
 }
 
@@ -2168,6 +2188,9 @@ export async function approveClosing(id: string, expected: ClosingRevision, user
 export async function returnClosing(id: string, expected: ClosingRevision, reason: string, user: User) {
   await requireUser(user, ["accounting", "op"]);
   await assertMonthOpen(expected.businessDate.slice(0, 7));
+  if (isDevelopmentWorkspace() && (await get(rootRef(`castDailyCorrectionClaims/${id}`))).exists()) {
+    throw new Error("この営業日は経理訂正で使用中です。関連する経理訂正を原本へ戻してから差し戻してください。");
+  }
   const normalizedReason = reason.trim();
   if (!normalizedReason) throw new Error("差戻し理由を入力してください。");
   if (normalizedReason.length > 500) throw new Error("差戻し理由は500文字以内で入力してください。");
@@ -2211,8 +2234,174 @@ export async function saveMonthlyAdjustments(value: MonthlyAdjustments, user: Us
   }, { applyLocally: false });
 }
 
+function correctionTargetClosingIds(draft: CastCorrectionDraft | null | undefined) {
+  return new Set(draft ? [draft.sourceClosingId, ...draft.entries.map((entry) => entry.targetClosingId)] : []);
+}
+
+function castCorrectionClaimsForSource(value: unknown, sourceClosingId: string) {
+  if (!value || typeof value !== "object") return new Map<string, CastDailyCorrectionClaim>();
+  const result = new Map<string, CastDailyCorrectionClaim>();
+  for (const [closingId, claims] of Object.entries(value as Record<string, unknown>)) {
+    if (!claims || typeof claims !== "object") continue;
+    const claim = (claims as Record<string, unknown>)[sourceClosingId];
+    if (!claim || typeof claim !== "object") continue;
+    const normalized = claim as Partial<CastDailyCorrectionClaim>;
+    if (normalized.sourceClosingId === sourceClosingId && Number.isSafeInteger(normalized.revision) && Number(normalized.revision) > 0) {
+      result.set(closingId, { sourceClosingId, revision: Number(normalized.revision) });
+    }
+  }
+  return result;
+}
+
+function castCorrectionGlobalRevision(value: unknown) {
+  if (value === null || value === undefined) return 0;
+  if (!Number.isSafeInteger(value) || Number(value) < 1) throw new Error("経理訂正の全体版番号が不正です。Firebaseデータを確認してください。");
+  return Number(value);
+}
+
+function assertCastCorrectionDaysAndMonthsOpen(
+  drafts: Array<CastCorrectionDraft | null | undefined>,
+  data: AccountingWorkspaceData,
+) {
+  for (const draft of drafts) {
+    if (!draft) continue;
+    for (const entry of draft.entries) {
+      const target = data.closings.find((row) => row.id === entry.targetClosingId);
+      if (!target || target.businessDate !== entry.businessDate) {
+        throw new Error(`${entry.name}の変更先営業日が現在の日次データと一致しません。最新データを読み込んでください。`);
+      }
+    }
+  }
+  const affectedClosingIds = new Set(drafts.flatMap((draft) => [...correctionTargetClosingIds(draft)]));
+  for (const closingId of affectedClosingIds) {
+    const closing = data.closings.find((row) => row.id === closingId);
+    if (!closing || closing.status !== "approved") {
+      throw new Error("経理訂正の対象に承認済みでない営業日があります。最新データを読み込んでください。");
+    }
+    const month = closing.businessDate.slice(0, 7);
+    const state = data.monthStates.find((row) => row.month === month);
+    if (state && state.status !== "open") {
+      throw new Error(`${month}は月次確定中または確定済みです。確定を解除してから訂正してください。`);
+    }
+  }
+}
+
+async function castCorrectionWriteResult(
+  sourceClosingId: string,
+  expectedRevision: number,
+  active: boolean,
+  targetClosingIds: Set<string>,
+  expectedHistory: unknown,
+  minimumGlobalRevision: number,
+) {
+  const [documentSnapshot, claimsSnapshot, globalRevisionSnapshot] = await Promise.all([
+    get(rootRef(`castDailyCorrections/${sourceClosingId}`)),
+    get(rootRef("castDailyCorrectionClaims")),
+    get(rootRef("castDailyCorrectionRevision")),
+  ]);
+  if (!documentSnapshot.exists()) return null;
+  const document = normalizeCastDailyCorrectionDocument(documentSnapshot.val(), sourceClosingId);
+  if (document.revision !== expectedRevision || document.active !== active) return null;
+  if (JSON.stringify(canonicalComparisonValue(document.history[String(expectedRevision)]))
+    !== JSON.stringify(canonicalComparisonValue(expectedHistory))) return null;
+  const claims = castCorrectionClaimsForSource(claimsSnapshot.val(), sourceClosingId);
+  if (active && ([...targetClosingIds].some((closingId) => claims.get(closingId)?.revision !== expectedRevision)
+    || [...claims.keys()].some((closingId) => !targetClosingIds.has(closingId)))) return null;
+  if (!active && claims.size > 0) return null;
+  if (castCorrectionGlobalRevision(globalRevisionSnapshot.val()) < minimumGlobalRevision) return null;
+  return document;
+}
+
+/**
+ * 承認済み日次のキャスト勤務・売上を、店舗原本を変更せず訂正履歴として保存する。
+ * draft=null は訂正解除（原本復元）で、同じCAS・監査履歴・月次ロック検査を通る。
+ */
+export async function saveCastCorrection(
+  draft: CastCorrectionDraft | null,
+  sourceClosingId: string,
+  expectedRevision: number,
+  reason: string,
+  user: User,
+): Promise<CastDailyCorrectionDocument> {
+  await requireUser(user, ["accounting", "op"]);
+  if (!isDevelopmentWorkspace()) throw new Error("経理日次訂正は開発環境でのみ利用できます。");
+  if (!sourceClosingId.trim() || !/^[A-Za-z0-9_-]+$/.test(sourceClosingId)) throw new Error("訂正元の日次IDが正しくありません。");
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) throw new Error("経理訂正の版番号が正しくありません。最新データを読み込んでください。");
+  const normalizedReason = reason.trim();
+  if (!normalizedReason) throw new Error("訂正理由を入力してください。");
+  if (normalizedReason.length > 500) throw new Error("訂正理由は500文字以内で入力してください。");
+  if (draft && draft.sourceClosingId !== sourceClosingId) throw new Error("訂正元の日次IDが一致しません。");
+
+  const initialGlobalRevision = castCorrectionGlobalRevision((await get(rootRef("castDailyCorrectionRevision"))).val());
+  const [data, claimsSnapshot, finalizeLockSnapshot, serverClock] = await Promise.all([
+    loadWorkspaceData("accounting"),
+    get(rootRef("castDailyCorrectionClaims")),
+    get(rootRef("accountingFinalizeLock")),
+    firebaseServerNow(),
+  ]);
+  const confirmedGlobalRevision = castCorrectionGlobalRevision((await get(rootRef("castDailyCorrectionRevision"))).val());
+  if (confirmedGlobalRevision !== initialGlobalRevision) {
+    throw new Error("別の端末で経理訂正が更新されています。最新データを読み込んでから反映し直してください。");
+  }
+  const existing = data.castCorrections?.find((row) => row.sourceClosingId === sourceClosingId);
+  const currentRevision = existing?.revision || 0;
+  if (currentRevision !== expectedRevision) {
+    throw new Error("別の端末で経理訂正が更新されています。最新データを読み込んでから反映し直してください。");
+  }
+  if (!draft && (!existing?.active || !existing.current)) throw new Error("この日次に解除できる経理訂正はありません。");
+  const source = data.closings.find((row) => row.id === sourceClosingId);
+  if (!source || source.status !== "approved") throw new Error("承認済みの日次だけ経理訂正できます。");
+  const anchor = draft || existing?.current;
+  if (!anchor || anchor.sourceClosingId !== sourceClosingId || anchor.sourceUpdatedAt !== source.updatedAt
+    || anchor.sourceChecksum !== source.checksum || anchor.sourceSubmissionId !== source.submissionId) {
+    throw new Error("店舗原本が訂正開始時から変更されています。最新データを読み込み、訂正内容を再確認してください。");
+  }
+  let storedDraft: CastCorrectionDraft | null = null;
+  if (draft) {
+    storedDraft = sealCastCorrectionDraft(draft, data);
+    validateCastCorrectionDraft(storedDraft, data);
+  }
+  assertCastCorrectionDaysAndMonthsOpen([existing?.active ? existing.current : null, storedDraft], data);
+  const finalizeLock = finalizeLockSnapshot.val() as AccountingFinalizeLock | null;
+  if (finalizeLock && finalizeLock.expiresAt > serverClock.milliseconds) {
+    throw new Error("月次確定処理中のため経理訂正を保存できません。処理完了後に最新データを読み込んでください。");
+  }
+
+  const nextRevision = currentRevision + 1;
+  const active = Boolean(storedDraft);
+  const targetClosingIds = correctionTargetClosingIds(storedDraft);
+  const previousClaims = castCorrectionClaimsForSource(claimsSnapshot.val(), sourceClosingId);
+  const history = clean({ revision: nextRevision, active, ...(storedDraft ? { draft: storedDraft } : {}), reason: normalizedReason,
+    createdAt: serverClock.timestamp, createdBy: user.uid });
+  const plan: Record<string, unknown> = {
+    castDailyCorrectionRevision: confirmedGlobalRevision + 1,
+    [`castDailyCorrections/${sourceClosingId}/revision`]: nextRevision,
+    [`castDailyCorrections/${sourceClosingId}/active`]: active,
+    [`castDailyCorrections/${sourceClosingId}/current`]: storedDraft ? clean(storedDraft) : null,
+    [`castDailyCorrections/${sourceClosingId}/history/${nextRevision}`]: history,
+  };
+  if (!existing) plan[`castDailyCorrections/${sourceClosingId}/sourceClosingId`] = sourceClosingId;
+  for (const closingId of previousClaims.keys()) {
+    if (!targetClosingIds.has(closingId)) plan[`castDailyCorrectionClaims/${closingId}/${sourceClosingId}`] = null;
+  }
+  for (const closingId of targetClosingIds) {
+    plan[`castDailyCorrectionClaims/${closingId}/${sourceClosingId}`] = { sourceClosingId, revision: nextRevision };
+  }
+
+  try {
+    await update(rootRef(), clean(plan));
+  } catch (error) {
+    const applied = await castCorrectionWriteResult(sourceClosingId, nextRevision, active, targetClosingIds, history, confirmedGlobalRevision + 1).catch(() => null);
+    if (applied) return applied;
+    throw error;
+  }
+  const saved = await castCorrectionWriteResult(sourceClosingId, nextRevision, active, targetClosingIds, history, confirmedGlobalRevision + 1);
+  if (!saved) throw new Error("経理訂正の保存結果を確認できません。再送せず最新データを読み込んでください。");
+  return saved;
+}
+
 async function currentMonthlySources(month: string) {
-  const [casts, staff, introducers, closings, adjustment, entryEvents, introducerDeletionCommits, introducerMonthEvents] = await Promise.all([
+  const [casts, staff, introducers, closings, adjustment, entryEvents, introducerDeletionCommits, introducerMonthEvents, castCorrections] = await Promise.all([
     get(rootRef("casts")),
     get(rootRef("staff")),
     get(rootRef("introducers")),
@@ -2221,7 +2410,10 @@ async function currentMonthlySources(month: string) {
     get(rootRef(`introducerEntryEvents/${month}`)),
     get(rootRef("introducerDeletionCommits")),
     get(rootRef(`introducerMonthEvents/${month}`)),
+    isDevelopmentWorkspace() ? get(rootRef("castDailyCorrections")) : Promise.resolve(null),
   ]);
+  const correctionRows = Object.entries((castCorrections?.val() || {}) as Record<string, unknown>)
+    .map(([sourceClosingId, row]) => normalizeCastDailyCorrectionDocument(row, sourceClosingId));
   const data: DomainWorkspaceData = {
     casts: asArray<CastRecord>(casts.val()),
     staff: asArray<StaffRecord>(staff.val()),
@@ -2232,6 +2424,7 @@ async function currentMonthlySources(month: string) {
       .sort((left, right) => right.businessDate.localeCompare(left.businessDate)),
     adjustments: [],
     cashFloat: 0,
+    castCorrections: correctionRows,
   };
   const adjustments = normalizeMonthlyAdjustments({
     month,

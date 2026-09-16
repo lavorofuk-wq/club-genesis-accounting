@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { CastRecord, DailyCast, DailyClosing, DailyStaffWork, MonthlyAdjustments, StaffRecord, WorkspaceData } from "./gms";
 import { calculateMonthlyAccounting } from "./month-accounting";
-import { allocateBalancePayroll, type BalancePayrollAllocationInput } from "./balance-allocation";
+import { allocateBalancePayroll, balanceCastClosingSources, type BalancePayrollAllocationInput } from "./balance-allocation";
 
 const month = "2026-09";
 
@@ -407,5 +407,120 @@ describe("収支表の日別給与配分", () => {
     const input = fixture([closing(1, { casts: [cast()] })]);
     input.snapshot = { schemaVersion: 3, calculationVersion };
     expect(() => allocateBalancePayroll(input)).toThrow("保存形式を確認");
+  });
+});
+
+describe("収支表の経理修正キャスト配分と原本分離", () => {
+  it("キャストの時間・本数・美容室は修正後、スタッフとドライバーは原本勤務を使う", () => {
+    const original = [closing(1, { casts: [cast()], staffWork: [staffWork()],
+      drivers: [{ driverId: "driver", name: "運転手", dailyRate: 5000, dailyPayment: 1000 }] }), closing(2)];
+    const effective = structuredClone(original);
+    effective[0].casts[0] = cast({ hours: 2.25, hourlyRate: 3007, honShimeiCount: 2, beautyAllowance: 500 });
+    const input = fixture(effective);
+    input.closings = original;
+    input.castClosings = structuredClone(effective);
+    // 呼出元が誤って非キャスト項目を変えても採用せず、原本で検証・配分する。
+    input.castClosings[0].staffWork = [];
+    input.castClosings[0].drivers = [];
+    input.castClosings[0].cash.expectedClosingCash = -999;
+    const before = structuredClone(input);
+    expect(allocateBalancePayroll(input).byDate).toEqual([
+      { businessDate: "2026-09-01", castHourly: 9265, castSalesReward: 0, employeeGross: 11000 },
+      { businessDate: "2026-09-02", castHourly: 0, castSalesReward: 0, employeeGross: 0 },
+    ]);
+    expect(input).toEqual(before);
+  });
+
+  it("キャストの追加・削除・移動で最終出勤日が変わっても修正後の日にだけ配分する", () => {
+    const original = [closing(1, { casts: [cast()] }), closing(2), closing(3)];
+    const effective = structuredClone(original);
+    effective[0].casts = [];
+    effective[1].casts = [cast({ hours: 1, hourlyRate: 3007, honShimeiCount: 1 })];
+    effective[2].casts = [cast({ hours: 2, hourlyRate: 3007, beautyAllowance: 500 })];
+    const input = { ...fixture(effective), closings: original, castClosings: effective };
+    expect(allocateBalancePayroll(input).byDate.map((row) => row.castHourly)).toEqual([0, 4007, 6514]);
+  });
+
+  it("月跨ぎの追加・削除は当月の修正後勤務だけを配分し、他月を当月に混ぜない", () => {
+    const original = [closing(31, { id: "aug-31", businessDate: "2026-08-31", casts: [cast()] }),
+      closing(1), closing(2, { casts: [cast()] })];
+    const effective = structuredClone(original);
+    effective[0].casts = [];
+    effective[1].casts = [cast({ hours: 1, beautyAllowance: 500 })];
+    effective[2].casts = [];
+    const input = { ...fixture(effective), closings: original,
+      castClosings: effective.filter((row) => row.businessDate.startsWith(month)) };
+    expect(allocateBalancePayroll(input).byDate).toEqual([
+      { businessDate: "2026-09-01", castHourly: 3500, castSalesReward: 0, employeeGross: 0 },
+      { businessDate: "2026-09-02", castHourly: 0, castSalesReward: 0, employeeGross: 0 },
+    ]);
+  });
+
+  it("共有ボトルの修正後配分を各本人へ一度ずつ計上し、原本配分を再加算しない", () => {
+    const bottle = { itemId: "bottle", sourceKey: "tx:0:bottle", name: "シャンパン", kind: "champagneWine" as const,
+      quantity: .5, salesAmount: 17500, costAmount: 6250, backAmount: 2810, specialCost: false };
+    const original = [closing(1, { casts: [cast({ bottles: [bottle], liquorCost: 6250 }),
+      cast({ masterId: "cast-2", posCastId: "pos-2", name: "次子", bottles: [bottle], liquorCost: 6250 })] })];
+    const effective = structuredClone(original);
+    effective[0].casts[0].bottles[0].backAmount = 1400;
+    effective[0].casts[1].bottles[0].backAmount = 1400;
+    effective[0].casts.forEach((row, index) => { row.accountingCorrection = { sourceClosingId: original[0].id,
+      sourceEntryId: `entry-${index}`, productClassifications: { [bottle.sourceKey]: "honShimei" } }; });
+    const input = { ...fixture(effective), closings: original, castClosings: effective };
+    expect(input.results.castRewards.map((reward) => reward.bottleBack)).toEqual([1400, 1400]);
+    expect(allocateBalancePayroll(input).byDate[0].castHourly).toBe(26800);
+    expect(original[0].casts.map((row) => row.bottles[0].backAmount)).toEqual([2810, 2810]);
+  });
+
+  it.each([
+    ["欠落", (rows: DailyClosing[]) => { rows.pop(); }],
+    ["重複", (rows: DailyClosing[]) => { rows[1] = structuredClone(rows[0]); }],
+    ["別ID", (rows: DailyClosing[]) => { rows[0].id = "unrelated"; }],
+    ["別月", (rows: DailyClosing[]) => { rows[0].businessDate = "2026-08-01"; }],
+    ["未承認", (rows: DailyClosing[]) => { rows[0].status = "returned"; }],
+  ] as const)("修正日次の%sを原本と突合し停止する", (_label, mutate) => {
+    const input = fixture([closing(1), closing(2)]);
+    input.castClosings = structuredClone(input.closings);
+    mutate(input.castClosings);
+    expect(() => allocateBalancePayroll(input)).toThrow(/経理修正日次/);
+  });
+
+  it("確定時のキャスト修正を保持し、旧確定月への後付け・修正日次欠落を拒否する", () => {
+    const original = [closing(1, { casts: [cast()] })];
+    const effective = structuredClone(original);
+    effective[0].casts[0].beautyAllowance = 500;
+    const input = { ...fixture(effective), closings: original, castClosings: effective };
+    input.snapshot = { schemaVersion: 3, calculationVersion: "2.25.0", castAccountingDays:
+      effective.map(({ businessDate, casts }) => ({ businessDate, casts: structuredClone(casts) })) };
+    expect(allocateBalancePayroll(input).byDate[0].castHourly).toBe(12500);
+    expect(() => allocateBalancePayroll({ ...input, castClosings: undefined })).toThrow("原本だけでは出力できません");
+    input.castClosings[0].casts[0].beautyAllowance = 0;
+    expect(() => allocateBalancePayroll(input)).toThrow("月次確定時と一致しません");
+    input.castClosings[0].casts[0].beautyAllowance = 500;
+    delete input.snapshot.castAccountingDays;
+    expect(() => allocateBalancePayroll(input)).toThrow("月次確定時と一致しません");
+  });
+
+  it("修正投影のキャスト以外は日次原本から復元し、双方を変更しない", () => {
+    const original = [closing(1, { casts: [cast()] })];
+    const effective = structuredClone(original);
+    effective[0].casts[0].beautyAllowance = 500;
+    effective[0].sales.cashSales = 999999;
+    effective[0].dispatchStaffPayment = 999999;
+    effective[0].posSnapshot = undefined as never;
+    const result = balanceCastClosingSources(original, effective).get("2026-09-01")!;
+    expect(result).toEqual({ ...original[0], casts: effective[0].casts });
+    expect(original[0].casts[0].beautyAllowance).toBe(0);
+  });
+
+  it("未確定でも月次集計の修正根拠を突合し、本数だけ異なる古い投影を出力しない", () => {
+    const input = fixture([closing(1, { casts: [cast({ honShimeiCount: 1 })] })]);
+    input.castClosings = structuredClone(input.closings);
+    input.results.castAccountingDays = input.closings.map(({ businessDate, casts }) => ({ businessDate, casts: structuredClone(casts) }));
+    expect(allocateBalancePayroll(input).byDate[0].castHourly).toBe(13000);
+    input.castClosings[0].casts[0].honShimeiCount = 2;
+    expect(() => allocateBalancePayroll(input)).toThrow("月次集計時と一致しません");
+    input.castClosings = undefined;
+    expect(() => allocateBalancePayroll(input)).toThrow("原本だけでは出力できません");
   });
 });

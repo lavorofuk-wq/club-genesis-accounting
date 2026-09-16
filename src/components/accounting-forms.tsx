@@ -4,11 +4,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { User } from "firebase/auth";
 import { secureRandomUUID } from "@/lib/crypto-compat";
 import type { CashReconciliation, CastReward, CastSalesBackBreakdown, CastSalesBottleSummary, CastSalesReport, DailyClosing, LegacyBottleClassification, MonthlyAdjustments } from "@/domain/gms";
-import { findUnclassifiedLegacyBottles, normalizeMonthlyAdjustments } from "@/domain/gms";
+import { castIdentityForMonth, findUnclassifiedLegacyBottles, normalizeMonthlyAdjustments } from "@/domain/gms";
+import { applyCastCorrections } from "@/domain/cast-corrections";
 import { validateExpenseExport, type ExpenseExportInput } from "@/domain/expense-export";
 import { buildBalanceExportReport, type BalanceExportInput } from "@/domain/balance-export";
 import {
-  buildMonthlySnapshot, calculateMonthlyAccounting, canFinalizeMonthlyAccounting, monthlySourceFingerprint,
+  buildMonthlySnapshot, calculateMonthlyAccounting, canFinalizeMonthlyAccounting, castAccountingClosings, monthlySourceFingerprint,
   type AccountingWorkspaceData, type MonthlyAccountingResults, type StaffPayrollRow,
 } from "@/domain/month-accounting";
 import { approveClosing, cancelAccountingMonthClosing, finalizeAccountingMonth, reopenAccountingMonth, returnClosing, saveMonthlyAdjustments } from "@/lib/firebase/repository";
@@ -18,6 +19,8 @@ import { useRecoverableState, useUpdateDraftBusy } from "./update-drafts";
 import { cashDayIssues, cashFundingIssues, cashLedgerIssues, type CashFundingSummary } from "@/domain/cash-funding";
 import { IntroducerPayments } from "./introducer-payments";
 import { CastReceiptExport } from "./cast-receipt-export";
+import { CastDailyEditor } from "./cast-daily-editor";
+import { isProductionEnvironment } from "@/lib/firebase/client";
 
 type Props = { data: AccountingWorkspaceData; user: User; busy: boolean; run: (action: () => Promise<unknown>, message: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void };
 type Section = "approval" | "castSales" | "castRewards" | "introducers" | "staffPayroll" | "driverPayroll" | "expenses" | "balance";
@@ -52,6 +55,13 @@ function accountingMonthLockMessage(data: AccountingWorkspaceData, businessDate:
   return "";
 }
 
+export function castCorrectionReturnMessage(data: AccountingWorkspaceData, closingId: string) {
+  const sources = (data.castCorrections || []).filter((record) => record.active && record.current
+    && (record.sourceClosingId === closingId || record.current.entries.some((entry) => entry.targetClosingId === closingId)))
+    .map((record) => data.closings.find((closing) => closing.id === record.sourceClosingId)?.businessDate || record.sourceClosingId);
+  return sources.length ? `経理修正で使用中です。キャスト売上で${[...new Set(sources)].join("・")}の経理修正を原本へ戻してから差し戻してください。` : "";
+}
+
 function ApprovalView({ data, user, busy, run }: Props) {
   const [expanded, setExpanded] = useRecoverableState("accounting.approval.expanded", "");
   const [reviewed, setReviewed] = useState<Record<string, boolean>>({});
@@ -75,16 +85,18 @@ function ApprovalView({ data, user, busy, run }: Props) {
           const revisionKey = closingReviewKey(row, data.closings);
           const isReviewed = Boolean(reviewed[revisionKey]);
           const monthLock = accountingMonthLockMessage(data, row.businessDate);
+          const correctionLock = castCorrectionReturnMessage(data, row.id);
           const fundingProblems = closingApprovalCashIssues(row, data.closings);
           return <tr key={row.id}><td>{row.businessDate}</td><td><StatusPill tone={row.status === "approved" ? "good" : row.status === "returned" ? "danger" : "warn"}>{statusLabel[row.status]}</StatusPill></td><td>{yen.format(row.sales.totalSales)}</td><td>{yen.format(row.cash.expenseAndPaymentTotal)}</td><td>{yen.format(row.cash.actualClosingCash)}</td><td><StatusPill tone={!fundingProblems.length ? "good" : "warn"}>{!fundingProblems.length ? "照合確認済み" : !row.cash.funding ? "補充・返済未入力" : "要確認"}</StatusPill></td><td><div className="row-actions">
             <button className="button secondary mini" disabled={busy} onClick={() => setExpanded(expanded === row.id ? "" : row.id)}>{expanded === row.id ? "閉じる" : "詳細"}</button>
             {row.status === "submitted" && <button className="button mini" title={monthLock || fundingProblems[0] || (!isReviewed ? "詳細下部の確認ボタンを押してください。" : undefined)} disabled={busy || Boolean(monthLock) || !isReviewed || (row.integrityIssues?.length || 0) > 0 || fundingProblems.length > 0} onClick={() => { if (window.confirm(`${row.businessDate}の店舗データと現金照合を承認しますか？`)) void run(() => approveClosing(row.id, { businessDate: row.businessDate, updatedAt: row.updatedAt, checksum: row.checksum, submissionId: row.submissionId }, user), "店舗データを承認しました。"); }}>承認</button>}
-            {(row.status === "submitted" || row.status === "approved") && <button className="button danger mini" title={monthLock || undefined} disabled={busy || Boolean(monthLock)} onClick={() => {
+            {(row.status === "submitted" || row.status === "approved") && <button className="button danger mini" title={monthLock || correctionLock || undefined} disabled={busy || Boolean(monthLock) || Boolean(correctionLock)} onClick={() => {
               if (row.status === "approved" && !window.confirm(`${row.businessDate}の承認を取り消して店舗へ差し戻しますか？\n再送・再承認されるまで月次集計から除外されます。`)) return;
               const reason = window.prompt(row.status === "approved" ? "承認後の差戻し理由を入力してください（500文字以内）。" : "差戻し理由を入力してください（500文字以内）。");
               if (reason?.trim()) void run(() => returnClosing(row.id, { businessDate: row.businessDate, updatedAt: row.updatedAt, checksum: row.checksum, submissionId: row.submissionId }, reason, user), "店舗へ差し戻しました。");
             }}>差戻し</button>}
             {monthLock && <small className="text-danger">{monthLock}</small>}
+            {correctionLock && <small className="text-danger">{correctionLock}</small>}
             {fundingProblems.length > 0 && <small className="text-danger">{fundingProblems[0]}</small>}
           </div></td></tr>;
         })}
@@ -183,6 +195,8 @@ export function ClosingCastProductDetails({
 
 function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Props & { section: Exclude<Section, "approval"> }) {
   const [month, setMonth] = useRecoverableState("accounting.monthly.month", currentMonth());
+  const [castEditDirty, setCastEditDirty] = useState(false);
+  const [castEditRequest, setCastEditRequest] = useState<{ sourceId: string; sequence: number }>();
   const stored = data.adjustments.find((row) => row.month === month);
   const [adjustments, setAdjustments] = useRecoverableState<MonthlyAdjustments>("accounting.monthly.adjustments", () => blankAdjustments(month, stored));
   const loadedAdjustments = useRef({ month, rows: data.adjustments });
@@ -198,22 +212,27 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
   const storedAdjustments = blankAdjustments(month, stored);
   const adjustmentsDirty = adjustmentSignature(adjustments) !== adjustmentSignature(storedAdjustments);
   useEffect(() => {
-    onDirtyChange?.(adjustmentsDirty);
+    onDirtyChange?.(adjustmentsDirty || castEditDirty);
     return () => onDirtyChange?.(false);
-  }, [adjustmentsDirty, onDirtyChange]);
-  const allLegacyBottles = useMemo(() => findUnclassifiedLegacyBottles(data.closings, month, { ...adjustments, legacyBottleClassifications: {} }), [adjustments, data.closings, month]);
+  }, [adjustmentsDirty, castEditDirty, onDirtyChange]);
+  const corrected = useMemo(() => applyCastCorrections(data), [data]);
+  const allLegacyBottles = useMemo(() => findUnclassifiedLegacyBottles(corrected.closings, month, { ...adjustments, legacyBottleClassifications: {} }), [adjustments, corrected.closings, month]);
   const pendingLegacy = allLegacyBottles.filter((row) => !adjustments.legacyBottleClassifications?.[row.sourceKey]);
   const legacyDirty = classificationSignature(adjustments) !== classificationSignature(storedAdjustments);
   const calculationsBlocked = !closed && (pendingLegacy.length > 0 || legacyDirty);
   const liveResults = useMemo(() => calculateMonthlyAccounting(data, month, adjustments, data.introducerEntryEvents), [adjustments, data, month]);
   const results = closed ? currentSnapshot : calculationsBlocked ? undefined : liveResults;
+  const castExportSource = useMemo(() => {
+    try { return { closings: results ? castAccountingClosings(results, data.closings, month) : undefined, error: "" }; }
+    catch (error) { return { closings: undefined, error: error instanceof Error ? error.message : "経理修正の確定時データを読み込めません。" }; }
+  }, [results, data.closings, month]);
   const approved = data.closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(month));
   const finalizeCheck = canFinalizeMonthlyAccounting(data, month, adjustments, true);
   const monthlyCashProblems = closed ? [] : cashLedgerIssues(data.closings, month);
   const setMap = (key: "withholdingByCast" | "staffSalesAllowance" | "staffBottleAllowance" | "driverRemoteAllowance", id: string, value: number) => setAdjustments((row) => ({ ...row, [key]: { ...row[key], [id]: value } }));
   const save = () => run(() => saveMonthlyAdjustments(adjustments, user), `${month}の経理入力を保存しました。`);
   const finalize = () => {
-    if (adjustmentsDirty || calculationsBlocked || !finalizeCheck.allowed) return;
+    if (adjustmentsDirty || castEditDirty || calculationsBlocked || !finalizeCheck.allowed) return;
     if (!window.confirm(`${month}を月次確定しますか？\n確定後は日次承認・差戻し・経理入力を変更できません。`)) return;
     void run(async () => {
       const fingerprint = await monthlySourceFingerprint(data, month, adjustments, data.introducerEntryEvents);
@@ -232,11 +251,20 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
   const locked = closed || state?.status === "closing";
   const changeMonth = (nextMonth: string) => {
     if (nextMonth === month) return;
+    if (castEditDirty) { window.alert("キャスト日次の未保存の経理修正があります。保存するか、編集を閉じてから対象月を変更してください。"); return; }
     if (adjustmentsDirty && !window.confirm(`${month}の未保存の経理入力を破棄して、${nextMonth}へ移動しますか？`)) return;
     setMonth(nextMonth);
   };
+  const requestCastEdit = (castId: string, businessDate: string) => {
+    const casts = [...data.archivedCasts, ...data.casts];
+    const castById = new Map(casts.map((cast) => [cast.id, cast]));
+    const regularIds = new Set(corrected.closings.filter((closing) => closing.businessDate.startsWith(month)).flatMap((closing) => closing.casts.filter((cast) => cast.kind === "regular").map((cast) => cast.masterId)));
+    const closing = corrected.closings.find((closing) => closing.status === "approved" && closing.businessDate === businessDate);
+    const entry = closing?.casts.find((cast) => castIdentityForMonth(cast, castById, casts, month, regularIds) === castId);
+    if (entry && closing) setCastEditRequest((request) => ({ sourceId: entry.accountingCorrection?.sourceClosingId || closing.id, sequence: (request?.sequence || 0) + 1 }));
+  };
   return <div className="grid">
-    <Card><div className="month-toolbar"><Field label="対象月"><input className="input" type="month" value={month} onChange={(event) => changeMonth(event.target.value)} /></Field><span>承認済み営業日 <strong>{results?.approvedDays ?? approved.length}日</strong></span>{state?.status === "closed" ? <StatusPill tone="good">月次確定済み 第{state.currentSnapshotRevision}版</StatusPill> : state?.status === "closing" ? <StatusPill tone="warn">月次確定処理中</StatusPill> : <StatusPill>未確定</StatusPill>}{!closed && state?.status !== "closing" && (section !== "castSales" || adjustmentsDirty) && <button className="button" disabled={busy || !adjustmentsDirty} onClick={() => void save()}>経理入力を保存</button>}{!closed && state?.status !== "closing" && <button className="button secondary" disabled={busy || adjustmentsDirty || calculationsBlocked || !finalizeCheck.allowed} onClick={finalize}>月次確定</button>}{state?.status === "closing" && <button className="button danger" disabled={busy} onClick={cancelClosing}>確定処理を中止</button>}{closed && <button className="button danger" disabled={busy} onClick={reopen}>確定解除</button>}</div></Card>
+    <Card><div className="month-toolbar"><Field label="対象月"><input className="input" type="month" value={month} onChange={(event) => changeMonth(event.target.value)} /></Field><span>承認済み営業日 <strong>{results?.approvedDays ?? approved.length}日</strong></span>{state?.status === "closed" ? <StatusPill tone="good">月次確定済み 第{state.currentSnapshotRevision}版</StatusPill> : state?.status === "closing" ? <StatusPill tone="warn">月次確定処理中</StatusPill> : <StatusPill>未確定</StatusPill>}{!closed && state?.status !== "closing" && (section !== "castSales" || adjustmentsDirty) && <button className="button" disabled={busy || !adjustmentsDirty} onClick={() => void save()}>経理入力を保存</button>}{!closed && state?.status !== "closing" && <button className="button secondary" disabled={busy || adjustmentsDirty || castEditDirty || calculationsBlocked || !finalizeCheck.allowed} onClick={finalize}>月次確定</button>}{state?.status === "closing" && <button className="button danger" disabled={busy} onClick={cancelClosing}>確定処理を中止</button>}{closed && <button className="button danger" disabled={busy} onClick={reopen}>確定解除</button>}</div></Card>
     {state?.status === "closing" && <div className="notice error">月次確定処理中です。画面を更新しても解消しない場合は、処理を行った担当者と通信状態を確認してください。</div>}
     {!closed && finalizeCheck.unresolvedDaily.length > 0 && <div className="notice error"><strong>未承認・差戻し中・店舗編集中の日次データがあるため月次確定できません。</strong><ul>{finalizeCheck.unresolvedDaily.map((row) => <li key={row.id}>{row.businessDate}：{statusLabel[row.status]}</li>)}</ul></div>}
     {monthlyCashProblems.length > 0 && <div className="notice error"><strong>現金補充・返済の未入力または前営業日との不整合があります。</strong><p>該当日を日付順に再確認してください。補充・返済額や後続日の支払実績は自動補完・変更しません。</p><ul>{monthlyCashProblems.map((issue) => <li key={issue}>{issue}</li>)}</ul></div>}
@@ -249,7 +277,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
       results={results} month={month}
       sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
       disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"
-        : adjustmentsDirty ? "未保存の経理入力を保存してください。"
+        : adjustmentsDirty || castEditDirty ? "未保存の経理入力・キャスト日次修正を保存してください。"
         : calculationsBlocked ? "ボトル区分を確認して保存してください。"
         : !results ? "出力する月次データを読み込めません。"
         : results.warnings.length || (!closed && finalizeCheck.integrityIssues.length) ? "データの警告を解消してから出力してください。"
@@ -259,7 +287,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
       rows={results?.castRewards} casts={data.casts} month={month}
       sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
       disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"
-        : adjustmentsDirty ? "未保存の経理入力を保存してください。"
+        : adjustmentsDirty || castEditDirty ? "未保存の経理入力・キャスト日次修正を保存してください。"
         : calculationsBlocked ? "ボトル区分を確認して保存してください。"
         : !results ? "出力する月次データを読み込めません。"
         : results.warnings.length || (!closed && finalizeCheck.integrityIssues.length) ? "データの警告を解消してから出力してください。" : ""}
@@ -269,22 +297,23 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
       month={month}
       sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
       disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"
-        : adjustmentsDirty ? "未保存の経理入力を保存してください。"
+        : adjustmentsDirty || castEditDirty ? "未保存の経理入力・キャスト日次修正を保存してください。"
         : calculationsBlocked ? "ボトル区分を確認して保存してください。"
         : !results ? "出力する月次データを読み込めません。"
         : results.warnings.length || (!closed && finalizeCheck.integrityIssues.length) ? "データの警告を解消してから出力してください。" : ""}
     />}
     {section === "balance" && <BalanceExport
-      input={results ? { results, closings: data.closings, adjustments, month, snapshot: currentSnapshot, staff: data.staff, archivedStaff: data.archivedStaff } : undefined}
+      input={results ? { results, closings: data.closings, castClosings: castExportSource.closings, adjustments, month, snapshot: currentSnapshot, staff: data.staff, archivedStaff: data.archivedStaff } : undefined}
       month={month}
       sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
-      disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"
-        : adjustmentsDirty ? "未保存の経理入力を保存してください。"
+      disabledReason={castExportSource.error ? castExportSource.error : busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"
+        : adjustmentsDirty || castEditDirty ? "未保存の経理入力・キャスト日次修正を保存してください。"
         : calculationsBlocked ? "ボトル区分を確認して保存してください。"
         : !results ? "出力する月次データを読み込めません。"
         : results.warnings.length || (!closed && finalizeCheck.integrityIssues.length) ? "データの警告を解消してから出力してください。" : ""}
     />}
-    {results && section === "castSales" && <CastSalesReports rows={results.castSalesReports} month={month} />}
+    {section === "castSales" && !isProductionEnvironment() && <CastDailyEditor data={data} user={user} busy={busy || adjustmentsDirty} month={month} locked={locked} run={run} request={castEditRequest} onDirtyChange={setCastEditDirty} />}
+    {results && section === "castSales" && <CastSalesReports rows={results.castSalesReports} month={month} onEdit={!isProductionEnvironment() && !locked && !busy ? requestCastEdit : undefined} />}
     {results && section === "castRewards" && <CastRewards rows={results.castRewards} disabled={busy || locked} onWithholding={(id, value) => setMap("withholdingByCast", id, value)} />}
     {results && section === "introducers" && <IntroducerPayments key={month} rows={results.introducerPayments} castRewards={results.castRewards} />}
     {results && section === "staffPayroll" && <StaffPayroll rows={results.staffPayroll} disabled={busy || locked} onSales={(id, value) => setMap("staffSalesAllowance", id, value)} onBottle={(id, value) => setMap("staffBottleAllowance", id, value)} />}
@@ -429,10 +458,10 @@ const businessDateLabel = (value: string) => { const [, month, day] = value.spli
 function BackBreakdown({ rows }: { rows: CastSalesBackBreakdown[] }) { return <div className="back-breakdown">{rows.map((row) => <span key={row.key}><small>{row.label}</small><strong>{yen.format(row.amount)}</strong></span>)}</div>; }
 function BottleSummary({ rows }: { rows: CastSalesBottleSummary[] }) { return rows.length ? <div className="bottle-summary">{rows.map((row) => <span key={row.name}>{row.name}<small>×{row.quantity}</small></span>)}</div> : <>—</>; }
 
-function CastSalesReports({ rows, month }: { rows: CastSalesReport[]; month: string }) {
+function CastSalesReports({ rows, month, onEdit }: { rows: CastSalesReport[]; month: string; onEdit?: (castId: string, businessDate: string) => void }) {
   const totals = rows.reduce((result, row) => ({ attendanceDays: result.attendanceDays + row.attendanceDays, sales: result.sales + row.totals.totalSales, liquorCost: result.liquorCost + row.totals.totalLiquorCost, backs: result.backs + row.totals.backTotal }), { attendanceDays: 0, sales: 0, liquorCost: 0, backs: 0 });
   if (!rows.length) return <Card title="キャスト売上" description={`${month}の承認済みキャスト売上はありません。`}><div className="notice">店舗送信データを承認すると、この画面へ反映されます。</div></Card>;
-  return <div className="grid cast-sales-report"><div className="grid metrics"><Metric label="対象キャスト" value={`${rows.length}名`} /><Metric label="延べ出勤" value={`${totals.attendanceDays}日`} /><Metric label="キャスト合計売上" value={yen.format(totals.sales)} /><Metric label="バック合計" value={yen.format(totals.backs)} /></div>{rows.map((report, index) => <details className="card cast-sales-card" key={report.id} open={index === 0}><summary className="cast-sales-summary"><strong>{report.name}</strong><span>{report.totals.attendanceDays}日 / {report.totals.hours}時間</span><span>合計売上 <b>{yen.format(report.totals.totalSales)}</b></span><span>バック <b>{yen.format(report.totals.backTotal)}</b></span></summary><div className="cast-sales-content"><Table headers={["出勤日", "出勤時刻", "退勤時刻", "勤務時間", "本指名売上", "場内延長売上", "合計売上", "本指名酒代原価", "場内延長酒代原価", "合計酒代原価", "本指名/場内指名", "同伴", "各種バック", "ボトル銘柄", "美容室手当"]}>{report.days.map((day) => <tr key={`${report.id}-${day.businessDate}`}><td>{businessDateLabel(day.businessDate)}</td><td>{day.startTime || "—"}</td><td>{day.endTime || "—"}</td><td>{day.hours}時間</td><td>{yen.format(day.honShimeiSales)}</td><td>{yen.format(day.jonaiExtensionSales)}</td><td><strong>{yen.format(day.totalSales)}</strong></td><td>{yen.format(day.honShimeiLiquorCost)}</td><td>{yen.format(day.jonaiExtensionLiquorCost)}</td><td>{yen.format(day.totalLiquorCost)}</td><td>{day.honShimeiCount}本 / {day.banaiShimeiCount}本<br /><small>計 {day.nominationCount}本</small></td><td>{day.dohanCount}本</td><td className="wrap-cell"><BackBreakdown rows={day.backs} /><div className="cell-total">計 {yen.format(day.backTotal)}</div></td><td className="wrap-cell"><BottleSummary rows={day.bottles} /></td><td>{day.beautyAllowance > 0 ? <><StatusPill tone="good">あり</StatusPill><br />{yen.format(day.beautyAllowance)}</> : "なし"}</td></tr>)}<tr className="total-row"><td>{month} 合計<br /><strong>{report.totals.attendanceDays}日</strong></td><td>—</td><td>—</td><td>{report.totals.hours}時間</td><td>{yen.format(report.totals.honShimeiSales)}</td><td>{yen.format(report.totals.jonaiExtensionSales)}</td><td><strong>{yen.format(report.totals.totalSales)}</strong></td><td>{yen.format(report.totals.honShimeiLiquorCost)}</td><td>{yen.format(report.totals.jonaiExtensionLiquorCost)}</td><td>{yen.format(report.totals.totalLiquorCost)}</td><td>{report.totals.honShimeiCount}本 / {report.totals.banaiShimeiCount}本<br /><small>計 {report.totals.nominationCount}本</small></td><td>{report.totals.dohanCount}本</td><td className="wrap-cell"><BackBreakdown rows={report.totals.backs} /><div className="cell-total">計 {yen.format(report.totals.backTotal)}</div></td><td className="wrap-cell"><BottleSummary rows={report.totals.bottles} /></td><td>{report.days.filter((day) => day.beautyAllowance > 0).length}日<br />{yen.format(report.totals.beautyAllowance)}</td></tr></Table></div></details>)}</div>;
+  return <div className="grid cast-sales-report"><div className="grid metrics"><Metric label="対象キャスト" value={`${rows.length}名`} /><Metric label="延べ出勤" value={`${totals.attendanceDays}日`} /><Metric label="キャスト合計売上" value={yen.format(totals.sales)} /><Metric label="バック合計" value={yen.format(totals.backs)} /></div>{rows.map((report, index) => <details className="card cast-sales-card" key={report.id} open={index === 0}><summary className="cast-sales-summary"><strong>{report.name}</strong><span>{report.totals.attendanceDays}日 / {report.totals.hours}時間</span><span>合計売上 <b>{yen.format(report.totals.totalSales)}</b></span><span>バック <b>{yen.format(report.totals.backTotal)}</b></span></summary><div className="cast-sales-content"><Table headers={["出勤日", "出勤時刻", "退勤時刻", "勤務時間", "本指名売上", "場内延長売上", "合計売上", "本指名酒代原価", "場内延長酒代原価", "合計酒代原価", "本指名/場内指名", "同伴", "各種バック", "ボトル銘柄", "美容室手当"]}>{report.days.map((day) => <tr key={`${report.id}-${day.businessDate}`}><td>{businessDateLabel(day.businessDate)}{onEdit && <div><button className="button secondary mini" onClick={() => onEdit(report.id, day.businessDate)}>編集</button></div>}</td><td>{day.startTime || "—"}</td><td>{day.endTime || "—"}</td><td>{day.hours}時間</td><td>{yen.format(day.honShimeiSales)}</td><td>{yen.format(day.jonaiExtensionSales)}</td><td><strong>{yen.format(day.totalSales)}</strong></td><td>{yen.format(day.honShimeiLiquorCost)}</td><td>{yen.format(day.jonaiExtensionLiquorCost)}</td><td>{yen.format(day.totalLiquorCost)}</td><td>{day.honShimeiCount}本 / {day.banaiShimeiCount}本<br /><small>計 {day.nominationCount}本</small></td><td>{day.dohanCount}本</td><td className="wrap-cell"><BackBreakdown rows={day.backs} /><div className="cell-total">計 {yen.format(day.backTotal)}</div></td><td className="wrap-cell"><BottleSummary rows={day.bottles} /></td><td>{day.beautyAllowance > 0 ? <><StatusPill tone="good">あり</StatusPill><br />{yen.format(day.beautyAllowance)}</> : "なし"}</td></tr>)}<tr className="total-row"><td>{month} 合計<br /><strong>{report.totals.attendanceDays}日</strong></td><td>—</td><td>—</td><td>{report.totals.hours}時間</td><td>{yen.format(report.totals.honShimeiSales)}</td><td>{yen.format(report.totals.jonaiExtensionSales)}</td><td><strong>{yen.format(report.totals.totalSales)}</strong></td><td>{yen.format(report.totals.honShimeiLiquorCost)}</td><td>{yen.format(report.totals.jonaiExtensionLiquorCost)}</td><td>{yen.format(report.totals.totalLiquorCost)}</td><td>{report.totals.honShimeiCount}本 / {report.totals.banaiShimeiCount}本<br /><small>計 {report.totals.nominationCount}本</small></td><td>{report.totals.dohanCount}本</td><td className="wrap-cell"><BackBreakdown rows={report.totals.backs} /><div className="cell-total">計 {yen.format(report.totals.backTotal)}</div></td><td className="wrap-cell"><BottleSummary rows={report.totals.bottles} /></td><td>{report.days.filter((day) => day.beautyAllowance > 0).length}日<br />{yen.format(report.totals.beautyAllowance)}</td></tr></Table></div></details>)}</div>;
 }
 
 function CastRewards({ rows, disabled, onWithholding }: { rows: CastReward[]; disabled: boolean; onWithholding: (id: string, value: number) => void }) {

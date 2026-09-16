@@ -5,6 +5,7 @@ import {
   calculateDailyHourlyPay,
   castIdentityForMonth,
   castMasterIdentityForMonth,
+  castSubmissionClosing,
   compareDailyClosingSubmissionOrder,
   compareIntroducerMonthEventEffectiveOrder,
   dailyClosingSubmissionOrderValue,
@@ -19,6 +20,7 @@ import type {
   CastRecord,
   CastReward,
   CastSalesReport,
+  DailyCast,
   DailyClosing,
   DailyHourlyPay,
   DriverPayrollRow,
@@ -32,8 +34,9 @@ import type {
 import { cashLedgerIssues, summarizeCashFunding, type CashFundingSummary } from "./cash-funding";
 import { STAFF_MONTHLY_RATES_START_MONTH, staffMonthlyRateForMonth } from "./staff-rates";
 import { sha256Hex } from "../lib/crypto-compat";
+import { applyCastCorrections, normalizeCorrectedDailyCast } from "./cast-corrections";
 
-export const MONTHLY_CALCULATION_VERSION = "2.25.0";
+export const MONTHLY_CALCULATION_VERSION = "2.30.0";
 export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 3 as const;
 
 export type IntroducerEntryEvent = {
@@ -138,6 +141,9 @@ export type MonthlyAccountingResults = {
   /** 補充・返済・個人未返済残高。損益の売上・経費・利益へは含めない。旧確定月には存在しない。 */
   cashFunding?: CashFundingSummary;
   warnings: string[];
+  /** 経理修正適用後のキャスト日次。店舗の現金・POS原本とは別に確定時の根拠を保存する。 */
+  castAccountingDays?: Array<{ businessDate: string; casts: DailyCast[] }>;
+  castCorrectionRevisions?: Array<{ sourceClosingId: string; revision: number }>;
 };
 
 export type AccountingMonthState = {
@@ -488,6 +494,29 @@ export function normalizeMonthlyAccountingSnapshot(
   const driverPayrollValid = Boolean(driverPayroll?.every((item) => snapshotObject(item)
     && item.gross === Number(item.basic) + Number(item.remote)
     && item.net === Number(item.gross) - Number(item.dailyPayment)));
+  let castAccountingDays: MonthlyAccountingResults["castAccountingDays"];
+  let castCorrectionRevisions: MonthlyAccountingResults["castCorrectionRevisions"];
+  if (row.castAccountingDays !== undefined || row.castCorrectionRevisions !== undefined) {
+    try {
+      const days = snapshotList<{ businessDate: string; casts?: unknown }>(row.castAccountingDays);
+      const revisions = snapshotList<{ sourceClosingId: string; revision: number }>(row.castCorrectionRevisions);
+      if (days.length !== row.approvedDays || new Set(days.map((day) => day.businessDate)).size !== days.length
+        || !revisions.length || new Set(revisions.map((item) => item.sourceClosingId)).size !== revisions.length
+        || revisions.some((item) => !snapshotString(item.sourceClosingId) || !snapshotInteger(item.revision) || item.revision < 1)) return undefined;
+      castAccountingDays = days.map((day) => {
+        if (!snapshotDateInMonth(day.businessDate, pathMonth)) throw new Error("不正な訂正営業日");
+        const casts = snapshotList<unknown>(day.casts).map(normalizeCorrectedDailyCast);
+        if (new Set(casts.map((cast) => cast.masterId)).size !== casts.length) throw new Error("訂正キャスト重複");
+        return { businessDate: day.businessDate, casts };
+      });
+      if (castSalesReports?.some((report) => report.days.some((day) => !castAccountingDays!.some((source) => source.businessDate === day.businessDate)))) return undefined;
+      for (const day of castAccountingDays) {
+        const reported = castSalesReports?.flatMap((report) => report.days.filter((item) => item.businessDate === day.businessDate)) || [];
+        if (reported.length !== day.casts.length || reported.reduce((sum, item) => sum + item.hours, 0) !== day.casts.reduce((sum, item) => sum + item.hours, 0)) return undefined;
+      }
+      castCorrectionRevisions = revisions;
+    } catch { return undefined; }
+  }
   if (!castSalesReports || !castRewards || !introducerPayments || !staffPayroll || !driverPayroll || !approvedClosings
     || !castRewardsValid || !introducerPaymentsValid || !staffPayrollValid || !driverPayrollValid
     || warnings.some((warning) => typeof warning !== "string")
@@ -510,6 +539,7 @@ export function normalizeMonthlyAccountingSnapshot(
     driverPayroll: driverPayroll as DriverPayrollRow[],
     warnings: warnings as string[],
     approvedClosings: approvedClosings as MonthlyAccountingSnapshot["approvedClosings"],
+    ...(castAccountingDays ? { castAccountingDays, castCorrectionRevisions } : {}),
     expenses: { ...row.expenses, byCategory: snapshotObject(row.expenses.byCategory) ? row.expenses.byCategory : {} },
   };
 }
@@ -978,12 +1008,12 @@ function introducerSaveOrderIssues(
       || castId;
     const distinctDailyTerms = new Set(entries.map(({ row }) => introducerConditionKey(row.introducer)));
     const issues: string[] = [];
-    if (distinctDailyTerms.size > 1 && entries.some(({ closing }) => !hasDailyClosingSubmissionOrder(closing))) {
+    if (distinctDailyTerms.size > 1 && entries.some(({ closing, row }) => !hasDailyClosingSubmissionOrder(castSubmissionClosing(closing, row)))) {
       issues.push(`${name}の旧日次に店舗保存順がないため、当月の紹介者条件を確定できません。該当日次を差し戻して再送してください。`);
     }
     const dailyByOrder = new Map<number, Set<string>>();
-    entries.filter(({ closing }) => hasDailyClosingSubmissionOrder(closing)).forEach(({ closing, row }) => {
-      const order = dailyClosingSubmissionOrderValue(closing);
+    entries.filter(({ closing, row }) => hasDailyClosingSubmissionOrder(castSubmissionClosing(closing, row))).forEach(({ closing, row }) => {
+      const order = dailyClosingSubmissionOrderValue(castSubmissionClosing(closing, row));
       dailyByOrder.set(order, new Set([...(dailyByOrder.get(order) || []), introducerConditionKey(row.introducer)]));
     });
     if ([...dailyByOrder.values()].some((terms) => terms.size > 1)) {
@@ -1218,12 +1248,14 @@ export function calculateMonthlyAccounting(
   deletionCommits: IntroducerDeletionCommit[] = data.introducerDeletionCommits ?? [],
 ): MonthlyAccountingResults {
   const calculationData = withArchivedMasters(data);
+  const corrected = applyCastCorrections(calculationData);
+  const castData = { ...calculationData, closings: corrected.closings };
   const approved = calculationData.closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(month));
-  const castSalesReports = calculateCastSalesReports(calculationData.closings, calculationData.casts, month, adjustments);
-  const castRewards = calculateCastRewards(calculationData.closings, calculationData.casts, month, adjustments, monthEvents, deletionCommits);
+  const castSalesReports = calculateCastSalesReports(castData.closings, castData.casts, month, adjustments);
+  const castRewards = calculateCastRewards(castData.closings, castData.casts, month, adjustments, monthEvents, deletionCommits);
   const staffPayroll = calculateStaffPayroll(approved, adjustments, calculationData.staff, month);
   const driverPayroll = calculateDriverPayroll(approved, adjustments.driverRemoteAllowance);
-  const introducerPayments = calculateIntroducerPayments(castRewards, calculationData, month, entryEvents, monthEvents, deletionCommits);
+  const introducerPayments = calculateIntroducerPayments(castRewards, castData, month, entryEvents, monthEvents, deletionCommits);
   const byCategory: Record<string, number> = {};
   approved.forEach((closing) => (closing.expenses ?? []).forEach((row) => {
     byCategory[row.category] = (byCategory[row.category] || 0) + row.amount;
@@ -1276,13 +1308,47 @@ export function calculateMonthlyAccounting(
     sales,
     balance: { ...balanceWithoutProfit, totalCosts, profit: sales.total - totalCosts },
     cashFunding,
+    ...castCorrectionSnapshotFields(calculationData, corrected.closings, month),
     warnings: [...new Set([
+      ...corrected.issues,
+      ...(relevantCastCorrections(calculationData, month).length ? castRewards.filter((reward) => reward.netPay < 0)
+        .map((reward) => `${reward.name}の経理修正後の差引支給額がマイナスです。支払実績は変更していません。返金済みとは扱わず、控除と支払記録を確認するまで収支帳票の出力を停止します。`) : []),
       ...monthlyAccountingWarnings(approved, calculationData.casts, month, calculationData.staff),
       ...cashLedgerIssues(calculationData.closings, month),
       ...cashFundingWarnings,
       ...effectiveIntroducerIssues(castRewards),
     ])],
   };
+}
+
+function relevantCastCorrections(data: WorkspaceData, month: string) {
+  return (data.castCorrections || []).filter((record) => record.active && record.current
+    && (data.closings.find((closing) => closing.id === record.sourceClosingId)?.businessDate.startsWith(month)
+      || record.current.entries.some((entry) => entry.businessDate.startsWith(month))));
+}
+
+function castCorrectionSnapshotFields(data: WorkspaceData, closings: DailyClosing[], month: string):
+  Pick<MonthlyAccountingResults, "castAccountingDays" | "castCorrectionRevisions"> {
+  const records = relevantCastCorrections(data, month);
+  if (!records.length) return {};
+  return {
+    castAccountingDays: closings.filter((closing) => closing.status === "approved" && closing.businessDate.startsWith(month))
+      .map((closing) => ({ businessDate: closing.businessDate, casts: closing.casts }))
+      .sort((a, b) => a.businessDate.localeCompare(b.businessDate)),
+    castCorrectionRevisions: records.map((record) => ({ sourceClosingId: record.sourceClosingId, revision: record.revision }))
+      .sort((a, b) => a.sourceClosingId.localeCompare(b.sourceClosingId)),
+  };
+}
+
+/** 帳票では確定時のキャスト根拠だけを差し替え、現金・経費・スタッフ原本を保持する。 */
+export function castAccountingClosings(results: MonthlyAccountingResults, closings: DailyClosing[], month: string) {
+  if (!results.castAccountingDays) return undefined;
+  const days = new Map(results.castAccountingDays.map((day) => [day.businessDate, day.casts]));
+  const approved = closings.filter((closing) => closing.status === "approved" && closing.businessDate.startsWith(month));
+  if (days.size !== results.castAccountingDays.length || days.size !== approved.length || approved.some((closing) => !days.has(closing.businessDate))) {
+    throw new Error("経理修正の出勤日次と承認済み営業日が一致しません。最新データを読み直してください。");
+  }
+  return approved.map((closing) => ({ ...closing, casts: days.get(closing.businessDate)! }));
 }
 
 function canonicalize(value: unknown): unknown {
@@ -1310,6 +1376,12 @@ export async function monthlySourceFingerprint(
     // 計算方式だけが変わった場合も、旧画面のfingerprintと一致させない。
     snapshotSchemaVersion: MONTHLY_SNAPSHOT_SCHEMA_VERSION,
     calculationVersion: MONTHLY_CALCULATION_VERSION,
+    castCorrections: relevantCastCorrections(calculationData, month)
+      .sort((a, b) => a.sourceClosingId.localeCompare(b.sourceClosingId)),
+    castCorrectionSources: relevantCastCorrections(calculationData, month)
+      .map((record) => calculationData.closings.find((closing) => closing.id === record.sourceClosingId))
+      .filter((closing): closing is DailyClosing => Boolean(closing))
+      .sort((a, b) => a.id.localeCompare(b.id)),
     // updatedAtだけでなく計算へ入力される実値を含め、同一ミリ秒の更新や直接書込みも検出する。
     closings: calculationData.closings.filter((row) => row.businessDate.startsWith(month))
       .sort((left, right) => left.id.localeCompare(right.id)),
@@ -1350,15 +1422,17 @@ export function canFinalizeMonthlyAccounting(
   deletionCommits?: IntroducerDeletionCommit[],
 ) {
   const calculationData = withArchivedMasters(data);
+  const corrected = applyCastCorrections(calculationData);
+  const castData = { ...calculationData, closings: corrected.closings };
   const resolvedEntryEvents = entryEvents ?? data.introducerEntryEvents ?? [];
   const resolvedMonthEvents = monthEvents ?? data.introducerMonthEvents ?? [];
   const resolvedDeletionCommits = deletionCommits ?? data.introducerDeletionCommits ?? [];
-  const unclassified = findUnclassifiedLegacyBottles(data.closings, month, adjustments);
+  const unclassified = findUnclassifiedLegacyBottles(castData.closings, month, adjustments);
   const unresolvedDaily = data.closings.filter((row) => row.businessDate.startsWith(month)
     && (row.status === "submitted" || row.status === "returned" || row.status === "withdrawn"));
   const approved = data.closings.filter((row) => row.businessDate.startsWith(month) && row.status === "approved");
   const castRewards = calculateCastRewards(
-    calculationData.closings,
+    castData.closings,
     calculationData.casts,
     month,
     adjustments,
@@ -1371,17 +1445,20 @@ export function canFinalizeMonthlyAccounting(
     .filter(([, count]) => count > 1)
     .map(([businessDate]) => `${businessDate}の承認済み日次データが複数あります。重複データを差し戻してから確定してください。`);
   const integrityIssues = [
+    ...corrected.issues,
+    ...(relevantCastCorrections(calculationData, month).length ? castRewards.filter((reward) => reward.netPay < 0)
+      .map((reward) => `${reward.name}の経理修正後の差引支給額がマイナスです。支払実績と控除を確認してください。`) : []),
     ...approved.flatMap((row) => row.integrityIssues || []),
     ...cashLedgerIssues(calculationData.closings, month),
     ...duplicateBusinessDates,
     ...staffPayrollInputWarnings(approved, calculationData.staff, month),
     ...effectiveIntroducerIssues(castRewards),
-    ...introducerSaveOrderIssues(calculationData, month, resolvedMonthEvents, resolvedDeletionCommits),
-    ...introducerMonthEventConsistencyIssues(calculationData, month, resolvedMonthEvents, resolvedDeletionCommits),
-    ...introducerDeletionCommitConsistencyIssues(calculationData, month, resolvedMonthEvents, resolvedDeletionCommits),
+    ...introducerSaveOrderIssues(castData, month, resolvedMonthEvents, resolvedDeletionCommits),
+    ...introducerMonthEventConsistencyIssues(castData, month, resolvedMonthEvents, resolvedDeletionCommits),
+    ...introducerDeletionCommitConsistencyIssues(castData, month, resolvedMonthEvents, resolvedDeletionCommits),
     ...introducerEntryEventConflicts(
       castRewards,
-      calculationData,
+      castData,
       month,
       resolvedEntryEvents,
       resolvedMonthEvents,
