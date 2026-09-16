@@ -9,6 +9,5 @@ if errorlevel 1 (
   exit /b 1
 )
 
-start "CLUB GENESIS Development Server" cmd /k "cd /d ""%~dp0"" && npm run dev:pc"
-timeout /t 8 /nobreak >nul
-start "" "http://localhost:3000"
+call npm run dev:pc
+if errorlevel 1 pause
