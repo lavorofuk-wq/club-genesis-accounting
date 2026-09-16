@@ -1,4 +1,11 @@
-# GMS Ver2.27.0 アーキテクチャ
+# GMS Ver2.28.0 アーキテクチャ
+
+## iPadアクセスファイルの自動更新（Ver2.28.0、devのみ反映）
+
+- `iPad開発環境を起動.cmd` は `npm run dev:ipad` を実行し、有効なWi-Fi優先のRFC1918 IPv4を起動時に検出する。固定IPや前回のIPを使用しない。
+- 検出したIPをNext.jsの `GMS_ALLOWED_DEV_ORIGINS` に渡し、`0.0.0.0:3000` で開発サーバーを起動する。LAN経由でもFirebase接続先は `accounting-dev` のままとする。
+- OneDriveで同期される `iPad開発環境.html` を毎回生成し、現在URLへの自動遷移と手動リンクを提供する。生成ファイルはGit管理せず、業務データや認証情報を含めない。
+- main・本番環境・Firebase Rules・保存済みFirebaseデータは変更しない。
 
 ## 店舗送信済み日次の印刷プレビュー（Ver2.27.0、devのみ反映）
 

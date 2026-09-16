@@ -15,9 +15,10 @@ Firebaseプロジェクト: `club-genesis-gms`
 
 ## iPadからLAN接続
 
-PCとiPadを同じWi-Fiへ接続し、PCで `npm run dev:lan` を実行する。
-iPadのSafariから `http://192.168.0.121:3000` を開く。
-LANのIPアドレスが変わった場合は、`GMS_ALLOWED_DEV_ORIGINS` に新しいIPを指定する。
+PCとiPadを同じWi-Fiへ接続し、PCで `iPad開発環境を起動.cmd` をダブルクリックする。
+起動時に現在のWi-Fi IPを自動検出し、プロジェクト直下の `iPad開発環境.html` とNext.jsの許可Originを更新する。
+iPadのOneDriveから `デスクトップ/club-genesis-accounting/iPad開発環境.html` を開く。IPアドレスの手入力は不要。
+HTMLが自動で遷移しない場合は、ファイル内の「開発環境を開く」を押す。
 プライベートLANのIPはローカル環境として扱い、Realtime Databaseの `accounting-dev` のみを使用する。
 
 ## 検証
