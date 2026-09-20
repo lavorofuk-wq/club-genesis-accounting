@@ -6,6 +6,7 @@ import { secureRandomUUID } from "@/lib/crypto-compat";
 import type { CashReconciliation, CastReward, CastSalesBackBreakdown, CastSalesBottleSummary, CastSalesReport, DailyClosing, LegacyBottleClassification, MonthlyAdjustments } from "@/domain/gms";
 import { castIdentityForMonth, findUnclassifiedLegacyBottles, normalizeMonthlyAdjustments } from "@/domain/gms";
 import { applyCastCorrections } from "@/domain/cast-corrections";
+import { castReturnHandoffBlockReason } from "@/domain/cast-return-handoff";
 import { validateExpenseExport, type ExpenseExportInput } from "@/domain/expense-export";
 import { buildBalanceExportReport, type BalanceExportInput } from "@/domain/balance-export";
 import {
@@ -56,10 +57,7 @@ function accountingMonthLockMessage(data: AccountingWorkspaceData, businessDate:
 }
 
 export function castCorrectionReturnMessage(data: AccountingWorkspaceData, closingId: string) {
-  const sources = (data.castCorrections || []).filter((record) => record.active && record.current
-    && (record.sourceClosingId === closingId || record.current.entries.some((entry) => entry.targetClosingId === closingId)))
-    .map((record) => data.closings.find((closing) => closing.id === record.sourceClosingId)?.businessDate || record.sourceClosingId);
-  return sources.length ? `経理修正で使用中です。キャスト売上で${[...new Set(sources)].join("・")}の経理修正を原本へ戻してから差し戻してください。` : "";
+  return castReturnHandoffBlockReason(data, closingId);
 }
 
 function ApprovalView({ data, user, busy, run }: Props) {
@@ -91,7 +89,8 @@ function ApprovalView({ data, user, busy, run }: Props) {
             <button className="button secondary mini" disabled={busy} onClick={() => setExpanded(expanded === row.id ? "" : row.id)}>{expanded === row.id ? "閉じる" : "詳細"}</button>
             {row.status === "submitted" && <button className="button mini" title={monthLock || fundingProblems[0] || (!isReviewed ? "詳細下部の確認ボタンを押してください。" : undefined)} disabled={busy || Boolean(monthLock) || !isReviewed || (row.integrityIssues?.length || 0) > 0 || fundingProblems.length > 0} onClick={() => { if (window.confirm(`${row.businessDate}の店舗データと現金照合を承認しますか？`)) void run(() => approveClosing(row.id, { businessDate: row.businessDate, updatedAt: row.updatedAt, checksum: row.checksum, submissionId: row.submissionId }, user), "店舗データを承認しました。"); }}>承認</button>}
             {(row.status === "submitted" || row.status === "approved") && <button className="button danger mini" title={monthLock || correctionLock || undefined} disabled={busy || Boolean(monthLock) || Boolean(correctionLock)} onClick={() => {
-              if (row.status === "approved" && !window.confirm(`${row.businessDate}の承認を取り消して店舗へ差し戻しますか？\n再送・再承認されるまで月次集計から除外されます。`)) return;
+              const carriesCorrections = data.castCorrections?.some((record) => record.sourceClosingId === row.id && record.active);
+              if (row.status === "approved" && !window.confirm(`${row.businessDate}の承認を取り消して店舗へ差し戻しますか？\n${carriesCorrections ? "経理で修正した勤務・売上・商品情報を店舗の再編集へ引き継ぎます。日払いなどの支払実績と現金照合は変更しません。\n" : ""}再送・再承認されるまで月次集計から除外されます。`)) return;
               const reason = window.prompt(row.status === "approved" ? "承認後の差戻し理由を入力してください（500文字以内）。" : "差戻し理由を入力してください（500文字以内）。");
               if (reason?.trim()) void run(() => returnClosing(row.id, { businessDate: row.businessDate, updatedAt: row.updatedAt, checksum: row.checksum, submissionId: row.submissionId }, reason, user), "店舗へ差し戻しました。");
             }}>差戻し</button>}
@@ -196,7 +195,7 @@ export function ClosingCastProductDetails({
 function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Props & { section: Exclude<Section, "approval"> }) {
   const [month, setMonth] = useRecoverableState("accounting.monthly.month", currentMonth());
   const [castEditDirty, setCastEditDirty] = useState(false);
-  const [castEditRequest, setCastEditRequest] = useState<{ sourceId: string; sequence: number }>();
+  const [castEditRequest, setCastEditRequest] = useState<{ sourceId: string; entryId: string; sequence: number }>();
   const stored = data.adjustments.find((row) => row.month === month);
   const [adjustments, setAdjustments] = useRecoverableState<MonthlyAdjustments>("accounting.monthly.adjustments", () => blankAdjustments(month, stored));
   const loadedAdjustments = useRef({ month, rows: data.adjustments });
@@ -261,7 +260,11 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
     const regularIds = new Set(corrected.closings.filter((closing) => closing.businessDate.startsWith(month)).flatMap((closing) => closing.casts.filter((cast) => cast.kind === "regular").map((cast) => cast.masterId)));
     const closing = corrected.closings.find((closing) => closing.status === "approved" && closing.businessDate === businessDate);
     const entry = closing?.casts.find((cast) => castIdentityForMonth(cast, castById, casts, month, regularIds) === castId);
-    if (entry && closing) setCastEditRequest((request) => ({ sourceId: entry.accountingCorrection?.sourceClosingId || closing.id, sequence: (request?.sequence || 0) + 1 }));
+    if (entry && closing) setCastEditRequest((request) => ({
+      sourceId: entry.accountingCorrection?.sourceClosingId || closing.id,
+      entryId: entry.accountingCorrection?.sourceEntryId || entry.posCastId,
+      sequence: (request?.sequence || 0) + 1,
+    }));
   };
   return <div className="grid">
     <Card><div className="month-toolbar"><Field label="対象月"><input className="input" type="month" value={month} onChange={(event) => changeMonth(event.target.value)} /></Field><span>承認済み営業日 <strong>{results?.approvedDays ?? approved.length}日</strong></span>{state?.status === "closed" ? <StatusPill tone="good">月次確定済み 第{state.currentSnapshotRevision}版</StatusPill> : state?.status === "closing" ? <StatusPill tone="warn">月次確定処理中</StatusPill> : <StatusPill>未確定</StatusPill>}{!closed && state?.status !== "closing" && (section !== "castSales" || adjustmentsDirty) && <button className="button" disabled={busy || !adjustmentsDirty} onClick={() => void save()}>経理入力を保存</button>}{!closed && state?.status !== "closing" && <button className="button secondary" disabled={busy || adjustmentsDirty || castEditDirty || calculationsBlocked || !finalizeCheck.allowed} onClick={finalize}>月次確定</button>}{state?.status === "closing" && <button className="button danger" disabled={busy} onClick={cancelClosing}>確定処理を中止</button>}{closed && <button className="button danger" disabled={busy} onClick={reopen}>確定解除</button>}</div></Card>

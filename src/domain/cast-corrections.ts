@@ -34,7 +34,7 @@ function validIntroducer(value: unknown) {
     && (value.entryAdvisoryEnabled === undefined || typeof value.entryAdvisoryEnabled === "boolean");
 }
 
-function normalizeDraft(value: unknown): CastCorrectionDraft {
+export function normalizeCastCorrectionDraft(value: unknown): CastCorrectionDraft {
   requireValue(object(value), "経理訂正の入力データがありません。");
   const draft = { ...value, entries: list<CastCorrectionEntry>(value.entries).map((entry) => ({
     ...entry, dohan: list<CastCorrectionEntry["dohan"][number]>(entry?.dohan),
@@ -83,6 +83,7 @@ function normalizeDraft(value: unknown): CastCorrectionDraft {
   }
   return draft;
 }
+const normalizeDraft = normalizeCastCorrectionDraft;
 
 /** Firebaseの空配列欠落・数値キー配列を正規化。不正履歴は黙って削除しない。 */
 export function normalizeCastDailyCorrectionDocument(value: unknown, sourceClosingId: string): CastDailyCorrectionDocument {
@@ -130,6 +131,8 @@ export function normalizeCorrectedDailyCast(value: unknown): DailyCast {
     && (product.backAmount === undefined || numeric(product.backAmount)), `${row.name}の商品明細が不正です。`);
   for (const bottle of row.bottles) requireValue(["champagneWine", "keepBottle"].includes(bottle.kind)
     && Number.isFinite(bottle.costAmount) && bottle.costAmount >= 0, `${row.name}の酒代原価が不正です。`);
+  for (const drink of row.drinkAllocations!) requireValue(drink.unitPrice === undefined || money(drink.unitPrice),
+    `${row.name}のドリンク販売単価が不正です。`);
   if (row.accountingCorrection !== undefined) {
     const metadata = row.accountingCorrection;
     requireValue(object(metadata) && text(metadata.sourceClosingId) && text(metadata.sourceEntryId)
@@ -160,6 +163,20 @@ export function castCorrectionDohanBack(items: CastCorrectionEntry["dohan"]) {
 
 export function createCastCorrectionDraft(source: DailyClosing, _adjustments?: MonthlyAdjustments): CastCorrectionDraft {
   requireValue(source.status === "approved", "承認済みの日次だけ経理訂正できます。");
+  if (source.castInputRevision) {
+    const accepted = normalizeDraft(source.castInputRevision.draft);
+    return normalizeDraft({ ...accepted, sourceClosingId: source.id, sourceUpdatedAt: source.updatedAt,
+      sourceChecksum: source.checksum, sourceSubmissionId: source.submissionId,
+      entries: source.casts.map((row) => {
+        const prior = accepted.entries.find((entry) => !entry.deleted
+          && (entry.originalPosCastId || `handoff_${entry.id}`) === row.posCastId);
+        requireValue(prior, `${row.name}の引継ぎ勤務原本がありません。店舗へ差し戻して確認してください。`);
+        return { ...prior, originalPosCastId: row.posCastId, masterId: row.masterId, name: row.name, kind: row.kind,
+          hourlyRate: row.hourlyRate, honShimeiSales: row.honShimeiSales, jonaiExtensionSales: row.jonaiExtensionSales,
+          beautyAllowance: row.beautyAllowance, deleted: false };
+      }),
+    });
+  }
   const pos = source.posSnapshot;
   requireValue(pos && Array.isArray(pos.castWork) && Array.isArray(pos.transactions), "POS原本がなく、勤務・商品内訳を復元できません。店舗へ差し戻して原本を確認してください。");
   const entries: CastCorrectionEntry[] = source.casts.map((row) => {
@@ -311,7 +328,7 @@ export function sealCastCorrectionDraft(value: CastCorrectionDraft, data: CastCo
   return normalizeDraft(sealed);
 }
 
-function correctedRow(entry: CastCorrectionEntry, draft: CastCorrectionDraft, source: DailyClosing, data: CastCorrectionWorkspace): DailyCast {
+function correctedRow(entry: CastCorrectionEntry, draft: CastCorrectionDraft, source: DailyClosing): DailyCast {
   const original = source.casts.find((row) => row.posCastId === entry.originalPosCastId);
   const terms = termsFor(entry, original, source);
   const row: DailyCast = { masterId: entry.masterId, posCastId: `accounting_${source.id}_${entry.id}`, name: entry.name, kind: entry.kind,
@@ -332,7 +349,7 @@ function correctedRow(entry: CastCorrectionEntry, draft: CastCorrectionDraft, so
     if (product.kind === "castDrink") {
       row.drinkSales += sales / denominator;
       row.drinkAllocations!.push({ itemId: product.id, sourceKey, name: product.name, quantity: product.quantity,
-        salesAmount: sales / denominator, backAmount: splitItemBackPerTarget(sales, .1, denominator) });
+        salesAmount: sales / denominator, unitPrice: product.unitPrice, backAmount: splitItemBackPerTarget(sales, .1, denominator) });
     } else {
       row.bottles.push({ itemId: product.id, sourceKey, name: product.name, kind: product.kind, quantity: product.quantity,
         salesAmount: sales / denominator, costAmount: cost / denominator, specialCost: true,
@@ -344,6 +361,14 @@ function correctedRow(entry: CastCorrectionEntry, draft: CastCorrectionDraft, so
   return row;
 }
 
+/** 検証済みの引継ぎを店舗入力へ実体化する。計算専用metadataは保存しない。 */
+export function materializeCastCorrectionRows(draft: CastCorrectionDraft, source: DailyClosing): DailyCast[] {
+  return normalizeDraft(draft).entries.filter((entry) => !entry.deleted).map((entry) => {
+    const { accountingCorrection: _projectionOnly, ...row } = correctedRow(entry, draft, source);
+    return { ...row, posCastId: entry.originalPosCastId || `handoff_${entry.id}` };
+  });
+}
+
 function project(data: CastCorrectionWorkspace, drafts: CastCorrectionDraft[]) {
   const sourceIds = new Set(drafts.map((draft) => draft.sourceClosingId));
   requireValue(sourceIds.size === drafts.length, "同じ原本の経理訂正が重複しています。");
@@ -353,7 +378,7 @@ function project(data: CastCorrectionWorkspace, drafts: CastCorrectionDraft[]) {
     for (const entry of draft.entries.filter((row) => !row.deleted)) {
       const target = closings.find((row) => row.id === entry.targetClosingId)!;
       requireValue(!target.casts.some((row) => row.masterId === entry.masterId), `${entry.name}は${entry.businessDate}に既に出勤しています。同じ人物・営業日の重複を解消してください。`);
-      target.casts.push(correctedRow(entry, draft, source, data));
+      target.casts.push(correctedRow(entry, draft, source));
     }
   }
   const masters = [...(data.archivedCasts || []), ...data.casts];

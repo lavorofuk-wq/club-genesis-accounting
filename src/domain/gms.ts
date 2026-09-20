@@ -1,6 +1,7 @@
 import { cashFundingIssues } from "./cash-funding";
 import type { CashFunding } from "./cash-funding";
 import { sha256Hex } from "../lib/crypto-compat";
+import { normalizeCastInputRevision, validateAcceptedCastInputRows } from "./cast-return-handoff";
 
 export type Role = "shop" | "accounting" | "op";
 export type PersonStatus = "active" | "trial" | "departed";
@@ -251,6 +252,8 @@ export type DrinkAllocation = {
   name: string;
   quantity: number;
   salesAmount: number;
+  /** 経理修正から引き継ぐ場合の、配賦前の販売単価。 */
+  unitPrice?: number;
   /** 商品1行全体の10%を10円未満切捨て後、対象人数で均等割りした1人分（10円未満切捨て）。旧保存値は1円単位の場合がある。 */
   backAmount?: number;
 };
@@ -368,6 +371,31 @@ export type CastDailyCorrectionDocument = {
   history: Record<string, CastCorrectionHistory>;
 };
 export type CastCorrectionRecord = CastDailyCorrectionDocument;
+
+/** 差戻しで受け入れたキャスト入力。POS原本とは別に保持する。 */
+export type CastInputRevision = {
+  schema: 1;
+  handoffId: string;
+  sourceCorrectionRevision: number;
+  draft: CastCorrectionDraft;
+  /** 店舗全体本数（派遣を含む）へ修正差分を加算するための原本対応行。 */
+  originalCasts: Array<Pick<DailyCast, "posCastId" | "masterId" | "name" | "kind" | "honShimeiCount" | "banaiShimeiCount" | "dohanCount">>;
+};
+export type CastReturnHandoff = {
+  schema: 1;
+  id: string;
+  sourceClosingId: string;
+  sourceUpdatedAt: string;
+  sourceChecksum: string;
+  sourceSubmissionId: string;
+  sourceCorrectionRevision: number;
+  returnedAt: string;
+  reason: string;
+  createdAt: string;
+  createdBy: string;
+  sourceRecordJson: string;
+  draft: CastCorrectionDraft;
+};
 
 /**
  * 紹介者マスタを削除した月だけに適用する、キャスト単位の月次制御履歴。
@@ -491,6 +519,8 @@ export type DailyClosing = {
   cashRevisionId?: string;
   previousUpdatedAt?: string;
   posSnapshot: PosClosingV3;
+  castReturnHandoffId?: string;
+  castInputRevision?: CastInputRevision;
   submittedAt?: string;
   /** Firebaseサーバーが確定した店舗送信時刻（ミリ秒）。旧データでは未設定。 */
   submittedAtMs?: number;
@@ -687,6 +717,9 @@ export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
           return [];
         }
         const drink = drinkCandidate as DrinkAllocation & Record<string, unknown>;
+        if (drink.unitPrice !== undefined && (!Number.isSafeInteger(drink.unitPrice) || Number(drink.unitPrice) < 0)) {
+          integrityIssues.push(`${label}のドリンク販売単価が不正です。`);
+        }
         const drinkNumeric = normalizeNumericFields(
           drink,
           ["quantity", "salesAmount"],
@@ -702,6 +735,7 @@ export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
           name: String(drink.name || ""),
           quantity: drinkNumeric.quantity,
           salesAmount: drinkNumeric.salesAmount,
+          ...(drink.unitPrice === undefined ? {} : { unitPrice: storedNumber(drink.unitPrice) }),
           ...(drink.backAmount === undefined ? {} : { backAmount: Math.max(0, Math.floor(parsedBackAmount || 0)) }),
         }];
       });
@@ -827,8 +861,17 @@ export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
     if (!row.name.trim()) integrityIssues.push(`送迎ドライバー勤務${index + 1}件目の名前がありません。`);
   });
   reportDuplicateIds("送迎ドライバー勤務のドライバーID", drivers.map((row) => row.driverId));
+  let castInputRevision: CastInputRevision | undefined;
+  if (value.castInputRevision !== undefined) {
+    try {
+      castInputRevision = normalizeCastInputRevision(value.castInputRevision);
+      validateAcceptedCastInputRows({ ...value, casts, castInputRevision });
+    }
+    catch (error) { integrityIssues.push(error instanceof Error ? error.message : "差戻しで引き継いだキャスト入力が不正です。"); }
+  }
   return {
     ...value,
+    castInputRevision,
     businessDate: String(value.businessDate || ""),
     sales: {
       totalSales: storedNumber(value.sales?.totalSales),
@@ -943,6 +986,7 @@ export type WorkspaceData = {
   adjustments: MonthlyAdjustments[];
   cashFloat: number;
   castCorrections?: CastDailyCorrectionDocument[];
+  castReturnHandoffs?: CastReturnHandoff[];
 };
 
 /** 時給は営業日ごとに1円未満を切り捨て、月額はこの確定した日額の合計とする。 */
@@ -1941,9 +1985,10 @@ export function findUnclassifiedLegacyBottles(
   return closings
     .filter((closing) => closing.status === "approved"
       && closing.businessDate.startsWith(month)
+      && !closing.castInputRevision
       && !hasAttributablePosSnapshot(closing))
     .flatMap((closing) => (closing.casts || []).flatMap((row) =>
-      (row.bottles || []).flatMap((bottle, bottleIndex) => {
+      (row.accountingCorrection ? [] : row.bottles || []).flatMap((bottle, bottleIndex) => {
         const sourceKey = legacyBottleSourceKey(closing, row, bottleIndex);
         return classifications[sourceKey] ? [] : [{
           sourceKey,
@@ -1965,6 +2010,15 @@ function bottleAllocationsBySalesType(
   if (row.accountingCorrection) {
     return (row.bottles || []).reduce((result, bottle) => {
       const classification = row.accountingCorrection!.productClassifications[bottle.sourceKey || ""];
+      if (classification === "honShimei" || classification === "jonaiExtension") result[classification].push(bottle);
+      return result;
+    }, { honShimei: [] as BottleAllocation[], jonaiExtension: [] as BottleAllocation[] });
+  }
+  if (closing.castInputRevision) {
+    const classifications = new Map(closing.castInputRevision.draft.products.map((product, index) =>
+      [`accounting_${closing.castInputRevision!.draft.sourceClosingId}_${index}`, product.classification]));
+    return (row.bottles || []).reduce((result, bottle) => {
+      const classification = classifications.get(bottle.sourceKey || "");
       if (classification === "honShimei" || classification === "jonaiExtension") result[classification].push(bottle);
       return result;
     }, { honShimei: [] as BottleAllocation[], jonaiExtension: [] as BottleAllocation[] });
@@ -2031,7 +2085,7 @@ function bottleAllocationsBySalesType(
 }
 
 function drinkBackFromPosSnapshot(closing: DailyClosing, row: DailyCast) {
-  if (row.accountingCorrection) return drinkBack([row]);
+  if (row.accountingCorrection || closing.castInputRevision) return drinkBack([row]);
   if (!hasAttributablePosSnapshot(closing)) return undefined;
   return closing.posSnapshot.transactions.reduce((transactionTotal, transaction) =>
     transactionTotal + (transaction.items || []).reduce((itemTotal, item) => {

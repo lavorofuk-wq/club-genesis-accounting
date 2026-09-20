@@ -131,13 +131,18 @@ function balanceWorkspace(): AccountingWorkspaceData {
 }
 
 describe("主要ページのSSRスモーク", () => {
-  it("経理修正の元日・移動先は原本復元を案内し、別営業日は制限しない", () => {
-    const workspace = { ...data, castCorrections: [{ sourceClosingId: closing.id, active: true,
-      current: { entries: [{ targetClosingId: "moved-day" }] } }] } as unknown as AccountingWorkspaceData;
+  it("別営業日にまたがる修正は関連日を案内し、単日修正の差戻しは妨げない", () => {
+    const workspace = { ...data, closings: [...data.closings,
+      { ...closing, id: "moved-day", businessDate: "2026-09-02" },
+      { ...closing, id: "another-day", businessDate: "2026-09-03" }],
+    castCorrections: [{ sourceClosingId: closing.id, active: true,
+      current: { entries: [{ targetClosingId: "moved-day", businessDate: "2026-09-02" }] } }] } as unknown as AccountingWorkspaceData;
     expect(castCorrectionReturnMessage(workspace, closing.id)).toContain(businessDate);
-    expect(castCorrectionReturnMessage(workspace, "moved-day")).toContain("原本へ戻して");
+    expect(castCorrectionReturnMessage(workspace, "moved-day")).toContain(businessDate);
     expect(castCorrectionReturnMessage(workspace, "another-day")).toBe("");
     expect(castCorrectionReturnMessage({ ...workspace, castCorrections: workspace.castCorrections!.map((record) => ({ ...record, active: false })) }, closing.id)).toBe("");
+    const singleDay = { ...workspace, castCorrections: [{ ...workspace.castCorrections![0], current: { entries: [{ targetClosingId: closing.id, businessDate }] } }] } as unknown as AccountingWorkspaceData;
+    expect(castCorrectionReturnMessage(singleDay, closing.id)).toBe("");
   });
   it("キャスト報酬に受領書の全員一括ボタンを表示し、未保存・処理中・不整合では停止する", () => {
     const source = balanceWorkspace();

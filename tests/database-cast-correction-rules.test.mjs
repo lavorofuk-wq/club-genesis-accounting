@@ -21,11 +21,11 @@ function evaluate(rule, oldTree, newTree, path, variables = {}) {
   const old = structuredClone(oldTree);
   old.users = { user: { role: variables.role || "op" } };
   const expression = rule.replaceAll(".matches(", ".match(").replaceAll(".beginsWith(", ".startsWith(");
-  const names = ["root", "data", "newData", "auth", "now", "$workspace", "$sourceClosingId", "$closingId", "$revision", "$index", "$itemIndex", "$targetIndex", "$other", "$id", "$field"];
+  const names = ["root", "data", "newData", "auth", "now", "$workspace", "$sourceClosingId", "$closingId", "$revision", "$index", "$itemIndex", "$targetIndex", "$other", "$id", "$field", "$handoffId"];
   const run = new Function(...names, `return Boolean(${expression});`);
   return run(new Snapshot(old), new Snapshot(old, path.split("/")), new Snapshot(newTree, path.split("/")), { uid: "user" }, 1800000000000,
     variables.workspace || "accounting-dev", variables.sourceClosingId || "source", variables.closingId || "target",
-    variables.revision || "1", "0", "0", "0", "", variables.id || "target", variables.field || "status");
+    variables.revision || "1", variables.index || "0", "0", "0", variables.other || "", variables.id || "target", variables.field || "status", variables.handoffId || "handoff");
 }
 
 function correctionTrees({ oldGlobal = 1, newGlobal = 2, documentRevision = 2, claimRevision = documentRevision, existingClaim } = {}) {
@@ -89,7 +89,8 @@ test("訂正draftは原本アンカー・承認済み変更先・金額型・固
 
 test("追加した全Rules式はJavaScript互換構文として括弧が閉じている", () => {
   const roots = [workspaceRules.castDailyCorrectionRevision, workspaceRules.castDailyCorrections,
-    workspaceRules.castDailyCorrectionClaims, workspaceRules.history.$id.$field, workspaceRules.dailyClosingDeletionLock];
+    workspaceRules.castDailyCorrectionClaims, workspaceRules.castReturnHandoffs, workspaceRules.history.$id.castInputRevision,
+    workspaceRules.history.$id.$field, workspaceRules.dailyClosingDeletionLock];
   const expressions = [];
   const visit = (value) => {
     if (!value || typeof value !== "object") return;
@@ -103,4 +104,44 @@ test("追加した全Rules式はJavaScript互換構文として括弧が閉じ�
     assert.doesNotThrow(() => new Function("root", "data", "newData", "auth", "now", "$workspace", "$sourceClosingId", "$closingId",
       "$revision", "$index", "$itemIndex", "$targetIndex", "$other", "$id", "$field", `return (${expression});`));
   }
+});
+
+test("引継ぎ履歴はdevの個別IDだけ店舗から読め、店舗書込・履歴上書き・本番利用は禁止する", () => {
+  const rule = workspaceRules.castReturnHandoffs.$id.$handoffId;
+  assert.equal(workspaceRules.castReturnHandoffs[".read"], undefined);
+  assert.equal(evaluate(rule[".read"], {}, {}, "accounting-dev/castReturnHandoffs/source/handoff", { role: "shop" }), true);
+  assert.equal(evaluate(rule[".read"], {}, {}, "accounting/castReturnHandoffs/source/handoff", { role: "shop", workspace: "accounting" }), false);
+  assert.equal(evaluate(rule[".write"], {}, {}, "accounting-dev/castReturnHandoffs/source/handoff", { role: "shop" }), false);
+  assert.match(rule[".write"], /!data\.exists\(\) && newData\.exists\(\)/);
+  assert.match(rule[".validate"], /castDailyCorrectionClaims/);
+  assert.match(rule[".validate"], /castDailyCorrections.*active.*false/);
+});
+
+test("受入済み引継ぎの途中entry欠落は、残った前行の連続index検査でも拒否する", () => {
+  const entry = { id: "pos0", targetClosingId: "source", businessDate: "2026-09-01", masterId: "cast0", name: "合成",
+    kind: "regular", startTime: "20:00", endTime: "01:00", breakMinutes: 0, hourlyRate: 3000,
+    honShimeiCount: 0, banaiShimeiCount: 0, honShimeiSales: 0, jonaiExtensionSales: 0, beautyAllowance: 0, deleted: false };
+  const draft = { entries: [entry, { ...entry, id: "pos1" }, { ...entry, id: "pos2" }] };
+  const handoff = { draft, draftShape: { entries: 3, products: 0, originalCasts: 0, indices: { 0: 0, 1: 1, 2: 2 }, dohan: { 0: 0, 1: 0, 2: 0 } } };
+  const old = { "accounting-dev": { castReturnHandoffs: { source: { handoff } } } };
+  const next = { "accounting-dev": { ...old["accounting-dev"], history: { source: { castInputRevision: { handoffId: "handoff", draft: structuredClone(draft) } } } } };
+  const rule = workspaceRules.history.$id.castInputRevision.draft.entries.$index[".validate"];
+  const path = "accounting-dev/history/source/castInputRevision/draft/entries/0";
+  assert.equal(evaluate(rule, old, next, path, { id: "source" }), true);
+  delete next["accounting-dev"].history.source.castInputRevision.draft.entries[1];
+  assert.equal(evaluate(rule, old, next, path, { id: "source" }), false);
+});
+
+test("受入済み引継ぎは新POSへ持ち越せず、既存の本番検証は変えない", () => {
+  const draft = { sourceClosingId: "source", sourceChecksum: "old", sourceSubmissionId: "submission-old" };
+  const input = { schema: 1, handoffId: "handoff", sourceCorrectionRevision: 1, draft };
+  const old = { "accounting-dev": { history: { source: { castReturnHandoffId: "handoff" } },
+    castReturnHandoffs: { source: { handoff: { sourceCorrectionRevision: 1, draftShape: { originalCasts: 0 } } } } } };
+  const next = { "accounting-dev": { ...old["accounting-dev"], history: { source: { status: "submitted", checksum: "old", submissionId: "submission-old", castInputRevision: input } } } };
+  const rule = workspaceRules.history.$id.castInputRevision[".validate"];
+  const path = "accounting-dev/history/source/castInputRevision";
+  assert.equal(evaluate(rule, old, next, path, { id: "source" }), true);
+  next["accounting-dev"].history.source.checksum = "new";
+  assert.equal(evaluate(rule, old, next, path, { id: "source" }), false);
+  assert.equal(evaluate(rule, {}, {}, "accounting/history/source/castInputRevision", { workspace: "accounting", id: "source" }), true);
 });

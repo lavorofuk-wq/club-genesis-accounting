@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { balanceDailyCounts, buildBalanceExportReport, type BalanceExportInput } from "./balance-export";
-import type { DailyCast, DailyClosing, MonthlyAdjustments, PosCastWork, PosItem } from "./gms";
+import type { CastInputRevision, DailyCast, DailyClosing, MonthlyAdjustments, PosCastWork, PosItem } from "./gms";
 import { calculateCash } from "./gms";
 import { calculateCashFunding, cashFundingContext } from "./cash-funding";
 import { buildMonthlySnapshot, calculateMonthlyAccounting } from "./month-accounting";
@@ -79,6 +79,53 @@ describe("収支帳票のキャスト修正本数とPOS派遣の分離", () => {
       honShimeiCount: index === 0 ? 1 : 0, banaiShimeiCount: index === 0 ? 1 : 0, dohanCount: index === 0 ? 1 : 0 }));
     return source;
   }
+
+  function accepted(source: DailyClosing, casts: DailyCast[]) {
+    return { ...structuredClone(source), casts: structuredClone(casts), castInputRevision: {
+      schema: 1, handoffId: "handoff", sourceCorrectionRevision: 1,
+      originalCasts: source.casts.map(({ posCastId, masterId, name, kind, honShimeiCount, banaiShimeiCount, dohanCount }) => ({ posCastId, masterId, name, kind, honShimeiCount, banaiShimeiCount, dohanCount })),
+      draft: { sourceClosingId: source.id, sourceUpdatedAt: "2026-09-03T00:00:00Z", sourceChecksum: "a".repeat(64), sourceSubmissionId: "submission", entries: [], products: [] },
+    } satisfies CastInputRevision };
+  }
+
+  it("経理訂正を差戻しで受け入れ再承認しても、本人の訂正本数と派遣分が残る", () => {
+    const source = original();
+    const casts = source.casts.map((row, index) => ({ ...row, posCastId: `accounting_${source.id}_${row.posCastId}`,
+      honShimeiCount: index === 0 ? 4 : 0, banaiShimeiCount: index === 0 ? 3 : 0, dohanCount: index === 0 ? 2 : 0 }));
+    const next = accepted(source, casts);
+    expect(balanceDailyCounts(next)).toEqual({ groups: 3, customers: 5, honShimeiCount: 6,
+      jonaiCount: 4, dohanCount: 3, castCount: 2, dispatchCastCount: 2 });
+    expect(next.posSnapshot).toEqual(source.posSnapshot);
+  });
+
+  it("引継ぎ後の二度目の経理訂正は原本基準の累積差分だけ反映し、二重加算しない", () => {
+    const source = original();
+    const next = accepted(source, source.casts.map((row, index) => ({ ...row, honShimeiCount: index === 0 ? 4 : 0 })));
+    const overlay = structuredClone(next); overlay.casts[0].honShimeiCount = 5;
+    expect(balanceDailyCounts(next, overlay)).toMatchObject({ honShimeiCount: 7, dispatchCastCount: 2 });
+    // 同じ訂正を再送した場合も、原本の差分基準は変えない。
+    const reaccepted = { ...next, casts: overlay.casts };
+    expect(balanceDailyCounts(reaccepted)).toMatchObject({ honShimeiCount: 7, dispatchCastCount: 2 });
+  });
+
+  it("旧版で追加・削除・別人化した出勤の引継ぎも原本照合へ戻さず人数を維持する", () => {
+    const source = original();
+    const remaining = { ...source.casts[1], posCastId: "accounting-trial", name: "修正した名前" };
+    const next = accepted(source, [remaining]);
+    expect(balanceDailyCounts(next)).toMatchObject({ honShimeiCount: 2, jonaiCount: 1, dohanCount: 1, castCount: 1, dispatchCastCount: 2 });
+    next.casts.push({ ...source.casts[0], posCastId: "accounting-added", masterId: "added", name: "追加した人", honShimeiCount: 2 });
+    expect(balanceDailyCounts(next)).toMatchObject({ honShimeiCount: 4, castCount: 2, dispatchCastCount: 2 });
+  });
+
+  it("引継ぎ原本本数の欠落・破損をゼロ補完しない", () => {
+    const source = original();
+    const missing = accepted(source, source.casts); missing.castInputRevision.originalCasts = undefined as never;
+    expect(() => balanceDailyCounts(missing)).toThrow("原本キャスト本数");
+    const invalid = accepted(source, source.casts); invalid.castInputRevision.originalCasts[0].honShimeiCount = .5;
+    expect(() => balanceDailyCounts(invalid)).toThrow("整数");
+    const mismatch = accepted(source, source.casts); mismatch.castInputRevision.originalCasts[0].name = "原本にない名前";
+    expect(() => balanceDailyCounts(mismatch)).toThrow("名前・区分");
+  });
 
   it("修正された在籍・体入本数の差分だけ加算し、派遣人数と派遣由来の本数を保持する", () => {
     const source = original();

@@ -36,7 +36,7 @@ import { STAFF_MONTHLY_RATES_START_MONTH, staffMonthlyRateForMonth } from "./sta
 import { sha256Hex } from "../lib/crypto-compat";
 import { applyCastCorrections, normalizeCorrectedDailyCast } from "./cast-corrections";
 
-export const MONTHLY_CALCULATION_VERSION = "2.30.0";
+export const MONTHLY_CALCULATION_VERSION = "2.31.0";
 export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 3 as const;
 
 export type IntroducerEntryEvent = {

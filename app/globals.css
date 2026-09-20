@@ -315,4 +315,5 @@ details summary { list-style: none; cursor: pointer; }
 .correction-entry h4 { margin-bottom: 8px; }
 .correction-entry output { display: block; padding: 9px 0; }
 .cast-correction-panel { scroll-margin-top: 24px; }
+.cast-daily-editor .modal { width: min(980px, 100%); }
 .correction-history { max-width: 720px; max-height: 360px; overflow: auto; white-space: pre-wrap; font-size: 12px; }

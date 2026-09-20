@@ -45,8 +45,17 @@ vi.mock("./client", () => ({
   rootRef: (path = "") => ({ path: `${memory.rootName}${path ? `/${path}` : ""}`, key: path ? path.split("/").at(-1) : memory.rootName }),
 }));
 vi.mock("../client-release", () => ({ assertCurrentClientRelease: vi.fn().mockResolvedValue(undefined) }));
+vi.mock("./ready-transaction", () => ({
+  runReadyTransaction: async (reference: { path: string }, change: (value: unknown) => unknown) => {
+    const next = change(memory.read(reference.path));
+    if (next === undefined) return { committed: false, snapshot: memory.snapshot(reference.path) };
+    memory.write(reference.path, next);
+    return { committed: true, snapshot: memory.snapshot(reference.path) };
+  },
+}));
 
-import { loadWorkspaceData, saveCastCorrection } from "./repository";
+import { approveClosing, loadWorkspaceData, returnClosing, saveCastCorrection } from "./repository";
+import { materializeCastReturnHandoff } from "@/domain/cast-return-handoff";
 
 const user = { uid: "op-user" } as User;
 const updatedAt = "2026-09-01T12:00:00.000Z";
@@ -69,7 +78,8 @@ function closing(id: string, businessDate: string, casts: DailyCast[] = []): Dai
     cash: { ...sales, cashFloat: 200000, expenseAndPaymentTotal: 0, expectedClosingCash: 200000,
       cashProfit: 0, actualClosingCash: 200000, difference: 0 },
     posSnapshot: { schema: "club-genesis-pos-closing", schemaVersion: 3, businessDate, status: "closed", sales, customers, nominations,
-      transactions: [], castSales: [], castWork: [], enteredCasts: [], exitedCasts: [], trialCasts: [],
+      transactions: [], castSales: [], castWork: casts.map((row) => ({ castId: row.posCastId, castName: row.name, castType: row.kind,
+        isTrial: row.kind === "trial", startTime: row.startTime, endTime: row.endTime, hours: row.hours, breakMinutes: 0 })), enteredCasts: [], exitedCasts: [], trialCasts: [],
       rosterSnapshot: { complete: true, capturedAt: updatedAt, casts: [] }, lifecycleEvents: [], submissionId: `submission-${id}`,
       generatedAt: updatedAt, checksumAlgorithm: "sha256", checksumCanonicalization: "recursive-key-sort-v1", checksum } };
 }
@@ -153,5 +163,66 @@ describe("キャスト日次経理訂正の永続化", () => {
   it("読込時に不正な訂正履歴を黙って破棄しない", async () => {
     memory.write("accounting-dev/castDailyCorrections/source", { sourceClosingId: "source", revision: 1, active: true, history: {} });
     await expect(loadWorkspaceData("op")).rejects.toThrow(/経理訂正履歴.*欠落/);
+  });
+
+  it("訂正を引き継いで差し戻すと原本・現金を維持し、訂正履歴と不変handoffを一括保存する", async () => {
+    const original = structuredClone(memory.read("accounting-dev/history/source")) as DailyClosing;
+    await saveCastCorrection(draft("source", "2026-09-01", 120000), "source", 0, "本指名売上訂正", user);
+    await returnClosing("source", original, "日払いの確認", user);
+    const returned = memory.read("accounting-dev/history/source") as DailyClosing & { castReturnHandoffId: string };
+    expect(returned).toMatchObject({ status: "returned", returnedFromStatus: "approved", returnReason: "日払いの確認" });
+    expect(returned.casts).toEqual(original.casts);
+    expect(returned.cash).toEqual(original.cash);
+    expect(returned.posSnapshot).toEqual(original.posSnapshot);
+    expect(memory.read("accounting-dev/castDailyCorrections/source")).toMatchObject({ revision: 2, active: false,
+      history: { "1": { active: true }, "2": { active: false, createdBy: user.uid } } });
+    expect(memory.read("accounting-dev/castDailyCorrections/source/current")).toBeNull();
+    expect(memory.read("accounting-dev/castDailyCorrectionClaims/source/source")).toBeNull();
+    expect(memory.read("accounting-dev/castDailyCorrectionRevision")).toBe(2);
+    const handoff = memory.read(`accounting-dev/castReturnHandoffs/source/${returned.castReturnHandoffId}`);
+    expect(handoff).toMatchObject({ sourceClosingId: "source", sourceCorrectionRevision: 1, sourceUpdatedAt: original.updatedAt,
+      draft: { entries: [{ honShimeiSales: 120000 }] } });
+    const shopData = await loadWorkspaceData("shop");
+    expect(shopData.castCorrections).toEqual([]);
+    expect(shopData.castReturnHandoffs).toHaveLength(1);
+    expect(shopData.castReturnHandoffs?.[0].id).toBe(returned.castReturnHandoffId);
+  });
+
+  it("他日へ移動済みの訂正を一日の差戻しで消さず、具体的な関係営業日を警告する", async () => {
+    const original = memory.read("accounting-dev/history/source") as DailyClosing;
+    await saveCastCorrection(draft("target", "2026-10-01", 120000), "source", 0, "過去の移動", user);
+    const before = structuredClone(memory.tree);
+    await expect(returnClosing("source", original, "確認", user)).rejects.toThrow("2026-09-01、2026-10-01");
+    expect(memory.tree).toEqual(before);
+  });
+
+  it("引継ぎ差戻しが競合で拒否されたら訂正だけを先に解除しない", async () => {
+    const original = memory.read("accounting-dev/history/source") as DailyClosing;
+    await saveCastCorrection(draft(), "source", 0, "訂正", user);
+    const before = structuredClone(memory.tree);
+    memory.hook(async () => { throw new Error("PERMISSION_DENIED"); });
+    await expect(returnClosing("source", original, "確認", user)).rejects.toThrow("PERMISSION_DENIED");
+    expect(memory.tree).toEqual(before);
+  });
+
+  it("受入済みの不変入力は残し、勤務だけ直接改変された再送データを承認しない", async () => {
+    const original = memory.read("accounting-dev/history/source") as DailyClosing;
+    original.cash.funding = { schema: 2, previousClosingId: "", previousBusinessDate: "", previousClosingCash: 200000,
+      openingShortfall: 0, openingPersonalDebt: 0, companyReplenishment: 0, personalReplenishment: 0,
+      companyTransfer: 0, personalRepayment: 0, closingPersonalDebt: 0, confirmed: true };
+    memory.write("accounting-dev/history/source", original);
+    await saveCastCorrection(draft(), "source", 0, "勤務確認", user);
+    await returnClosing("source", original, "再確認", user);
+    const data = await loadWorkspaceData("shop");
+    const returned = data.closings.find((row) => row.id === "source")!;
+    const accepted = materializeCastReturnHandoff(returned, data.castReturnHandoffs![0]);
+    const protectedInput = structuredClone(accepted.castInputRevision);
+    accepted.status = "submitted";
+    accepted.castReturnHandoffId = undefined;
+    accepted.casts[0].hours += 1;
+    memory.write("accounting-dev/history/source", accepted);
+    await expect(approveClosing("source", accepted, user)).rejects.toThrow("データ不備");
+    expect((memory.read("accounting-dev/history/source") as DailyClosing).status).toBe("submitted");
+    expect((memory.read("accounting-dev/history/source") as DailyClosing).castInputRevision).toEqual(protectedInput);
   });
 });

@@ -13,6 +13,7 @@ import { STAFF_MONTHLY_RATES_START_MONTH, staffMonthlyRateForMonth } from "@/dom
 import { calculateConfirmedCashFunding, cashFundingDraftContext, cashFundingIssues, recommendedPersonalRepayment, cashDayIssues, cashChangeImpacts, sameCashReconciliation, assertCashLedgerChange } from "@/domain/cash-funding";
 import type { CashFundingContext, CashFundingInputs } from "@/domain/cash-funding";
 import { duplicateClosingForNewWorkflow, existingClosingSubmissionMessage } from "@/domain/daily-edit-source";
+import { prepareCastReturnReedit } from "@/domain/cast-return-handoff";
 import { deleteUnapprovedClosing, submitClosing, withdrawClosing } from "@/lib/firebase/repository";
 import { Card, Field, MoneyInput, StatusPill, Table, yen } from "./ui";
 import { useRecoverableState, useUpdateDraftBusy } from "./update-drafts";
@@ -107,6 +108,10 @@ export function StoreWork(props: Props) {
   const [preview, setPreview] = useState<DailyClosing | null>(null);
   const [editing, setEditing] = useRecoverableState<DailyClosing | null>("store.editing", null);
   const [workflowDirty, setWorkflowDirty] = useRecoverableState("store.workflowDirty", false);
+  const preparedEditing = useMemo(() => {
+    try { return { initial: editing ? prepareCastReturnReedit(editing, props.data.castReturnHandoffs) : null, error: "" }; }
+    catch (error) { return { initial: null, error: error instanceof Error ? error.message : "経理修正の引継ぎを確認できません。" }; }
+  }, [editing, props.data.castReturnHandoffs]);
   const beginEditing = (row: DailyClosing) => {
     if (lockedMonthMessage(props.data, row.businessDate)) return;
     if (workflowDirty && !window.confirm("現在入力中の営業日データは保存されていません。破棄して別の送信済みデータを再編集しますか？")) return;
@@ -139,7 +144,8 @@ export function StoreWork(props: Props) {
   const cashReviewRows = props.data.closings.map((row) => ({ row, issues: cashDayIssues(row, props.data.closings) }))
     .filter(({ issues }) => issues.length > 0).sort((a, b) => a.row.businessDate.localeCompare(b.row.businessDate));
   return <div className="grid">
-    <DailyWorkflow key={editing?.id || "new"} {...props} initial={editing} onFinished={() => setEditing(null)} onDirtyChange={setWorkflowDirty} />
+    {preparedEditing.error ? <div className="notice error" role="alert">{preparedEditing.error}<button className="button secondary" onClick={() => { setEditing(null); setWorkflowDirty(false); }}>再編集を終了</button></div>
+      : <DailyWorkflow key={`${editing?.id || "new"}:${editing?.castReturnHandoffId || ""}`} {...props} initial={preparedEditing.initial} onFinished={() => setEditing(null)} onDirtyChange={setWorkflowDirty} />}
     {cashReviewRows.length > 0 && <Card title="現金管理の未入力・要確認営業日" description="日付順に記録を確認してください。後続日の実績は自動変更しません。">
       <Table headers={["営業日", "状態", "確認内容", "操作"]}>{cashReviewRows.map(({ row, issues }) => {
         const lock = lockedMonthMessage(props.data, row.businessDate);
@@ -178,13 +184,13 @@ export function StoreWork(props: Props) {
 
 function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChange }: Props & { initial: DailyClosing | null; onFinished: () => void; onDirtyChange: (dirty: boolean) => void }) {
   // 再編集対象とその入力を同じキーで復元し、別営業日の下書きを混在させない。
-  const draftKey = `store.workflow.${initial?.id || "new"}`;
+  const draftKey = `store.workflow.${initial?.id || "new"}${initial?.castReturnHandoffId ? `.handoff.${initial.castReturnHandoffId}` : ""}`;
   const [stage, setStage] = useRecoverableState<Stage>(`${draftKey}.stage`, initial?.posSnapshot ? "details" : "json");
   const [pos, setPos] = useRecoverableState<PosClosingV3 | null>(`${draftKey}.pos`, initial?.posSnapshot || null);
   const [mapping, setMapping] = useRecoverableState<Record<string, string>>(`${draftKey}.mapping`, () => deriveReeditCastMapping(initial));
   const [allowInitialSnapshotMapping, setAllowInitialSnapshotMapping] = useRecoverableState(`${draftKey}.allowInitialSnapshotMapping`, Boolean(initial?.posSnapshot));
   const [specialCosts, setSpecialCosts] = useRecoverableState<Record<string, number>>(`${draftKey}.specialCosts`, () => initialStoredBottleCosts(initial));
-  const [castRows, setCastRows] = useRecoverableState<DailyCast[]>(`${draftKey}.castRows`, () => initial?.posSnapshot
+  const [castRows, setCastRows] = useRecoverableState<DailyCast[]>(`${draftKey}.castRows`, () => initial?.castInputRevision ? initial.casts : initial?.posSnapshot
     ? restoreDailyCastBackMetadata(initial.posSnapshot, initial.casts || [])
     : initial?.casts || []);
   const [castRowsSourcePos, setCastRowsSourcePos] = useRecoverableState<PosClosingV3 | null>(`${draftKey}.castRowsSourcePos`, initial?.posSnapshot || null);
@@ -231,11 +237,13 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     return () => onDirtyChange(false);
   }, [hasUnsavedDailyData, onDirtyChange]);
   const references = useMemo(() => pos ? posCastReferences(pos) : [], [pos]);
-  const missingBottles = useMemo<MissingBottleCost[]>(() => pos ? pos.transactions.flatMap((transaction) => transaction.items.flatMap((item, itemIndex) => {
+  const acceptedInputs = initial?.castInputRevision && pos?.checksum === initial.checksum && pos?.submissionId === initial.submissionId
+    ? initial.castInputRevision : undefined;
+  const missingBottles = useMemo<MissingBottleCost[]>(() => pos && !acceptedInputs ? pos.transactions.flatMap((transaction) => transaction.items.flatMap((item, itemIndex) => {
     if (!requiresBottleCost(transaction, item, mapping)) return [];
     if (data.liquor.some((row) => row.kind === item.category && row.name === item.label && row.salePrice === item.price)) return [];
     return [{ transaction, item, sourceKey: posItemOccurrenceKey(transaction, itemIndex) }];
-  })) : [], [data.liquor, mapping, pos]);
+  })) : [], [acceptedInputs, data.liquor, mapping, pos]);
   const month = pos?.businessDate.slice(0, 7) || "";
 
   const activeOnBusinessDate = (hiredAt?: string, departedAt?: string) => Boolean(pos && hiredAt && hiredAt <= pos.businessDate && (!departedAt || departedAt >= pos.businessDate));
@@ -258,7 +266,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
       ? ""
       : "選択済みデータが現在の営業日・名前・区分と一致しません";
   };
-  const mappingComplete = isCastMappingComplete(references, mapping) && references.every((source) => !mappingIssue(source));
+  const mappingComplete = Boolean(acceptedInputs) || isCastMappingComplete(references, mapping) && references.every((source) => !mappingIssue(source));
   const costsComplete = missingBottles.every((bottle) => {
     const value = specialCostValue(specialCosts, bottle);
     return value !== undefined && Number.isFinite(value) && value >= 0;
@@ -368,6 +376,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     if (!pos) return;
     if (workflowLock) return setError(workflowLock);
     if (duplicateMessage) return setError(duplicateMessage);
+    if (acceptedInputs) { setStage("details"); setError(""); return; }
     if (!mappingComplete) return setError("未照合、または現在の営業日・名前・区分と一致しないキャストがあります。再照合してください。");
     if (!costsComplete) return setError("今回のみの酒代原価をすべて入力してください。");
     const details = Object.fromEntries(references.map((source) => {
@@ -535,13 +544,14 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     }
     if (!ensureCurrentReferences()) return;
     // 旧版で保存された再編集データも、手当・控除等を保持したまま商品バック明細だけ最新形式へ揃える。
-    const submissionCastRows = restoreDailyCastBackMetadata(pos, castRows);
+    const submissionCastRows = acceptedInputs ? castRows : restoreDailyCastBackMetadata(pos, castRows);
     const value: DailyClosing = {
       id: initial?.id || `daily_${pos.businessDate.replaceAll("-", "")}`,
       businessDate: pos.businessDate, status: "submitted", submissionId: pos.submissionId, checksum: pos.checksum,
       sales: pos.sales, customers: pos.customers, nominations: pos.nominations, casts: submissionCastRows, staffWork, drivers: driverRows, expenses,
       staffDailyPaymentTotal: staffWork.reduce((sum, row) => sum + row.dailyPayment, 0), dispatchStaffPayment, dispatchCastPayment, dispatchFee,
-      liquorDeliveryAmount, cash, ...(cashChanged ? { cashRevisionReason: cashRevisionReason.trim() } : {}), posSnapshot: pos, updatedAt: new Date().toISOString()
+      liquorDeliveryAmount, cash, ...(cashChanged ? { cashRevisionReason: cashRevisionReason.trim() } : {}),
+      ...(acceptedInputs ? { castInputRevision: acceptedInputs } : {}), posSnapshot: pos, updatedAt: new Date().toISOString()
     };
     const saved = await run(() => submitClosing(value, user, initial?.updatedAt), `${pos.businessDate}のデータを経理へ送信しました。`);
     if (saved) {
@@ -559,6 +569,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
   return <Card title={initial ? `${initial.businessDate} 再編集` : "当日営業データ作成"} description="POS JSONの照合から現金の補充・返済実績・確認まで順番に入力します。" action={initial ? <button className="button secondary" disabled={busy} onClick={() => { if (window.confirm("保存していない再編集内容を破棄して終了しますか？")) onFinished(); }}>再編集を終了</button> : null}>
     <div className="stepper">{(["json", "details", "cash", "preview"] as Stage[]).map((value, index) => <span key={value} className={visibleStage === value ? "active" : ""}><b>{index + 1}</b>{["JSON取込", "店舗データ", "現金照合", "送信確認"][index]}</span>)}</div>
     {error && <div className="notice error">{error}</div>}
+    {acceptedInputs && <div className="notice">経理で修正した勤務・売上・本数・商品情報を引き継いでいます。日払い・立替・送迎・現金照合の実績は自動変更していません。出勤追加・削除・人物変更は修正済みのPOS JSONを再取込して確認してください。</div>}
     {workflowLock && <div className="notice warn"><strong>この営業日は編集できません。</strong><br />{workflowLock}</div>}
     {duplicateMessage && <div className="notice warn" role="alert"><strong>この営業日の送信済みデータがあります。</strong><p>{duplicateMessage}</p><p>現在の入力は保持していますが、この新規作成画面からは送信できません。</p><a className="text-button" href="#store-sent-data">送信済みデータを確認</a></div>}
     {stage === "json" && <div className="stack section-pad">
@@ -578,7 +589,9 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
           if (existing) throw new Error(existingClosingSubmissionMessage(existing));
           const previousDate = pos?.businessDate || initial?.businessDate || "";
           if (initial || pos) {
-            if (!window.confirm(jsonReimportConfirmation(previousDate, parsed.businessDate))) return;
+            const message = `${acceptedInputs && (parsed.checksum !== initial?.checksum || parsed.submissionId !== initial?.submissionId)
+              ? "経理修正から引き継いだ勤務・本数・商品情報は、新しいPOS JSONの内容に置き換わります。入力済みの売上修正・手当・支払実績は可能な限り保持し、対応を確認できない行は引継ぎ保留になります。\n\n" : ""}${jsonReimportConfirmation(previousDate, parsed.businessDate)}`;
+            if (!window.confirm(message)) return;
           }
           const changedDate = shouldResetDailyInputsForJson(previousDate, parsed.businessDate);
           if (changedDate) resetDailyInputsForDifferentDate();
@@ -597,7 +610,8 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
           input.value = "";
         }
       }} />{jsonReading && <small>JSONを検証しています…</small>}</Field>
-      {pos && <><div className="summary-strip"><span><small>営業日</small><strong>{pos.businessDate}</strong></span><span><small>総売上</small><strong>{yen.format(pos.sales.totalSales)}</strong></span><span><small>会計</small><strong>{pos.transactions.length}件</strong></span><span><small>勤務</small><strong>{pos.castWork.length}名</strong></span></div>
+      {pos && acceptedInputs && <button className="button" disabled={busy || Boolean(workflowLock)} onClick={createRows}>引継ぎ済みの店舗データへ戻る</button>}
+      {pos && !acceptedInputs && <><div className="summary-strip"><span><small>営業日</small><strong>{pos.businessDate}</strong></span><span><small>総売上</small><strong>{yen.format(pos.sales.totalSales)}</strong></span><span><small>会計</small><strong>{pos.transactions.length}件</strong></span><span><small>勤務</small><strong>{pos.castWork.length}名</strong></span></div>
         <h3>キャストデータ照合</h3><Table headers={["POS名", "区分", "GMSデータ", "状態"]}>{references.map((source) => {
           const options = candidates(source.kind, source.name);
           const selected = mapping[source.id] || "";
@@ -619,7 +633,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     {stage === "details" && pos && !workflowLock && <div className="stack section-pad">
       {unmatchedCastDrafts.length > 0 && <div className="notice error"><strong>引継ぎ保留のキャスト入力があります</strong><p>POSキャストID・名前・区分の一致を確認できなかったため、別人への誤転記を防いで元の入力を保留しています。正しいJSONまたは照合内容を確認してください。</p><Table headers={["キャスト", "本指名売上", "場内延長売上", "美容室", "日払い", "立替", "送迎"]}>{unmatchedCastDrafts.map((row) => <tr key={`${row.posCastId}-${row.name}-${row.kind}`}><td>{row.name}<br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td><td>{yen.format(row.honShimeiSales)}</td><td>{yen.format(row.jonaiExtensionSales)}</td><td>{yen.format(row.beautyAllowance)}</td><td>{yen.format(row.dailyPayment)}</td><td>{yen.format(row.advancePayment)}</td><td>{yen.format(row.transportFee)}</td></tr>)}</Table><button className="button danger mini" onClick={() => { if (window.confirm("引継ぎ保留のキャスト入力を破棄しますか？破棄した値は現在の再編集画面へ戻せません。")) { setUnmatchedCastDrafts([]); setError(""); } }}>保留入力を確認済みとして破棄</button></div>}
       {invalidTrialBeautyExpenses.length > 0 && <div className="notice error">体入キャストとの紐付けを確認できない美容室手当経費があります。経費一覧から対象行を削除し、現在の体入キャストを選び直してください。</div>}
-      <h3>キャスト出勤・売上・手当控除</h3><Table headers={["キャスト", "勤務", "本指名", "場内", "同伴", "本指名売上", "場内延長売上", "ボトル/ドリンク", "美容室", "日払い", "立替", "送迎"]}>{castRows.map((row) => <tr key={row.posCastId}><td><strong>{row.name}</strong><br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td><td>{row.startTime}–{row.endTime}<br />{row.hours}時間</td><td>{row.honShimeiCount}本</td><td>{row.banaiShimeiCount}本</td><td>{row.dohanCount}本</td><td><MoneyInput value={row.honShimeiSales} step={10} onChange={(value) => updateCast(row.posCastId, { honShimeiSales: value })} /></td><td><MoneyInput value={row.jonaiExtensionSales} step={10} onChange={(value) => updateCast(row.posCastId, { jonaiExtensionSales: value })} /></td><td><CastProductSummary row={row} pos={pos} /></td><td><label className="check-row"><input type="checkbox" checked={row.beautyAllowance === 500} disabled={row.kind === "trial"} onChange={(e) => updateCast(row.posCastId, { beautyAllowance: e.target.checked ? 500 : 0 })} />500円</label></td><td><MoneyInput value={row.dailyPayment} onChange={(value) => updateCast(row.posCastId, { dailyPayment: value })} /></td><td><MoneyInput value={row.advancePayment} onChange={(value) => updateCast(row.posCastId, { advancePayment: value })} /></td><td><MoneyInput value={row.transportFee} step={500} onChange={(value) => updateCast(row.posCastId, { transportFee: value })} /></td></tr>)}</Table>
+      <h3>キャスト出勤・売上・手当控除</h3><Table headers={["キャスト", "勤務", "本指名", "場内", "同伴", "本指名売上", "場内延長売上", "ボトル/ドリンク", "美容室", "日払い", "立替", "送迎"]}>{castRows.map((row) => <tr key={row.posCastId}><td><strong>{row.name}</strong><br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td><td>{row.startTime}–{row.endTime}<br />{row.hours}時間</td><td>{row.honShimeiCount}本</td><td>{row.banaiShimeiCount}本</td><td>{row.dohanCount}本</td><td><MoneyInput value={row.honShimeiSales} step={10} onChange={(value) => updateCast(row.posCastId, { honShimeiSales: value })} /></td><td><MoneyInput value={row.jonaiExtensionSales} step={10} onChange={(value) => updateCast(row.posCastId, { jonaiExtensionSales: value })} /></td><td><CastProductSummary row={row} pos={acceptedInputs ? undefined : pos} /></td><td><label className="check-row"><input type="checkbox" checked={row.beautyAllowance === 500} disabled={row.kind === "trial"} onChange={(e) => updateCast(row.posCastId, { beautyAllowance: e.target.checked ? 500 : 0 })} />500円</label></td><td><MoneyInput value={row.dailyPayment} onChange={(value) => updateCast(row.posCastId, { dailyPayment: value })} /></td><td><MoneyInput value={row.advancePayment} onChange={(value) => updateCast(row.posCastId, { advancePayment: value })} /></td><td><MoneyInput value={row.transportFee} step={500} onChange={(value) => updateCast(row.posCastId, { transportFee: value })} /></td></tr>)}</Table>
       <h3>スタッフ勤務・日払い</h3><p className="muted compact-text">登録時時給は店舗入力時の保存値です。在籍スタッフの未確定月（2026年9月以降）は月度時給で給与計算します。</p><div className="grid form-row"><Field label="スタッフ"><select className="input" value={staffId} onChange={(e) => setStaffId(e.target.value)}><option value="">選択</option>{staffCandidates.map((row) => <option key={row.id} value={row.id}>{row.name}（{row.status === "trial" ? "体入" : "在籍"}）</option>)}</select></Field><Field label="出勤"><input className="input" type="time" value={staffStart} onChange={(e) => setStaffStart(e.target.value)} /></Field><Field label="退勤"><input className="input" type="time" value={staffEnd} onChange={(e) => setStaffEnd(e.target.value)} /></Field><button className="button compact" onClick={addStaff}>追加</button></div><Table headers={["スタッフ", "区分", "出勤", "退勤", "勤務", "登録時時給", "日払い", "操作"]}>{staffWork.map((row) => <tr key={row.staffId}><td>{row.name}</td><td>{row.kind === "trial" ? "体入" : "在籍"}</td><td>{row.startTime}</td><td>{row.endTime}</td><td>{row.hours}時間</td><td>{yen.format(row.hourlyRate)}</td><td><MoneyInput value={row.dailyPayment} disabled={row.kind === "trial"} onChange={(value) => setStaffWork((rows) => rows.map((item) => item.staffId === row.staffId ? { ...item, dailyPayment: value } : item))} />{row.kind === "trial" && <small>{initial?.staffWork.some((recorded) => recorded.staffId === row.staffId) ? "保存済みの日払い額を保持（時給給与との差額は月次精算）" : "基本給与全額を即日払い"}</small>}</td><td><button className="button danger mini" onClick={() => setStaffWork((rows) => rows.filter((item) => item.staffId !== row.staffId))}>削除</button></td></tr>)}</Table>
       <h3>送迎ドライバー・日払い</h3><div className="check-grid">{data.drivers.filter((row) => activeOnBusinessDate(row.hiredAt, row.departedAt)).map((row) => { const selected = driverWork.some((item) => item.driverId === row.id); return <label className="select-card" key={row.id}><input type="checkbox" checked={selected} onChange={(e) => setDriverWork(e.target.checked ? [...driverWork.filter((item) => item.driverId !== row.id), { driverId: row.id, name: row.name, dailyRate: row.dailyRate, dailyPayment: 0 }] : driverWork.filter((item) => item.driverId !== row.id))} /><span>{row.name}<small>日給 {yen.format(row.dailyRate)}</small></span></label>; })}</div><Table headers={["ドライバー", "日給", "日払い", "操作"]}>{driverWork.map((row) => <tr key={row.driverId}><td>{row.name}</td><td>{yen.format(row.dailyRate)}</td><td><MoneyInput value={row.dailyPayment} onChange={(value) => setDriverWork((rows) => rows.map((item) => item.driverId === row.driverId ? { ...item, dailyPayment: value } : item))} /></td><td><button className="button danger mini" onClick={() => setDriverWork((rows) => rows.filter((item) => item.driverId !== row.driverId))}>削除</button></td></tr>)}</Table>
       <h3>当日経費</h3><div className="grid form-row expense-row"><Field label="勘定科目"><select className="input" value={expenseCategory} onChange={(e) => { setExpenseCategory(e.target.value as ExpenseCategory); setExpensePayee(""); setExpensePersonId(""); }}>{Object.entries(expenseLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>{expenseCategory === "beautyTrial" ? <Field label="対象の体入キャスト"><select className="input" value={expensePersonId} onChange={(e) => setExpensePersonId(e.target.value)}><option value="">選択</option>{castRows.filter((row) => row.kind === "trial").map((row) => <option key={row.posCastId} value={row.posCastId}>{row.name}</option>)}</select></Field> : <Field label="支払先"><input className="input" value={expensePayee} onChange={(e) => setExpensePayee(e.target.value)} /></Field>}<Field label="金額"><MoneyInput value={expenseAmount} onChange={setExpenseAmount} /></Field><button className="button compact" onClick={addExpense}>追加</button></div><Table headers={["勘定科目", "支払先", "金額", "操作"]}>{expenses.map((row) => <tr key={row.id}><td>{expenseLabels[row.category]}</td><td>{row.payee}</td><td>{yen.format(row.amount)}</td><td><button className="button danger mini" onClick={() => setExpenses((rows) => rows.filter((item) => item.id !== row.id))}>削除</button></td></tr>)}</Table><div className="right-total">経費総計 <strong>{yen.format(expenseTotal)}</strong></div>
@@ -679,7 +693,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
       {!cashConfirmed && <div className="notice warn">現金の一致確認が必要です。入力・前提の変更や画面の再読込・復元後は、もう一度確認してください。</div>}
       <div className="actions spread"><button className="button secondary" onClick={() => setStage("details")}>店舗データへ戻る</button><button className="button" disabled={busy || !canSubmitCash} onClick={() => { if (canSubmitCash) setStage("preview"); }}>現金照合内容を確認して送信確認へ</button></div>
     </div>}
-    {visibleStage === "preview" && pos && cash && <div className="stack section-pad"><DailyPreview closing={{ id: initial?.id || "preview", businessDate: pos.businessDate, status: "submitted", submissionId: pos.submissionId, checksum: pos.checksum, sales: pos.sales, customers: pos.customers, nominations: pos.nominations, casts: castRows, staffWork, drivers: driverRows, expenses, staffDailyPaymentTotal: staffWork.reduce((sum, row) => sum + row.dailyPayment, 0), dispatchStaffPayment, dispatchCastPayment, dispatchFee, liquorDeliveryAmount, cash, ...(cashChanged ? { cashRevisionReason: cashRevisionReason.trim() } : {}), posSnapshot: pos, updatedAt: new Date().toISOString() }} /><div className="actions spread"><button className="button secondary" onClick={() => setStage("cash")}>現金照合へ戻る</button><button className="button submit-button" disabled={busy || !canSubmitCash} onClick={() => void submit()}>{busy ? "送信中…" : "確認済み・経理へ送信"}</button></div></div>}
+    {visibleStage === "preview" && pos && cash && <div className="stack section-pad"><DailyPreview closing={{ id: initial?.id || "preview", businessDate: pos.businessDate, status: "submitted", submissionId: pos.submissionId, checksum: pos.checksum, sales: pos.sales, customers: pos.customers, nominations: pos.nominations, casts: castRows, staffWork, drivers: driverRows, expenses, staffDailyPaymentTotal: staffWork.reduce((sum, row) => sum + row.dailyPayment, 0), dispatchStaffPayment, dispatchCastPayment, dispatchFee, liquorDeliveryAmount, cash, ...(cashChanged ? { cashRevisionReason: cashRevisionReason.trim() } : {}), castInputRevision: acceptedInputs, posSnapshot: pos, updatedAt: new Date().toISOString() }} /><div className="actions spread"><button className="button secondary" onClick={() => setStage("cash")}>現金照合へ戻る</button><button className="button submit-button" disabled={busy || !canSubmitCash} onClick={() => void submit()}>{busy ? "送信中…" : "確認済み・経理へ送信"}</button></div></div>}
   </Card>;
 }
 
@@ -698,6 +712,7 @@ function CashContextTable({ before, after }: { before?: Partial<CashFundingConte
 }
 
 export function DailyPreview({ closing }: { closing: DailyClosing }) {
+  const productPos = closing.castInputRevision ? undefined : closing.posSnapshot;
   const expenseTotal = closing.expenses.reduce((sum, row) => sum + row.amount, 0);
   const castTotals = closing.casts.reduce((total, row) => ({
     honShimeiCount: total.honShimeiCount + row.honShimeiCount,
@@ -707,7 +722,7 @@ export function DailyPreview({ closing }: { closing: DailyClosing }) {
     jonaiExtensionSales: total.jonaiExtensionSales + row.jonaiExtensionSales,
     beautyCount: total.beautyCount + (row.beautyAllowance > 0 ? 1 : 0),
   }), { honShimeiCount: 0, banaiShimeiCount: 0, dohanCount: 0, honShimeiSales: 0, jonaiExtensionSales: 0, beautyCount: 0 });
-  const drinkTotals = summarizePreviewDrinks(closing.casts, closing.posSnapshot);
+  const drinkTotals = summarizePreviewDrinks(closing.casts, productPos);
   return <div className="preview-sheet">
     <header><div><p className="eyebrow">営業日次データ</p><h2>{closing.businessDate}</h2></div><StatusPill tone={closing.status === "approved" ? "good" : "warn"}>{closingLabels[closing.status]}</StatusPill></header>
     <div className="grid metrics"><Metric label="総売上" value={closing.sales.totalSales} /><Metric label="現金売上" value={closing.sales.cashSales} /><Metric label="カード売上" value={closing.sales.cardSales} /><Metric label="経費総計" value={expenseTotal} /></div>
@@ -721,7 +736,7 @@ export function DailyPreview({ closing }: { closing: DailyClosing }) {
       <td>{yen.format(row.honShimeiSales)}</td>
       <td>{yen.format(row.jonaiExtensionSales)}</td>
       <td className="wrap-cell preview-product-cell"><PreviewBottleBackDetails row={row} /></td>
-      <td className="wrap-cell preview-product-cell"><PreviewDrinkBackDetails row={row} pos={closing.posSnapshot} /></td>
+      <td className="wrap-cell preview-product-cell"><PreviewDrinkBackDetails row={row} pos={productPos} /></td>
       <td>{yen.format(row.beautyAllowance)}</td>
       <td>{yen.format(row.dailyPayment)}</td>
       <td>{yen.format(row.advancePayment)}</td>
@@ -799,7 +814,8 @@ function summarizePreviewDrinks(rows: DailyCast[], pos?: PosClosingV3) {
   let unpricedQuantity = 0;
   let hasUnknownQuantity = false;
   rows.forEach((row) => {
-    const hasPosDetails = Boolean(pos?.transactions.some((transaction) => transaction.items.some((item) =>
+    const hasPosDetails = Boolean(row.drinkAllocations?.length && row.drinkAllocations.every((drink) => drink.unitPrice !== undefined))
+      || Boolean(pos?.transactions.some((transaction) => transaction.items.some((item) =>
       item.category === "castDrink" && item.backTargetCastIds.includes(row.posCastId))));
     if (hasPosDetails) {
       summarizeCastDrinksByPrice(row, pos).forEach((drink) => {
@@ -865,6 +881,10 @@ export function summarizeCastDrinksByPrice(
     grouped.set(unitPrice, current);
   };
 
+  if (row.drinkAllocations?.length && row.drinkAllocations.every((drink) => drink.unitPrice !== undefined)) {
+    row.drinkAllocations.forEach((drink) => append(drink.unitPrice!, drink.quantity, drink.salesAmount));
+    return [...grouped.values()].sort((left, right) => left.unitPrice - right.unitPrice);
+  }
   let posDrinkCount = 0;
   pos?.transactions.forEach((transaction) => transaction.items.forEach((item) => {
     if (item.category !== "castDrink" || !item.backTargetCastIds.includes(row.posCastId)) return;

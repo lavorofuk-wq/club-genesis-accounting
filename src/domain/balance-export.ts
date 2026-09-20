@@ -72,16 +72,21 @@ function same(actual: number, expected: number, label: string) {
     `${label}が月次データと一致しません。出力元データを確認してください。`);
 }
 
-/** 人数・本数は店舗全体の保存POSから取得し、派遣の欠落を0人として隠さない。 */
+/** POS全体を基準に受入済み・未受入の訂正差分を一度だけ反映し、派遣人数は原本照合を保つ。 */
 export function balanceDailyCounts(closing: DailyClosing, castClosing?: DailyClosing) {
   const label = closing.businessDate;
   const pos = closing.posSnapshot;
   requireValue(pos && pos.businessDate === label && Array.isArray(pos.castWork)
     && Array.isArray(pos.transactions), `${label}の保存POSが不足しているため、派遣人数・同伴本数を確認できません。`);
   requireValue(Array.isArray(closing.casts), `${label}のキャスト出勤を読み込めません。`);
-  const saved = new Map<string, DailyClosing["casts"][number]>();
+  if (closing.castInputRevision) requireValue(Array.isArray(closing.castInputRevision.originalCasts),
+    `${label}の経理修正引継ぎに原本キャスト本数がなく、派遣を含む本数・人数を確認できません。`);
+  // 差戻しで訂正を受け入れた後は casts 自体が訂正済みになる。
+  // 原本POSに対応していた人物・本数を基準に保ち、再送／再承認を二重加算しない。
+  const originalCasts = closing.castInputRevision?.originalCasts ?? closing.casts;
+  const saved = new Map<string, typeof originalCasts[number]>();
   const masterIds = new Set<string>();
-  for (const cast of closing.casts) {
+  for (const cast of originalCasts) {
     requireValue(cast && typeof cast.posCastId === "string" && cast.posCastId.length > 0
       && typeof cast.masterId === "string" && cast.masterId.length > 0
       && (cast.kind === "regular" || cast.kind === "trial"), `${label}のキャスト出勤の照合情報が不正です。`);
@@ -136,13 +141,14 @@ export function balanceDailyCounts(closing: DailyClosing, castClosing?: DailyClo
   same(count(pos.nominations.jonaiCount, `${label}のPOS場内本数`), jonaiCount, `${label}のPOS場内本数`);
   requireValue(closing.customers, `${label}の組数・客数を読み込めません。`);
   let castCount = saved.size;
-  if (castClosing) {
-    requireValue(castClosing.id === closing.id && castClosing.businessDate === label
-      && castClosing.status === "approved" && Array.isArray(castClosing.casts),
+  const effectiveClosing = castClosing || (closing.castInputRevision ? closing : undefined);
+  if (effectiveClosing) {
+    requireValue(effectiveClosing.id === closing.id && effectiveClosing.businessDate === label
+      && effectiveClosing.status === "approved" && Array.isArray(effectiveClosing.casts),
     `${label}のキャスト経理修正の営業日・IDが承認済み原本と一致しません。`);
     const correctedPosIds = new Set<string>();
     const correctedMasterIds = new Set<string>();
-    for (const cast of castClosing.casts) {
+    for (const cast of effectiveClosing.casts) {
       requireValue(cast && typeof cast.posCastId === "string" && cast.posCastId.length > 0
         && typeof cast.masterId === "string" && cast.masterId.length > 0
         && (cast.kind === "regular" || cast.kind === "trial")
@@ -152,8 +158,8 @@ export function balanceDailyCounts(closing: DailyClosing, castClosing?: DailyClo
       correctedMasterIds.add(cast.masterId);
     }
     const correctedCount = (total: number, key: "honShimeiCount" | "banaiShimeiCount" | "dohanCount", name: string) => {
-      const before = sum(closing.casts, (cast) => count(cast[key], `${label} ${cast.name}の修正前${name}`));
-      const after = sum(castClosing.casts, (cast) => count(cast[key], `${label} ${cast.name}の修正後${name}`));
+      const before = sum(originalCasts, (cast) => count(cast[key], `${label} ${cast.name}の修正前${name}`));
+      const after = sum(effectiveClosing.casts, (cast) => count(cast[key], `${label} ${cast.name}の修正後${name}`));
       requireValue(Number.isSafeInteger(before) && Number.isSafeInteger(after), `${label}の${name}合計が不正です。`);
       const result = total + (after - before);
       requireValue(Number.isSafeInteger(result) && result >= 0,
@@ -164,7 +170,7 @@ export function balanceDailyCounts(closing: DailyClosing, castClosing?: DailyClo
     honShimeiCount = correctedCount(honShimeiCount, "honShimeiCount", "本指名本数");
     jonaiCount = correctedCount(jonaiCount, "banaiShimeiCount", "場内本数");
     dohanCount = correctedCount(dohanCount, "dohanCount", "同伴本数");
-    castCount = castClosing.casts.length;
+    castCount = effectiveClosing.casts.length;
   }
   return {
     groups: count(closing.customers.groupCount, `${label}の組数`),
