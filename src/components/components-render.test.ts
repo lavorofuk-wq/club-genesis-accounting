@@ -4,7 +4,7 @@ import type { User } from "firebase/auth";
 import { describe, expect, it } from "vitest";
 import { invalidTrialBeautyExpensesForRows, mergeReconciledDailyCastInputs, posItemOccurrenceKey, type DailyClosing, type PosClosingV3 } from "@/domain/gms";
 import type { AccountingWorkspaceData } from "@/domain/month-accounting";
-import { buildMonthlySnapshot, calculateMonthlyAccounting } from "@/domain/month-accounting";
+import { buildMonthlySnapshot, calculateMonthlyAccounting, normalizeMonthlyAccountingSnapshot } from "@/domain/month-accounting";
 import { introducerDeletionLinkedCastSignature } from "@/lib/firebase/repository";
 import { AccountingForms, BalanceExport, castCorrectionReturnMessage, ClosingCastProductDetails, ExpenseExport } from "./accounting-forms";
 import { CommonForms, introducerDeletionConfirmation } from "./common-forms";
@@ -179,6 +179,97 @@ describe("主要ページのSSRスモーク", () => {
     expect(html).toContain("￥8,400");
     expect(html).toContain("￥7,400");
     expect(html).not.toContain("￥1,300");
+  });
+
+  it.each([false, true])("同月に体入から入店したキャストは体入分も在籍欄に一人だけ表示する（在籍出勤あり=%s）", (hasRegularAttendance) => {
+    const source = balanceWorkspace();
+    const member = source.casts[0];
+    member.name = "同月入店キャスト";
+    member.hiredAt = `${month}-03`;
+    member.convertedFromTrialId = "converted-trial";
+    source.casts.push({
+      ...member, id: "converted-trial", name: "体入時キャスト名", status: "trial",
+      hiredAt: undefined, hourlyRates: {}, trialDate: businessDate, trialHourlyRate: 1_500,
+      convertedFromTrialId: undefined, convertedToCastId: member.id,
+    });
+    const regularCast = { ...source.closings[0].casts[0], name: member.name };
+    source.closings[0].casts = [{
+      ...regularCast, masterId: "converted-trial", posCastId: "pos-converted-trial",
+      name: "体入時キャスト名", kind: "trial", hourlyRate: 1_500,
+    }];
+    if (hasRegularAttendance) {
+      source.closings.push({
+        ...structuredClone(source.closings[0]), id: "regular-attendance", businessDate: `${month}-03`,
+        casts: [regularCast],
+      });
+    }
+    const calculated = calculateMonthlyAccounting(source, month, source.adjustments[0]);
+    expect(calculated.castRewards).toHaveLength(1);
+    expect(calculated.castRewards[0]).toMatchObject({
+      id: member.id, trialOnly: false, days: hasRegularAttendance ? 2 : 1,
+    });
+
+    const markup = renderToStaticMarkup(createElement(AccountingForms, {
+      section: "castRewards", data: source, user, busy: false, run,
+    }));
+    const regularCard = markup.match(/<h2>在籍キャスト報酬（1名）<\/h2>[\s\S]*?<\/section>/)?.[0];
+    const trialCard = markup.match(/<h2>体入キャスト報酬（0名）<\/h2>[\s\S]*?<\/section>/)?.[0];
+    expect(regularCard).toBeDefined();
+    expect(trialCard).toBeDefined();
+    expect(regularCard).toContain(`<strong>${member.name}</strong>`);
+    expect(markup.match(new RegExp(`<strong>${member.name}</strong>`, "g"))).toHaveLength(1);
+    expect(trialCard).toContain("当月の体入キャスト報酬データはありません。");
+    expect(trialCard).not.toContain(member.name);
+    expect(markup).not.toContain("体入時キャスト名");
+  });
+
+  it("確定月の在籍・体入欄は保存区分を使い、現在マスタや日次の変更・削除後も表示と源泉入力の禁止を保持する", () => {
+    const source = balanceWorkspace();
+    source.casts[0].name = "確定時の在籍名";
+    source.closings[0].casts[0].name = "確定時の在籍名";
+    source.casts.push({
+      ...source.casts[0], id: "snapshot-trial", name: "確定時の体入名", status: "trial",
+      hiredAt: undefined, hourlyRates: {}, trialDate: businessDate, trialHourlyRate: 1_500,
+    });
+    source.closings[0].casts.push({
+      ...source.closings[0].casts[0], masterId: "snapshot-trial", posCastId: "pos-snapshot-trial",
+      name: "確定時の体入名", kind: "trial", hourlyRate: 1_500,
+      dailyPayment: 0, beautyAllowance: 0, transportFee: 0,
+    });
+    source.adjustments[0].withholdingByCast = { "cast-1": 101, "snapshot-trial": 202 };
+    const result = calculateMonthlyAccounting(source, month, source.adjustments[0]);
+    expect(result.castRewards.find((row) => row.id === "cast-1")?.trialOnly).toBe(false);
+    expect(result.castRewards.find((row) => row.id === "snapshot-trial")?.trialOnly).toBe(true);
+    const snapshot = buildMonthlySnapshot(month, 3, "a".repeat(64), source.adjustments[0], result, source.closings, user.uid, new Date().toISOString());
+    const restored = normalizeMonthlyAccountingSnapshot(JSON.parse(JSON.stringify(snapshot)), month, 3);
+    expect(restored).toBeDefined();
+    const closed: AccountingWorkspaceData = {
+      ...source, monthSnapshots: [restored!],
+      monthStates: [{ month, status: "closed", revision: 1, currentSnapshotRevision: 3, updatedAt: "", updatedBy: user.uid }],
+    };
+    const render = (workspace: AccountingWorkspaceData) => renderToStaticMarkup(createElement(AccountingForms, {
+      section: "castRewards", data: workspace, user, busy: false, run,
+    }));
+    const markup = render(closed);
+    const regularCard = markup.match(/<h2>在籍キャスト報酬（1名）<\/h2>[\s\S]*?<\/section>/)?.[0];
+    const trialCard = markup.match(/<h2>体入キャスト報酬（1名）<\/h2>[\s\S]*?<\/section>/)?.[0];
+    expect(regularCard).toContain("<strong>確定時の在籍名</strong>");
+    expect(regularCard).not.toContain("確定時の体入名");
+    expect(trialCard).toContain("<strong>確定時の体入名</strong>");
+    expect(trialCard).not.toContain("確定時の在籍名");
+    expect(regularCard).toMatch(/<input[^>]*class="input money-input"[^>]*disabled=""[^>]*value="101"/);
+    expect(trialCard).toMatch(/<input[^>]*class="input money-input"[^>]*disabled=""[^>]*value="202"/);
+
+    const changed = structuredClone(closed);
+    changed.casts[0].status = "trial";
+    changed.casts[0].name = "変更後の在籍名";
+    changed.casts[1].status = "active";
+    changed.casts[1].name = "変更後の体入名";
+    changed.closings[0].casts[0].kind = "trial";
+    changed.closings[0].casts[1].kind = "regular";
+    changed.closings[0].casts[0].hours = 99;
+    expect(render(changed)).toBe(markup);
+    expect(render({ ...changed, casts: [], closings: [] })).toBe(markup);
   });
 
   it("スタッフ給与の確定済み日別内訳は現在マスタ変更後も保存基準を表示する", () => {
