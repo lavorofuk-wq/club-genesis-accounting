@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 import { isGmsReady, openDefaultBrowser, waitForGms } from "../scripts/pc-dev.mjs";
 
@@ -32,14 +33,30 @@ test("開発サーバーが先に終了した場合は待機を中断する", as
   );
 });
 
-test("既定ブラウザーはlocalhostだけを開く", () => {
+test("WindowsのURLハンドラーでlocalhostだけを開く", async () => {
   let invocation;
-  const child = { unref() {} };
-  openDefaultBrowser(undefined, (...args) => {
+  let unrefCalled = false;
+  const child = new EventEmitter();
+  child.unref = () => { unrefCalled = true; };
+  const opening = openDefaultBrowser(undefined, (...args) => {
     invocation = args;
+    queueMicrotask(() => child.emit("spawn"));
     return child;
   });
-  assert.equal(invocation[0], "cmd.exe");
-  assert.match(invocation[1].at(-1), /^start "" "http:\/\/localhost:3000"$/);
+  await opening;
+  assert.equal(invocation[0], "explorer.exe");
+  assert.deepEqual(invocation[1], ["http://localhost:3000"]);
   assert.equal(invocation[2].detached, true);
+  assert.equal(unrefCalled, true);
+});
+
+test("ブラウザー起動に失敗した場合はエラーを返す", async () => {
+  const expected = new Error("browser failed");
+  const child = new EventEmitter();
+  child.unref = () => {};
+  const opening = openDefaultBrowser(undefined, () => {
+    queueMicrotask(() => child.emit("error", expected));
+    return child;
+  });
+  await assert.rejects(opening, expected);
 });

@@ -29,18 +29,27 @@ export async function waitForGms({ fetcher = fetch, timeoutMs = 60_000, interval
 }
 
 export function openDefaultBrowser(url = APP_URL, spawnProcess = spawn) {
-  const browser = spawnProcess("cmd.exe", ["/d", "/s", "/c", `start "" "${url}"`], {
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true,
+  return new Promise((resolvePromise, rejectPromise) => {
+    const browser = spawnProcess("explorer.exe", [url], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    const onError = (error) => rejectPromise(error);
+    browser.once("error", onError);
+    browser.once("spawn", () => {
+      browser.off("error", onError);
+      browser.unref();
+      resolvePromise();
+    });
   });
-  browser.unref();
 }
 
 export async function startPcDevelopment() {
   if (await isGmsReady()) {
     console.log("開発サーバーはすでに起動しています。ブラウザーを開きます。");
-    openDefaultBrowser();
+    await openDefaultBrowser();
+    console.log(`ブラウザーを開きました: ${APP_URL}`);
     return;
   }
 
@@ -69,7 +78,8 @@ export async function startPcDevelopment() {
   child.off("exit", onExit);
 
   console.log(`起動を確認しました: ${APP_URL}`);
-  openDefaultBrowser();
+  await openDefaultBrowser();
+  console.log(`ブラウザーを開きました: ${APP_URL}`);
   child.once("exit", (code, signal) => {
     process.exitCode = typeof code === "number" ? code : signal ? 1 : 0;
   });
