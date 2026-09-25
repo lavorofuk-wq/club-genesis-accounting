@@ -20,6 +20,7 @@ import { useRecoverableState, useUpdateDraftBusy } from "./update-drafts";
 import { cashDayIssues, cashFundingIssues, cashLedgerIssues, type CashFundingSummary } from "@/domain/cash-funding";
 import { IntroducerPayments } from "./introducer-payments";
 import { CastReceiptExport } from "./cast-receipt-export";
+import { IntroducerStatementExport } from "./introducer-statement-export";
 import { CastDailyEditor } from "./cast-daily-editor";
 import { isProductionEnvironment } from "@/lib/firebase/client";
 
@@ -288,6 +289,15 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
     />}
     {section === "castRewards" && <CastReceiptExport
       rows={results?.castRewards} casts={data.casts} month={month}
+      sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
+      disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"
+        : adjustmentsDirty || castEditDirty ? "未保存の経理入力・キャスト日次修正を保存してください。"
+        : calculationsBlocked ? "ボトル区分を確認して保存してください。"
+        : !results ? "出力する月次データを読み込めません。"
+        : results.warnings.length || (!closed && finalizeCheck.integrityIssues.length) ? "データの警告を解消してから出力してください。" : ""}
+    />}
+    {section === "introducers" && <IntroducerStatementExport
+      results={results} month={month}
       sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
       disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"
         : adjustmentsDirty || castEditDirty ? "未保存の経理入力・キャスト日次修正を保存してください。"

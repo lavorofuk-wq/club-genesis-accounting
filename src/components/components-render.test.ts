@@ -11,6 +11,7 @@ import { CommonForms, introducerDeletionConfirmation } from "./common-forms";
 import { CastProductSummary, closingDeletionConfirmation, DailyPreview, jsonReimportConfirmation, reconcileTrialBeautyExpenses, retainCurrentCastMappingForJson, retainMatchingSpecialCosts, shouldResetDailyInputsForJson, StoreWork, summarizeCastDrinksByPrice } from "./store-work";
 import { Modal, currentMonth } from "./ui";
 import { CastReceiptExport } from "./cast-receipt-export";
+import { IntroducerStatementExport } from "./introducer-statement-export";
 
 const month = currentMonth();
 const businessDate = `${month}-02`;
@@ -137,6 +138,21 @@ function expectReceiptExportButtons(markup: string, disabled: boolean) {
     expect(buttons![0].includes('disabled=""')).toBe(disabled);
   }
   expect(markup).not.toContain("在籍キャストの受領書・明細書をXLSX出力");
+}
+
+function introducerWorkspace(): AccountingWorkspaceData {
+  const source = balanceWorkspace();
+  source.introducers = structuredClone(data.introducers);
+  source.casts[0].introducerId = data.casts[0].introducerId;
+  source.casts[0].attendanceAdvisoryFee = data.casts[0].attendanceAdvisoryFee;
+  source.closings[0].casts[0].introducer = structuredClone(data.closings[0].casts[0].introducer);
+  return source;
+}
+
+function expectIntroducerExportButton(markup: string, disabled: boolean) {
+  const buttons = markup.match(/<button[^>]*>紹介者明細をXLSX出力<\/button>/g);
+  expect(buttons).toHaveLength(1);
+  expect(buttons![0].includes('disabled=""')).toBe(disabled);
 }
 
 describe("主要ページのSSRスモーク", () => {
@@ -403,6 +419,66 @@ describe("主要ページのSSRスモーク", () => {
     changed.closings[0].casts[0].honShimeiSales = 9_990_000;
     expect(render(changed)).toBe(originalMarkup);
     expect(render({ ...closed, closings: [], casts: [], introducers: [] })).toBe(originalMarkup);
+  });
+
+  it("紹介者支払に全紹介者一括・紹介者別シートのXLSX出力を表示し、処理中や不整合は停止する", () => {
+    const source = introducerWorkspace();
+    const render = (workspace = source, busy = false) => renderToStaticMarkup(createElement(AccountingForms, {
+      section: "introducers", data: workspace, user, busy, run,
+    }));
+    const markup = render();
+    expect(markup).toContain("全紹介者の明細を1つのファイルにまとめ");
+    expect(markup).toContain("紹介者ごとのシート");
+    expect(markup).toContain("対象月の計算結果を数式なしで出力");
+    expectIntroducerExportButton(markup, false);
+    expectIntroducerExportButton(render(source, true), true);
+    expectIntroducerExportButton(render({ ...source, closings: [] }), true);
+    expectIntroducerExportButton(render({ ...source, closings: [{ ...source.closings[0], status: "submitted" }] }), true);
+    expectIntroducerExportButton(render({ ...source, closings: [{ ...source.closings[0], integrityIssues: ["欠損"] }] }), true);
+    expectIntroducerExportButton(render({ ...source, monthStates: [{ month, status: "closing", revision: 1, updatedAt: "", updatedBy: user.uid }] }), true);
+  });
+
+  it("紹介者明細は未保存・対象なし・不正な支払データの出力を止める", () => {
+    const source = introducerWorkspace();
+    const results = calculateMonthlyAccounting(source, month, source.adjustments[0]);
+    const render = (props: Partial<Parameters<typeof IntroducerStatementExport>[0]> = {}) => renderToStaticMarkup(createElement(IntroducerStatementExport, {
+      results, month, sourceLabel: "未確定", disabledReason: "", ...props,
+    }));
+    for (const disabledReason of ["未保存の経理入力を保存してください。", "ボトル区分を確認して保存してください。", "月次確定処理中です。"]) {
+      const markup = render({ disabledReason });
+      expect(markup).toContain(disabledReason);
+      expectIntroducerExportButton(markup, true);
+    }
+    expectIntroducerExportButton(render({ results: undefined }), true);
+    expectIntroducerExportButton(render({ results: { ...results, introducerPayments: [] } }), true);
+    expectIntroducerExportButton(render({ results: { ...results, warnings: ["金額不整合"] } }), true);
+    expectIntroducerExportButton(render({ results: { ...results, introducerPayments: [{ ...results.introducerPayments[0], total: NaN }] } }), true);
+    expectIntroducerExportButton(render({ month: "2000-01" }), true);
+  });
+
+  it("紹介者明細は確定時のデータを使用し、現在マスタ・日次を削除しても出力条件を保持する", () => {
+    const source = introducerWorkspace();
+    const result = calculateMonthlyAccounting(source, month, source.adjustments[0]);
+    const snapshot = buildMonthlySnapshot(month, 3, "a".repeat(64), source.adjustments[0], result, source.closings, user.uid, new Date().toISOString());
+    const closed: AccountingWorkspaceData = {
+      ...source, monthSnapshots: [snapshot],
+      monthStates: [{ month, status: "closed", revision: 1, currentSnapshotRevision: 3, updatedAt: "", updatedBy: user.uid }],
+    };
+    const render = (workspace: AccountingWorkspaceData) => renderToStaticMarkup(createElement(AccountingForms, {
+      section: "introducers", data: workspace, user, busy: false, run,
+    }));
+    const original = render(closed);
+    expectIntroducerExportButton(original, false);
+    expect(original).toContain("月次確定済み 第3版");
+    expect(original).toContain("確定時の保存金額を使用");
+    const changed = structuredClone(closed);
+    changed.introducers[0].name = "変更後の紹介者";
+    changed.introducers[0].feeType = "gross10";
+    changed.closings[0].casts[0].honShimeiSales = 999_990;
+    changed.casts[0].hourlyRates = { [month]: 50_000 };
+    expect(render(changed)).toBe(original);
+    expect(render({ ...closed, introducers: [], casts: [], closings: [] })).toBe(original);
+    expectIntroducerExportButton(render({ ...closed, monthSnapshots: [] }), true);
   });
 
   it("収支表XLSXは未確定の承認済みデータを出力でき、日別配分・紹介料列・Excel入金入力を案内する", () => {
