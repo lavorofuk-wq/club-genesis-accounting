@@ -76,12 +76,12 @@ describe("キャスト報酬から受領書への転記", () => {
     expect(output[0].statementCells.F8).toBe("1,500 / 3,000");
     expect([trial, converted, reward]).toEqual(before);
   });
-  it("実際のXLSXにも在籍分のみのシート・値を格納する", async () => {
+  it.each(["receipt", "statement"] as const)("%sのXLSXにも在籍分のみのシート・値を格納する", async (document) => {
     const sales = { ...reward, id: "sales", name: "在籍売上", adoptedSystem: "salesReward" as const,
       rewardRate: .65, salesReward: 100000, adoptedReward: 100000, grossPay: 100500, netPay: 96000 };
     const trial = { ...reward, id: "trial", name: "体入除外テスト", trialOnly: true };
-    const sheets = buildCastReceiptSheets([trial, reward, sales], "2026-09", { trial: "体入本名除外" });
-    const zip = await JSZip.loadAsync(await fillReceiptTemplate(await readFile("public/templates/cast-receipt-v3.xlsx"), sheets));
+    const sheets = buildCastReceiptSheets([trial, reward, sales], "2026-09", { trial: "体入本名除外", "cast-1": "在籍本名テスト" });
+    const zip = await JSZip.loadAsync(await fillReceiptTemplate(await readFile("public/templates/cast-receipt-v3.xlsx"), sheets, document));
     const workbook = await zip.file("xl/workbook.xml")!.async("string");
     expect(workbook).toContain('name="花子"');
     expect(workbook).toContain('name="在籍売上"');
@@ -91,6 +91,14 @@ describe("キャスト報酬から受領書への転記", () => {
     const content = (await Promise.all(Object.keys(zip.files).filter((name) => /\.xml$/.test(name)).map((name) => zip.file(name)!.async("string")))).join("");
     expect(content).not.toContain("体入除外テスト");
     expect(content).not.toContain("体入本名除外");
+    if (document === "receipt") {
+      expect(content).not.toContain("在籍本名テスト");
+      expect(content).not.toContain("報酬明細書");
+    } else {
+      expect(content).toContain("在籍本名テスト");
+      expect(content).toContain("報酬明細書");
+      expect(content).not.toContain("受領印");
+    }
     expect(await zip.file(paths[0])!.async("string")).toContain("<v>17582</v>");
     expect(await zip.file(paths[1])!.async("string")).toContain("<v>96000</v>");
   });
