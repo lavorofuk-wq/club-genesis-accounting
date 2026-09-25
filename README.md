@@ -17,6 +17,7 @@ Firebaseプロジェクト: `club-genesis-gms`
 
 PCで `開発環境を起動.cmd` をダブルクリックする。
 開発サーバーを `127.0.0.1:3000` で起動し、起動完了を確認してからWindowsのURLハンドラーで `http://localhost:3000` を自動的に開く。
+起動バッチはWindowsコマンドプロンプトの文字コード差異で壊れないよう、ASCIIだけで記述し、`Program Files` のNode.jsを使用する。
 IPアドレスの入力は不要。PC外からは接続できず、Realtime Databaseの `accounting-dev` のみを使用する。
 開発中は起動したコマンド画面を閉じない。終了時はその画面を閉じる。
 

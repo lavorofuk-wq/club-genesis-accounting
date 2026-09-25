@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { isGmsReady, openDefaultBrowser, waitForGms } from "../scripts/pc-dev.mjs";
+
+test("Windows起動バッチはcmd.exeで文字化けしないASCIIだけを使う", () => {
+  const launcher = readFileSync(new URL("../開発環境を起動.cmd", import.meta.url), "utf8");
+  assert.doesNotMatch(launcher, /[^\x00-\x7F]/);
+  assert.match(launcher, /%ProgramFiles%\\nodejs\\npm\.cmd/);
+  assert.match(launcher, /run dev:pc/);
+});
 
 test("GMSのローカルrelease応答だけを起動済みと判定する", async () => {
   assert.equal(await isGmsReady(async () => ({ ok: true, json: async () => ({ schema: 1, environment: "local" }) })), true);
