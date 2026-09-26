@@ -222,6 +222,34 @@ describe("主要ページのSSRスモーク", () => {
     expectReceiptExportButtons(renderToStaticMarkup(createElement(CastReceiptExport, { rows: [{ ...rows[0], grossPay: NaN }], month, sourceLabel: "未確定", disabledReason: "" })), true);
   });
 
+  it("明細書の追加手当名目が欠けても受領書は出力でき、正常な売上明細は親画面から渡す", () => {
+    const source = balanceWorkspace();
+    source.adjustments[0].castInputs = [{ id: "statement-allowance", castId: "cast-1", castName: "花子",
+      kind: "allowance", label: "イベント手当", amount: 1234 }];
+    const result = calculateMonthlyAccounting(source, month, source.adjustments[0]);
+    const parentMarkup = renderToStaticMarkup(createElement(AccountingForms, {
+      section: "castRewards", data: source, user, busy: false, run,
+    }));
+    expectReceiptExportButtons(parentMarkup, false);
+    expect(parentMarkup).toContain("明細書は1名につき1シートで名目数に応じて複数ページ");
+    expect(parentMarkup).toContain("用紙サイズと既存の印刷サイズは変更しません");
+    const broken = structuredClone(result.castSalesReports);
+    for (const report of broken) for (const row of [...report.days, report.totals]) {
+      for (const entry of row.accountingInputs || []) if (entry.kind === "allowance") entry.label = "";
+    }
+    for (const reports of [undefined, broken]) {
+      const markup = renderToStaticMarkup(createElement(CastReceiptExport, {
+        rows: result.castRewards, reports, month, sourceLabel: "未確定", disabledReason: "",
+      }));
+      const receipt = markup.match(/<button[^>]*>受領書をXLSX出力<\/button>/)?.[0];
+      const statement = markup.match(/<button[^>]*>明細書をXLSX出力<\/button>/)?.[0];
+      expect(receipt).toBeDefined(); expect(statement).toBeDefined();
+      expect(receipt).not.toContain('disabled=""');
+      expect(statement).toContain('disabled=""');
+      expect(markup).toContain("明細書：");
+    }
+  });
+
   it("体入のみの月は在籍対象なしを案内して受領書出力を止め、混在月は在籍分を出力できる", () => {
     const source = balanceWorkspace();
     const regular = calculateMonthlyAccounting(source, month, source.adjustments[0]).castRewards[0];

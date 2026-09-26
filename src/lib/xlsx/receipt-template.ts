@@ -1,7 +1,8 @@
 import JSZip from "jszip";
 import receiptLayouts from "./receipt-layouts.json";
+import { addStatementAllowancePages, type StatementAllowance } from "./statement-allowance-pages";
 
-export type ReceiptSheet = { template: "hourlyAndBack" | "salesReward"; name: string; cells: Record<string, string | number>; statementCells: Record<string, string | number> };
+export type ReceiptSheet = { template: "hourlyAndBack" | "salesReward"; name: string; cells: Record<string, string | number>; statementCells: Record<string, string | number>; statementAllowances?: StatementAllowance[] };
 export type ReceiptDocument = "receipt" | "statement";
 export const RECEIPT_TEMPLATE_URL = "/templates/cast-receipt-v3.xlsx";
 
@@ -151,6 +152,22 @@ export async function fillReceiptTemplate(template: ArrayBuffer | Uint8Array, sh
     return next;
   }
   let stringReferences = 0;
+  const printAreas: string[][] = [];
+  function allowanceStyle(id: number, kind: "label" | "amount", plain: boolean, decimal = false) {
+    const key = `allowance:${id}:${kind}:${plain}:${decimal}`;
+    const previous = styleIds.get(key);
+    if (previous !== undefined) return previous;
+    let result = styles![id];
+    if (!result) throw new Error("明細書テンプレートの手当書式が正しくありません。");
+    if (plain) result = result.replace(/fillId="\d+"/, 'fillId="0"').replace(/borderId="\d+"/, 'borderId="0"');
+    if (kind === "amount") result = result.replace(/numFmtId="\d+"/, `numFmtId="${decimal ? decimalFormatId : 3}"`);
+    result = result.replace(/<alignment\b[^>]*\/>/, kind === "label"
+      ? '<alignment horizontal="left" vertical="top" wrapText="1" shrinkToFit="0"/>'
+      : '<alignment horizontal="right" vertical="center" shrinkToFit="1"/>');
+    const next = styles!.length + addedStyles.length;
+    addedStyles.push(result); styleIds.set(key, next);
+    return next;
+  }
   const sourceStrings = sharedStrings.match(/<si\b[^>]*>[\s\S]*?<\/si>/g) || [];
   const usedStrings = new Map<number, number>();
   sheets.forEach((sheet, index) => {
@@ -187,6 +204,15 @@ export async function fillReceiptTemplate(template: ArrayBuffer | Uint8Array, sh
       });
       if (count !== 1) throw new Error("受領書テンプレートの記入欄を読み込めません。");
     }
+    if (document === "statement" && sheet.statementAllowances !== undefined) {
+      const result = addStatementAllowancePages(xml, layout, sheet.statementAllowances, allowanceStyle, (id) => {
+        const fontId = Number(styles![id]?.match(/fontId="(\d+)"/)?.[1]);
+        const size = Number(fonts![fontId]?.match(/<sz val="([\d.]+)"/)?.[1]);
+        if (!Number.isFinite(size) || size <= 0) throw new Error("明細書テンプレートの文字サイズが正しくありません。");
+        return size;
+      });
+      xml = result.xml; printAreas.push(result.printAreas);
+    } else printAreas.push([document === "receipt" ? layout.receiptPrintArea : layout.statementPrintArea]);
     // コピーしたシートをグループ選択させず、Excelのシート識別子も重複させない。
     xml = xml.replace(/ xr:uid="[^"]*"/g, "");
     if (index > 0) xml = xml.replace(/ tabSelected="1"/g, "");
@@ -212,7 +238,7 @@ export async function fillReceiptTemplate(template: ArrayBuffer | Uint8Array, sh
   }
   zip.file("xl/styles.xml", outputStyles);
   zip.file("xl/sharedStrings.xml", `${declaration}<sst xmlns="${spreadsheetNs}" count="${stringReferences}" uniqueCount="${usedStrings.size}">${[...usedStrings.keys()].map((id) => sourceStrings[id]).join("")}</sst>`);
-  zip.file("xl/workbook.xml", `${declaration}<workbook xmlns="${spreadsheetNs}" xmlns:r="${relationshipNs}"><bookViews><workbookView activeTab="0"/></bookViews><sheets>${names.map((name, i) => `<sheet name="${escapeXml(name)}" sheetId="${i + 1}" r:id="sheet${i + 1}"/>`).join("")}</sheets><definedNames>${names.map((name, i) => `<definedName name="_xlnm.Print_Area" localSheetId="${i}">${escapeXml(`'${name.replace(/'/g, "''")}'!${document === "receipt" ? layouts[sheets[i].template].receiptPrintArea : layouts[sheets[i].template].statementPrintArea}`)}</definedName>`).join("")}</definedNames></workbook>`);
+  zip.file("xl/workbook.xml", `${declaration}<workbook xmlns="${spreadsheetNs}" xmlns:r="${relationshipNs}"><bookViews><workbookView activeTab="0"/></bookViews><sheets>${names.map((name, i) => `<sheet name="${escapeXml(name)}" sheetId="${i + 1}" r:id="sheet${i + 1}"/>`).join("")}</sheets><definedNames>${names.map((name, i) => `<definedName name="_xlnm.Print_Area" localSheetId="${i}">${escapeXml(printAreas[i].map((area) => `'${name.replace(/'/g, "''")}'!${area}`).join(","))}</definedName>`).join("")}</definedNames></workbook>`);
   zip.file("xl/_rels/workbook.xml.rels", `${declaration}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="styles" Type="${relationshipNs}/styles" Target="styles.xml"/><Relationship Id="theme" Type="${relationshipNs}/theme" Target="theme/theme1.xml"/><Relationship Id="strings" Type="${relationshipNs}/sharedStrings" Target="sharedStrings.xml"/>${names.map((_, i) => `<Relationship Id="sheet${i + 1}" Type="${relationshipNs}/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join("")}</Relationships>`);
   zip.file("[Content_Types].xml", contentTypes.replace(/<Override\b[^>]*PartName="\/xl\/worksheets\/sheet\d+\.xml"[^>]*\/>/g, "")
     .replace("</Types>", `${names.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("")}</Types>`));

@@ -1,10 +1,12 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 import { createHash } from "node:crypto";
 import JSZip from "jszip";
 import ExcelJS from "exceljs/dist/exceljs.min.js";
 import { describe, expect, it } from "vitest";
 import { fillReceiptTemplate, receiptCellAddress, type ReceiptDocument, type ReceiptSheet } from "./receipt-template";
 import layouts from "./receipt-layouts.json";
+import { statementAllowanceLines } from "./statement-allowance-pages";
 
 const template = () => readFile("public/templates/cast-receipt-v3.xlsx");
 const cells = { G1: "9月報酬分", G2: 100000, G3: 8300, G4: 1000, G5: 109300, G6: 10000, G7: 3000, G8: 96300, G10: "花子" };
@@ -191,6 +193,135 @@ describe("受領書と明細書の分割出力", () => {
         : xml.replace("</sheetData>", '<row r="47"><c r="A47"><f>1+1</f><v>2</v></c></row></sheetData>'));
       await expect(fillReceiptTemplate(await zip.generateAsync({ type: "uint8array" }), [{ template: "hourlyAndBack", name: "テスト", cells, statementCells }], document))
         .rejects.toThrow(corruption === "merge" ? "結合範囲" : "分割できない項目");
+    }
+  });
+});
+
+describe("明細書の美容室と名目別手当・固定寸法の続き頁", () => {
+  const kinds = ["hourlyAndBack", "salesReward"] as const;
+  const input = (kind: ReceiptSheet["template"], allowances: NonNullable<ReceiptSheet["statementAllowances"]>): ReceiptSheet => ({
+    template: kind, name: "花子", cells: kind === "hourlyAndBack" ? cells : { G1: cells.G1, G2: cells.G2, G3: cells.G3, G4: cells.G4, G5: cells.G5, G6: cells.G6, G7: cells.G8, G9: cells.G10 },
+    statementCells: { ...statementCells, B15: "美容室手当" }, statementAllowances: allowances,
+  });
+  async function inspect(kind: ReceiptSheet["template"], allowances: NonNullable<ReceiptSheet["statementAllowances"]>) {
+    const bytes = await fillReceiptTemplate(await template(), [input(kind, allowances)], "statement");
+    const zip = await JSZip.loadAsync(bytes), book = await open(bytes), sheet = book.worksheets[0];
+    const workbook = await part(zip, "xl/workbook.xml");
+    const areas = [...workbook.matchAll(/!\$A\$(\d+):\$K\$(\d+)/g)].map((match) => ({ start: Number(match[1]), end: Number(match[2]) }));
+    const detail = areas.flatMap(({ start }, page) => (page === 0 ? [16, 17] : Array.from({ length: 20 }, (_, n) => n + 7))
+      .map((logical) => ({ label: sheet.getCell("B" + (layouts[kind].statementRows[logical - 1] + start - 1)),
+        amount: sheet.getCell("F" + (layouts[kind].statementRows[logical - 1] + start - 1)) })));
+    return { bytes, zip, sheet, areas, detail, xml: await part(zip, "xl/worksheets/sheet1.xml") };
+  }
+  async function qa(name: string, bytes: Uint8Array) {
+    const directory = process.env.GMS_STATEMENT_QA_DIR;
+    if (!directory) return;
+    await mkdir(directory, { recursive: true });
+    await writeFile(path.join(directory, name + ".xlsx"), bytes);
+  }
+
+  it.each(kinds)("%s: 追加なしは固定の手当表示を消し、美容室と元の給与・控除を独立保持する", async (kind) => {
+    const result = await inspect(kind, []);
+    expect(result.areas).toHaveLength(1);
+    expect(result.sheet.getCell(receiptCellAddress(kind, "statement", "B15")).value).toBe("美容室手当");
+    expect(result.sheet.getCell(receiptCellAddress(kind, "statement", "F15")).value).toBe(1000);
+    for (const logical of [16, 17]) for (const col of ["B", "F", "J"]) expect(result.sheet.getCell(receiptCellAddress(kind, "statement", col + logical)).value).toBeNull();
+    for (const [logical, amount] of Object.entries(statementCells)) if (logical.startsWith("F")) expect(result.sheet.getCell(receiptCellAddress(kind, "statement", logical)).value).toBe(amount);
+    const legacy = (await open(await fillReceiptTemplate(await template(), [{ ...input(kind, []), statementAllowances: undefined }], "statement"))).worksheets[0];
+    expect(legacy.getCell(receiptCellAddress(kind, "statement", "B16")).value).toBe("手当");
+  });
+
+  it.each(kinds)("%s: 1・2名目は既存の空き枠だけに収め、0円を欠損にしない", async (kind) => {
+    for (const allowances of [[{ label: "売上手当", amount: 0 }], [{ label: "売上手当", amount: 0 }, { label: "特別手当", amount: 1500 }]]) {
+      const result = await inspect(kind, allowances);
+      expect(result.areas).toHaveLength(1);
+      expect(result.detail.filter((item) => item.label.value !== null).map((item) => item.label.value)).toEqual(allowances.map((item) => item.label));
+      expect(result.detail.filter((item) => item.amount.value !== null).map((item) => item.amount.value)).toEqual(allowances.map((item) => item.amount));
+      for (const item of result.detail) { expect(item.label.font.size).toBe(11); expect(item.label.alignment.shrinkToFit).toBe(false); }
+    }
+  });
+
+  it.each(kinds)("%s: 多数の手当は同じ用紙・幅・各行高の離散印刷領域へ1回ずつ出力する", async (kind) => {
+    const allowances = Array.from({ length: 43 }, (_, i) => ({ label: "手当" + (i + 1), amount: i === 0 ? 0 : i + .5 }));
+    const result = await inspect(kind, allowances);
+    expect(result.areas).toHaveLength(4);
+    const sourceZip = await JSZip.loadAsync(await template());
+    const original = await part(sourceZip, `xl/worksheets/sheet${layouts[kind].source}.xml`);
+    const sourceBook = await open(await template()), sourceSheet = sourceBook.worksheets[layouts[kind].source - 1];
+    const height = Number(layouts[kind].statementPrintArea.match(/\$(\d+)$/)![1]);
+    const firstPageOnly = await inspect(kind, allowances.slice(0, 2));
+    for (let physical = 1; physical <= height; physical += 1) {
+      if (physical === layouts[kind].statementRows[26]) continue; // 続き頁の案内欄だけは従来どおり追加される。
+      const unit = result.sheet.getCell("J" + physical), unchanged = firstPageOnly.sheet.getCell("J" + physical);
+      expect(unit.value).toEqual(unchanged.value);
+      expect(unit.master.address).toBe(unchanged.master.address);
+      expect(unit.style).toEqual(unchanged.style);
+    }
+    expect(result.sheet.pageSetup).toMatchObject({ paperSize: 281, orientation: "landscape", fitToWidth: 1, fitToHeight: 1, fitToPage: true });
+    for (const tag of ["pageSetup", "pageMargins", "pageSetUpPr"]) expect(result.xml.match(new RegExp(`<${tag}\\b[^>]*\\/>`))?.[0]).toBe(original.match(new RegExp(`<${tag}\\b[^>]*\\/>`))?.[0]);
+    for (const [page, area] of result.areas.entries()) {
+      expect(area).toEqual({ start: page * (height + 1) + 1, end: page * (height + 1) + height });
+      for (let n = 0; n < height; n += 1) expect(result.sheet.getRow(area.start + n).height).toBe(sourceSheet.getRow(n + 1).height);
+      if (page) {
+        expect(result.sheet.getCell("B" + (area.start + layouts[kind].statementRows[1] - 1)).value).toBe("手当明細書");
+        expect(result.sheet.getCell("D" + (area.start + layouts[kind].statementRows[2] - 1)).value).toBe("2026年9月分");
+        expect(result.sheet.getCell("F" + (area.start + layouts[kind].statementRows[3] - 1)).value).toBe("花子");
+        for (let logical = 6; logical <= 26; logical += 1) {
+          const top = area.start + layouts[kind].statementRows[logical - 1] - 1;
+          const bottom = area.start + layouts[kind].statementRows[logical] - 2;
+          if (bottom > top) expect(result.xml).toContain(`<mergeCell ref="J${top}:J${bottom}"/>`);
+          for (let physical = top; physical <= bottom; physical += 1) {
+            expect(result.sheet.getCell("J" + physical).master.address).toBe("J" + top);
+          }
+          const amount = result.sheet.getCell("F" + top).value;
+          expect(result.sheet.getCell("J" + top).value).toBe(typeof amount === "number" ? "円" : null);
+        }
+      }
+    }
+    for (let column = 1; column <= 11; column += 1) expect(result.sheet.getColumn(column).width).toBe(sourceSheet.getColumn(column + 9).width);
+    expect(result.detail.filter((item) => item.label.value !== null).map((item) => item.label.value)).toEqual(allowances.map((item) => item.label));
+    expect(result.detail.filter((item) => item.amount.value !== null).map((item) => item.amount.value)).toEqual(allowances.map((item) => item.amount));
+    const subsequent = result.xml.split(`<row r="${height + 2}"`)[1];
+    for (const amount of [statementCells.F9, statementCells.F18, statementCells.F25, statementCells.F26]) expect(subsequent).not.toContain(`<v>${amount}</v>`);
+    const printerPath = `xl/printerSettings/printerSettings${layouts[kind].source}.bin`;
+    expect(await result.zip.file(printerPath)!.async("uint8array")).toEqual(await sourceZip.file(printerPath)!.async("uint8array"));
+    expect(await part(result.zip, "xl/worksheets/_rels/sheet1.xml.rels")).toBe(await part(sourceZip, `xl/worksheets/_rels/sheet${layouts[kind].source}.xml.rels`));
+    expect(result.xml).not.toMatch(/<(rowBreaks|colBreaks)\b/);
+    await qa("allowance-overflow-" + kind, result.bytes);
+  });
+
+  it.each(kinds)("%s: 100文字・多数改行・特殊文字の名目全文を縮小せず保持し、金額は1回だけ印字する", async (kind) => {
+    const allowances = [{ label: "長".repeat(100), amount: 100 }, { label: "改行" + "\n".repeat(97) + "終", amount: 200 }, { label: "=1+1<&>\"'😀", amount: 300 }];
+    const result = await inspect(kind, allowances);
+    expect(result.areas.length).toBeGreaterThan(3);
+    expect(result.detail.map((item) => item.label.value || "").join("")).toBe(allowances.map((item) => item.label).join(""));
+    expect(result.detail.filter((item) => item.amount.value !== null).map((item) => item.amount.value)).toEqual([100, 200, 300]);
+    for (const item of result.detail) { expect(item.label.font.size).toBe(11); expect(item.label.alignment.shrinkToFit).toBe(false); }
+    expect(result.xml).not.toContain("<f>");
+    expect(statementAllowanceLines("e\u0301e\u0301e\u0301", 1)).toEqual(["e\u0301", "e\u0301", "e\u0301"]);
+    await qa("allowance-long-label-" + kind, result.bytes);
+  });
+
+  it.each(kinds)("%s: 空き枠と続き頁の境界に余計な白紙頁や欠落を作らない", async (kind) => {
+    for (const [count, pages] of [[2, 1], [3, 2], [22, 2], [23, 3], [42, 3]]) {
+      const result = await inspect(kind, Array.from({ length: count }, (_, i) => ({ label: "手当" + i, amount: i })));
+      expect(result.areas).toHaveLength(pages);
+      expect(result.detail.filter((item) => item.amount.value !== null)).toHaveLength(count);
+    }
+  });
+
+  it.each(kinds)("%s: 受領書は新しい手当明細の有無にかかわらず全ZIPパーツが同一", async (kind) => {
+    const source = await template();
+    const plain = await JSZip.loadAsync(await fillReceiptTemplate(source, [{ ...input(kind, []), statementAllowances: undefined }], "receipt"));
+    const extra = await JSZip.loadAsync(await fillReceiptTemplate(source, [input(kind, [{ label: "長".repeat(100), amount: 100 }])], "receipt"));
+    expect(Object.keys(extra.files)).toEqual(Object.keys(plain.files));
+    for (const file of Object.keys(plain.files)) if (!plain.files[file].dir) expect(await extra.file(file)!.async("uint8array")).toEqual(await plain.file(file)!.async("uint8array"));
+  });
+
+  it("不正な名目・金額では壊れた明細を出さない", async () => {
+    for (const allowance of [{ label: " ", amount: 1 }, { label: "a".repeat(101), amount: 1 }, { label: "a\u0001", amount: 1 },
+      { label: "\uD800", amount: 1 }, { label: "手当", amount: -1 }, { label: "手当", amount: NaN }, { label: "手当", amount: Infinity }, { label: "手当", amount: Number.MAX_SAFE_INTEGER + 1 }]) {
+      await expect(fillReceiptTemplate(await template(), [input("hourlyAndBack", [allowance])], "statement")).rejects.toThrow("手当名目・金額");
     }
   });
 });

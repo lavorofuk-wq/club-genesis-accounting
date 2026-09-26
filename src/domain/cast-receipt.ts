@@ -1,5 +1,6 @@
-import type { CastReward } from "./gms";
+import type { CastReward, CastSalesReport } from "./gms";
 import { additionalCastAmounts } from "./cast-input-export";
+import { normalizeCastAccountingInputs } from "./cast-accounting-inputs";
 
 const amountKeys = ["hourlyPay", "honShimeiBack", "banaiShimeiBack", "dohanBack", "bottleBack", "drinkBack",
   "hourlyAndBack", "salesReward", "adoptedReward", "beautyAllowance", "grossPay", "dailyPayment",
@@ -87,5 +88,46 @@ export function buildCastReceiptSheets(rows: CastReward[], month: string, legalN
       F26: row.netPay,
     };
     return { template: row.adoptedSystem, name: row.name, cells, statementCells };
+  });
+}
+
+/** 明細書だけに保存済みの追加手当名目を渡す。受領書の合算表示・金額は変更しない。 */
+export function buildCastStatementSheets(rows: CastReward[], reports: CastSalesReport[], month: string,
+  legalNames: Readonly<Record<string, string>> = {}) {
+  const sheets = buildCastReceiptSheets(rows, month, legalNames);
+  if (!Array.isArray(reports)) throw new Error("明細書のキャスト売上データを読み込めません。");
+  const regularRows = rows.filter((row) => !row.trialOnly);
+  const usedInputIds = new Set<string>();
+  return sheets.map((sheet, index) => {
+    const reward = regularRows[index];
+    const expectedAllowance = additionalCastAmounts(reward).allowance;
+    const matching = reports.filter((report) => report?.id === reward.id);
+    const fail = () => { throw new Error(`${reward.name}の追加手当の名目・金額を確認できません。明細書の出力元データを確認してください。`); };
+    if (matching.length > 1 || !matching.length && expectedAllowance > 0) fail();
+    const report = matching[0];
+    if (report && (!report.totals || additionalCastAmounts(report.totals).allowance !== expectedAllowance)) fail();
+    // 追加額0円の旧確定・Firebase空配列省略は許容する。正額の名目を推定しない。
+    const inputs = normalizeCastAccountingInputs(report?.totals.accountingInputs);
+    const grouped = new Map<string, number>();
+    let total = 0;
+    for (const input of inputs) {
+      if (input.castId !== reward.id || usedInputIds.has(input.id)
+        || typeof input.businessDate !== "string" || !input.businessDate.startsWith(`${month}-`)) fail();
+      usedInputIds.add(input.id);
+      if (input.kind !== "allowance") continue;
+      total += input.amount;
+      const amount = (grouped.get(input.label) || 0) + input.amount;
+      if (!Number.isSafeInteger(total) || !Number.isSafeInteger(amount)) fail();
+      grouped.set(input.label, amount);
+    }
+    if (total !== expectedAllowance) fail();
+    const statementCells: Record<string, string | number> = {
+      ...sheet.statementCells, B15: "美容室手当", F15: reward.beautyAllowance,
+    };
+    return {
+      ...sheet,
+      statementCells,
+      statementAllowances: [...grouped].map(([label, amount]) => ({ label, amount })),
+    };
   });
 }

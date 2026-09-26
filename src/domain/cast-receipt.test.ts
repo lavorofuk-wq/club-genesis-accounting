@@ -2,8 +2,8 @@ import { readFile } from "node:fs/promises";
 import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
 import { fillReceiptTemplate } from "@/lib/xlsx/receipt-template";
-import type { CastReward } from "./gms";
-import { buildCastReceiptSheets } from "./cast-receipt";
+import type { CastReward, CastSalesReport, ResolvedCastAccountingInput } from "./gms";
+import { buildCastReceiptSheets, buildCastStatementSheets } from "./cast-receipt";
 
 const reward: CastReward = {
   id: "cast-1", name: "花子", days: 1, advisoryDays: 1, hours: 4.25, trialOnly: false,
@@ -140,5 +140,114 @@ describe("キャスト報酬から受領書への転記", () => {
     for (const appliedHourlyRates of [[], [NaN], [-1], [Infinity]]) {
       expect(() => buildCastReceiptSheets([{ ...reward, appliedHourlyRates }], "2026-09")).toThrow("不一致");
     }
+  });
+});
+
+describe("明細書の追加手当名目", () => {
+  function entry(id: string, label: string, amount: number, kind: ResolvedCastAccountingInput["kind"] = "allowance"): ResolvedCastAccountingInput {
+    return { id, castId: reward.id, castName: reward.name, kind, label, amount, businessDate: "2026-09-02" };
+  }
+  function input(entries: ResolvedCastAccountingInput[]) {
+    const allowance = entries.filter((item) => item.kind === "allowance").reduce((sum, item) => sum + item.amount, 0);
+    const row: CastReward = { ...reward, additionalAllowance: allowance, grossPay: reward.grossPay + allowance,
+      netPay: reward.netPay + allowance };
+    const totals: CastSalesReport["totals"] = { attendanceDays: 1, hours: reward.hours,
+      honShimeiSales: reward.honShimeiSales, jonaiExtensionSales: reward.jonaiExtensionSales,
+      totalSales: reward.honShimeiSales + reward.jonaiExtensionSales,
+      honShimeiLiquorCost: reward.honShimeiLiquorCost, jonaiExtensionLiquorCost: 5000,
+      totalLiquorCost: reward.liquorCost, honShimeiCount: 2, banaiShimeiCount: 1, nominationCount: 3, dohanCount: 1,
+      backs: [], backTotal: 0, bottles: [], beautyAllowance: reward.beautyAllowance,
+      additionalAllowance: allowance, accountingInputs: entries };
+    const report: CastSalesReport = { id: row.id, name: row.name, attendanceDays: 1,
+      days: [{ ...totals, businessDate: "2026-09-02", startTime: "20:00", endTime: "00:15" }], totals };
+    return { row, report };
+  }
+
+  it.each(["hourlyAndBack", "salesReward"] as const)("%s明細は美容室と同名合算の追加手当を分け、受領書は変更しない", (system) => {
+    const { row, report } = input([
+      entry("a", "イベント手当", 1001), entry("b", "皆勤手当", 2000),
+      { ...entry("c", "イベント手当", 999), businessDate: "2026-09-03" },
+      entry("d", "追加売上", 10000, "sales"), entry("e", "追加送迎", 500, "transport"),
+    ]);
+    if (system === "salesReward") Object.assign(row, { adoptedSystem: system, rewardRate: .65,
+      salesReward: 100000, adoptedReward: 100000, grossPay: 104500, netPay: 100000 });
+    const before = structuredClone({ row, report });
+    const originalReceipt = buildCastReceiptSheets([row], "2026-09", { [row.id]: "本名" })[0];
+    const sheet = buildCastStatementSheets([row], [report], "2026-09", { [row.id]: "本名" })[0];
+    expect(sheet.cells).toEqual(originalReceipt.cells);
+    expect(sheet.statementCells).toMatchObject({ B15: "美容室手当", F15: 500, F18: row.grossPay, F26: row.netPay, E5: "本名" });
+    expect(sheet.statementAllowances).toEqual([{ label: "イベント手当", amount: 2000 }, { label: "皆勤手当", amount: 2000 }]);
+    expect(sheet.statementAllowances[0]).not.toHaveProperty("businessDate");
+    expect(sheet.statementAllowances[0]).not.toHaveProperty("castId");
+    expect(originalReceipt.statementCells.F15).toBe(4500);
+    expect({ row, report }).toEqual(before);
+  });
+
+  it("同名は完全一致だけを集約し、初出順・0円名目・美容室と同じ入力名目を保持する", () => {
+    const { row, report } = input([entry("a", "手当", 0), entry("b", "手当 ", 2),
+      entry("c", "手当", 3), entry("d", "美容室手当", 4), entry("e", "0円手当", 0)]);
+    const sheet = buildCastStatementSheets([row], [report], "2026-09")[0];
+    expect(sheet.statementCells.F15).toBe(500);
+    expect(sheet.statementAllowances).toEqual([{ label: "手当", amount: 3 }, { label: "手当 ", amount: 2 },
+      { label: "美容室手当", amount: 4 }, { label: "0円手当", amount: 0 }]);
+  });
+
+  it("件数や100文字名目を省略せずテンプレートへ引き渡す", () => {
+    const entries = Array.from({ length: 30 }, (_, index) => entry(`item-${index}`, `${index}`.padStart(100, "手"), 1));
+    const { row, report } = input(entries);
+    expect(buildCastStatementSheets([row], [report], "2026-09")[0].statementAllowances)
+      .toEqual(entries.map(({ label, amount }) => ({ label, amount })));
+  });
+
+  it("旧確定・0円の報告書やFirebase空配列の欠損を許容し、名目を推定しない", () => {
+    const { row, report } = input([]);
+    delete report.totals.accountingInputs;
+    for (const selected of [reward, row]) {
+      for (const reports of [[], [report]]) {
+        const sheet = buildCastStatementSheets([selected], reports, "2026-09")[0];
+        expect(sheet.statementAllowances).toEqual([]);
+        expect(sheet.statementCells.F15).toBe(500);
+        expect(sheet.statementCells.F26).toBe(selected.netPay);
+      }
+    }
+  });
+
+  it("在籍のみをIDで照合し、同名別人の手当を混ぜない", () => {
+    const first = input([entry("a", "手当A", 1)]);
+    const second = input([entry("b", "手当B", 2)]);
+    second.row.id = "cast-2"; second.report.id = "cast-2";
+    second.report.totals.accountingInputs![0].castId = "cast-2";
+    const trial = { ...reward, id: "trial", trialOnly: true };
+    const sheets = buildCastStatementSheets([trial, second.row, first.row], [first.report, second.report], "2026-09");
+    expect(sheets.map((sheet) => sheet.statementAllowances)).toEqual([[{ label: "手当B", amount: 2 }], [{ label: "手当A", amount: 1 }]]);
+  });
+
+  const corruptions: Array<[string, (report: CastSalesReport) => void]> = [
+    ["名目欠損", (r) => { delete r.totals.accountingInputs; }],
+    ["空明細", (r) => { r.totals.accountingInputs = []; }],
+    ["別人の明細", (r) => { r.totals.accountingInputs![0].castId = "other"; }],
+    ["重複ID", (r) => { r.totals.accountingInputs!.push({ ...r.totals.accountingInputs![0] }); }],
+    ["白紙名目", (r) => { r.totals.accountingInputs![0].label = " "; }],
+    ["長すぎる名目", (r) => { r.totals.accountingInputs![0].label = "手".repeat(101); }],
+    ["日付未解決", (r) => { delete (r.totals.accountingInputs![0] as Partial<ResolvedCastAccountingInput>).businessDate; }],
+    ["別月", (r) => { r.totals.accountingInputs![0].businessDate = "2026-10-02"; }],
+    ["金額不一致", (r) => { r.totals.accountingInputs![0].amount += 1; }],
+    ["報告書合計不一致", (r) => { r.totals.additionalAllowance = 0; }],
+    ["マイナス", (r) => { r.totals.accountingInputs![0].amount = -1; }],
+    ["手当の小数", (r) => { r.totals.accountingInputs![0].amount = 1.5; }],
+    ["上限超過", (r) => { r.totals.accountingInputs![0].amount = Number.MAX_SAFE_INTEGER + 1; }],
+  ];
+  it.each(corruptions)("%sは明細だけ拒否し、受領書出力を妨げない", (_name, corrupt) => {
+    const { row, report } = input([entry("a", "手当", 100)]);
+    corrupt(report);
+    expect(() => buildCastStatementSheets([row], [report], "2026-09")).toThrow();
+    expect(() => buildCastReceiptSheets([row], "2026-09")).not.toThrow();
+  });
+
+  it("追加手当がある報告書の欠落・同一人物報告書重複を拒否する", () => {
+    const { row, report } = input([entry("a", "手当", 100)]);
+    expect(() => buildCastStatementSheets([row], [], "2026-09")).toThrow("追加手当");
+    expect(() => buildCastStatementSheets([row], [report, report], "2026-09")).toThrow("追加手当");
+    expect(() => buildCastReceiptSheets([row], "2026-09")).not.toThrow();
   });
 });

@@ -91,7 +91,7 @@ function fullInput(): BalanceExportInput {
 
 import { readFile, mkdir, writeFile } from "node:fs/promises";
 import ExcelJS from "exceljs/dist/exceljs.min.js";
-import { buildCastReceiptSheets } from "./cast-receipt";
+import { buildCastReceiptSheets, buildCastStatementSheets } from "./cast-receipt";
 import { buildIntroducerExport } from "./introducer-export";
 import { normalizeMonthlyAccountingSnapshot } from "./month-accounting";
 import { validateExpenseExport } from "./expense-export";
@@ -212,6 +212,7 @@ describe("キャストデータ入力から全帳票への統合", () => {
     const exported = { ...input, results: saved!, snapshot: saved! };
     validateExpenseExport(exported);
     const sheets = buildCastReceiptSheets(saved!.castRewards, input.month);
+    const statementSheets = buildCastStatementSheets(saved!.castRewards, saved!.castSalesReports, input.month);
     const template = await readFile("public/templates/cast-receipt-v3.xlsx");
     const books = {
       "cast-sales": createCastSalesWorkbook(saved!, input.month, "追加項目確認"),
@@ -239,12 +240,18 @@ describe("キャストデータ入力から全帳票への統合", () => {
     expect(castSheet.getCell("S49").value).toBe(1210000);
     expect(books.balance.worksheets[0].getCell("D44").value).toEqual({ formula: "SUM(D42:D43,D45)", result: 1258000 });
     for (const document of ["receipt", "statement"] as const) {
-      const bytes = await fillReceiptTemplate(template, sheets, document);
+      const bytes = await fillReceiptTemplate(template, document === "statement" ? statementSheets : sheets, document);
       const restored = new ExcelJS.Workbook();
       await restored.xlsx.load(bytes as unknown as ExcelJS.Buffer);
       const address = receiptCellAddress("salesReward", document, document === "receipt" ? "G7" : "F26");
       expect(restored.worksheets[0].getCell(address).value).toBe(847968);
-      if (document === "statement") expect(restored.worksheets[0].getCell(receiptCellAddress("salesReward", "statement", "B15")).value).toBe("美容室・手当て等");
+      if (document === "statement") {
+        const sheet = restored.worksheets[0];
+        expect(sheet.getCell(receiptCellAddress("salesReward", "statement", "B15")).value).toBe("美容室手当");
+        expect(sheet.getCell(receiptCellAddress("salesReward", "statement", "F15")).value).toBe(1000);
+        expect(statementSheets[0].statementAllowances).toEqual([{ label: "イベント1位手当", amount: 100001 }]);
+        expect(sheet.getCell(receiptCellAddress("salesReward", "statement", "F16")).value).toBe(100001);
+      }
       buffers.set(document, bytes);
     }
     if (process.env.GMS_CAST_INPUT_QA_DIR) {
@@ -258,5 +265,42 @@ describe("キャストデータ入力から全帳票への統合", () => {
     input.results.castSalesReports[0].totals.additionalAllowance = 100000;
     expect(() => createCastSalesWorkbook(input.results, input.month, "")).toThrow();
     expect(() => buildBalanceExportReport(input)).toThrow();
+  });
+
+  it.each([90000, 1210000])("売上%i円の採用方式で同名手当を集約しても受領書・支給額・確定結果は変わらない", async (sales) => {
+    const input = featureInput(sales);
+    input.adjustments.castInputs!.push(
+      { id: "allowance-2", castId: "regular", castName: "regular", kind: "allowance", label: "イベント1位手当", amount: 20002, businessDate: "2026-09-02" },
+      { id: "allowance-3", castId: "regular", castName: "regular", kind: "allowance", label: "皆勤手当", amount: 30003 },
+    );
+    const results = calculateMonthlyAccounting(input.data, input.month, input.adjustments);
+    const snapshot = buildMonthlySnapshot(input.month, 1, "b".repeat(64), input.adjustments, results, input.closings, "op", "2026-10-01T00:00:00Z");
+    const saved = normalizeMonthlyAccountingSnapshot(JSON.parse(JSON.stringify(snapshot)), input.month, 1)!;
+    expect(saved).toBeDefined();
+    const before = structuredClone(saved);
+    const receipt = buildCastReceiptSheets(saved.castRewards, input.month);
+    const statement = buildCastStatementSheets(saved.castRewards, saved.castSalesReports, input.month);
+    expect(statement[0].statementAllowances).toEqual(expect.arrayContaining([
+      { label: "イベント1位手当", amount: 120003 }, { label: "皆勤手当", amount: 30003 },
+    ]));
+    expect(statement[0].statementAllowances).toHaveLength(2);
+    expect(statement[0].statementCells.F15).toBe(1000);
+    expect(statement[0].statementCells.F18).toBe(saved.castRewards[0].grossPay);
+    expect(statement[0].statementCells.F26).toBe(saved.castRewards[0].netPay);
+    expect(statement[0].cells).toEqual(receipt[0].cells);
+    const template = await readFile("public/templates/cast-receipt-v3.xlsx");
+    const bytes = await fillReceiptTemplate(template, statement, "statement");
+    const book = new ExcelJS.Workbook();
+    await book.xlsx.load(bytes as unknown as ExcelJS.Buffer);
+    const sheet = book.worksheets[0];
+    const kind = saved.castRewards[0].adoptedSystem;
+    expect(sheet.getCell(receiptCellAddress(kind, "statement", "F26")).value).toBe(saved.castRewards[0].netPay);
+    expect(sheet.pageSetup).toMatchObject({ paperSize: 281, orientation: "landscape", fitToWidth: 1, fitToHeight: 1 });
+    expect(saved).toEqual(before);
+    if (process.env.GMS_STATEMENT_QA_DIR) {
+      await mkdir(process.env.GMS_STATEMENT_QA_DIR, { recursive: true });
+      await writeFile(process.env.GMS_STATEMENT_QA_DIR + `/statement-${kind}.xlsx`, bytes);
+      await writeFile(process.env.GMS_STATEMENT_QA_DIR + `/receipt-${kind}.xlsx`, await fillReceiptTemplate(template, receipt, "receipt"));
+    }
   });
 });
