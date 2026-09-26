@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { User } from "firebase/auth";
 import type { CastAccountingInput } from "@/domain/gms";
 import type { AccountingWorkspaceData } from "@/domain/month-accounting";
@@ -10,6 +10,7 @@ import { saveCastAccountingInputs } from "@/lib/firebase/repository";
 import { isProductionEnvironment } from "@/lib/firebase/client";
 import { Card, Field, StatusPill, Table, currentMonth, yen } from "./ui";
 import { useRecoverableState } from "./update-drafts";
+import { CastInputPicker } from "./cast-input-picker";
 
 type Props = { data: AccountingWorkspaceData; user: User; busy: boolean; run: (action: () => Promise<unknown>, message: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void };
 type Editing = { input: CastAccountingInput; amountText: string; original?: CastAccountingInput; revision: number; context: string };
@@ -41,6 +42,9 @@ function CastAccountingInputForm({ data, user, busy, run, onDirtyChange }: Props
   const [editing, setEditing] = useRecoverableState<Editing | null>("accounting.castInputs.editing", null);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [detailsCastId, setDetailsCastId] = useState<string | null>(() => selected || null);
+  const detailsId = useId();
   const savingRef = useRef(false);
   const stored = data.adjustments.find((row) => row.month === month);
   const revision = stored?.revision || 0;
@@ -52,7 +56,8 @@ function CastAccountingInputForm({ data, user, busy, run, onDirtyChange }: Props
   const context = useMemo(() => castInputSourceKey(data, month), [data, month]);
   const stale = Boolean(editing && (editing.context !== context || editing.revision !== revision));
   const casts = useMemo(() => [...data.archivedCasts, ...data.casts], [data.archivedCasts, data.casts]);
-  const active = data.casts.filter((cast) => cast.status === "active");
+  const active = useMemo(() => data.casts.filter((cast) => cast.status === "active"), [data.casts]);
+  const pickerRows = useMemo(() => active.map((cast) => ({ id: cast.id, name: cast.name, attendanceDays: castAccountingAttendanceDays(data.closings, casts, month, cast.id).length })).sort((left, right) => left.name.localeCompare(right.name, "ja")), [active, casts, data.closings, month]);
   const selectedCast = active.find((cast) => cast.id === selected);
   const inputCastId = editing?.input.castId || selected;
   const days = useMemo(() => inputCastId ? castAccountingAttendanceDays(data.closings, casts, month, inputCastId) : [], [casts, data.closings, month, inputCastId]);
@@ -66,12 +71,15 @@ function CastAccountingInputForm({ data, user, busy, run, onDirtyChange }: Props
   const changeMonth = (value: string) => {
     if (!/^\d{4}-\d{2}$/.test(value) || busy || saving || value === month) return;
     if (editing && !window.confirm("保存していない入力を破棄して対象月を変更しますか？")) return;
-    setEditing(null); setSelected(""); setError(""); setMonth(value);
+    setEditing(null); setSelected(""); setDetailsCastId(null); setPickerOpen(false); setError(""); setMonth(value);
   };
   const chooseCast = (castId: string) => {
-    if (disabled || castId === selected) return;
+    if (disabled) return;
+    const cast = active.find((row) => row.id === castId);
+    if (!cast || !castAccountingAttendanceDays(data.closings, casts, month, castId).length) return;
+    if (castId === selected) { setPickerOpen(false); return; }
     if (editing && !window.confirm("保存していない入力を破棄してキャストを変更しますか？")) return;
-    setEditing(null); setError(""); setSelected(castId);
+    setEditing(null); setError(""); setSelected(castId); setDetailsCastId(castId); setPickerOpen(false);
   };
   const open = (kind: CastAccountingInput["kind"], original?: CastAccountingInput) => {
     if (disabled) return;
@@ -80,7 +88,7 @@ function CastAccountingInputForm({ data, user, busy, run, onDirtyChange }: Props
     if (!castAccountingAttendanceDays(data.closings, casts, month, cast.id).length) { setError("対象月に本人の承認済み出勤データがありません。"); return; }
     if (editing && !window.confirm("保存していない入力を破棄して別の項目を開きますか？")) return;
     const input = original ? { ...original, castName: cast.name } : { id: secureRandomUUID(), castId: cast.id, castName: cast.name, kind, label: "", amount: 0 };
-    setSelected(cast.id);
+    setSelected(cast.id); setDetailsCastId(cast.id);
     setEditing({ input, amountText: original ? String(original.amount) : "", original: original && { ...original }, revision, context });
     setError("");
   };
@@ -133,15 +141,14 @@ function CastAccountingInputForm({ data, user, busy, run, onDirtyChange }: Props
     </Card>
     {error && <div className="notice error" role="alert">{error}</div>}
     {resolved.issues.length > 0 && <div className="notice error"><strong>保存済み入力の対象日・出勤を確認してください。</strong><ul>{resolved.issues.map((issue) => <li key={issue}>{issue}</li>)}</ul></div>}
-    <div className="grid two">
-      <Card title="在籍キャスト" description="対象月に本人の承認済み出勤があるキャストに入力できます。">
-        <div className="cast-input-selection">{active.map((cast) => {
-          const count = castAccountingAttendanceDays(data.closings, casts, month, cast.id).length;
-          return <button type="button" className={"select-card" + (selected === cast.id ? " selected" : "")} key={cast.id} disabled={disabled || !count} onClick={() => chooseCast(cast.id)} aria-pressed={selected === cast.id}><span><strong>{cast.name}</strong><small>{count ? "承認済み出勤 " + count + "日" : "当月の承認済み出勤なし"}</small></span></button>;
-        })}</div>
-        {!active.length && <p className="muted">在籍キャストがいません。</p>}
-      </Card>
-      <Card title={selectedCast ? selectedCast.name + "の入力" : "キャストを選択してください"}>
+    <Card title="キャストを選択" description="対象月に本人の承認済み出勤がある在籍キャストに入力できます。">
+      <div className="cast-input-selected">
+        <div>{selectedCast ? <><strong>{selectedCast.name}</strong><span className="muted">承認済み出勤 {pickerRows.find((row) => row.id === selectedCast.id)?.attendanceDays || 0}日</span></> : <span className="muted">キャストが選択されていません。</span>}</div>
+        <button type="button" className="button secondary" disabled={disabled} aria-haspopup="dialog" onClick={() => setPickerOpen(true)}>{selectedCast ? "キャストを変更" : "キャストを選ぶ"}</button>
+      </div>
+    </Card>
+    {pickerOpen && <CastInputPicker month={month} rows={pickerRows} selected={selected} disabled={locked} busy={busy || saving} onSelect={chooseCast} onClose={() => setPickerOpen(false)} />}
+    <Card title={selectedCast ? selectedCast.name + "の入力" : "売上・手当・送迎の入力"}>
         {selectedCast && <div className="actions">{(["sales", "allowance", "transport"] as const).map((kind) => <button type="button" key={kind} className="button secondary" disabled={disabled || !days.length} onClick={() => open(kind)}>{labels[kind]}入力</button>)}</div>}
         {editing && <div className="stack top-gap">
           <h3>{editing.input.castName}・{labels[editing.input.kind]}入力</h3>
@@ -164,22 +171,33 @@ function CastAccountingInputForm({ data, user, busy, run, onDirtyChange }: Props
           {candidate.error ? <p className="muted">{candidate.error}</p> : <p className="notice">反映額 {yen.format(candidate.amount || 0)} ／ 計上日 {candidate.date}</p>}
           <div className="actions"><button type="button" className="button" disabled={disabled || stale || !candidate.input || !active.some((cast) => cast.id === editing.input.castId)} onClick={() => void save()}>{saving ? "保存中…" : "この入力を保存"}</button><button type="button" className="button secondary" disabled={busy || saving} onClick={() => { if (window.confirm("保存していない入力を破棄して閉じますか？")) { setEditing(null); setError(""); } }}>入力を閉じる</button></div>
         </div>}
-        {!selectedCast && !editing && <p className="muted">左の在籍キャストを選ぶと入力項目が表示されます。</p>}
-      </Card>
-    </div>
+        {!selectedCast && !editing && <p className="muted">「キャストを選ぶ」から対象者を選択してください。</p>}
+    </Card>
     <Card title="入力済みキャスト一覧" description={month + "に登録した名目別の入力です。退店後も保存済み明細は残ります。"}>
-      {!groups.size && <p className="muted">この月の入力はありません。</p>}
-      {[...groups].map(([castId, rows]) => {
-        const name = rows[0].castName;
-        const isActive = active.some((cast) => cast.id === castId);
-        const total = (kind: CastAccountingInput["kind"]) => rows.filter((row) => row.kind === kind).reduce((sum, row) => sum + row.amount, 0);
-        return <details className="cast-sales-card" key={castId} open={selected === castId}><summary className="cast-sales-summary"><strong>{name}{!isActive && "（在籍外）"}</strong><span>売上 {yen.format(total("sales"))}</span><span>手当 {yen.format(total("allowance"))}</span><span>追加送迎 {yen.format(total("transport"))}</span><span>詳細</span></summary><div className="cast-sales-content">
-          <Table headers={["区分", "名目", "金額", "指定日・計上日", "操作"]}>{rows.map((row) => {
-            const day = resolved.inputs.find((item) => item.id === row.id)?.businessDate;
-            return <tr key={row.id}><td>{labels[row.kind]}</td><td className="wrap-cell">{row.label}</td><td>{yen.format(row.amount)}</td><td>{row.businessDate || "最終出勤日" + (day ? "（" + day + "）" : "（要確認）")}</td><td><div className="row-actions"><button className="button secondary mini" disabled={disabled || !isActive} onClick={() => open(row.kind, row)}>編集</button><button className="button danger mini" disabled={disabled || Boolean(editing)} onClick={() => void remove(row)}>削除</button></div></td></tr>;
-          })}</Table>
-        </div></details>;
-      })}
+      {!groups.size ? <p className="muted">この月の入力はありません。</p> : <div className="table-wrap cast-input-summary"><table>
+        <thead><tr><th scope="col">キャスト</th><th scope="col">売上</th><th scope="col">手当</th><th scope="col">追加送迎</th><th scope="col">件数</th><th scope="col">詳細</th></tr></thead>
+        <tbody>{[...groups].map(([castId, rows]) => {
+          const name = rows[0].castName;
+          const isActive = active.some((cast) => cast.id === castId);
+          const total = (kind: CastAccountingInput["kind"]) => rows.filter((row) => row.kind === kind).reduce((sum, row) => sum + row.amount, 0);
+          const expanded = detailsCastId === castId;
+          const regionId = detailsId + "-" + castId;
+          return <Fragment key={castId}>
+            <tr className={expanded ? "is-selected" : undefined}>
+              <th scope="row">{name}{!isActive && "（在籍外）"}</th>
+              <td className="money-cell">{yen.format(total("sales"))}</td><td className="money-cell">{yen.format(total("allowance"))}</td><td className="money-cell">{yen.format(total("transport"))}</td><td>{rows.length}件</td>
+              <td><button type="button" className="button secondary mini" aria-expanded={expanded} aria-controls={regionId} aria-label={name + "の明細" + (expanded ? "を閉じる" : "を表示")} onClick={() => setDetailsCastId(expanded ? null : castId)}>{expanded ? "閉じる" : "詳細"}</button></td>
+            </tr>
+            {expanded && <tr className="cast-input-detail-row"><td colSpan={6}><section id={regionId} aria-label={name + "の入力明細"} className="cast-input-detail">
+              <h3>{name}の入力明細</h3>
+              <Table headers={["区分", "名目", "金額", "指定日・計上日", "操作"]}>{rows.map((row) => {
+                const day = resolved.inputs.find((item) => item.id === row.id)?.businessDate;
+                return <tr key={row.id}><td>{labels[row.kind]}</td><td className="wrap-cell">{row.label}</td><td>{yen.format(row.amount)}</td><td>{row.businessDate || "最終出勤日" + (day ? "（" + day + "）" : "（要確認）")}</td><td><div className="row-actions"><button type="button" className="button secondary mini" disabled={disabled || !isActive} onClick={() => open(row.kind, row)}>編集</button><button type="button" className="button danger mini" disabled={disabled || Boolean(editing)} onClick={() => void remove(row)}>削除</button></div></td></tr>;
+              })}</Table>
+            </section></td></tr>}
+          </Fragment>;
+        })}</tbody>
+      </table></div>}
     </Card>
   </div>;
 }

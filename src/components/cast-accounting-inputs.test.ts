@@ -21,6 +21,14 @@ function fixture(): AccountingWorkspaceData {
   const day = (day: string, status: DailyClosing["status"]): DailyClosing => ({
     id: "day_" + day, businessDate: month + "-" + day, status, updatedAt: "initial",
     checksum: "a".repeat(64), submissionId: "submission_" + day,
+    posSnapshot: {
+      schema: "club-genesis-pos-closing", schemaVersion: 3, businessDate: month + "-" + day, status: "closed",
+      sales: { cashSales: 0, cardSales: 0, totalSales: 0 }, customers: { groupCount: 0, totalCustomers: 0 },
+      nominations: { honShimeiCount: 0, jonaiCount: 0 }, transactions: [], castSales: [], castWork: [],
+      enteredCasts: [], exitedCasts: [], trialCasts: [], lifecycleEvents: [],
+      rosterSnapshot: { complete: false, capturedAt: "", casts: [] }, submissionId: "submission_" + day,
+      generatedAt: "", checksumAlgorithm: "sha256", checksumCanonicalization: "recursive-key-sort-v1", checksum: "a".repeat(64),
+    },
     casts: ["cast1", "retired"].map((id) => ({
       masterId: id, posCastId: "pos_" + id, name: id === "cast1" ? "在籍花子" : "退店ゆり", kind: "regular",
       startTime: "20:00", endTime: "00:00", hours: 4, hourlyRate: 3000, honShimeiSales: 0, jonaiExtensionSales: 0,
@@ -47,10 +55,12 @@ function recover(data: AccountingWorkspaceData, row = input, amountText = String
 beforeEach(() => { drafts.clear(); drafts.set("accounting.castInputs.month", month); production.value = false; });
 
 describe("キャストデータ入力の表示・入力保護", () => {
-  it("在籍者のみ選択可能にし、出勤なしを無効化して体入を除く", () => {
+  it("常設の全員ボタンを描画せず選択モーダルへの入口を表示する", () => {
     const html = render();
-    expect(html).toContain("在籍花子");
-    expect(html).toMatch(/<button[^>]*disabled[^>]*><span><strong>出勤なし/);
+    expect(html).not.toContain("在籍花子");
+    expect(html).not.toContain("出勤なし");
+    expect(html).toContain("キャストを選ぶ");
+    expect(html).toContain('aria-haspopup="dialog"');
     expect(html).not.toContain("体入のみ");
     expect(html).not.toContain("退店ゆり");
     expect(html).toContain("入力済みキャスト一覧");
@@ -129,6 +139,7 @@ describe("キャストデータ入力の表示・入力保護", () => {
   it("退店後も保存名と明細を残し、変更を禁止して削除だけ可能にする", () => {
     const data = fixture();
     data.adjustments[0].castInputs = [{ ...input, castId: "retired", castName: "保存時ゆり" }];
+    drafts.set("accounting.castInputs.selected", "retired");
     const html = render(data);
     expect(html).toContain("保存時ゆり（在籍外）");
     expect(html).toContain("イベント売上");
@@ -137,6 +148,7 @@ describe("キャストデータ入力の表示・入力保護", () => {
   });
   it.each(["closing", "closed"] as const)("月次%sでは編集・削除を止めて明細を表示する", (status) => {
     const data = fixture(); data.adjustments[0].castInputs = [input];
+    drafts.set("accounting.castInputs.selected", "cast1");
     data.monthStates = [{ month, status, revision: 1, updatedAt: "", updatedBy: "" }];
     if (status === "closed") {
       data.monthStates[0].currentSnapshotRevision = 1;
@@ -152,6 +164,7 @@ describe("キャストデータ入力の表示・入力保護", () => {
     data.monthStates = [{ month, status: "closed", revision: 1, currentSnapshotRevision: 1, updatedAt: "", updatedBy: "" }];
     data.monthSnapshots = [{ month, revision: 1, castSalesReports: [{ totals: { accountingInputs: [{ ...input, kind: "allowance", label: "確定時手当", businessDate: month + "-03" }] } }] } as unknown as AccountingWorkspaceData["monthSnapshots"][number]];
     data.casts = []; data.closings = [];
+    drafts.set("accounting.castInputs.selected", "cast1");
     const html = render(data);
     expect(html).toContain("確定時手当");
     expect(html).toContain("2026-09-03");
