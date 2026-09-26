@@ -73,25 +73,68 @@ export function discardUpdateDraft(storage: DraftStorage, scope: UpdateDraftScop
   catch { throw new Error("退避入力を削除できませんでした。画面を更新せず、もう一度お試しください。"); }
 }
 
+
+/** Ver2.36: obsolete form drafts must not recreate the removed accounting overrides. */
+function incompatibleDraftKeys(entries: UpdateDraftEntry[]) {
+  const blocked = new Set<string>();
+  const workflows = new Set<string>();
+  const hasMetadata = (value: unknown): boolean => record(value) && (
+    value.castInputRevision !== undefined && value.castInputRevision !== null
+    || typeof value.castReturnHandoffId === "string" && value.castReturnHandoffId.length > 0
+    || value.accountingCorrection !== undefined && value.accountingCorrection !== null
+    || Array.isArray(value.casts) && value.casts.some((row) => record(row) && row.accountingCorrection != null)
+  );
+  for (const entry of entries) {
+    if (entry.key === "store.editing" && hasMetadata(entry.value)) {
+      blocked.add(entry.key);
+      if (record(entry.value) && typeof entry.value.id === "string" && entry.value.id) {
+        workflows.add("store.workflow." + entry.value.id);
+      }
+    }
+    const workflow = /^(store\.workflow\.[^.]+)(?:\.handoff\.[^.]+)?\./.exec(entry.key);
+    if (!workflow) continue;
+    if (entry.key.startsWith(workflow[1] + ".handoff.") || hasMetadata(entry.value)
+      || Array.isArray(entry.value) && entry.value.some(hasMetadata)
+      || /\.(?:castInputRevision|castReturnHandoffId)$/.test(entry.key) && entry.value != null && entry.value !== "") {
+      workflows.add(workflow[1]);
+    }
+  }
+  for (const entry of entries) {
+    if ([...workflows].some((prefix) => entry.key.startsWith(prefix + "."))) blocked.add(entry.key);
+  }
+  const editing = entries.find((entry) => entry.key === "store.editing")?.value;
+  if (record(editing) && typeof editing.id === "string" && workflows.has("store.workflow." + editing.id)) {
+    blocked.add("store.editing");
+  }
+  if (blocked.has("store.editing")) blocked.add("store.workflowDirty");
+  return blocked;
+}
+
 /** Registration lives only as long as its form does, so abandoned forms never reappear. */
 export function createUpdateDraftRegistry() {
   const active = new Map<string, { token: symbol; read: () => unknown }>();
   const busy = new Map<string, { token: symbol; read: () => boolean }>();
   let recovery = new Map<string, unknown>();
+  let incompatible = new Set<string>();
   const assertIdle = () => {
     if ([...busy.values()].some((entry) => entry.read())) throw new Error("JSON読込・ファイル出力などの処理中です。完了してから画面を更新・復元してください。");
   };
   return {
     assertIdle,
-    prepare(entries: UpdateDraftEntry[]) { recovery = new Map(entries.map((entry) => [entry.key, entry.value])); },
+    prepare(entries: UpdateDraftEntry[]) {
+      const supported = entries.filter((entry) => !entry.key.startsWith("accounting.castDaily."));
+      incompatible = incompatibleDraftKeys(supported);
+      recovery = new Map(supported.map((entry) => [entry.key, entry.value]));
+    },
     remaining() { return recovery.size; },
-    clearRecovery() { recovery.clear(); },
-    peek(key: string) { return { found: recovery.has(key), value: recovery.get(key) }; },
+    incompatible() { return incompatible.size > 0; },
+    clearRecovery() { recovery.clear(); incompatible.clear(); },
+    peek(key: string) { return { found: !incompatible.has(key) && recovery.has(key), value: incompatible.has(key) ? undefined : recovery.get(key) }; },
     register(key: string, read: () => unknown) {
       const token = Symbol(key);
       active.set(key, { token, read });
       // Consume at commit, not in a state initializer (which React may call twice).
-      recovery.delete(key);
+      if (!incompatible.has(key)) recovery.delete(key);
       return () => { if (active.get(key)?.token === token) active.delete(key); };
     },
     registerBusy(key: string, read: () => boolean) {

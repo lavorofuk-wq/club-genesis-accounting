@@ -70,14 +70,14 @@ function same(actual: number, expected: number, label: string) {
     `${label}が月次データと一致しません。出力元データを確認してください。`);
 }
 
-/** 人数・本数は店舗全体の保存POSから取得し、派遣の欠落を0人として隠さない。 */
+/** 店舗送信のPOS全体を基準に、派遣を含む人数・本数を集計する。 */
 export function balanceDailyCounts(closing: DailyClosing) {
   const label = closing.businessDate;
   const pos = closing.posSnapshot;
   requireValue(pos && pos.businessDate === label && Array.isArray(pos.castWork)
     && Array.isArray(pos.transactions), `${label}の保存POSが不足しているため、派遣人数・同伴本数を確認できません。`);
   requireValue(Array.isArray(closing.casts), `${label}のキャスト出勤を読み込めません。`);
-  const saved = new Map<string, DailyClosing["casts"][number]>();
+  const saved = new Map<string, typeof closing.casts[number]>();
   const masterIds = new Set<string>();
   for (const cast of closing.casts) {
     requireValue(cast && typeof cast.posCastId === "string" && cast.posCastId.length > 0

@@ -1,4 +1,7 @@
+import { readFile } from "node:fs/promises";
+import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
+import { fillReceiptTemplate } from "@/lib/xlsx/receipt-template";
 import type { CastReward } from "./gms";
 import { buildCastReceiptSheets } from "./cast-receipt";
 
@@ -46,12 +49,58 @@ describe("キャスト報酬から受領書への転記", () => {
       expect(buildCastReceiptSheets([{ ...reward, netPay, withholding: 18582 - netPay }], "2026-09")[0].cells.G8).toBe(netPay);
     }
   });
-  it("キャストごとに保存された名前・方式・金額を使い、入力を変更しない", () => {
+  it("在籍だけの保存名・方式・金額を使い、体入を含む入力データ自体は変更しない", () => {
     const rows = [reward, { ...reward, id: "trial", name: "体入キャスト", trialOnly: true }];
     const before = structuredClone(rows);
     const sheets = buildCastReceiptSheets(rows, "2026-09");
-    expect(sheets.map((sheet) => sheet.cells.G10)).toEqual(["花子", "体入キャスト"]);
+    expect(sheets.map((sheet) => sheet.cells.G10)).toEqual(["花子"]);
     expect(rows).toEqual(before);
+  });
+  it("体入のみ・空の月は在籍対象なしとして出力しない", () => {
+    for (const rows of [[], [{ ...reward, trialOnly: true }]]) {
+      expect(() => buildCastReceiptSheets(rows, "2026-09")).toThrow("承認済み在籍キャスト報酬がありません");
+    }
+  });
+  it.each([undefined, null, 0, 1, "false", "true"])("区分%sを在籍と推測せず停止する", (trialOnly) => {
+    expect(() => buildCastReceiptSheets([{ ...reward, trialOnly } as CastReward], "2026-09")).toThrow("在籍・体入区分");
+  });
+  it("混在・同名でも在籍のIDに対応した本名を出し、在籍の元の順序を保つ", () => {
+    const converted = { ...reward, id: "converted", name: "同月入店", appliedHourlyRates: [1500, 3000] };
+    const trial = { ...reward, id: "trial", trialOnly: true };
+    const before = structuredClone([trial, converted, reward]);
+    const output = buildCastReceiptSheets([trial, converted, reward], "2026-09", {
+      "cast-1": "在籍の本名", trial: "体入の本名", converted: "同月入店者の本名",
+    });
+    expect(output.map((sheet) => sheet.name)).toEqual(["同月入店", "花子"]);
+    expect(output.map((sheet) => sheet.statementCells.E5)).toEqual(["同月入店者の本名", "在籍の本名"]);
+    expect(output[0].statementCells.F8).toBe("1,500 / 3,000");
+    expect([trial, converted, reward]).toEqual(before);
+  });
+  it.each(["receipt", "statement"] as const)("%sのXLSXにも在籍分のみのシート・値を格納する", async (document) => {
+    const sales = { ...reward, id: "sales", name: "在籍売上", adoptedSystem: "salesReward" as const,
+      rewardRate: .65, salesReward: 100000, adoptedReward: 100000, grossPay: 100500, netPay: 96000 };
+    const trial = { ...reward, id: "trial", name: "体入除外テスト", trialOnly: true };
+    const sheets = buildCastReceiptSheets([trial, reward, sales], "2026-09", { trial: "体入本名除外", "cast-1": "在籍本名テスト" });
+    const zip = await JSZip.loadAsync(await fillReceiptTemplate(await readFile("public/templates/cast-receipt-v3.xlsx"), sheets, document));
+    const workbook = await zip.file("xl/workbook.xml")!.async("string");
+    expect(workbook).toContain('name="花子"');
+    expect(workbook).toContain('name="在籍売上"');
+    expect(workbook.match(/<sheet\b/g)).toHaveLength(2);
+    const paths = Object.keys(zip.files).filter((name) => /^xl\/worksheets\/sheet\d+\.xml$/.test(name));
+    expect(paths).toHaveLength(2);
+    const content = (await Promise.all(Object.keys(zip.files).filter((name) => /\.xml$/.test(name)).map((name) => zip.file(name)!.async("string")))).join("");
+    expect(content).not.toContain("体入除外テスト");
+    expect(content).not.toContain("体入本名除外");
+    if (document === "receipt") {
+      expect(content).not.toContain("在籍本名テスト");
+      expect(content).not.toContain("報酬明細書");
+    } else {
+      expect(content).toContain("在籍本名テスト");
+      expect(content).toContain("報酬明細書");
+      expect(content).not.toContain("受領印");
+    }
+    expect(await zip.file(paths[0])!.async("string")).toContain("<v>17582</v>");
+    expect(await zip.file(paths[1])!.async("string")).toContain("<v>96000</v>");
   });
   it.each(["grossPay", "netPay", "hourlyAndBack", "adoptedReward", "bottleBack", "dailyPayment"] as const)("%sが内訳と不一致なら停止する", (key) => {
     expect(() => buildCastReceiptSheets([{ ...reward, [key]: reward[key] + 1 }], "2026-09")).toThrow("不一致");

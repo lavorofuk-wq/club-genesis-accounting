@@ -569,6 +569,8 @@ export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
     }
     const row = candidate as unknown as DailyCast & Record<string, unknown>;
     const label = `キャスト明細「${String(row.name || index + 1)}」`;
+    const { accountingCorrection: forbiddenCorrection, ...originalRow } = row;
+    if (forbiddenCorrection !== undefined) integrityIssues.push(`${label}の店舗原本に経理訂正専用の情報が混在しています。原本を確認してください。`);
     const numeric = normalizeNumericFields(row, castNumericKeys, label);
     const bottles = storedList<unknown>(row.bottles).flatMap((bottleCandidate, bottleIndex): BottleAllocation[] => {
       if (!bottleCandidate || typeof bottleCandidate !== "object" || Array.isArray(bottleCandidate)) {
@@ -647,7 +649,7 @@ export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
         })()
       : undefined;
     return [{
-      ...row,
+      ...originalRow,
       masterId: String(row.masterId || ""),
       posCastId: String(row.posCastId || ""),
       name: String(row.name || ""),

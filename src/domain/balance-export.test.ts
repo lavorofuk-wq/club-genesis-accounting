@@ -70,6 +70,7 @@ describe("収支帳票の店舗全体本数・人数", () => {
   });
 });
 
+
 function fullInput(): BalanceExportInput {
   const casts: DailyCast[] = [{
     masterId: "regular", posCastId: "regular", name: "regular", kind: "regular",

@@ -33,7 +33,7 @@ import { cashLedgerIssues, summarizeCashFunding, type CashFundingSummary } from 
 import { STAFF_MONTHLY_RATES_START_MONTH, staffMonthlyRateForMonth } from "./staff-rates";
 import { sha256Hex } from "../lib/crypto-compat";
 
-export const MONTHLY_CALCULATION_VERSION = "2.25.0";
+export const MONTHLY_CALCULATION_VERSION = "2.36.0";
 export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 3 as const;
 
 export type IntroducerEntryEvent = {
@@ -1353,7 +1353,7 @@ export function canFinalizeMonthlyAccounting(
   const resolvedEntryEvents = entryEvents ?? data.introducerEntryEvents ?? [];
   const resolvedMonthEvents = monthEvents ?? data.introducerMonthEvents ?? [];
   const resolvedDeletionCommits = deletionCommits ?? data.introducerDeletionCommits ?? [];
-  const unclassified = findUnclassifiedLegacyBottles(data.closings, month, adjustments);
+  const unclassified = findUnclassifiedLegacyBottles(calculationData.closings, month, adjustments);
   const unresolvedDaily = data.closings.filter((row) => row.businessDate.startsWith(month)
     && (row.status === "submitted" || row.status === "returned" || row.status === "withdrawn"));
   const approved = data.closings.filter((row) => row.businessDate.startsWith(month) && row.status === "approved");

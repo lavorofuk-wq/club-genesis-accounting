@@ -616,6 +616,7 @@ function validateDailyClosingForSubmission(value: DailyClosing, before: DailyClo
     .filter((work) => work.castType === "regular")
     .every((work) => castPosIds.has(work.castId)), "POS原本の在籍キャスト勤務が店舗データから欠落しています。JSONを再取込してください。");
   value.casts.forEach((row) => {
+    require(!("accountingCorrection" in row), `${row.name}に現在は使用できない編集情報が含まれています。店舗の送信済みデータから再編集してください。`);
     require((row.kind === "regular" || row.kind === "trial") && Boolean(row.masterId) && Boolean(row.posCastId) && Boolean(row.name), "キャストデータの識別情報が正しくありません。");
     const sourceWork = workByPosId.get(row.posCastId);
     require(Boolean(sourceWork) && sourceWork!.castType === row.kind && sourceWork!.castName === row.name, `${row.name}の勤務区分がPOS原本と一致しません。JSONを再取込してください。`);
@@ -1046,13 +1047,14 @@ export async function loadWorkspaceData(role?: Role): Promise<AccountingWorkspac
       const normalized = normalizeMonthlyAccountingSnapshot(row, month, Number(revision));
       return normalized ? [normalized] : [];
     }));
+  const closingRows = asArray<DailyClosing>(closings.val()).map(normalizeDailyClosing).sort((a, b) => b.businessDate.localeCompare(a.businessDate));
   return {
     casts: allCastRows.filter((row) => !row.deletedAt).sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ja")),
     staff: allStaffRows.filter((row) => !row.deletedAt).sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ja")),
     drivers: asArray<DriverRecord>(drivers.val()).sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ja")),
     introducers: asArray<IntroducerRecord>(introducers.val()).sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ja")),
     liquor: asArray<LiquorRecord>(liquor.val()).sort((a, b) => String(a.kind || "").localeCompare(String(b.kind || "")) || String(a.name || "").localeCompare(String(b.name || ""), "ja")),
-    closings: asArray<DailyClosing>(closings.val()).map(normalizeDailyClosing).sort((a, b) => b.businessDate.localeCompare(a.businessDate)),
+    closings: closingRows,
     adjustments: Object.entries((adjustments?.val() || {}) as Record<string, Omit<MonthlyAdjustments, "month">>)
       .map(([month, row]) => normalizeMonthlyAdjustments({ month, ...row } as MonthlyAdjustments)),
     cashFloat: Number(cashFloat.val() ?? 200000),
@@ -1980,6 +1982,9 @@ export async function submitClosing(value: DailyClosing, user: User, expectedUpd
     assertFresh(before, expectedUpdatedAt);
     if (before && before.businessDate !== value.businessDate) throw new Error("再送時に営業日は変更できません。元の営業日データから再編集してください。");
     if (before && !["returned", "withdrawn"].includes(before.status)) throw new Error("差戻しまたは取下げ済みのデータだけ再送できます。");
+    if (["castInputRevision", "castReturnHandoffId", "castReturnProductAllocation"].some((key) => key in value)) {
+      throw new Error("現在は使用できない編集情報が含まれています。店舗の送信済みデータから再編集してください。");
+    }
     validateDailyClosingForSubmission(value, before);
     const monthStates = Object.entries((monthStatesSnapshot.val() || {}) as Record<string, AccountingMonthState>)
       .map(([month, state]) => ({ ...state, month }));

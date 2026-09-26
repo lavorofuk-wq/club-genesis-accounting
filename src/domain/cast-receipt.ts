@@ -6,12 +6,15 @@ const amountKeys = ["hourlyPay", "honShimeiBack", "banaiShimeiBack", "dohanBack"
   "honShimeiSales", "jonaiExtensionSales", "liquorCost"] as const;
 const equalAmount = (left: number, right: number) => Math.abs(left - right) < 0.000001;
 
-/** 画面が選んだ承認済み結果／確定スナップショットを受け取り、報酬を再計算しない。 */
+/** 承認済み結果／確定スナップショットの在籍分だけを出力し、報酬や月次区分を再計算しない。 */
 export function buildCastReceiptSheets(rows: CastReward[], month: string, legalNames: Readonly<Record<string, string>> = {}) {
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error("対象月が正しくありません。");
-  if (!rows.length) throw new Error("対象月の承認済みキャスト報酬がありません。");
+  if (rows.some((row) => typeof row.trialOnly !== "boolean")) throw new Error("キャストの在籍・体入区分を確認できません。報酬データを再読み込みしてください。");
+  // 同月入店者は体入分も含めtrialOnly=false。現在のマスタではなく対象月の保存区分を使う。
+  const regularRows = rows.filter((row) => !row.trialOnly);
+  if (!regularRows.length) throw new Error("対象月の承認済み在籍キャスト報酬がありません。");
   const ids = new Set<string>();
-  return rows.map((row) => {
+  return regularRows.map((row) => {
     if (!row.id?.trim() || !row.name?.trim() || ids.has(row.id)) throw new Error("キャストの名前・識別情報が正しくありません。");
     ids.add(row.id);
     const fail = () => { throw new Error(`${row.name}の報酬内訳に欠損または合計の不一致があります。元データを確認してください。`); };

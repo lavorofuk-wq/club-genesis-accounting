@@ -52,7 +52,8 @@
       46
     ],
     "statementColumnOffset": 9,
-    "printArea": "$A$1:$T$46"
+    "receiptPrintArea": "$A$1:$H$29",
+    "statementPrintArea": "$A$1:$K$46"
   },
   "salesReward": {
     "source": 2,
@@ -106,6 +107,7 @@
       45
     ],
     "statementColumnOffset": 9,
-    "printArea": "$A$1:$T$45"
+    "receiptPrintArea": "$A$1:$H$29",
+    "statementPrintArea": "$A$1:$K$45"
   }
 }

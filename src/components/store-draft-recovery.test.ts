@@ -75,6 +75,18 @@ function restoreWorkflow(id: string, values: Record<string, unknown>) {
 beforeEach(() => { drafts.values = {}; drafts.keys = []; drafts.busyKeys = []; });
 
 describe("店舗フォームの更新時入力退避", () => {
+  it("差戻し後も店舗の原本を再編集でき、手入力の売上・支払実績を保持する", () => {
+    drafts.values["store.editing"] = closing;
+    const markup = render({ ...data, closings: [closing] });
+    expect(markup).toContain("2026-09-02 再編集");
+    expect(markup).toContain("20:00");
+    expect(markup).toContain("6時間");
+    for (const value of ["123450", "45670", "1234", "2345", "1500"]) {
+      expect(markup).toContain('value="' + value + '"');
+    }
+    expect(drafts.keys).toContain("store.workflow.daily_20260902.castRows");
+    expect(markup).not.toContain("経理で修正した勤務");
+  });
   it("親の再編集対象と全入力を登録し、読込中・エラーは退避しない", () => {
     render();
     expect(drafts.keys).toEqual([

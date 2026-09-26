@@ -2,6 +2,7 @@ import JSZip from "jszip";
 import receiptLayouts from "./receipt-layouts.json";
 
 export type ReceiptSheet = { template: "hourlyAndBack" | "salesReward"; name: string; cells: Record<string, string | number>; statementCells: Record<string, string | number> };
+export type ReceiptDocument = "receipt" | "statement";
 export const RECEIPT_TEMPLATE_URL = "/templates/cast-receipt-v3.xlsx";
 
 const declaration = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
@@ -14,15 +15,56 @@ const layouts = {
 } as const;
 const statementCells = new Set(["D3", "F4", "E5", "F6", "F7", "F8", "F9", "F10", "F11", "F12", "F13", "F14", "F15", "F18", "F19", "F20", "F21", "F22", "F25", "F26"]);
 
-/** 元様式のセル名から、左右の行高を保持するため分割した出力行へ対応付ける。 */
-export function receiptCellAddress(template: ReceiptSheet["template"], section: "receipt" | "statement", address: string) {
+/** 元様式のセル名から、個別帳票の行高を保持した出力行へ対応付ける。 */
+export function receiptCellAddress(template: ReceiptSheet["template"], section: ReceiptDocument, address: string) {
   const layout = layouts[template];
   const match = /^([A-K])(\d+)$/.exec(address);
   if (!layout || !match) throw new Error("受領書・明細書の記入対象セルが正しくありません。");
   const row = (section === "receipt" ? layout.receiptRows : layout.statementRows)[Number(match[2]) - 1];
   if (!row) throw new Error("受領書・明細書の記入対象行が正しくありません。");
-  const col = String.fromCharCode(match[1].charCodeAt(0) + (section === "statement" ? layout.statementColumnOffset : 0));
-  return `${col}${row}`;
+  return `${match[1]}${row}`;
+}
+
+/** 固定テンプレートから片方だけを残す。非表示や印刷範囲外に別帳票の値を残さない。 */
+function separateTemplate(xml: string, kind: ReceiptSheet["template"], document: ReceiptDocument) {
+  const layout = layouts[kind];
+  const printArea = document === "receipt" ? layout.receiptPrintArea : layout.statementPrintArea;
+  const lastRow = Number(printArea.match(/\$(\d+)$/)![1]);
+  const offset = document === "receipt" ? 0 : layout.statementColumnOffset;
+  const firstCol = offset + 1;
+  const lastCol = document === "receipt" ? 8 : offset + 11;
+  const colNumber = (col: string) => col.charCodeAt(0) - 64;
+  const shiftCol = (col: string) => String.fromCharCode(col.charCodeAt(0) - offset);
+  const inColumns = (col: string) => col.length === 1 && colNumber(col) >= firstCol && colNumber(col) <= lastCol;
+  // この固定様式にない依存オブジェクトは、移動して壊す前に停止する。
+  if (/<(?:f|drawing|hyperlinks|conditionalFormatting|dataValidations|tableParts)\b/.test(xml)) throw new Error("帳票テンプレートに分割できない項目があります。");
+  xml = xml.replace(/<cols>[\s\S]*?<\/cols>/, (columns) => `<cols>${(columns.match(/<col\b[^>]*\/>/g) || []).flatMap((col) => {
+    const min = Math.max(firstCol, Number(col.match(/\bmin="(\d+)"/)?.[1]));
+    const max = Math.min(lastCol, Number(col.match(/\bmax="(\d+)"/)?.[1]));
+    return min <= max ? [col.replace(/\bmin="\d+"/, `min="${min - offset}"`).replace(/\bmax="\d+"/, `max="${max - offset}"`)] : [];
+  }).join("")}</cols>`);
+  xml = xml.replace(/<sheetData>[\s\S]*?<\/sheetData>/, (data) => `<sheetData>${(data.match(/<row\b[^>]*?(?:\/>|>[\s\S]*?<\/row>)/g) || []).flatMap((row) => {
+    const rowNumber = Number(row.match(/\br="(\d+)"/)?.[1]);
+    if (!rowNumber || rowNumber > lastRow) return [];
+    const cells = (row.match(/<c\b[^>]*?(?:\/>|>[\s\S]*?<\/c>)/g) || []).flatMap((cell) => {
+      const address = cell.match(/\br="([A-Z]+)(\d+)"/);
+      if (!address || !inColumns(address[1])) return [];
+      return [cell.replace(/\br="[A-Z]+\d+"/, `r="${shiftCol(address[1])}${address[2]}"`)];
+    });
+    const start = row.match(/^<row\b[^>]*>/)![0].replace(/\s+spans="[^"]*"/g, "").replace(/\/>$/, ">");
+    return [`${start}${cells.join("")}</row>`];
+  }).join("")}</sheetData>`);
+  xml = xml.replace(/<mergeCells\b[^>]*>[\s\S]*?<\/mergeCells>/, (merges) => {
+    const kept = [...merges.matchAll(/<mergeCell\b[^>]*\bref="([A-Z]+)(\d+):([A-Z]+)(\d+)"[^>]*\/>/g)].flatMap((match) => {
+      const [, left, top, right, bottom] = match;
+      if (!inColumns(left) && !inColumns(right)) return [];
+      if (!inColumns(left) || !inColumns(right) || Number(bottom) > lastRow) throw new Error("帳票テンプレートの結合範囲が正しくありません。");
+      return [`<mergeCell ref="${shiftCol(left)}${top}:${shiftCol(right)}${bottom}"/>`];
+    });
+    return kept.length ? `<mergeCells count="${kept.length}">${kept.join("")}</mergeCells>` : "";
+  });
+  return xml.replace(/<dimension\b[^>]*\/>/, `<dimension ref="${printArea.replace(/\$/g, "")}"/>`)
+    .replace(/<selection\b[^>]*\/>/g, '<selection activeCell="A1" sqref="A1"/>');
 }
 
 function escapeXml(value: string) {
@@ -55,7 +97,8 @@ async function readPart(zip: JSZip, path: string) {
 }
 
 /** プリンター固有の用紙設定を失わないよう、固定テンプレートのOOXMLへ値だけを差し込む。 */
-export async function fillReceiptTemplate(template: ArrayBuffer | Uint8Array, sheets: ReceiptSheet[]) {
+export async function fillReceiptTemplate(template: ArrayBuffer | Uint8Array, sheets: ReceiptSheet[], document: ReceiptDocument) {
+  if (document !== "receipt" && document !== "statement") throw new Error("出力する帳票を選択してください。");
   if (!sheets.length) throw new Error("出力するキャスト報酬がありません。");
   const zip = await JSZip.loadAsync(template);
   // 出力中にsheet1/sheet2を上書きする前に、両様式とそれぞれのプリンター参照を退避する。
@@ -108,15 +151,15 @@ export async function fillReceiptTemplate(template: ArrayBuffer | Uint8Array, sh
     return next;
   }
   let stringReferences = 0;
+  const sourceStrings = sharedStrings.match(/<si\b[^>]*>[\s\S]*?<\/si>/g) || [];
+  const usedStrings = new Map<number, number>();
   sheets.forEach((sheet, index) => {
     const layout = layouts[sheet.template];
     if (!layout) throw new Error("受領書の報酬方式が正しくありません。");
     const source = sources[layout.source - 1];
-    let xml = source.sheet;
-    const entries = [
-      ...Object.entries(sheet.cells).map(([logical, value]) => ({ section: "receipt" as const, logical, value })),
-      ...Object.entries(sheet.statementCells).map(([logical, value]) => ({ section: "statement" as const, logical, value })),
-    ];
+    let xml = separateTemplate(source.sheet, sheet.template, document);
+    const entries = Object.entries(document === "receipt" ? sheet.cells : sheet.statementCells)
+      .map(([logical, value]) => ({ section: document, logical, value }));
     for (const { section, logical, value } of entries) {
       if (!(section === "receipt" ? layout.cells.has(logical) : statementCells.has(logical) || logical === "B11" && sheet.template === "salesReward")) throw new Error("受領書・明細書の記入対象セルが正しくありません。");
       const address = receiptCellAddress(sheet.template, section, logical);
@@ -147,7 +190,13 @@ export async function fillReceiptTemplate(template: ArrayBuffer | Uint8Array, sh
     // コピーしたシートをグループ選択させず、Excelのシート識別子も重複させない。
     xml = xml.replace(/ xr:uid="[^"]*"/g, "");
     if (index > 0) xml = xml.replace(/ tabSelected="1"/g, "");
-    stringReferences += (xml.match(/<c\b[^>]*\bt="s"/g) || []).length;
+    xml = xml.replace(/<c\b[^>]*\bt="s"[^>]*>[\s\S]*?<\/c>/g, (cell) => {
+      const id = Number(cell.match(/<v>(\d+)<\/v>/)?.[1]);
+      if (!sourceStrings[id]) throw new Error("帳票テンプレートの文字列が正しくありません。");
+      if (!usedStrings.has(id)) usedStrings.set(id, usedStrings.size);
+      stringReferences += 1;
+      return cell.replace(/<v>\d+<\/v>/, `<v>${usedStrings.get(id)}</v>`);
+    });
     zip.file(`xl/worksheets/sheet${index + 1}.xml`, xml);
     zip.file(`xl/worksheets/_rels/sheet${index + 1}.xml.rels`, source.rels);
   });
@@ -162,8 +211,8 @@ export async function fillReceiptTemplate(template: ArrayBuffer | Uint8Array, sh
       : outputStyles.replace(/(<styleSheet\b[^>]*>)/, `$1<numFmts count="1">${format}</numFmts>`);
   }
   zip.file("xl/styles.xml", outputStyles);
-  zip.file("xl/sharedStrings.xml", sharedStrings.replace(/(<sst\b[^>]*\bcount=")\d+("[^>]*>)/, `$1${stringReferences}$2`));
-  zip.file("xl/workbook.xml", `${declaration}<workbook xmlns="${spreadsheetNs}" xmlns:r="${relationshipNs}"><bookViews><workbookView activeTab="0"/></bookViews><sheets>${names.map((name, i) => `<sheet name="${escapeXml(name)}" sheetId="${i + 1}" r:id="sheet${i + 1}"/>`).join("")}</sheets><definedNames>${names.map((name, i) => `<definedName name="_xlnm.Print_Area" localSheetId="${i}">${escapeXml(`'${name.replace(/'/g, "''")}'!${layouts[sheets[i].template].printArea}`)}</definedName>`).join("")}</definedNames></workbook>`);
+  zip.file("xl/sharedStrings.xml", `${declaration}<sst xmlns="${spreadsheetNs}" count="${stringReferences}" uniqueCount="${usedStrings.size}">${[...usedStrings.keys()].map((id) => sourceStrings[id]).join("")}</sst>`);
+  zip.file("xl/workbook.xml", `${declaration}<workbook xmlns="${spreadsheetNs}" xmlns:r="${relationshipNs}"><bookViews><workbookView activeTab="0"/></bookViews><sheets>${names.map((name, i) => `<sheet name="${escapeXml(name)}" sheetId="${i + 1}" r:id="sheet${i + 1}"/>`).join("")}</sheets><definedNames>${names.map((name, i) => `<definedName name="_xlnm.Print_Area" localSheetId="${i}">${escapeXml(`'${name.replace(/'/g, "''")}'!${document === "receipt" ? layouts[sheets[i].template].receiptPrintArea : layouts[sheets[i].template].statementPrintArea}`)}</definedName>`).join("")}</definedNames></workbook>`);
   zip.file("xl/_rels/workbook.xml.rels", `${declaration}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="styles" Type="${relationshipNs}/styles" Target="styles.xml"/><Relationship Id="theme" Type="${relationshipNs}/theme" Target="theme/theme1.xml"/><Relationship Id="strings" Type="${relationshipNs}/sharedStrings" Target="sharedStrings.xml"/>${names.map((_, i) => `<Relationship Id="sheet${i + 1}" Type="${relationshipNs}/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join("")}</Relationships>`);
   zip.file("[Content_Types].xml", contentTypes.replace(/<Override\b[^>]*PartName="\/xl\/worksheets\/sheet\d+\.xml"[^>]*\/>/g, "")
     .replace("</Types>", `${names.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("")}</Types>`));

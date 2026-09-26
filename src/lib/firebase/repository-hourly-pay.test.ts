@@ -26,7 +26,7 @@ vi.mock("@/domain/gms", async (importOriginal) => ({
   parsePosClosingV3: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { submitClosing } from "./repository";
+import { loadWorkspaceData, submitClosing } from "./repository";
 
 const user = { uid: "test-shop" } as User;
 const timestamp = "2026-09-09T12:00:00.000Z";
@@ -104,6 +104,40 @@ describe("日次送信の再編集元と重複営業日の保護", () => {
     expect(memory.update).not.toHaveBeenCalled();
     expect(memory.transaction.mock.calls.every(([reference]) => reference.path === "cashManagementLock")).toBe(true);
   }
+
+  it("店舗原本へ廃止済みの計算射影を混入できない", async () => {
+    const value = fixture(1500);
+    value.casts = [{
+      masterId: "cast-1", posCastId: "pos-cast-1", name: "テストキャスト", kind: "regular",
+      startTime: "20:00", endTime: "21:00", hours: 1, hourlyRate: 3000,
+      honShimeiCount: 0, banaiShimeiCount: 0, dohanCount: 0, dohanBack: 0,
+      honShimeiSales: 0, jonaiExtensionSales: 0, drinkSales: 0, bottles: [], liquorCost: 0,
+      beautyAllowance: 0, dailyPayment: 0, advancePayment: 0, transportFee: 0,
+      accountingCorrection: { sourceClosingId: id, sourceEntryId: "entry-1", productClassifications: {} },
+    } as DailyCast];
+    await expect(submitClosing(value, user)).rejects.toThrow("現在は使用できない編集情報");
+    expect(memory.update).not.toHaveBeenCalled();
+  });
+
+  it.each(["castInputRevision", "castReturnHandoffId", "castReturnProductAllocation"])(
+    "廃止済みの %s を新規・再送データに混入できない", async (key) => {
+      const value = { ...fixture(1503), [key]: { unexpected: true } };
+      await expect(submitClosing(value, user)).rejects.toThrow("現在は使用できない編集情報");
+      seedExisting(saved());
+      const before = protectedRecords();
+      await expect(submitClosing(value, user, timestamp)).rejects.toThrow("現在は使用できない編集情報");
+      expectNoBusinessWrites(before);
+    },
+  );
+
+  it.each(["shop", "accounting", "op"] as const)("%s の読込は廃止済みデータへアクセスしない", async (role) => {
+    memory.values.set("castDailyCorrections", { invalid: { active: true } });
+    memory.values.set("castReturnHandoffs", { invalid: { draft: {} } });
+    const workspace = await loadWorkspaceData(role);
+    expect(workspace).not.toHaveProperty("castCorrections");
+    expect(workspace).not.toHaveProperty("castReturnHandoffs");
+    expect(memory.get.mock.calls.every(([reference]) => !/castDailyCorrection|castReturnHandoff/.test(reference.path))).toBe(true);
+  });
 
   it.each([
     { status: "returned" as const, operation: /再編集/ },
