@@ -6,7 +6,7 @@ import { invalidTrialBeautyExpensesForRows, mergeReconciledDailyCastInputs, posI
 import type { AccountingWorkspaceData } from "@/domain/month-accounting";
 import { buildMonthlySnapshot, calculateMonthlyAccounting, normalizeMonthlyAccountingSnapshot } from "@/domain/month-accounting";
 import { introducerDeletionLinkedCastSignature } from "@/lib/firebase/repository";
-import { AccountingForms, BalanceExport, castCorrectionReturnMessage, ClosingCastProductDetails, ExpenseExport } from "./accounting-forms";
+import { AccountingForms, BalanceExport, ClosingCastProductDetails, ExpenseExport } from "./accounting-forms";
 import { CommonForms, introducerDeletionConfirmation } from "./common-forms";
 import { CastProductSummary, closingDeletionConfirmation, DailyPreview, jsonReimportConfirmation, reconcileTrialBeautyExpenses, retainCurrentCastMappingForJson, retainMatchingSpecialCosts, shouldResetDailyInputsForJson, StoreWork, summarizeCastDrinksByPrice } from "./store-work";
 import { Modal, currentMonth } from "./ui";
@@ -156,18 +156,30 @@ function expectIntroducerExportButton(markup: string, disabled: boolean) {
 }
 
 describe("主要ページのSSRスモーク", () => {
-  it("別営業日にまたがる修正は関連日を案内し、単日修正の差戻しは妨げない", () => {
-    const workspace = { ...data, closings: [...data.closings,
-      { ...closing, id: "moved-day", businessDate: "2026-09-02" },
-      { ...closing, id: "another-day", businessDate: "2026-09-03" }],
-    castCorrections: [{ sourceClosingId: closing.id, active: true,
-      current: { entries: [{ targetClosingId: "moved-day", businessDate: "2026-09-02" }] } }] } as unknown as AccountingWorkspaceData;
-    expect(castCorrectionReturnMessage(workspace, closing.id)).toContain(businessDate);
-    expect(castCorrectionReturnMessage(workspace, "moved-day")).toContain(businessDate);
-    expect(castCorrectionReturnMessage(workspace, "another-day")).toBe("");
-    expect(castCorrectionReturnMessage({ ...workspace, castCorrections: workspace.castCorrections!.map((record) => ({ ...record, active: false })) }, closing.id)).toBe("");
-    const singleDay = { ...workspace, castCorrections: [{ ...workspace.castCorrections![0], current: { entries: [{ targetClosingId: closing.id, businessDate }] } }] } as unknown as AccountingWorkspaceData;
-    expect(castCorrectionReturnMessage(singleDay, closing.id)).toBe("");
+  it("キャスト売上は閲覧専用とし、日次編集の入口を表示しない", () => {
+    const markup = renderToStaticMarkup(createElement(AccountingForms, {
+      section: "castSales", data, user, busy: false, run,
+    }));
+    expect(markup).toContain("花子");
+    expect(markup).toContain("出勤時刻");
+    expect(markup).toContain("退勤時刻");
+    expect(markup).toContain("バック合計");
+    expect(markup).not.toMatch(/<button[^>]*>編集<\/button>/);
+    expect(markup).not.toContain("日次編集");
+    expect(markup).not.toContain('role="dialog"');
+  });
+  it("確認待ちと承認済みの通常差戻しを維持し、月次確定時だけ禁止する", () => {
+    const source = { ...data, closings: [closing, { ...closing, id: "submitted-day", status: "submitted" as const }] };
+    const render = (workspace: AccountingWorkspaceData) => renderToStaticMarkup(createElement(AccountingForms, {
+      section: "approval", data: workspace, user, busy: false, run,
+    }));
+    const buttons = render(source).match(/<button[^>]*>差戻し<\/button>/g) || [];
+    expect(buttons).toHaveLength(2);
+    expect(buttons.every((button) => !button.includes('disabled=""'))).toBe(true);
+    const closed = { ...source, monthStates: [{ month, status: "closed" as const, revision: 1, updatedAt: "", updatedBy: "accounting" }] };
+    const locked = render(closed).match(/<button[^>]*>差戻し<\/button>/g) || [];
+    expect(locked).toHaveLength(2);
+    expect(locked.every((button) => button.includes('disabled=""'))).toBe(true);
   });
   it("キャスト報酬に在籍のみの受領書と明細書の個別出力ボタンを表示し、未保存・処理中・不整合では両方停止する", () => {
     const source = balanceWorkspace();

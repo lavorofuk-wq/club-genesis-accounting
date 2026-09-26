@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { balanceDailyCounts, buildBalanceExportReport, type BalanceExportInput } from "./balance-export";
-import type { CastInputRevision, DailyCast, DailyClosing, MonthlyAdjustments, PosCastWork, PosItem } from "./gms";
+import type { DailyCast, DailyClosing, MonthlyAdjustments, PosCastWork, PosItem } from "./gms";
 import { calculateCash } from "./gms";
 import { calculateCashFunding, cashFundingContext } from "./cash-funding";
 import { buildMonthlySnapshot, calculateMonthlyAccounting } from "./month-accounting";
@@ -70,108 +70,6 @@ describe("収支帳票の店舗全体本数・人数", () => {
   });
 });
 
-describe("収支帳票のキャスト修正本数とPOS派遣の分離", () => {
-  function original() {
-    const source = closing();
-    source.id = "daily_20260902";
-    source.status = "approved";
-    source.casts = source.casts.map((cast, index) => ({ ...cast,
-      honShimeiCount: index === 0 ? 1 : 0, banaiShimeiCount: index === 0 ? 1 : 0, dohanCount: index === 0 ? 1 : 0 }));
-    return source;
-  }
-
-  function accepted(source: DailyClosing, casts: DailyCast[]) {
-    return { ...structuredClone(source), casts: structuredClone(casts), castInputRevision: {
-      schema: 1, handoffId: "handoff", sourceCorrectionRevision: 1,
-      originalCasts: source.casts.map(({ posCastId, masterId, name, kind, honShimeiCount, banaiShimeiCount, dohanCount }) => ({ posCastId, masterId, name, kind, honShimeiCount, banaiShimeiCount, dohanCount })),
-      draft: { sourceClosingId: source.id, sourceUpdatedAt: "2026-09-03T00:00:00Z", sourceChecksum: "a".repeat(64), sourceSubmissionId: "submission", entries: [], products: [] },
-    } satisfies CastInputRevision };
-  }
-
-  it("経理訂正を差戻しで受け入れ再承認しても、本人の訂正本数と派遣分が残る", () => {
-    const source = original();
-    const casts = source.casts.map((row, index) => ({ ...row, posCastId: `accounting_${source.id}_${row.posCastId}`,
-      honShimeiCount: index === 0 ? 4 : 0, banaiShimeiCount: index === 0 ? 3 : 0, dohanCount: index === 0 ? 2 : 0 }));
-    const next = accepted(source, casts);
-    expect(balanceDailyCounts(next)).toEqual({ groups: 3, customers: 5, honShimeiCount: 6,
-      jonaiCount: 4, dohanCount: 3, castCount: 2, dispatchCastCount: 2 });
-    expect(next.posSnapshot).toEqual(source.posSnapshot);
-  });
-
-  it("引継ぎ後の二度目の経理訂正は原本基準の累積差分だけ反映し、二重加算しない", () => {
-    const source = original();
-    const next = accepted(source, source.casts.map((row, index) => ({ ...row, honShimeiCount: index === 0 ? 4 : 0 })));
-    const overlay = structuredClone(next); overlay.casts[0].honShimeiCount = 5;
-    expect(balanceDailyCounts(next, overlay)).toMatchObject({ honShimeiCount: 7, dispatchCastCount: 2 });
-    // 同じ訂正を再送した場合も、原本の差分基準は変えない。
-    const reaccepted = { ...next, casts: overlay.casts };
-    expect(balanceDailyCounts(reaccepted)).toMatchObject({ honShimeiCount: 7, dispatchCastCount: 2 });
-  });
-
-  it("旧版で追加・削除・別人化した出勤の引継ぎも原本照合へ戻さず人数を維持する", () => {
-    const source = original();
-    const remaining = { ...source.casts[1], posCastId: "accounting-trial", name: "修正した名前" };
-    const next = accepted(source, [remaining]);
-    expect(balanceDailyCounts(next)).toMatchObject({ honShimeiCount: 2, jonaiCount: 1, dohanCount: 1, castCount: 1, dispatchCastCount: 2 });
-    next.casts.push({ ...source.casts[0], posCastId: "accounting-added", masterId: "added", name: "追加した人", honShimeiCount: 2 });
-    expect(balanceDailyCounts(next)).toMatchObject({ honShimeiCount: 4, castCount: 2, dispatchCastCount: 2 });
-  });
-
-  it("引継ぎ原本本数の欠落・破損をゼロ補完しない", () => {
-    const source = original();
-    const missing = accepted(source, source.casts); missing.castInputRevision.originalCasts = undefined as never;
-    expect(() => balanceDailyCounts(missing)).toThrow("原本キャスト本数");
-    const invalid = accepted(source, source.casts); invalid.castInputRevision.originalCasts[0].honShimeiCount = .5;
-    expect(() => balanceDailyCounts(invalid)).toThrow("整数");
-    const mismatch = accepted(source, source.casts); mismatch.castInputRevision.originalCasts[0].name = "原本にない名前";
-    expect(() => balanceDailyCounts(mismatch)).toThrow("名前・区分");
-  });
-
-  it("修正された在籍・体入本数の差分だけ加算し、派遣人数と派遣由来の本数を保持する", () => {
-    const source = original();
-    const projected = structuredClone(source);
-    projected.casts[0].honShimeiCount = 4;
-    projected.casts[0].banaiShimeiCount = 3;
-    projected.casts[0].dohanCount = 2;
-    projected.posSnapshot = undefined as never;
-    expect(balanceDailyCounts(source, projected)).toEqual({ groups: 3, customers: 5, honShimeiCount: 6,
-      jonaiCount: 4, dohanCount: 3, castCount: 2, dispatchCastCount: 2 });
-    expect(balanceDailyCounts(source).honShimeiCount).toBe(3);
-  });
-
-  it("削除・追加した在籍/体入は人数と本人本数だけ増減し、POS未照合の派遣へ組み替えない", () => {
-    const source = original();
-    const projected = structuredClone(source);
-    projected.casts.shift();
-    expect(balanceDailyCounts(source, projected)).toMatchObject({ honShimeiCount: 2, jonaiCount: 1,
-      dohanCount: 1, castCount: 1, dispatchCastCount: 2 });
-    projected.casts.push({ ...source.casts[0], masterId: "additional", posCastId: "accounting-only", name: "追加",
-      honShimeiCount: 2, banaiShimeiCount: 3, dohanCount: 1 });
-    expect(balanceDailyCounts(source, projected)).toMatchObject({ honShimeiCount: 4, jonaiCount: 4,
-      dohanCount: 2, castCount: 2, dispatchCastCount: 2 });
-  });
-
-  it.each(["honShimeiCount", "banaiShimeiCount", "dohanCount"] as const)("%sの修正結果が負になる不整合をゼロで隠さない", (key) => {
-    const source = original();
-    source.casts[0][key] = 100;
-    const projected = structuredClone(source);
-    projected.casts = [];
-    expect(() => balanceDailyCounts(source, projected)).toThrow("マイナスまたは不正");
-  });
-
-  it.each([
-    ["別日", (row: DailyClosing) => { row.businessDate = "2026-10-02"; }],
-    ["別原本", (row: DailyClosing) => { row.id = "wrong-id"; }],
-    ["重複人物", (row: DailyClosing) => { row.casts[1].masterId = row.casts[0].masterId; }],
-    ["重複勤務", (row: DailyClosing) => { row.casts[1].posCastId = row.casts[0].posCastId; }],
-    ["不正本数", (row: DailyClosing) => { row.casts[0].honShimeiCount = .5; }],
-  ] as const)("キャスト修正の%sを検知する", (_label, mutate) => {
-    const source = original();
-    const projected = structuredClone(source);
-    mutate(projected);
-    expect(() => balanceDailyCounts(source, projected)).toThrow();
-  });
-});
 
 function fullInput(): BalanceExportInput {
   const casts: DailyCast[] = [{
@@ -440,72 +338,6 @@ describe("収支帳票の月次突合", () => {
   it("保存済みのキャスト日払いが月次と違えば現金残高を出力しない", () => {
     const data = fullInput();
     data.closings[0].casts[0].dailyPayment += 1;
-    expect(() => buildBalanceExportReport(data)).toThrow("キャスト日払い・立替");
-  });
-});
-
-describe("収支帳票のキャスト経理修正と保存済み現金", () => {
-  function withCastCorrection(): BalanceExportInput {
-    const data = fullInput();
-    data.castClosings = structuredClone(data.closings);
-    const first = data.castClosings.find((row) => row.businessDate === "2026-09-02")!;
-    const cast = first.casts[0];
-    cast.hours = 2.25;
-    cast.honShimeiCount += 2;
-    cast.banaiShimeiCount += 1;
-    cast.dohanCount += 1;
-    cast.dohanBack += 2000;
-    cast.beautyAllowance += 500;
-    first.casts.push({ ...structuredClone(cast), masterId: "added", posCastId: "corrected-added", name: "追加キャスト",
-      hours: 3, honShimeiCount: 1, banaiShimeiCount: 0, dohanCount: 0, dohanBack: 0,
-      beautyAllowance: 0, dailyPayment: 0, advancePayment: 0, transportFee: 0 });
-    data.results = calculateMonthlyAccounting({ casts: [], staff: [], drivers: [], introducers: [], liquor: [],
-      closings: data.castClosings, adjustments: [data.adjustments], cashFloat: 200000 }, data.month, data.adjustments);
-    return data;
-  }
-
-  it("修正後の報酬・本数・在籍体入人数を出力し、現金・POS派遣・スタッフは原本のままにする", () => {
-    const data = withCastCorrection();
-    const originalReport = buildBalanceExportReport(fullInput());
-    // キャスト以外を投影側で変えても参照してはならない。
-    data.castClosings!.forEach((row) => {
-      row.sales = { cashSales: 1, cardSales: 1, totalSales: 2 };
-      row.staffWork = [];
-      row.drivers = [];
-      row.expenses = [];
-      row.dispatchCastPayment = 0;
-      row.dispatchStaffPayment = 0;
-      row.dispatchFee = 0;
-      row.posSnapshot = undefined as never;
-      row.cash.actualClosingCash = 1;
-    });
-    const before = structuredClone(data);
-    const report = buildBalanceExportReport(data);
-    expect(report.days.map((row) => row.castCount)).toEqual([2, 1]);
-    expect(report.days[0]).toMatchObject({ honShimeiCount: 6, jonaiCount: 3, dohanCount: 3, dispatchCastCount: 3 });
-    expect(report.days.reduce((sum, row) => sum + row.castHourly + row.castSalesReward, 0)).toBe(data.results.balance.cast);
-    report.days.forEach((day, index) => {
-      const original = originalReport.days[index];
-      expect(day.cashSales).toBe(original.cashSales);
-      expect(day.cardSales).toBe(original.cardSales);
-      expect(day.totalSales).toBe(original.totalSales);
-      expect(day.employeeGross).toBe(original.employeeGross);
-      expect(day.expenses).toBe(original.expenses);
-      expect(day.dispatchCastCount).toBe(original.dispatchCastCount);
-      expect(day.dispatchCastPayment).toBe(original.dispatchCastPayment);
-    });
-    expect(report.castDailyAndAdvance).toBe(originalReport.castDailyAndAdvance);
-    expect(report.castTransport).toBe(originalReport.castTransport);
-    expect(report.employeeDaily).toBe(originalReport.employeeDaily);
-    expect(report.cashFunding).toEqual(originalReport.cashFunding);
-    expect(data).toEqual(before);
-  });
-
-  it("経理修正側の支払済額変更を月次結果へ入れた場合は原本現金突合で停止する", () => {
-    const data = withCastCorrection();
-    data.castClosings![0].casts[0].dailyPayment += 1;
-    data.results = calculateMonthlyAccounting({ casts: [], staff: [], drivers: [], introducers: [], liquor: [],
-      closings: data.castClosings!, adjustments: [data.adjustments], cashFloat: 200000 }, data.month, data.adjustments);
     expect(() => buildBalanceExportReport(data)).toThrow("キャスト日払い・立替");
   });
 });

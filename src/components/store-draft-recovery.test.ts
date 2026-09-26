@@ -2,8 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { User } from "firebase/auth";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { CastCorrectionDraft, CastDailyCorrectionDocument, DailyCast, DailyClosing, PosClosingV3 } from "@/domain/gms";
-import { createCastReturnHandoff } from "@/domain/cast-return-handoff";
+import type { DailyCast, DailyClosing, PosClosingV3 } from "@/domain/gms";
 import type { AccountingWorkspaceData } from "@/domain/month-accounting";
 import { StoreWork } from "./store-work";
 
@@ -76,27 +75,17 @@ function restoreWorkflow(id: string, values: Record<string, unknown>) {
 beforeEach(() => { drafts.values = {}; drafts.keys = []; drafts.busyKeys = []; });
 
 describe("店舗フォームの更新時入力退避", () => {
-  it("差戻し後は修正勤務・本数・ドリンク単価を引き継ぎ支払実績は保持する", () => {
-    const source = { ...closing, status: "approved" as const };
-    const draft: CastCorrectionDraft = { sourceClosingId: source.id, sourceUpdatedAt: source.updatedAt, sourceChecksum: source.checksum,
-      sourceSubmissionId: source.submissionId, entries: [{ id: cast.posCastId, originalPosCastId: cast.posCastId,
-        targetClosingId: source.id, businessDate, masterId: cast.masterId, name: cast.name, kind: "regular", startTime: "21:00", endTime: "02:00",
-        breakMinutes: 0, hourlyRate: 3000, honShimeiCount: 7, banaiShimeiCount: 2, honShimeiSales: 200000, jonaiExtensionSales: 12340,
-        beautyAllowance: 500, dohan: [{ arrivalTime: "20:30", extended: true, quantity: 2 }], deleted: false }],
-      products: [{ id: "drink", kind: "castDrink", name: "新しいドリンク", unitPrice: 3000, unitCost: 0, quantity: 4,
-        classification: "excluded", targets: [cast.posCastId], externalTargetCount: 0 }] };
-    const correction: CastDailyCorrectionDocument = { sourceClosingId: source.id, revision: 1, active: true, current: draft,
-      history: { "1": { revision: 1, active: true, draft, reason: "原本訂正", createdAt: "2026-09-03T02:00:00.000Z", createdBy: "op" } } };
-    const handoff = createCastReturnHandoff(source, correction, { ...data, closings: [source], castCorrections: [correction] },
-      { id: "handoff-test", reason: "現金訂正", returnedAt: "2026-09-04T02:00:00.000Z", createdAt: "2026-09-04T02:00:00.000Z", createdBy: "op" });
-    const returned = { ...source, status: "returned" as const, castReturnHandoffId: handoff.id, returnedAt: handoff.returnedAt, updatedAt: handoff.returnedAt };
-    drafts.values["store.editing"] = returned;
-    const markup = render({ ...data, closings: [returned], castReturnHandoffs: [handoff] });
-    expect(markup).toContain("経理で修正した勤務・売上・本数・商品情報を引き継いでいます");
-    expect(markup).toContain("21:00"); expect(markup).toContain("5時間"); expect(markup).toContain("7本");
-    expect(markup).toContain("3,000"); expect(markup).toContain("4杯");
-    expect(markup).toContain('value="1234"'); expect(markup).toContain('value="2345"'); expect(markup).toContain('value="1500"');
-    expect(drafts.keys).toContain(`store.workflow.${source.id}.handoff.handoff-test.castRows`);
+  it("差戻し後も店舗の原本を再編集でき、手入力の売上・支払実績を保持する", () => {
+    drafts.values["store.editing"] = closing;
+    const markup = render({ ...data, closings: [closing] });
+    expect(markup).toContain("2026-09-02 再編集");
+    expect(markup).toContain("20:00");
+    expect(markup).toContain("6時間");
+    for (const value of ["123450", "45670", "1234", "2345", "1500"]) {
+      expect(markup).toContain('value="' + value + '"');
+    }
+    expect(drafts.keys).toContain("store.workflow.daily_20260902.castRows");
+    expect(markup).not.toContain("経理で修正した勤務");
   });
   it("親の再編集対象と全入力を登録し、読込中・エラーは退避しない", () => {
     render();

@@ -1,7 +1,6 @@
 import { cashFundingIssues } from "./cash-funding";
 import type { CashFunding } from "./cash-funding";
 import { sha256Hex } from "../lib/crypto-compat";
-import { normalizeCastInputRevision, validateAcceptedCastInputRows } from "./cast-return-handoff";
 
 export type Role = "shop" | "accounting" | "op";
 export type PersonStatus = "active" | "trial" | "departed";
@@ -252,8 +251,6 @@ export type DrinkAllocation = {
   name: string;
   quantity: number;
   salesAmount: number;
-  /** 経理修正から引き継ぐ場合の、配賦前の販売単価。 */
-  unitPrice?: number;
   /** 商品1行全体の10%を10円未満切捨て後、対象人数で均等割りした1人分（10円未満切捨て）。旧保存値は1円単位の場合がある。 */
   backAmount?: number;
 };
@@ -282,14 +279,6 @@ export type DailyCast = {
   dailyPayment: number;
   advancePayment: number;
   transportFee: number;
-  /** 経理訂正の計算用射影だけに付与。店舗原本へ保存しない。 */
-  accountingCorrection?: {
-    sourceClosingId: string;
-    sourceEntryId: string;
-    originalSubmittedAt?: string;
-    originalSubmittedAtMs?: number;
-    productClassifications: Record<string, LegacyBottleClassification>;
-  };
   introducer?: {
     id: string;
     name: string;
@@ -299,102 +288,6 @@ export type DailyCast = {
     attendanceAdvisoryFee: number;
     entryAdvisoryFee: number;
   };
-};
-
-export type CastCorrectionEntry = {
-  id: string;
-  originalPosCastId?: string;
-  targetClosingId: string;
-  businessDate: string;
-  masterId: string;
-  name: string;
-  kind: "regular" | "trial";
-  startTime: string;
-  endTime: string;
-  breakMinutes: number;
-  hourlyRate: number;
-  honShimeiCount: number;
-  banaiShimeiCount: number;
-  honShimeiSales: number;
-  jonaiExtensionSales: number;
-  beautyAllowance: number;
-  dohan: Array<{ arrivalTime: string; extended: boolean; quantity: number }>;
-  deleted: boolean;
-  /** 別人物・追加行の紹介者条件。訂正保存時に固定し、現在マスタを毎回読み直さない。 */
-  termsSnapshot?: {
-    masterId: string;
-    month: string;
-    source: "daily" | "master";
-    sourceClosingId?: string;
-    introducer?: DailyCast["introducer"];
-    submittedAt?: string;
-    submittedAtMs?: number;
-  };
-};
-
-export type CastCorrectionProduct = {
-  id: string;
-  originalSourceKey?: string;
-  name: string;
-  kind: "champagneWine" | "keepBottle" | "castDrink";
-  unitPrice: number;
-  unitCost: number;
-  quantity: number;
-  classification: LegacyBottleClassification;
-  targets: string[];
-  externalTargetCount: number;
-};
-
-export type CastCorrectionDraft = {
-  sourceClosingId: string;
-  sourceUpdatedAt: string;
-  sourceChecksum: string;
-  sourceSubmissionId: string;
-  entries: CastCorrectionEntry[];
-  products: CastCorrectionProduct[];
-};
-
-export type CastCorrectionHistory = {
-  revision: number;
-  active: boolean;
-  draft?: CastCorrectionDraft | null;
-  reason: string;
-  createdAt: string;
-  createdBy: string;
-};
-
-export type CastDailyCorrectionDocument = {
-  sourceClosingId: string;
-  revision: number;
-  active: boolean;
-  current?: CastCorrectionDraft | null;
-  history: Record<string, CastCorrectionHistory>;
-};
-export type CastCorrectionRecord = CastDailyCorrectionDocument;
-
-/** 差戻しで受け入れたキャスト入力。POS原本とは別に保持する。 */
-export type CastInputRevision = {
-  schema: 1;
-  handoffId: string;
-  sourceCorrectionRevision: number;
-  draft: CastCorrectionDraft;
-  /** 店舗全体本数（派遣を含む）へ修正差分を加算するための原本対応行。 */
-  originalCasts: Array<Pick<DailyCast, "posCastId" | "masterId" | "name" | "kind" | "honShimeiCount" | "banaiShimeiCount" | "dohanCount">>;
-};
-export type CastReturnHandoff = {
-  schema: 1;
-  id: string;
-  sourceClosingId: string;
-  sourceUpdatedAt: string;
-  sourceChecksum: string;
-  sourceSubmissionId: string;
-  sourceCorrectionRevision: number;
-  returnedAt: string;
-  reason: string;
-  createdAt: string;
-  createdBy: string;
-  sourceRecordJson: string;
-  draft: CastCorrectionDraft;
 };
 
 /**
@@ -519,8 +412,6 @@ export type DailyClosing = {
   cashRevisionId?: string;
   previousUpdatedAt?: string;
   posSnapshot: PosClosingV3;
-  castReturnHandoffId?: string;
-  castInputRevision?: CastInputRevision;
   submittedAt?: string;
   /** Firebaseサーバーが確定した店舗送信時刻（ミリ秒）。旧データでは未設定。 */
   submittedAtMs?: number;
@@ -717,9 +608,6 @@ export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
           return [];
         }
         const drink = drinkCandidate as DrinkAllocation & Record<string, unknown>;
-        if (drink.unitPrice !== undefined && (!Number.isSafeInteger(drink.unitPrice) || Number(drink.unitPrice) < 0)) {
-          integrityIssues.push(`${label}のドリンク販売単価が不正です。`);
-        }
         const drinkNumeric = normalizeNumericFields(
           drink,
           ["quantity", "salesAmount"],
@@ -735,7 +623,6 @@ export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
           name: String(drink.name || ""),
           quantity: drinkNumeric.quantity,
           salesAmount: drinkNumeric.salesAmount,
-          ...(drink.unitPrice === undefined ? {} : { unitPrice: storedNumber(drink.unitPrice) }),
           ...(drink.backAmount === undefined ? {} : { backAmount: Math.max(0, Math.floor(parsedBackAmount || 0)) }),
         }];
       });
@@ -861,17 +748,8 @@ export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
     if (!row.name.trim()) integrityIssues.push(`送迎ドライバー勤務${index + 1}件目の名前がありません。`);
   });
   reportDuplicateIds("送迎ドライバー勤務のドライバーID", drivers.map((row) => row.driverId));
-  let castInputRevision: CastInputRevision | undefined;
-  if (value.castInputRevision !== undefined) {
-    try {
-      castInputRevision = normalizeCastInputRevision(value.castInputRevision);
-      validateAcceptedCastInputRows({ ...value, casts, castInputRevision });
-    }
-    catch (error) { integrityIssues.push(error instanceof Error ? error.message : "差戻しで引き継いだキャスト入力が不正です。"); }
-  }
   return {
     ...value,
-    castInputRevision,
     businessDate: String(value.businessDate || ""),
     sales: {
       totalSales: storedNumber(value.sales?.totalSales),
@@ -985,8 +863,6 @@ export type WorkspaceData = {
   closings: DailyClosing[];
   adjustments: MonthlyAdjustments[];
   cashFloat: number;
-  castCorrections?: CastDailyCorrectionDocument[];
-  castReturnHandoffs?: CastReturnHandoff[];
 };
 
 /** 時給は営業日ごとに1円未満を切り捨て、月額はこの確定した日額の合計とする。 */
@@ -1506,7 +1382,7 @@ function uniqueCastIds(values: Array<string | undefined>) {
  * ボトルバック対象になれるキャストを、POSの売上帰属と同じ卓内ルールで求める。
  * 本指名卓は本指名キャスト、フリー卓は当該ボトルより前に開始した場内延長キャストだけが対象。
  */
-export function bottleBackContextCastIds(transaction: PosTransaction, bottle: PosItem) {
+function bottleBackContextCastIds(transaction: PosTransaction, bottle: PosItem) {
   const items = transaction.items || [];
   const honShimeiCastIds = uniqueCastIds(items
     .filter((item) => item.isHonShimei)
@@ -1523,7 +1399,7 @@ export function bottleBackContextCastIds(transaction: PosTransaction, bottle: Po
   return [];
 }
 
-export function effectiveBottleBackTargets(transaction: PosTransaction, item: PosItem) {
+function effectiveBottleBackTargets(transaction: PosTransaction, item: PosItem) {
   const eligibleTargets = new Set(bottleBackContextCastIds(transaction, item));
   return (item.backTargetCastIds || []).filter((id) => eligibleTargets.has(id));
 }
@@ -1985,10 +1861,9 @@ export function findUnclassifiedLegacyBottles(
   return closings
     .filter((closing) => closing.status === "approved"
       && closing.businessDate.startsWith(month)
-      && !closing.castInputRevision
       && !hasAttributablePosSnapshot(closing))
     .flatMap((closing) => (closing.casts || []).flatMap((row) =>
-      (row.accountingCorrection ? [] : row.bottles || []).flatMap((bottle, bottleIndex) => {
+      (row.bottles || []).flatMap((bottle, bottleIndex) => {
         const sourceKey = legacyBottleSourceKey(closing, row, bottleIndex);
         return classifications[sourceKey] ? [] : [{
           sourceKey,
@@ -2007,22 +1882,6 @@ function bottleAllocationsBySalesType(
   row: DailyCast,
   adjustments?: MonthlyAdjustments,
 ) {
-  if (row.accountingCorrection) {
-    return (row.bottles || []).reduce((result, bottle) => {
-      const classification = row.accountingCorrection!.productClassifications[bottle.sourceKey || ""];
-      if (classification === "honShimei" || classification === "jonaiExtension") result[classification].push(bottle);
-      return result;
-    }, { honShimei: [] as BottleAllocation[], jonaiExtension: [] as BottleAllocation[] });
-  }
-  if (closing.castInputRevision) {
-    const classifications = new Map(closing.castInputRevision.draft.products.map((product, index) =>
-      [`accounting_${closing.castInputRevision!.draft.sourceClosingId}_${index}`, product.classification]));
-    return (row.bottles || []).reduce((result, bottle) => {
-      const classification = classifications.get(bottle.sourceKey || "");
-      if (classification === "honShimei" || classification === "jonaiExtension") result[classification].push(bottle);
-      return result;
-    }, { honShimei: [] as BottleAllocation[], jonaiExtension: [] as BottleAllocation[] });
-  }
   const transactions = closing.posSnapshot?.transactions || [];
   if (!transactions.length) {
     // 旧データは売上額から推測しない。未分類・対象外は報酬計算へ一切含めない。
@@ -2085,7 +1944,6 @@ function bottleAllocationsBySalesType(
 }
 
 function drinkBackFromPosSnapshot(closing: DailyClosing, row: DailyCast) {
-  if (row.accountingCorrection || closing.castInputRevision) return drinkBack([row]);
   if (!hasAttributablePosSnapshot(closing)) return undefined;
   return closing.posSnapshot.transactions.reduce((transactionTotal, transaction) =>
     transactionTotal + (transaction.items || []).reduce((itemTotal, item) => {
@@ -2299,14 +2157,6 @@ export function calculateCastSalesReports(
   }).sort((left, right) => right.totals.totalSales - left.totals.totalSales || left.name.localeCompare(right.name, "ja"));
 }
 
-export function castSubmissionClosing(closing: DailyClosing, row: DailyCast): DailyClosing {
-  return row.accountingCorrection ? {
-    ...closing,
-    submittedAt: row.accountingCorrection.originalSubmittedAt,
-    submittedAtMs: row.accountingCorrection.originalSubmittedAtMs,
-  } : closing;
-}
-
 export function calculateCastRewards(
   closings: DailyClosing[],
   casts: CastRecord[],
@@ -2370,14 +2220,14 @@ export function calculateCastRewards(
     // 月途中で条件が変わった場合は営業日・在籍区分ではなく、体入日も含めて
     // 「最後に店舗保存された日次」に実際に入っている条件を正とする。
     const latestIntroducerEntry = [...entries].sort((left, right) => {
-      return compareDailyClosingSubmissionOrder(castSubmissionClosing(left.closing, left.row), castSubmissionClosing(right.closing, right.row))
+      return compareDailyClosingSubmissionOrder(left.closing, right.closing)
         || left.businessDate.localeCompare(right.businessDate)
         || left.closing.id.localeCompare(right.closing.id)
         || left.row.posCastId.localeCompare(right.row.posCastId);
     }).at(-1);
     const latestIntroducer = latestIntroducerEntry?.row.introducer;
     const latestDailySavedOrder = latestIntroducerEntry
-      ? dailyClosingSubmissionOrderValue(castSubmissionClosing(latestIntroducerEntry.closing, latestIntroducerEntry.row))
+      ? dailyClosingSubmissionOrderValue(latestIntroducerEntry.closing)
       : Number.NEGATIVE_INFINITY;
     // 体入・在籍IDのどちらに履歴が残っていても、人物全体で最後に保存された
     // イベントを採る。異なるパスのrevisionは大小比較できないため順序には使わない。

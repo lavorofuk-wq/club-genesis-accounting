@@ -43,7 +43,9 @@ function ScopedUpdateDraftProvider({ userId, environment, view, onRestoreView, c
     // Child registration effects have committed by this point. Retain the only
     // backup if a changed/unknown form did not consume every restored key.
     if (registry.remaining()) {
-      setRecoveryError("このバージョンで復元できない入力項目があります。退避データは削除していません。現在の入力を確認し、必要な内容を控えてください。");
+      setRecoveryError(registry.incompatible()
+        ? "廃止されたキャスト日次編集を含む店舗入力は復元していません。経費・現金入力などを失わないよう、元の退避データは削除せず保持しています。該当営業日は送信済みデータから再編集し、必要な入力内容を確認してください。"
+        : "このバージョンで復元できない入力項目があります。退避データは削除していません。現在の入力を確認し、必要な内容を控えてください。");
       return;
     }
     try {

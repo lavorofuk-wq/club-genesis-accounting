@@ -235,6 +235,49 @@ describe("月次会計ドメイン", () => {
     return { source, input, results, snapshot };
   }
 
+  it("未確定月は店舗送信原本だけを計算し、廃止済みの編集データを適用しない", () => {
+    const { source, input, results } = hourlyYenSnapshot();
+    const stored = { ...structuredClone(source), castCorrections: [{
+      sourceClosingId: source.closings[0].id, revision: 1, active: true,
+      current: { entries: [{ hours: 999, beautyAllowance: 999999 }], products: [] },
+    }], castReturnHandoffs: [{ sourceClosingId: source.closings[0].id }] };
+    const before = structuredClone(stored);
+    expect(calculateMonthlyAccounting(stored, month, input)).toEqual(results);
+    expect(canFinalizeMonthlyAccounting(stored, month, input, true))
+      .toEqual(canFinalizeMonthlyAccounting(source, month, input, true));
+    expect(stored).toEqual(before);
+  });
+
+  it("廃止済みの編集データは未確定月の入力ハッシュを変更しない", async () => {
+    const { source, input } = hourlyYenSnapshot();
+    const stored = { ...source, castCorrections: [{ sourceClosingId: source.closings[0].id,
+      revision: 99, active: true, current: { entries: [{ businessDate: "2026-10-01" }] } }] };
+    expect(await monthlySourceFingerprint(stored, month, input))
+      .toBe(await monthlySourceFingerprint(source, month, input));
+    source.closings[0].casts[0].honShimeiSales += 10;
+    expect(await monthlySourceFingerprint(source, month, input))
+      .not.toBe(await monthlySourceFingerprint(hourlyYenSnapshot().source, month, input));
+  });
+
+  it("確定済み月の保存金額は編集撤去後も現在マスタ・原本から再計算しない", () => {
+    const { source, input, snapshot } = hourlyYenSnapshot();
+    snapshot.calculationVersion = "2.31.0";
+    const before = structuredClone(snapshot);
+    source.casts[0].hourlyRates[month] = 9000;
+    source.closings[0].casts[0].honShimeiSales = 2000000;
+    expect(calculateMonthlyAccounting(source, month, input).castRewards[0].grossPay)
+      .not.toBe(snapshot.castRewards[0].grossPay);
+    const restored = normalizeMonthlyAccountingSnapshot(snapshot, month, 1)!;
+    expect(restored).toBeDefined();
+    expect(restored.castRewards).toEqual(before.castRewards);
+    expect(restored.castSalesReports).toEqual(before.castSalesReports);
+    expect(restored.introducerPayments).toEqual(before.introducerPayments);
+    expect(restored.staffPayroll).toEqual(before.staffPayroll);
+    expect(restored.driverPayroll).toEqual(before.driverPayroll);
+    expect(restored.balance).toEqual(before.balance);
+    expect(snapshot).toEqual(before);
+  });
+
   it("時給だけ1円化し、記録済み支払・現金を変更せず差額を月次に残す", () => {
     const { source, input, results, snapshot } = hourlyYenSnapshot();
     const before = structuredClone(source);

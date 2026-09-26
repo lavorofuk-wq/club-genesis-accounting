@@ -33,19 +33,7 @@ import {
   normalizeIntroducerMonthEvent,
   normalizeMonthlyAccountingSnapshot,
 } from "@/domain/month-accounting";
-import {
-  normalizeCastDailyCorrectionDocument,
-  sealCastCorrectionDraft,
-  validateCastCorrectionDraft,
-} from "@/domain/cast-corrections";
-import {
-  createCastReturnHandoff,
-  normalizeCastReturnHandoff,
-  validateCastReturnSubmission,
-} from "@/domain/cast-return-handoff";
 import type {
-  CastCorrectionDraft,
-  CastDailyCorrectionDocument,
   CastRecord,
   DailyClosing,
   DriverRecord,
@@ -98,7 +86,6 @@ export function introducerDeletionLinkedCastSignature(rows: IntroducerDeletionLi
 const emptyData: AccountingWorkspaceData = {
   casts: [], staff: [], drivers: [], introducers: [], liquor: [], closings: [], adjustments: [], cashFloat: 200000,
   archivedCasts: [], archivedStaff: [], introducerEntryEvents: [], introducerDeletionCommits: [], introducerMonthEvents: [], monthStates: [], monthSnapshots: [],
-  castCorrections: [],
 };
 
 type AccountingFinalizeLock = {
@@ -109,11 +96,6 @@ type AccountingFinalizeLock = {
   expiresAt: number;
 };
 const ACCOUNTING_FINALIZE_LOCK_TTL_MS = 10 * 60 * 1000;
-
-type CastDailyCorrectionClaim = {
-  sourceClosingId: string;
-  revision: number;
-};
 
 type IntroducerDeletionLock = {
   token: string;
@@ -164,7 +146,6 @@ const asArray = <T extends { id: string }>(value: unknown): T[] => {
 const clean = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 const now = () => new Date().toISOString();
 const serverOrderTimestamp = () => serverTimestamp() as unknown as number;
-const isDevelopmentWorkspace = () => rootRef().key === "accounting-dev";
 const JAPAN_UTC_OFFSET_MS = 9 * 60 * 60 * 1000;
 const INTRODUCER_MONTH_BOUNDARY_GUARD_MS = 5 * 60 * 1000;
 async function firebaseServerNow() {
@@ -631,14 +612,14 @@ function validateDailyClosingForSubmission(value: DailyClosing, before: DailyClo
   const drinkAllocationBySource = new Map<string, { salesAmount: number; backAmount: number }>();
   const workByPosId = new Map(value.posSnapshot.castWork.map((work) => [work.castId, work]));
   // regularは派遣指定できないため必ず日次キャスト行が必要。trialの行なしは正規の派遣指定になり得る。
-  require(value.castInputRevision || value.posSnapshot.castWork
+  require(value.posSnapshot.castWork
     .filter((work) => work.castType === "regular")
     .every((work) => castPosIds.has(work.castId)), "POS原本の在籍キャスト勤務が店舗データから欠落しています。JSONを再取込してください。");
   value.casts.forEach((row) => {
-    require(row.accountingCorrection === undefined, `${row.name}の店舗原本に経理訂正専用の情報を保存することはできません。`);
+    require(!("accountingCorrection" in row), `${row.name}に現在は使用できない編集情報が含まれています。店舗の送信済みデータから再編集してください。`);
     require((row.kind === "regular" || row.kind === "trial") && Boolean(row.masterId) && Boolean(row.posCastId) && Boolean(row.name), "キャストデータの識別情報が正しくありません。");
     const sourceWork = workByPosId.get(row.posCastId);
-    require(value.castInputRevision || (Boolean(sourceWork) && sourceWork!.castType === row.kind && sourceWork!.castName === row.name), `${row.name}の勤務区分がPOS原本と一致しません。JSONを再取込してください。`);
+    require(Boolean(sourceWork) && sourceWork!.castType === row.kind && sourceWork!.castName === row.name, `${row.name}の勤務区分がPOS原本と一致しません。JSONを再取込してください。`);
     require(money(row.hours) && row.hours > 0 && Number.isInteger(row.hours * 4), `${row.name}の勤務時間が15分単位ではありません。`);
     [row.hourlyRate, row.honShimeiCount, row.banaiShimeiCount, row.dohanCount, row.dohanBack,
       row.honShimeiSales, row.jonaiExtensionSales, row.drinkSales, row.liquorCost, row.beautyAllowance,
@@ -655,9 +636,6 @@ function validateDailyClosingForSubmission(value: DailyClosing, before: DailyClo
       require(money(bottle.salesAmount) && money(bottle.costAmount), `${row.name}のボトル金額が正しくありません。`);
       require(Boolean(bottle.sourceKey) && safeBackAmount(bottle.backAmount), `${row.name}のボトルバック額が10円単位ではありません。JSONを再取込してください。`);
       actualBottlePairs.add(pairKey(row.posCastId, bottle.sourceKey || ""));
-      // 引継ぎ済み商品はvalidateCastReturnSubmissionで不変handoffの計算結果と照合済み。
-      // 元POSの価格/対象者で再計算すると経理で直した内容を打ち消すため、混在させない。
-      if (!value.castInputRevision) {
       const source = posItems.get(bottle.sourceKey || "");
       require(Boolean(source) && (source!.item.category === "champagneWine" || source!.item.category === "keepBottle")
         && source!.item.category === bottle.kind
@@ -669,7 +647,6 @@ function validateDailyClosingForSubmission(value: DailyClosing, before: DailyClo
       require(Math.abs(bottle.salesAmount - source!.item.price * source!.item.quantity / targetCount) < 0.001, `${row.name}のボトル売上配賦がPOS原本と一致しません。JSONを再取込してください。`);
       const expectedBack = bottleBackAmountFromPosItem(source!.item, bottle, targetCount);
       require(bottle.backAmount === expectedBack, `${row.name}のボトルバック額がPOS原本と一致しません。JSONを再取込してください。`);
-      }
       const prior = bottleAllocationBySource.get(bottle.sourceKey!);
       require(!prior || (Math.abs(prior.salesAmount - bottle.salesAmount) < 0.001
         && Math.abs(prior.costAmount - bottle.costAmount) < 0.001
@@ -687,7 +664,6 @@ function validateDailyClosingForSubmission(value: DailyClosing, before: DailyClo
         && money(drink.salesAmount), `${row.name}のドリンク明細が正しくありません。`);
       require(Boolean(drink.sourceKey) && safeBackAmount(drink.backAmount), `${row.name}のドリンクバック額が10円単位ではありません。JSONを再取込してください。`);
       actualDrinkPairs.add(pairKey(row.posCastId, drink.sourceKey || ""));
-      if (!value.castInputRevision) {
       const source = posItems.get(drink.sourceKey || "");
       require(Boolean(source) && source!.item.category === "castDrink"
         && source!.item.itemId === drink.itemId
@@ -701,7 +677,6 @@ function validateDailyClosingForSubmission(value: DailyClosing, before: DailyClo
         source!.item.backTargetCastIds.length,
       );
       require(drink.backAmount === expectedBack, `${row.name}のドリンクバック額がPOS原本と一致しません。JSONを再取込してください。`);
-      }
       const prior = drinkAllocationBySource.get(drink.sourceKey!);
       require(!prior || (Math.abs(prior.salesAmount - drink.salesAmount) < 0.001
         && prior.backAmount === drink.backAmount), `${drink.name}の売上・バックが対象キャストへ均等分配されていません。JSONを再取込してください。`);
@@ -711,16 +686,13 @@ function validateDailyClosingForSubmission(value: DailyClosing, before: DailyClo
       });
     });
     require(Math.abs(row.drinkSales - row.drinkAllocations!.reduce((sum, drink) => sum + drink.salesAmount, 0)) < 0.001, `${row.name}のドリンク売上合計が明細と一致しません。JSONを再取込してください。`);
-    const acceptedClassifications = new Map(value.castInputRevision?.draft.products.map((product, index) =>
-      [`accounting_${value.castInputRevision!.draft.sourceClosingId}_${index}`, product.classification]) || []);
-    const bottleCost = row.bottles.reduce((sum, bottle) => sum
-      + (value.castInputRevision && acceptedClassifications.get(bottle.sourceKey || "") === "excluded" ? 0 : bottle.costAmount), 0);
+    const bottleCost = row.bottles.reduce((sum, bottle) => sum + bottle.costAmount, 0);
     require(Math.abs(bottleCost - row.liquorCost) < 0.001, `${row.name}の酒代原価合計が明細と一致しません。`);
   });
-  require(value.castInputRevision || (actualBottlePairs.size === expectedBottlePairs.size
-    && [...expectedBottlePairs].every((key) => actualBottlePairs.has(key))), "POS原本のボトル対象明細が不足または重複しています。JSONを再取込してください。");
-  require(value.castInputRevision || (actualDrinkPairs.size === expectedDrinkPairs.size
-    && [...expectedDrinkPairs].every((key) => actualDrinkPairs.has(key))), "POS原本のドリンク対象明細が不足または重複しています。JSONを再取込してください。");
+  require(actualBottlePairs.size === expectedBottlePairs.size
+    && [...expectedBottlePairs].every((key) => actualBottlePairs.has(key)), "POS原本のボトル対象明細が不足または重複しています。JSONを再取込してください。");
+  require(actualDrinkPairs.size === expectedDrinkPairs.size
+    && [...expectedDrinkPairs].every((key) => actualDrinkPairs.has(key)), "POS原本のドリンク対象明細が不足または重複しています。JSONを再取込してください。");
   value.staffWork.forEach((row) => {
     require((row.kind === "regular" || row.kind === "trial") && Boolean(row.staffId) && Boolean(row.name) && money(row.hours) && row.hours > 0 && Number.isInteger(row.hours * 4), `${row.name}のスタッフ勤務が正しくありません。`);
     require(money(row.hourlyRate) && money(row.dailyPayment), `${row.name}のスタッフ給与金額が正しくありません。`);
@@ -1044,8 +1016,7 @@ export async function userRole(user: User): Promise<Role> {
 
 export async function loadWorkspaceData(role?: Role): Promise<AccountingWorkspaceData> {
   const accountingAccess = role === "accounting" || role === "op";
-  const correctionAccess = accountingAccess && isDevelopmentWorkspace();
-  const [casts, staff, drivers, introducers, liquor, closings, cashFloat, adjustments, entryEvents, introducerDeletionCommits, introducerMonthEvents, monthStates, monthSnapshots, castCorrections] = await Promise.all([
+  const [casts, staff, drivers, introducers, liquor, closings, cashFloat, adjustments, entryEvents, introducerDeletionCommits, introducerMonthEvents, monthStates, monthSnapshots] = await Promise.all([
     get(rootRef("casts")), get(rootRef("staff")), get(rootRef("drivers")), get(rootRef("introducers")),
     get(rootRef("liquorCosts")), get(rootRef("history")), get(rootRef("config/cashFloat")),
     accountingAccess ? get(rootRef("accountingAdjustments")) : Promise.resolve(null),
@@ -1054,7 +1025,6 @@ export async function loadWorkspaceData(role?: Role): Promise<AccountingWorkspac
     accountingAccess ? get(rootRef("introducerMonthEvents")) : Promise.resolve(null),
     get(rootRef("accountingMonthStates")),
     accountingAccess ? get(rootRef("accountingMonthSnapshots")) : Promise.resolve(null),
-    correctionAccess ? get(rootRef("castDailyCorrections")) : Promise.resolve(null),
   ]);
   const allCastRows = asArray<CastRecord & { deletedAt?: string }>(casts.val());
   const allStaffRows = asArray<StaffRecord & { deletedAt?: string }>(staff.val());
@@ -1077,11 +1047,7 @@ export async function loadWorkspaceData(role?: Role): Promise<AccountingWorkspac
       const normalized = normalizeMonthlyAccountingSnapshot(row, month, Number(revision));
       return normalized ? [normalized] : [];
     }));
-  const castCorrectionRows = Object.entries((castCorrections?.val() || {}) as Record<string, unknown>)
-    .map(([sourceClosingId, row]) => normalizeCastDailyCorrectionDocument(row, sourceClosingId));
   const closingRows = asArray<DailyClosing>(closings.val()).map(normalizeDailyClosing).sort((a, b) => b.businessDate.localeCompare(a.businessDate));
-  const castReturnHandoffs = isDevelopmentWorkspace() ? await Promise.all(closingRows.filter((row) => row.castReturnHandoffId)
-    .map(async (row) => normalizeCastReturnHandoff((await get(rootRef(`castReturnHandoffs/${row.id}/${row.castReturnHandoffId}`))).val(), row.id, row.castReturnHandoffId!))) : [];
   return {
     casts: allCastRows.filter((row) => !row.deletedAt).sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ja")),
     staff: allStaffRows.filter((row) => !row.deletedAt).sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ja")),
@@ -1099,8 +1065,6 @@ export async function loadWorkspaceData(role?: Role): Promise<AccountingWorkspac
     introducerMonthEvents: introducerMonthEventRows,
     monthStates: monthStateRows,
     monthSnapshots: monthSnapshotRows,
-    castCorrections: castCorrectionRows,
-    castReturnHandoffs,
   };
 }
 
@@ -2018,13 +1982,9 @@ export async function submitClosing(value: DailyClosing, user: User, expectedUpd
     assertFresh(before, expectedUpdatedAt);
     if (before && before.businessDate !== value.businessDate) throw new Error("再送時に営業日は変更できません。元の営業日データから再編集してください。");
     if (before && !["returned", "withdrawn"].includes(before.status)) throw new Error("差戻しまたは取下げ済みのデータだけ再送できます。");
-    if (!isDevelopmentWorkspace() && (value.castInputRevision || value.castReturnHandoffId)) {
-      throw new Error("経理修正の店舗引継ぎは開発環境でのみ利用できます。");
+    if (["castInputRevision", "castReturnHandoffId", "castReturnProductAllocation"].some((key) => key in value)) {
+      throw new Error("現在は使用できない編集情報が含まれています。店舗の送信済みデータから再編集してください。");
     }
-    const handoff = before?.castReturnHandoffId
-      ? normalizeCastReturnHandoff((await get(rootRef(`castReturnHandoffs/${value.id}/${before.castReturnHandoffId}`))).val(), value.id, before.castReturnHandoffId)
-      : null;
-    validateCastReturnSubmission(value, before ? normalizeDailyClosing({ ...before, id: value.id }) : null, handoff);
     validateDailyClosingForSubmission(value, before);
     const monthStates = Object.entries((monthStatesSnapshot.val() || {}) as Record<string, AccountingMonthState>)
       .map(([month, state]) => ({ ...state, month }));
@@ -2069,7 +2029,6 @@ export async function submitClosing(value: DailyClosing, user: User, expectedUpd
           returnedBy: undefined,
           returnedFromStatus: undefined,
           returnReason: undefined,
-          castReturnHandoffId: undefined,
           submittedAt: timestamp,
           submittedAtMs: serverOrderTimestamp(),
           submittedBy: user.uid,
@@ -2217,10 +2176,6 @@ export async function returnClosing(id: string, expected: ClosingRevision, reaso
   const normalizedReason = reason.trim();
   if (!normalizedReason) throw new Error("差戻し理由を入力してください。");
   if (normalizedReason.length > 500) throw new Error("差戻し理由は500文字以内で入力してください。");
-  if (isDevelopmentWorkspace() && (await get(rootRef(`castDailyCorrectionClaims/${id}`))).exists()) {
-    await returnCorrectedClosing(id, expected, normalizedReason, user);
-    return;
-  }
   const returnedAt = now();
   await runReadyTransaction(rootRef(`history/${id}`), (current) => {
     const existing = current as DailyClosing | null;
@@ -2261,255 +2216,8 @@ export async function saveMonthlyAdjustments(value: MonthlyAdjustments, user: Us
   }, { applyLocally: false });
 }
 
-/** 経理訂正は現金や店舗原本を書き換えず、再編集用の不変履歴へ引き渡す。 */
-async function returnCorrectedClosing(id: string, expected: ClosingRevision, reason: string, user: User) {
-  const initialRevision = castCorrectionGlobalRevision((await get(rootRef("castDailyCorrectionRevision"))).val());
-  const [data, claimsSnapshot, finalizeLockSnapshot, clock] = await Promise.all([
-    loadWorkspaceData("accounting"), get(rootRef("castDailyCorrectionClaims")),
-    get(rootRef("accountingFinalizeLock")), firebaseServerNow(),
-  ]);
-  const globalRevision = castCorrectionGlobalRevision((await get(rootRef("castDailyCorrectionRevision"))).val());
-  if (initialRevision !== globalRevision) throw new Error("別の端末で経理訂正が更新されています。最新データを読み込んでから差し戻してください。");
-  const source = data.closings.find((row) => row.id === id);
-  if (!source || source.status !== "approved") throw new Error("経理訂正のある承認済みデータだけ引き継いで差し戻せます。最新データを読み込んでください。");
-  assertClosingRevision(source, expected);
-  const correction = data.castCorrections?.find((row) => row.sourceClosingId === id && row.active && row.current);
-  const incoming = (claimsSnapshot.val() as Record<string, Record<string, CastDailyCorrectionClaim>> | null)?.[id] || {};
-  const previousClaims = castCorrectionClaimsForSource(claimsSnapshot.val(), id);
-  const relatedIds = new Set([id, ...Object.keys(incoming), ...previousClaims.keys(), ...correctionTargetClosingIds(correction?.current)]);
-  if (!correction?.current || [...relatedIds].some((relatedId) => relatedId !== id)) {
-    const dates = [...relatedIds].map((relatedId) => data.closings.find((row) => row.id === relatedId)?.businessDate || relatedId).sort();
-    throw new Error(`別の営業日へ移動した経理訂正が含まれています（${dates.join("、")}）。他の日の修正を消さないため差戻しを停止しました。管理者へ確認してください。`);
-  }
-  if (incoming[id]?.revision !== correction.revision || previousClaims.get(id)?.revision !== correction.revision) {
-    throw new Error("経理訂正の参照情報が一致しません。最新データを読み込んでから差し戻してください。");
-  }
-  assertCastCorrectionDaysAndMonthsOpen([correction.current], data);
-  const lock = finalizeLockSnapshot.val() as AccountingFinalizeLock | null;
-  if (lock && lock.expiresAt > clock.milliseconds) throw new Error("月次確定処理中のため差戻しできません。完了後に最新データを読み込んでください。");
-  const returnedAt = nextEventTimestamp(clock.timestamp, source.updatedAt);
-  const handoffId = secureRandomUUID();
-  const createdHandoff = createCastReturnHandoff(source, correction, data,
-    { id: handoffId, returnedAt, reason, createdAt: clock.timestamp, createdBy: user.uid });
-  // RTDB Rulesには配列長APIがないため、隣接indexの存在とこの寸法で欠落を検証する。
-  const originalCasts = source.castInputRevision?.originalCasts || source.casts.map(
-    ({ posCastId, masterId, name, kind, honShimeiCount, banaiShimeiCount, dohanCount }) =>
-      ({ posCastId, masterId, name, kind, honShimeiCount, banaiShimeiCount, dohanCount }));
-  const handoff = { ...createdHandoff, originalCasts, draftShape: {
-    entries: createdHandoff.draft.entries.length,
-    products: createdHandoff.draft.products.length,
-    originalCasts: originalCasts.length,
-    indices: Object.fromEntries(Array.from({ length: Math.max(originalCasts.length, createdHandoff.draft.entries.length,
-      createdHandoff.draft.products.length, ...createdHandoff.draft.entries.map((entry) => entry.dohan.length),
-      ...createdHandoff.draft.products.map((product) => product.targets.length)) }, (_, index) => [index, index])),
-    dohan: Object.fromEntries(createdHandoff.draft.entries.map((entry, index) => [index, entry.dohan.length])),
-    targets: Object.fromEntries(createdHandoff.draft.products.map((product, index) => [index, product.targets.length])),
-  } };
-  const revision = correction.revision + 1;
-  const history = clean({ revision, active: false, reason: `店舗へ引継ぎ：${reason}`.slice(0, 500), createdAt: clock.timestamp, createdBy: user.uid });
-  const plan: Record<string, unknown> = {
-    castDailyCorrectionRevision: globalRevision + 1,
-    [`castDailyCorrections/${id}/revision`]: revision,
-    [`castDailyCorrections/${id}/active`]: false,
-    [`castDailyCorrections/${id}/current`]: null,
-    [`castDailyCorrections/${id}/history/${revision}`]: history,
-    [`castDailyCorrectionClaims/${id}/${id}`]: null,
-    [`castReturnHandoffs/${id}/${handoffId}`]: clean(handoff),
-    [`history/${id}/businessMonth`]: source.businessDate.slice(0, 7),
-    [`history/${id}/status`]: "returned",
-    [`history/${id}/returnedAt`]: returnedAt,
-    [`history/${id}/returnedBy`]: user.uid,
-    [`history/${id}/returnedFromStatus`]: source.status,
-    [`history/${id}/returnReason`]: reason,
-    [`history/${id}/updatedAt`]: returnedAt,
-    [`history/${id}/castReturnHandoffId`]: handoffId,
-  };
-  const wasApplied = async () => {
-    const [savedHandoff, savedSource, savedCorrection] = await Promise.all([
-      get(rootRef(`castReturnHandoffs/${id}/${handoffId}`)), get(rootRef(`history/${id}`)),
-      castCorrectionWriteResult(id, revision, false, new Set(), history, globalRevision + 1),
-    ]);
-    return Boolean(savedCorrection && savedSource.val()?.status === "returned"
-      && savedSource.val()?.castReturnHandoffId === handoffId && savedSource.val()?.updatedAt === returnedAt
-      && JSON.stringify(canonicalComparisonValue(savedHandoff.val())) === JSON.stringify(canonicalComparisonValue(clean(handoff))));
-  };
-  try {
-    await update(rootRef(), clean(plan));
-  } catch (error) {
-    if (await wasApplied().catch(() => false)) return;
-    throw error;
-  }
-  if (!(await wasApplied())) throw new Error("差戻しの保存結果を確認できません。再送せず最新データを読み込んでください。");
-}
-
-function correctionTargetClosingIds(draft: CastCorrectionDraft | null | undefined) {
-  return new Set(draft ? [draft.sourceClosingId, ...draft.entries.map((entry) => entry.targetClosingId)] : []);
-}
-
-function castCorrectionClaimsForSource(value: unknown, sourceClosingId: string) {
-  if (!value || typeof value !== "object") return new Map<string, CastDailyCorrectionClaim>();
-  const result = new Map<string, CastDailyCorrectionClaim>();
-  for (const [closingId, claims] of Object.entries(value as Record<string, unknown>)) {
-    if (!claims || typeof claims !== "object") continue;
-    const claim = (claims as Record<string, unknown>)[sourceClosingId];
-    if (!claim || typeof claim !== "object") continue;
-    const normalized = claim as Partial<CastDailyCorrectionClaim>;
-    if (normalized.sourceClosingId === sourceClosingId && Number.isSafeInteger(normalized.revision) && Number(normalized.revision) > 0) {
-      result.set(closingId, { sourceClosingId, revision: Number(normalized.revision) });
-    }
-  }
-  return result;
-}
-
-function castCorrectionGlobalRevision(value: unknown) {
-  if (value === null || value === undefined) return 0;
-  if (!Number.isSafeInteger(value) || Number(value) < 1) throw new Error("経理訂正の全体版番号が不正です。Firebaseデータを確認してください。");
-  return Number(value);
-}
-
-function assertCastCorrectionDaysAndMonthsOpen(
-  drafts: Array<CastCorrectionDraft | null | undefined>,
-  data: AccountingWorkspaceData,
-) {
-  for (const draft of drafts) {
-    if (!draft) continue;
-    for (const entry of draft.entries) {
-      const target = data.closings.find((row) => row.id === entry.targetClosingId);
-      if (!target || target.businessDate !== entry.businessDate) {
-        throw new Error(`${entry.name}の変更先営業日が現在の日次データと一致しません。最新データを読み込んでください。`);
-      }
-    }
-  }
-  const affectedClosingIds = new Set(drafts.flatMap((draft) => [...correctionTargetClosingIds(draft)]));
-  for (const closingId of affectedClosingIds) {
-    const closing = data.closings.find((row) => row.id === closingId);
-    if (!closing || closing.status !== "approved") {
-      throw new Error("経理訂正の対象に承認済みでない営業日があります。最新データを読み込んでください。");
-    }
-    const month = closing.businessDate.slice(0, 7);
-    const state = data.monthStates.find((row) => row.month === month);
-    if (state && state.status !== "open") {
-      throw new Error(`${month}は月次確定中または確定済みです。確定を解除してから訂正してください。`);
-    }
-  }
-}
-
-async function castCorrectionWriteResult(
-  sourceClosingId: string,
-  expectedRevision: number,
-  active: boolean,
-  targetClosingIds: Set<string>,
-  expectedHistory: unknown,
-  minimumGlobalRevision: number,
-) {
-  const [documentSnapshot, claimsSnapshot, globalRevisionSnapshot] = await Promise.all([
-    get(rootRef(`castDailyCorrections/${sourceClosingId}`)),
-    get(rootRef("castDailyCorrectionClaims")),
-    get(rootRef("castDailyCorrectionRevision")),
-  ]);
-  if (!documentSnapshot.exists()) return null;
-  const document = normalizeCastDailyCorrectionDocument(documentSnapshot.val(), sourceClosingId);
-  if (document.revision !== expectedRevision || document.active !== active) return null;
-  if (JSON.stringify(canonicalComparisonValue(document.history[String(expectedRevision)]))
-    !== JSON.stringify(canonicalComparisonValue(expectedHistory))) return null;
-  const claims = castCorrectionClaimsForSource(claimsSnapshot.val(), sourceClosingId);
-  if (active && ([...targetClosingIds].some((closingId) => claims.get(closingId)?.revision !== expectedRevision)
-    || [...claims.keys()].some((closingId) => !targetClosingIds.has(closingId)))) return null;
-  if (!active && claims.size > 0) return null;
-  if (castCorrectionGlobalRevision(globalRevisionSnapshot.val()) < minimumGlobalRevision) return null;
-  return document;
-}
-
-/**
- * 承認済み日次のキャスト勤務・売上を、店舗原本を変更せず訂正履歴として保存する。
- * draft=null は訂正解除（原本復元）で、同じCAS・監査履歴・月次ロック検査を通る。
- */
-export async function saveCastCorrection(
-  draft: CastCorrectionDraft | null,
-  sourceClosingId: string,
-  expectedRevision: number,
-  reason: string,
-  user: User,
-): Promise<CastDailyCorrectionDocument> {
-  await requireUser(user, ["accounting", "op"]);
-  if (!isDevelopmentWorkspace()) throw new Error("経理日次訂正は開発環境でのみ利用できます。");
-  if (!sourceClosingId.trim() || !/^[A-Za-z0-9_-]+$/.test(sourceClosingId)) throw new Error("訂正元の日次IDが正しくありません。");
-  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) throw new Error("経理訂正の版番号が正しくありません。最新データを読み込んでください。");
-  const normalizedReason = reason.trim();
-  if (!normalizedReason) throw new Error("訂正理由を入力してください。");
-  if (normalizedReason.length > 500) throw new Error("訂正理由は500文字以内で入力してください。");
-  if (draft && draft.sourceClosingId !== sourceClosingId) throw new Error("訂正元の日次IDが一致しません。");
-
-  const initialGlobalRevision = castCorrectionGlobalRevision((await get(rootRef("castDailyCorrectionRevision"))).val());
-  const [data, claimsSnapshot, finalizeLockSnapshot, serverClock] = await Promise.all([
-    loadWorkspaceData("accounting"),
-    get(rootRef("castDailyCorrectionClaims")),
-    get(rootRef("accountingFinalizeLock")),
-    firebaseServerNow(),
-  ]);
-  const confirmedGlobalRevision = castCorrectionGlobalRevision((await get(rootRef("castDailyCorrectionRevision"))).val());
-  if (confirmedGlobalRevision !== initialGlobalRevision) {
-    throw new Error("別の端末で経理訂正が更新されています。最新データを読み込んでから反映し直してください。");
-  }
-  const existing = data.castCorrections?.find((row) => row.sourceClosingId === sourceClosingId);
-  const currentRevision = existing?.revision || 0;
-  if (currentRevision !== expectedRevision) {
-    throw new Error("別の端末で経理訂正が更新されています。最新データを読み込んでから反映し直してください。");
-  }
-  if (!draft && (!existing?.active || !existing.current)) throw new Error("この日次に解除できる経理訂正はありません。");
-  const source = data.closings.find((row) => row.id === sourceClosingId);
-  if (!source || source.status !== "approved") throw new Error("承認済みの日次だけ経理訂正できます。");
-  const anchor = draft || existing?.current;
-  if (!anchor || anchor.sourceClosingId !== sourceClosingId || anchor.sourceUpdatedAt !== source.updatedAt
-    || anchor.sourceChecksum !== source.checksum || anchor.sourceSubmissionId !== source.submissionId) {
-    throw new Error("店舗原本が訂正開始時から変更されています。最新データを読み込み、訂正内容を再確認してください。");
-  }
-  let storedDraft: CastCorrectionDraft | null = null;
-  if (draft) {
-    storedDraft = sealCastCorrectionDraft(draft, data);
-    validateCastCorrectionDraft(storedDraft, data);
-  }
-  assertCastCorrectionDaysAndMonthsOpen([existing?.active ? existing.current : null, storedDraft], data);
-  const finalizeLock = finalizeLockSnapshot.val() as AccountingFinalizeLock | null;
-  if (finalizeLock && finalizeLock.expiresAt > serverClock.milliseconds) {
-    throw new Error("月次確定処理中のため経理訂正を保存できません。処理完了後に最新データを読み込んでください。");
-  }
-
-  const nextRevision = currentRevision + 1;
-  const active = Boolean(storedDraft);
-  const targetClosingIds = correctionTargetClosingIds(storedDraft);
-  const previousClaims = castCorrectionClaimsForSource(claimsSnapshot.val(), sourceClosingId);
-  const history = clean({ revision: nextRevision, active, ...(storedDraft ? { draft: storedDraft } : {}), reason: normalizedReason,
-    createdAt: serverClock.timestamp, createdBy: user.uid });
-  const plan: Record<string, unknown> = {
-    castDailyCorrectionRevision: confirmedGlobalRevision + 1,
-    [`castDailyCorrections/${sourceClosingId}/revision`]: nextRevision,
-    [`castDailyCorrections/${sourceClosingId}/active`]: active,
-    [`castDailyCorrections/${sourceClosingId}/current`]: storedDraft ? clean(storedDraft) : null,
-    [`castDailyCorrections/${sourceClosingId}/history/${nextRevision}`]: history,
-  };
-  if (!existing) plan[`castDailyCorrections/${sourceClosingId}/sourceClosingId`] = sourceClosingId;
-  for (const closingId of previousClaims.keys()) {
-    if (!targetClosingIds.has(closingId)) plan[`castDailyCorrectionClaims/${closingId}/${sourceClosingId}`] = null;
-  }
-  for (const closingId of targetClosingIds) {
-    plan[`castDailyCorrectionClaims/${closingId}/${sourceClosingId}`] = { sourceClosingId, revision: nextRevision };
-  }
-
-  try {
-    await update(rootRef(), clean(plan));
-  } catch (error) {
-    const applied = await castCorrectionWriteResult(sourceClosingId, nextRevision, active, targetClosingIds, history, confirmedGlobalRevision + 1).catch(() => null);
-    if (applied) return applied;
-    throw error;
-  }
-  const saved = await castCorrectionWriteResult(sourceClosingId, nextRevision, active, targetClosingIds, history, confirmedGlobalRevision + 1);
-  if (!saved) throw new Error("経理訂正の保存結果を確認できません。再送せず最新データを読み込んでください。");
-  return saved;
-}
-
 async function currentMonthlySources(month: string) {
-  const [casts, staff, introducers, closings, adjustment, entryEvents, introducerDeletionCommits, introducerMonthEvents, castCorrections] = await Promise.all([
+  const [casts, staff, introducers, closings, adjustment, entryEvents, introducerDeletionCommits, introducerMonthEvents] = await Promise.all([
     get(rootRef("casts")),
     get(rootRef("staff")),
     get(rootRef("introducers")),
@@ -2518,10 +2226,7 @@ async function currentMonthlySources(month: string) {
     get(rootRef(`introducerEntryEvents/${month}`)),
     get(rootRef("introducerDeletionCommits")),
     get(rootRef(`introducerMonthEvents/${month}`)),
-    isDevelopmentWorkspace() ? get(rootRef("castDailyCorrections")) : Promise.resolve(null),
   ]);
-  const correctionRows = Object.entries((castCorrections?.val() || {}) as Record<string, unknown>)
-    .map(([sourceClosingId, row]) => normalizeCastDailyCorrectionDocument(row, sourceClosingId));
   const data: DomainWorkspaceData = {
     casts: asArray<CastRecord>(casts.val()),
     staff: asArray<StaffRecord>(staff.val()),
@@ -2532,7 +2237,6 @@ async function currentMonthlySources(month: string) {
       .sort((left, right) => right.businessDate.localeCompare(left.businessDate)),
     adjustments: [],
     cashFloat: 0,
-    castCorrections: correctionRows,
   };
   const adjustments = normalizeMonthlyAdjustments({
     month,

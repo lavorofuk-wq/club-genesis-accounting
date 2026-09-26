@@ -167,3 +167,96 @@ describe("recovery registry", () => {
     expect(registry.capture()).toEqual([{ key: "input", value: "kept" }]);
   });
 });
+
+describe("廃止したフォームの退避互換ガード", () => {
+  it("日次編集専用の退避だけを復元対象から外し、通常の経理入力を保持する", () => {
+    const registry = createUpdateDraftRegistry();
+    registry.prepare([
+      { key: "accounting.castDaily.editing", value: { draft: { entries: [{ honShimeiSales: 999999 }] } } },
+      { key: "accounting.monthly.adjustments", value: { withholdingByCast: { one: 1234 } } },
+      { key: "common.casts.editing", value: { name: "通常のマスタ入力" } },
+    ]);
+    expect(registry.peek("accounting.castDaily.editing")).toEqual({ found: false, value: undefined });
+    expect(registry.peek("accounting.monthly.adjustments").found).toBe(true);
+    expect(registry.peek("common.casts.editing").found).toBe(true);
+    registry.register("accounting.monthly.adjustments", () => ({}));
+    registry.register("common.casts.editing", () => ({}));
+    expect(registry.remaining()).toBe(0);
+    expect(registry.incompatible()).toBe(false);
+  });
+
+  it.each([
+    { castReturnHandoffId: "handoff-1" },
+    { castInputRevision: { schema: 1 } },
+    { casts: [{ accountingCorrection: { sourceClosingId: "daily_1" } }] },
+  ])("廃止metadataを持つ再編集元と同じ営業日の入力だけを自動復元しない（%j）", (metadata) => {
+    const registry = createUpdateDraftRegistry();
+    const entries = [
+      { key: "store.editing", value: { id: "daily_1", ...metadata } },
+      { key: "store.workflowDirty", value: true },
+      { key: "store.workflow.daily_1.castRows", value: [{ honShimeiSales: 999999 }] },
+      { key: "store.workflow.daily_1.expenses", value: [{ amount: 1234 }] },
+      { key: "store.workflow.daily_10.castRows", value: [{ honShimeiSales: 5000 }] },
+      { key: "common.cash.amount", value: 200000 },
+    ];
+    const original = structuredClone(entries);
+    registry.prepare(entries);
+    for (const entry of entries.slice(0, 4)) {
+      expect(registry.peek(entry.key)).toEqual({ found: false, value: undefined });
+      registry.register(entry.key, () => null);
+    }
+    expect(registry.peek("store.workflow.daily_10.castRows").found).toBe(true);
+    expect(registry.peek("common.cash.amount").found).toBe(true);
+    registry.register("store.workflow.daily_10.castRows", () => []);
+    registry.register("common.cash.amount", () => 200000);
+    expect(registry.remaining()).toBe(4);
+    expect(registry.incompatible()).toBe(true);
+    expect(entries).toEqual(original);
+  });
+
+  it("引継ぎ専用keyしか残っていなくても元の経費・現金退避を削除せず保留する", () => {
+    const storage = memoryStorage();
+    const entries = [
+      { key: "store.workflow.daily_1.handoff.history-1.castRows", value: [{ honShimeiSales: 999999 }] },
+      { key: "store.workflow.daily_1.handoff.history-1.expenses", value: [{ amount: 1234 }] },
+      { key: "store.workflow.daily_1.handoff.history-1.personalRepayment", value: 10000 },
+    ];
+    writeUpdateDraft(storage, scope, "store", entries, savedAt);
+    const raw = storage.getItem(updateDraftStorageKey(scope));
+    const registry = createUpdateDraftRegistry();
+    registry.prepare(readUpdateDraft(storage, scope)!.entries);
+    expect(registry.incompatible()).toBe(true);
+    expect(registry.remaining()).toBe(3);
+    expect(registry.peek(entries[0].key).found).toBe(false);
+    expect(storage.getItem(updateDraftStorageKey(scope))).toBe(raw);
+    registry.clearRecovery();
+    expect(registry.incompatible()).toBe(false);
+  });
+
+  it("行の廃止metadataから対応workflowを保留し、同じIDの再編集元も復元しない", () => {
+    const registry = createUpdateDraftRegistry();
+    registry.prepare([
+      { key: "store.editing", value: { id: "daily_1" } },
+      { key: "store.workflow.daily_1.castRows", value: [{ accountingCorrection: { sourceClosingId: "daily_1" } }] },
+      { key: "store.workflow.daily_1.pos", value: { businessDate: "2026-09-01" } },
+    ]);
+    expect(registry.peek("store.editing").found).toBe(false);
+    expect(registry.peek("store.workflow.daily_1.pos").found).toBe(false);
+    expect(registry.remaining()).toBe(3);
+  });
+
+  it("metadataのない通常手入力や自由記述から経理修正と推測して破棄しない", () => {
+    const registry = createUpdateDraftRegistry();
+    const entries = [
+      { key: "store.editing", value: { id: "daily_1", castInputRevision: null, castReturnHandoffId: "" } },
+      { key: "store.workflowDirty", value: true },
+      { key: "store.workflow.daily_1.castRows", value: [{ honShimeiSales: 999999 }] },
+      { key: "store.workflow.daily_1.expenses", value: [{ payee: "accountingCorrection", amount: 5000 }] },
+      { key: "store.workflow.daily_1.cashRevisionReason", value: "castInputRevision" },
+      { key: "common.casts.editing", value: { note: "accounting.castDaily.editing" } },
+    ];
+    registry.prepare(entries);
+    for (const entry of entries) expect(registry.peek(entry.key)).toEqual({ found: true, value: entry.value });
+    expect(registry.incompatible()).toBe(false);
+  });
+});
