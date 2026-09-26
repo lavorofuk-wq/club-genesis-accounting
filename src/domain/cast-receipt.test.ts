@@ -62,7 +62,7 @@ describe("キャスト報酬から受領書への転記", () => {
     }
   });
   it.each([undefined, null, 0, 1, "false", "true"])("区分%sを在籍と推測せず停止する", (trialOnly) => {
-    expect(() => buildCastReceiptSheets([{ ...reward, trialOnly } as CastReward], "2026-09")).toThrow("在籍・体入区分");
+    expect(() => buildCastReceiptSheets([{ ...reward, trialOnly } as unknown as CastReward], "2026-09")).toThrow("在籍・体入区分");
   });
   it("混在・同名でも在籍のIDに対応した本名を出し、在籍の元の順序を保つ", () => {
     const converted = { ...reward, id: "converted", name: "同月入店", appliedHourlyRates: [1500, 3000] };

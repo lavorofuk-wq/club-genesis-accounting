@@ -211,7 +211,8 @@ export function validateExpenseExport({ results, closings, adjustments, month, s
     const salesReward = amount(row.salesReward, `${row.name}の売上報酬`);
     sameAmount(row.adoptedReward, Math.max(hourlyAndBack, salesReward), `${row.name}の採用報酬額`);
     sameAmount(row.adoptedReward, row.adoptedSystem === "salesReward" ? salesReward : hourlyAndBack, `${row.name}の採用報酬方式`);
-    sameAmount(row.grossPay, row.adoptedReward + amount(row.beautyAllowance, `${row.name}の美容室手当`), `${row.name}の総支給額`);
+    sameAmount(row.grossPay, row.adoptedReward + amount(row.beautyAllowance, `${row.name}の美容室手当`)
+      + amount(row.additionalAllowance ?? 0, `${row.name}の追加手当`), `${row.name}の総支給額`);
     const deductions = [row.dailyPayment, row.advancePayment, row.transportFee, row.withholding]
       .reduce((total, value) => total + amount(value, `${row.name}の控除`), 0);
     sameAmount(row.netPay, row.grossPay - deductions, `${row.name}の差引支給額`, true);

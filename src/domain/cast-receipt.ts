@@ -1,4 +1,5 @@
 import type { CastReward } from "./gms";
+import { additionalCastAmounts } from "./cast-input-export";
 
 const amountKeys = ["hourlyPay", "honShimeiBack", "banaiShimeiBack", "dohanBack", "bottleBack", "drinkBack",
   "hourlyAndBack", "salesReward", "adoptedReward", "beautyAllowance", "grossPay", "dailyPayment",
@@ -23,18 +24,20 @@ export function buildCastReceiptSheets(rows: CastReward[], month: string, legalN
     const backs = row.honShimeiBack + row.banaiShimeiBack + row.dohanBack + row.bottleBack + row.drinkBack;
     const deductions = row.dailyPayment + row.advancePayment + row.transportFee;
     const sales = row.adoptedSystem === "salesReward";
+    const additional = additionalCastAmounts(row);
+    const allowances = row.beautyAllowance + additional.allowance;
     if (!Number.isSafeInteger(row.days) || (row.appliedHourlyRates !== undefined && (!Array.isArray(row.appliedHourlyRates)
       || !row.appliedHourlyRates.length || row.appliedHourlyRates.some((rate) => !Number.isFinite(rate) || rate < 0 || rate > Number.MAX_SAFE_INTEGER)))) fail();
     if (sales && (!Number.isFinite(row.rewardRate) || row.rewardRate <= 0 || row.rewardRate > 1)) fail();
     if (!equalAmount(row.hourlyAndBack, row.hourlyPay + backs)
       || !equalAmount(row.adoptedReward, sales ? row.salesReward : row.hourlyAndBack)
-      || !equalAmount(row.grossPay, row.adoptedReward + row.beautyAllowance)
+      || !equalAmount(row.grossPay, row.adoptedReward + allowances)
       || !equalAmount(row.netPay, row.grossPay - deductions - row.withholding)) fail();
     const cells: Record<string, string | number> = sales ? {
       B2: `①　日売上－酒代（50％）×${Number((row.rewardRate * 100).toFixed(10))}％`,
       G1: `${Number(month.slice(5))}月報酬分`,
       G2: row.adoptedReward,
-      G3: row.beautyAllowance,
+      G3: allowances,
       G4: row.grossPay,
       G5: deductions,
       G6: row.withholding,
@@ -44,7 +47,7 @@ export function buildCastReceiptSheets(rows: CastReward[], month: string, legalN
       G1: `${Number(month.slice(5))}月報酬分`,
       G2: row.hourlyPay,
       G3: backs,
-      G4: row.beautyAllowance,
+      G4: allowances,
       G5: row.grossPay,
       G6: deductions,
       G7: row.withholding,
@@ -60,7 +63,7 @@ export function buildCastReceiptSheets(rows: CastReward[], month: string, legalN
       F7: row.hours,
       F8: !rates ? "未保存" : rates.length === 1 ? rates[0] : rates.map((rate) => rate.toLocaleString("ja-JP", { maximumFractionDigits: 15 })).join(" / "),
       ...(sales ? {
-        F9: row.honShimeiSales + row.jonaiExtensionSales,
+        F9: row.honShimeiSales + row.jonaiExtensionSales + additional.sales,
         F10: row.liquorCost * 0.5,
         B11: "報酬率",
         F11: Number((row.rewardRate * 100).toFixed(10)),
@@ -73,7 +76,8 @@ export function buildCastReceiptSheets(rows: CastReward[], month: string, legalN
         F13: row.bottleBack,
         F14: row.drinkBack,
       }),
-      F15: row.beautyAllowance,
+      F15: allowances,
+      ...(additional.allowance > 0 ? { B15: "美容室・手当て等" } : {}),
       F18: row.grossPay,
       F19: row.withholding,
       F20: row.dailyPayment,

@@ -43,6 +43,20 @@ const fingerprint = (value) => createHash("sha256").update(JSON.stringify(canoni
 function outsideRetiredRules(value) {
   const copy = structuredClone(value);
   const workspace = copy.$workspace;
+  // Ver2.37の新規追加項目だけを除き、それ以外は撤去前の指紋を維持する。
+  delete workspace.accountingAdjustments.$month.castInputs;
+  const snapshots = workspace.accountingMonthSnapshots.$month.$revision;
+  for (const node of [snapshots.castRewards.$index, snapshots.castSalesReports.$index.days.$dayIndex, snapshots.castSalesReports.$index.totals]) {
+    for (const key of ["additionalSales", "additionalAllowance", "additionalTransportFee", "accountingInputs"]) delete node[key];
+  }
+  // 追加売上を持つdevの分岐だけを除去し、本番/既存データの元式を指紋に含める。
+  const originalSales = "newData.child('totalSales').val() === newData.child('honShimeiSales').val() + newData.child('jonaiExtensionSales').val()";
+  const additionalSales = "(($workspace === 'accounting-dev' && newData.child('additionalSales').exists()) ? "
+    + originalSales + " + newData.child('additionalSales').val() : " + originalSales + ")";
+  for (const node of [snapshots.castSalesReports.$index.days.$dayIndex, snapshots.castSalesReports.$index.totals]) {
+    assert.ok(node[".validate"].includes(additionalSales));
+    node[".validate"] = node[".validate"].replace(additionalSales, originalSales);
+  }
   delete workspace.dailyClosingDeletionLock[".validate"];
   delete workspace.history.$id.$field[".validate"];
   delete workspace.history.$id.casts;

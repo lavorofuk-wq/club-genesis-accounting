@@ -156,6 +156,23 @@ function expectIntroducerExportButton(markup: string, disabled: boolean) {
 }
 
 describe("主要ページのSSRスモーク", () => {
+  it("キャスト売上と報酬に別名目の売上・手当・追加送迎を表示する", () => {
+    const source = balanceWorkspace();
+    source.adjustments[0].castInputs = [
+      { id: "input_sales", castId: "cast-1", castName: "花子", kind: "sales", label: "売上追加の名目", amount: 12340, businessDate },
+      { id: "input_allowance", castId: "cast-1", castName: "花子", kind: "allowance", label: "手当追加の名目", amount: 1234 },
+      { id: "input_transport", castId: "cast-1", castName: "花子", kind: "transport", label: "送迎追加の名目", amount: 1500 },
+    ];
+    for (const section of ["castSales", "castRewards"] as const) {
+      const markup = renderToStaticMarkup(createElement(AccountingForms, { section, data: source, user, busy: false, run }));
+      for (const label of ["売上追加の名目", "手当追加の名目", "送迎追加の名目"]) expect(markup).toContain(label);
+      for (const amount of ["￥12,340", "￥1,234", "￥1,500"]) expect(markup).toContain(amount);
+    }
+    const markup = renderToStaticMarkup(createElement(AccountingForms, { section: "castSales", data: source, user, busy: false, run }));
+    expect(markup).toContain("￥52,340");
+    expect(markup).not.toMatch(/<button[^>]*>編集<\/button>/);
+  });
+
   it("キャスト売上は閲覧専用とし、日次編集の入口を表示しない", () => {
     const markup = renderToStaticMarkup(createElement(AccountingForms, {
       section: "castSales", data, user, busy: false, run,

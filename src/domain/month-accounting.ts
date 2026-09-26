@@ -32,8 +32,9 @@ import type {
 import { cashLedgerIssues, summarizeCashFunding, type CashFundingSummary } from "./cash-funding";
 import { STAFF_MONTHLY_RATES_START_MONTH, staffMonthlyRateForMonth } from "./staff-rates";
 import { sha256Hex } from "../lib/crypto-compat";
+import { resolveCastAccountingInputs, normalizeCastAccountingInputs, castAccountingInputTotals } from "./cast-accounting-inputs";
 
-export const MONTHLY_CALCULATION_VERSION = "2.36.0";
+export const MONTHLY_CALCULATION_VERSION = "2.37.0";
 export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 3 as const;
 
 export type IntroducerEntryEvent = {
@@ -275,6 +276,30 @@ function validSnapshotBottleBackByKind(
       === backs.filter((back) => back.key === "bottle").reduce((sum, back) => sum + back.amount, 0);
 }
 
+const additionalCastKeys = ["additionalSales", "additionalAllowance", "additionalTransportFee"] as const;
+
+function validSnapshotCastAdditions(row: Record<string, unknown>) {
+  return additionalCastKeys.every((key) => row[key] === undefined || snapshotInteger(row[key]))
+    && (row.additionalSales === undefined || Number(row.additionalSales) % 10 === 0)
+    && (row.additionalTransportFee === undefined || Number(row.additionalTransportFee) % 500 === 0);
+}
+
+/** 確定後は入力日付を再解決せず、保存済みの名目・金額・割当日を検証して保持する。 */
+function normalizeSnapshotCastInputs(row: Record<string, unknown>, month: string, castId: string, businessDate?: string) {
+  if (!validSnapshotCastAdditions(row)) throw new Error("キャスト追加金額が不正です。");
+  if (row.accountingInputs === undefined) {
+    if (additionalCastKeys.some((key) => Number(row[key] || 0) !== 0)) throw new Error("キャスト追加金額の保存明細がありません。");
+    return undefined;
+  }
+  if (!Array.isArray(row.accountingInputs) && !snapshotObject(row.accountingInputs)) throw new Error("キャスト入力明細の形式が不正です。");
+  const inputs = normalizeCastAccountingInputs(snapshotList(row.accountingInputs));
+  if (inputs.some((input) => input.castId !== castId || !snapshotDateInMonth(input.businessDate, month)
+    || businessDate !== undefined && input.businessDate !== businessDate)) throw new Error("キャスト入力明細の人物・日付が一致しません。");
+  const totals = castAccountingInputTotals(inputs);
+  if (additionalCastKeys.some((key) => totals[key] !== Number(row[key] || 0))) throw new Error("キャスト入力明細の金額が一致しません。");
+  return inputs as NonNullable<CastSalesReport["days"][number]["accountingInputs"]>;
+}
+
 function normalizeSnapshotCastSales(value: unknown, month: string, requireTenYen: boolean): CastSalesReport[] | undefined {
   const tenYenKeys = ["honShimeiSales", "jonaiExtensionSales", "totalSales", "backTotal"];
   const reports = snapshotList<unknown>(value);
@@ -289,20 +314,30 @@ function normalizeSnapshotCastSales(value: unknown, month: string, requireTenYen
         || !allSnapshotNumbers(day, castSalesNumberKeys)) return undefined;
       const backs = normalizeSnapshotBacks(day.backs, requireTenYen);
       const bottles = normalizeSnapshotBottles(day.bottles);
-      if (!backs || !bottles || day.totalSales !== Number(day.honShimeiSales) + Number(day.jonaiExtensionSales)
+      let accountingInputs: CastSalesReport["days"][number]["accountingInputs"];
+      try { accountingInputs = normalizeSnapshotCastInputs(day, month, item.id as string, day.businessDate as string); } catch { return undefined; }
+      if (!backs || !bottles || day.totalSales !== Number(day.honShimeiSales) + Number(day.jonaiExtensionSales) + Number(day.additionalSales || 0)
         || (requireTenYen && !tenYenKeys.every((key) => snapshotTenYen(day[key])))
         || day.totalLiquorCost !== Number(day.honShimeiLiquorCost) + Number(day.jonaiExtensionLiquorCost)
         || day.backTotal !== backs.reduce((sum, back) => sum + back.amount, 0)
         || !validSnapshotBottleBackByKind(day.bottleBackByKind, backs, requireTenYen)) return undefined;
-      days.push({ ...(day as unknown as CastSalesReport["days"][number]), backs, bottles });
+      days.push({ ...(day as unknown as CastSalesReport["days"][number]), backs, bottles,
+        ...(accountingInputs === undefined ? {} : { accountingInputs }) });
     }
     const totals = item.totals;
     const backs = normalizeSnapshotBacks(totals.backs, requireTenYen);
     const bottles = normalizeSnapshotBottles(totals.bottles);
+    let accountingInputs: CastSalesReport["totals"]["accountingInputs"];
+    try { accountingInputs = normalizeSnapshotCastInputs(totals, month, item.id as string); } catch { return undefined; }
+    const dailyInputs = days.flatMap((day) => day.accountingInputs || []);
+    if (new Set(dailyInputs.map((input) => input.id)).size !== dailyInputs.length
+      || additionalCastKeys.some((key) => Number(totals[key] || 0) !== days.reduce((sum, day) => sum + Number(day[key] || 0), 0))
+      || JSON.stringify([...(accountingInputs || [])].sort((a, b) => a.id.localeCompare(b.id)))
+        !== JSON.stringify([...dailyInputs].sort((a, b) => a.id.localeCompare(b.id)))) return undefined;
     if (!backs || !bottles || !snapshotInteger(totals.attendanceDays) || Number(totals.attendanceDays) <= 0 || days.length === 0
       || !allSnapshotNumbers(totals, castSalesNumberKeys)
       || (requireTenYen && !tenYenKeys.every((key) => snapshotTenYen(totals[key])))
-      || totals.totalSales !== Number(totals.honShimeiSales) + Number(totals.jonaiExtensionSales)
+      || totals.totalSales !== Number(totals.honShimeiSales) + Number(totals.jonaiExtensionSales) + Number(totals.additionalSales || 0)
       || totals.totalLiquorCost !== Number(totals.honShimeiLiquorCost) + Number(totals.jonaiExtensionLiquorCost)
       || totals.backTotal !== backs.reduce((sum, back) => sum + back.amount, 0)
       || !validSnapshotBottleBackByKind(totals.bottleBackByKind, backs, requireTenYen)
@@ -311,7 +346,8 @@ function normalizeSnapshotCastSales(value: unknown, month: string, requireTenYen
     normalized.push({
       ...(item as unknown as CastSalesReport),
       days,
-      totals: { ...(totals as unknown as CastSalesReport["totals"]), backs, bottles },
+      totals: { ...(totals as unknown as CastSalesReport["totals"]), backs, bottles,
+        ...(accountingInputs === undefined ? {} : { accountingInputs }) },
     });
   }
   return normalized;
@@ -441,6 +477,12 @@ export function normalizeMonthlyAccountingSnapshot(
   const castRewards = (requireDailyHourlyYen
     ? normalizeSnapshotHourlyRows(storedCastRewards, pathMonth, "hourlyPay", castSalesReports)
     : storedCastRewards)?.map((item) => snapshotObject(item) ? { ...item } : item);
+  const hasCastInputs = castRewards?.some((item) => snapshotObject(item) && additionalCastKeys.some((key) => item[key] !== undefined))
+    || castSalesReports?.some((report) => report.totals.accountingInputs !== undefined
+      || report.days.some((day) => day.accountingInputs !== undefined));
+  const version = /^(\d+)\.(\d+)\.(\d+)$/.exec(row.calculationVersion);
+  if (hasCastInputs && (row.schemaVersion !== 3 || !version
+    || !(Number(version[1]) > 2 || Number(version[1]) === 2 && Number(version[2]) >= 37))) return undefined;
   const introducerPayments = validSnapshotRows(row.introducerPayments,
     ["id", "introducer", "cast", "feeType", "adopted"],
     ["honShimeiLiquorCost", "salesBase", "salesFee", "grossBase", "grossFee", "attendanceAdvisory", "entryAdvisory", "advisory", "total"]);
@@ -455,6 +497,9 @@ export function normalizeMonthlyAccountingSnapshot(
   const categoryValues = snapshotObject(row.expenses.byCategory) ? Object.values(row.expenses.byCategory) : [];
   const castRewardsValid = Boolean(castRewards?.every((item) => {
     if (!snapshotObject(item)) return false;
+    const report = castSalesReports?.find((report) => report.id === item.id);
+    if (!validSnapshotCastAdditions(item) || additionalCastKeys.some((key) => Number(item[key] || 0) !== Number(report?.totals[key] || 0))
+      || Number(item.additionalTransportFee || 0) > Number(item.transportFee)) return false;
     if (item.appliedHourlyRates !== undefined) {
       if (!Array.isArray(item.appliedHourlyRates) && !snapshotObject(item.appliedHourlyRates)) return false;
       const rates = snapshotList<unknown>(item.appliedHourlyRates);
@@ -472,7 +517,7 @@ export function normalizeMonthlyAccountingSnapshot(
       && item.hourlyAndBack === Number(item.hourlyPay) + Number(item.honShimeiBack) + Number(item.banaiShimeiBack)
         + Number(item.dohanBack) + Number(item.bottleBack) + Number(item.drinkBack)
       && item.adoptedReward === Math.max(Number(item.hourlyAndBack), Number(item.salesReward))
-      && item.grossPay === Number(item.adoptedReward) + Number(item.beautyAllowance)
+      && item.grossPay === Number(item.adoptedReward) + Number(item.beautyAllowance) + Number(item.additionalAllowance || 0)
       && item.netPay === Number(item.grossPay) - Number(item.dailyPayment) - Number(item.advancePayment)
         - Number(item.transportFee) - Number(item.withholding);
   }));
@@ -1209,6 +1254,13 @@ function introducerDeletionCommitConsistencyIssues(
   return [...new Set([...omittedIssues, ...synchronizationIssues])];
 }
 
+function castAccountingAmountIssues(rewards: CastReward[]): string[] {
+  return rewards.filter((reward) => additionalCastKeys.some((key) => reward[key] !== undefined)
+    && [reward.hourlyAndBack, reward.salesRewardBase, reward.salesReward, reward.adoptedReward,
+      reward.grossPay, reward.transportFee, reward.netPay].some((amount) => !Number.isSafeInteger(amount)))
+    .map((reward) => `${reward.name}のキャストデータ入力を反映した計算額が処理可能な範囲を超えています。入力金額を確認してください。`);
+}
+
 export function calculateMonthlyAccounting(
   data: WorkspaceData & { archivedCasts?: CastRecord[]; archivedStaff?: StaffRecord[]; introducerMonthEvents?: IntroducerMonthEvent[]; introducerDeletionCommits?: IntroducerDeletionCommit[] },
   month: string,
@@ -1277,6 +1329,8 @@ export function calculateMonthlyAccounting(
     balance: { ...balanceWithoutProfit, totalCosts, profit: sales.total - totalCosts },
     cashFunding,
     warnings: [...new Set([
+      ...resolveCastAccountingInputs(adjustments, calculationData.closings, calculationData.casts, month).issues,
+      ...castAccountingAmountIssues(castRewards),
       ...monthlyAccountingWarnings(approved, calculationData.casts, month, calculationData.staff),
       ...cashLedgerIssues(calculationData.closings, month),
       ...cashFundingWarnings,
@@ -1371,6 +1425,8 @@ export function canFinalizeMonthlyAccounting(
     .filter(([, count]) => count > 1)
     .map(([businessDate]) => `${businessDate}の承認済み日次データが複数あります。重複データを差し戻してから確定してください。`);
   const integrityIssues = [
+    ...resolveCastAccountingInputs(adjustments, calculationData.closings, calculationData.casts, month).issues,
+    ...castAccountingAmountIssues(castRewards),
     ...approved.flatMap((row) => row.integrityIssues || []),
     ...cashLedgerIssues(calculationData.closings, month),
     ...duplicateBusinessDates,

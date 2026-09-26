@@ -37,6 +37,7 @@ type View =
   | "home"
   | "store"
   | "approval"
+  | "castInputs"
   | "castSales"
   | "castRewards"
   | "introducersPay"
@@ -139,6 +140,13 @@ const viewInfo: Record<
     label: "受信・承認",
     title: "店舗データ確認",
     description: "店舗から送信された日次データを承認または差し戻します。",
+    roles: ["accounting", "op"],
+  },
+  castInputs: {
+    group: "経理作業",
+    label: "キャストデータ入力",
+    title: "キャストデータ入力",
+    description: "在籍キャストの売上・手当・追加送迎を名目別に登録します。",
     roles: ["accounting", "op"],
   },
   castSales: {
@@ -432,10 +440,10 @@ export function AccountingApp() {
         </Card>
       </main>
     );
-  const permitted = viewInfo[view].roles.includes(role);
+  const permitted = viewInfo[view].roles.includes(role) && (view !== "castInputs" || !isProductionEnvironment());
   const info = permitted ? viewInfo[view] : viewInfo.home;
   const navigateTo = (nextView: View) => {
-    if (nextView === view) return;
+    if (nextView === view || nextView === "castInputs" && isProductionEnvironment()) return;
     if (pageDirty && !window.confirm("未保存の入力があります。破棄して別のページへ移動しますか？")) return;
     setView(nextView);
   };
@@ -477,6 +485,7 @@ export function AccountingApp() {
   const accountingSection = (
     [
       "approval",
+      "castInputs",
       "castSales",
       "castRewards",
       "introducersPay",
@@ -493,7 +502,7 @@ export function AccountingApp() {
 
   return (
     <UpdateDraftProvider userId={user.uid} environment={environmentRoot()} view={view} onRestoreView={(restored) => {
-      if (!Object.hasOwn(viewInfo, restored) || !viewInfo[restored as View].roles.includes(role)) throw new Error("退避された画面への権限を確認できません。入力は退避したままです。");
+      if (!Object.hasOwn(viewInfo, restored) || !viewInfo[restored as View].roles.includes(role) || restored === "castInputs" && isProductionEnvironment()) throw new Error("退避された画面への権限を確認できません。入力は退避したままです。");
       setView(restored as View);
       setNotice({ kind: "success", text: "更新前の入力を復元しました。内容を確認してから保存してください。自動保存・送信はしていません。" });
     }}>
@@ -520,7 +529,7 @@ export function AccountingApp() {
             const rows = (Object.keys(viewInfo) as View[]).filter(
               (key) =>
                 viewInfo[key].group === group &&
-                viewInfo[key].roles.includes(role),
+                viewInfo[key].roles.includes(role) && (key !== "castInputs" || !isProductionEnvironment()),
             );
             return rows.length ? (
               <div className="nav-group" key={group}>
@@ -617,6 +626,7 @@ export function AccountingApp() {
                   section={
                     (view === "introducersPay" ? "introducers" : view) as
                       | "approval"
+                      | "castInputs"
                       | "castSales"
                       | "castRewards"
                       | "introducers"

@@ -13,7 +13,7 @@ const layouts = {
   hourlyAndBack: { ...receiptLayouts.hourlyAndBack, nameCell: "G10", cells: new Set(["G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G10"]) },
   salesReward: { ...receiptLayouts.salesReward, nameCell: "G9", cells: new Set(["B2", "G1", "G2", "G3", "G4", "G5", "G6", "G7", "G9"]) },
 } as const;
-const statementCells = new Set(["D3", "F4", "E5", "F6", "F7", "F8", "F9", "F10", "F11", "F12", "F13", "F14", "F15", "F18", "F19", "F20", "F21", "F22", "F25", "F26"]);
+const statementCells = new Set(["D3", "F4", "E5", "F6", "F7", "F8", "F9", "F10", "F11", "F12", "F13", "F14", "B15", "F15", "F18", "F19", "F20", "F21", "F22", "F25", "F26"]);
 
 /** 元様式のセル名から、個別帳票の行高を保持した出力行へ対応付ける。 */
 export function receiptCellAddress(template: ReceiptSheet["template"], section: ReceiptDocument, address: string) {

@@ -41,6 +41,7 @@ export type BalanceExportReport = {
   castNet: number;
   employeeDaily: number;
   honShimeiSales: number;
+  additionalSales?: number;
   jonaiExtensionSales: number;
   /** 損益には含めず、現状現金残高だけに加減する。旧確定分には後付けしない。 */
   cashFunding?: CashFundingSummary;
@@ -229,7 +230,8 @@ export function buildBalanceExportReport(input: BalanceExportInput): BalanceExpo
   same(castDailyAndAdvance, sum(approved, (closing) => sum(closing.casts,
     (cast) => amount(cast.dailyPayment, "キャスト日払い") + amount(cast.advancePayment, "キャスト立替"))),
   "キャスト日払い・立替合計");
-  same(castTransport, sum(approved, (closing) => sum(closing.casts, (cast) => amount(cast.transportFee, "キャスト送迎控除"))),
+  same(castTransport, sum(approved, (closing) => sum(closing.casts, (cast) => amount(cast.transportFee, "キャスト送迎控除")))
+    + sum(results.castRewards, (reward) => amount(reward.additionalTransportFee ?? 0, "キャスト追加送迎控除")),
     "キャスト送迎控除合計");
   // スタッフ/ドライバーの日払い控除後給与と日払いを別々に引き、派遣支払も各1回だけ引く。
   const expandedCash = results.sales.cash - castNet - castWithholding - results.balance.introducer
@@ -241,6 +243,7 @@ export function buildBalanceExportReport(input: BalanceExportInput): BalanceExpo
     month, days, approvedDays: results.approvedDays,
     castDailyAndAdvance, castTransport, castWithholding, castNet, employeeDaily,
     honShimeiSales: sum(results.castRewards, (row) => amount(row.honShimeiSales, "キャスト本指名売上")),
+    additionalSales: sum(results.castRewards, (row) => amount(row.additionalSales ?? 0, "キャスト追加売上")),
     jonaiExtensionSales: sum(results.castRewards, (row) => amount(row.jonaiExtensionSales, "キャスト場内延長売上")),
     ...(cashFunding ? { cashFunding } : {}),
   };

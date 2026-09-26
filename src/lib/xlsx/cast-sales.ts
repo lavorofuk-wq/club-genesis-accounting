@@ -3,6 +3,7 @@
 import ExcelJS from "exceljs/dist/exceljs.min.js";
 import type { CastReward, CastSalesDay, CastSalesReport } from "@/domain/gms";
 import type { MonthlyAccountingResults } from "@/domain/month-accounting";
+import { additionalCastAmounts } from "@/domain/cast-input-export";
 
 const amountFormat = '#,##0;[Red]-#,##0;0';
 const font = { name: "Yu Gothic", size: 10 };
@@ -29,10 +30,11 @@ function validateReport(report: CastSalesReport, reward: CastReward) {
   // 新規計算は10円単位だが、確定済みスナップショットには旧仕様の333円等が残る。
   // 帳票では保存済み結果を再計算しないため、金額は安全な整数と合計整合だけを検証する。
   for (const row of [...report.days, report.totals]) {
+    const additional = additionalCastAmounts(row);
     if (dailyNumberKeys.some((key) => !Number.isFinite(row[key]) || row[key] < 0)
       || row.backs.some((item) => !Number.isSafeInteger(item.amount) || item.amount < 0)
       || new Set(row.backs.map((item) => item.key)).size !== row.backs.length
-      || !closeEnough(row.totalSales, row.honShimeiSales + row.jonaiExtensionSales)
+      || !closeEnough(row.totalSales, row.honShimeiSales + row.jonaiExtensionSales + additional.sales)
       || !closeEnough(row.totalLiquorCost, row.honShimeiLiquorCost + row.jonaiExtensionLiquorCost)
       || !closeEnough(row.backTotal, row.backs.reduce((sum, item) => sum + item.amount, 0))) fail();
     if (row.bottleBackByKind && (!Number.isSafeInteger(row.bottleBackByKind.keepBottle)
@@ -51,8 +53,13 @@ function validateReport(report: CastSalesReport, reward: CastReward) {
     || !Number.isFinite(reward.rewardRate) || reward.rewardRate < 0 || reward.rewardRate > 1
     || !closeEnough(reward.hourlyAndBack, reward.hourlyPay + reward.honShimeiBack + reward.banaiShimeiBack + reward.dohanBack + reward.bottleBack + reward.drinkBack)
     || !closeEnough(reward.adoptedReward, reward.adoptedSystem === "hourlyAndBack" ? reward.hourlyAndBack : reward.salesReward)
-    || !closeEnough(reward.grossPay, reward.adoptedReward + reward.beautyAllowance)
+    || !closeEnough(reward.grossPay, reward.adoptedReward + reward.beautyAllowance + additionalCastAmounts(reward).allowance)
     || !closeEnough(reward.netPay, reward.grossPay - reward.dailyPayment - reward.advancePayment - reward.transportFee - reward.withholding)) fail();
+  for (const key of ["sales", "allowance", "transport"] as const) {
+    const monthly = additionalCastAmounts(report.totals)[key];
+    if (monthly !== additionalCastAmounts(reward)[key]
+      || monthly !== report.days.reduce((sum, day) => sum + additionalCastAmounts(day)[key], 0)) fail();
+  }
 }
 
 function safeSheetName(name: string, used: Set<string>) {
@@ -91,12 +98,13 @@ function addPayroll(sheet: ExcelJS.Worksheet, reward: CastReward, report: CastSa
   mergeValue(sheet, "R35:V35", `売上報酬${!reward.rewardRate ? "（対象外）" : hourlyAdopted ? "（比較用）" : "（採用）"}`);
   const deductions = reward.dailyPayment + reward.advancePayment + reward.transportFee;
   const totalBack = reward.honShimeiBack + reward.banaiShimeiBack + reward.dohanBack + reward.bottleBack + reward.drinkBack;
-  const hourlyGross = reward.hourlyAndBack + reward.beautyAllowance;
-  const salesGross = reward.salesReward + reward.beautyAllowance;
+  const allowances = reward.beautyAllowance + additionalCastAmounts(reward).allowance;
+  const hourlyGross = reward.hourlyAndBack + allowances;
+  const salesGross = reward.salesReward + allowances;
   const left: Array<[string, ExcelJS.CellValue]> = [
     ["① 時給 計", reward.hourlyPay],
     ["② 総バック 計", totalBack],
-    ["③ 美容室・手当て等", reward.beautyAllowance],
+    ["③ 美容室・手当て等", allowances],
     ["④ 総支給額", { formula: "SUM(I36:I38)", result: hourlyGross }],
     ["⑤ 日払い・その他", deductions],
     ["⑥ 源泉所得税", reward.withholding],
@@ -104,7 +112,7 @@ function addPayroll(sheet: ExcelJS.Worksheet, reward: CastReward, report: CastSa
   ];
   const right: Array<[string, ExcelJS.CellValue]> = [
     [reward.rewardRate ? `① 売上報酬（売上－酒代×50%）×${Math.round(reward.rewardRate * 100)}%` : "① 売上報酬（対象外）", reward.salesReward],
-    ["② 美容室・手当て等", reward.beautyAllowance],
+    ["② 美容室・手当て等", allowances],
     ["③ 総支給額", { formula: "SUM(U36:U37)", result: salesGross }],
     ["④ 日払い・その他", deductions],
     ["⑤ 源泉所得税", reward.withholding],
@@ -155,7 +163,7 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error("対象月を選択してください。");
   if (!results.castSalesReports.length) throw new Error("対象月の承認済みキャスト売上がありません。");
   const book = new ExcelJS.Workbook();
-  book.creator = "GENESIS Management System Ver2.36.0";
+  book.creator = "GENESIS Management System Ver2.37.0";
   book.created = new Date();
   book.calcProperties.fullCalcOnLoad = true;
   const used = new Set<string>();
@@ -266,6 +274,52 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
       sumCell(sheet, "Q", report.days.reduce((sum, day) => sum + day.bottleBackByKind!.champagneWine, 0));
     }
     addPayroll(sheet, reward, report);
+    addAccountingInputs(sheet, report);
   }
   return book;
+}
+
+/** 既存の日次表を崩さず、任意名目を同じキャストのシート下部へ全件表示する。 */
+function addAccountingInputs(sheet: ExcelJS.Worksheet, report: CastSalesReport) {
+  const entries = report.days.flatMap((day) => (day.accountingInputs || []).map((entry) => ({ ...entry, businessDate: day.businessDate })));
+  const totals = additionalCastAmounts(report.totals);
+  if (!entries.length) {
+    if (totals.sales || totals.allowance || totals.transport) throw new Error(`${report.name}の追加売上・手当・送迎の明細がありません。`);
+    return;
+  }
+  const labels = { sales: "追加売上", allowance: "追加手当", transport: "追加送迎控除" };
+  const seen = new Set<string>();
+  const sums = { sales: 0, allowance: 0, transport: 0 };
+  entries.forEach((entry) => {
+    if (!entry.id || seen.has(entry.id) || !Object.hasOwn(labels, entry.kind) || !entry.label?.trim()
+      || !Number.isSafeInteger(entry.amount) || entry.amount < 0) throw new Error(`${report.name}の経理入力明細が不正です。`);
+    seen.add(entry.id);
+    sums[entry.kind] += entry.amount;
+  });
+  for (const kind of ["sales", "allowance", "transport"] as const) {
+    if (sums[kind] !== totals[kind]) throw new Error(`${report.name}の${labels[kind]}の明細と合計が一致しません。`);
+  }
+  mergeValue(sheet, "B47:V47", "キャストデータ入力 明細（追加売上は店舗売上に含みません）");
+  sheet.getRow(47).font = { ...font, bold: true };
+  sheet.getRow(47).height = 24;
+  const lines = [
+    ["営業日", "区分", "名目", "金額"],
+    ...entries.sort((a, b) => a.businessDate.localeCompare(b.businessDate) || a.id.localeCompare(b.id))
+      .map((entry) => [entry.businessDate, labels[entry.kind], entry.label, entry.amount]),
+    ...(["sales", "allowance", "transport"] as const).map((kind) => ["合計", labels[kind], "", sums[kind]]),
+  ];
+  lines.forEach((values, index) => {
+    const row = 48 + index;
+    for (const [range, value] of [[`B${row}:E${row}`, values[0]], [`F${row}:I${row}`, values[1]],
+      [`J${row}:R${row}`, values[2]], [`S${row}:V${row}`, values[3]]] as const) mergeValue(sheet, range, value);
+    sheet.getRow(row).height = Math.max(23, Math.ceil(String(values[2]).length / 45) * 16);
+    for (let col = 2; col <= 22; col++) {
+      const cell = sheet.getCell(row, col);
+      cell.font = { ...font, bold: index === 0 || index > entries.length };
+      cell.alignment = { vertical: "middle", horizontal: col >= 19 ? "right" : "left", wrapText: true };
+      cell.border = border;
+      cell.numFmt = amountFormat;
+    }
+  });
+  sheet.pageSetup.printArea = `B1:V${47 + lines.length}`;
 }

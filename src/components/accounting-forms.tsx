@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { User } from "firebase/auth";
 import { secureRandomUUID } from "@/lib/crypto-compat";
-import type { CashReconciliation, CastReward, CastSalesBackBreakdown, CastSalesBottleSummary, CastSalesReport, DailyClosing, LegacyBottleClassification, MonthlyAdjustments } from "@/domain/gms";
+import type { CashReconciliation, CastAccountingInput, ResolvedCastAccountingInput, CastReward, CastSalesBackBreakdown, CastSalesBottleSummary, CastSalesReport, DailyClosing, LegacyBottleClassification, MonthlyAdjustments } from "@/domain/gms";
 import { findUnclassifiedLegacyBottles, normalizeMonthlyAdjustments } from "@/domain/gms";
 import { validateExpenseExport, type ExpenseExportInput } from "@/domain/expense-export";
 import { buildBalanceExportReport, type BalanceExportInput } from "@/domain/balance-export";
@@ -19,9 +19,10 @@ import { cashDayIssues, cashFundingIssues, cashLedgerIssues, type CashFundingSum
 import { IntroducerPayments } from "./introducer-payments";
 import { CastReceiptExport } from "./cast-receipt-export";
 import { IntroducerStatementExport } from "./introducer-statement-export";
+import { CastAccountingInputs } from "./cast-accounting-inputs";
 
 type Props = { data: AccountingWorkspaceData; user: User; busy: boolean; run: (action: () => Promise<unknown>, message: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void };
-type Section = "approval" | "castSales" | "castRewards" | "introducers" | "staffPayroll" | "driverPayroll" | "expenses" | "balance";
+type Section = "approval" | "castInputs" | "castSales" | "castRewards" | "introducers" | "staffPayroll" | "driverPayroll" | "expenses" | "balance";
 
 const statusLabel = { submitted: "確認待ち", returned: "差戻し中", approved: "承認済み", withdrawn: "店舗編集中（取下げ）" } as const;
 const expenseLabels: Record<string, string> = { beautyTrial: "美容室手当", introduction: "紹介料", advertising: "広告等", supplies: "備品・消耗品他", entertainment: "交際費・プレゼント等", liquor: "酒代", transportOther: "交通費・その他" };
@@ -29,6 +30,7 @@ const classificationLabels: Record<LegacyBottleClassification, string> = { honSh
 
 export function AccountingForms({ section, ...props }: Props & { section: Section }) {
   if (section === "approval") return <ApprovalView {...props} />;
+  if (section === "castInputs") return <CastAccountingInputs {...props} />;
   return <MonthlyAccounting section={section} {...props} />;
 }
 
@@ -182,22 +184,31 @@ export function ClosingCastProductDetails({
   </>;
 }
 
-function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Props & { section: Exclude<Section, "approval"> }) {
+function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Props & { section: Exclude<Section, "approval" | "castInputs"> }) {
   const [month, setMonth] = useRecoverableState("accounting.monthly.month", currentMonth());
   const stored = data.adjustments.find((row) => row.month === month);
   const [adjustments, setAdjustments] = useRecoverableState<MonthlyAdjustments>("accounting.monthly.adjustments", () => blankAdjustments(month, stored));
-  const loadedAdjustments = useRef({ month, rows: data.adjustments });
+  const loadedAdjustments = useRef({ month, rows: data.adjustments, value: blankAdjustments(month, stored) });
   useEffect(() => {
-    // A restored draft keeps its original revision; do not replace it on mount.
-    if (loadedAdjustments.current.month === month && loadedAdjustments.current.rows === data.adjustments) return;
-    loadedAdjustments.current = { month, rows: data.adjustments };
-    setAdjustments(blankAdjustments(month, data.adjustments.find((row) => row.month === month)));
+    const previous = loadedAdjustments.current;
+    if (previous.month === month && previous.rows === data.adjustments) return;
+    const next = blankAdjustments(month, data.adjustments.find((row) => row.month === month));
+    loadedAdjustments.current = { month, rows: data.adjustments, value: next };
+    setAdjustments((current) => {
+      if (previous.month !== month) return next;
+      // Preserve unsaved input when another account saves the common monthly revision.
+      // A successful save of this exact payload may adopt the new server revision.
+      if (adjustmentSignature(current) === adjustmentSignature(previous.value)
+        || adjustmentSignature(current) === adjustmentSignature(next)) return next;
+      return current;
+    });
   }, [data.adjustments, month, setAdjustments]);
   const state = data.monthStates.find((row) => row.month === month);
   const closed = state?.status === "closed";
   const currentSnapshot = closed ? data.monthSnapshots.find((row) => row.month === month && row.revision === state.currentSnapshotRevision) : undefined;
   const storedAdjustments = blankAdjustments(month, stored);
   const adjustmentsDirty = adjustmentSignature(adjustments) !== adjustmentSignature(storedAdjustments);
+  const adjustmentsStale = !closed && (adjustments.revision || 0) !== (storedAdjustments.revision || 0);
   useEffect(() => {
     onDirtyChange?.(adjustmentsDirty);
     return () => onDirtyChange?.(false);
@@ -212,9 +223,9 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
   const finalizeCheck = canFinalizeMonthlyAccounting(data, month, adjustments, true);
   const monthlyCashProblems = closed ? [] : cashLedgerIssues(data.closings, month);
   const setMap = (key: "withholdingByCast" | "staffSalesAllowance" | "staffBottleAllowance" | "driverRemoteAllowance", id: string, value: number) => setAdjustments((row) => ({ ...row, [key]: { ...row[key], [id]: value } }));
-  const save = () => run(() => saveMonthlyAdjustments(adjustments, user), `${month}の経理入力を保存しました。`);
+  const save = () => adjustmentsStale ? Promise.resolve(false) : run(() => saveMonthlyAdjustments(adjustments, user), `${month}の経理入力を保存しました。`);
   const finalize = () => {
-    if (adjustmentsDirty || calculationsBlocked || !finalizeCheck.allowed) return;
+    if (adjustmentsDirty || adjustmentsStale || calculationsBlocked || !finalizeCheck.allowed) return;
     if (!window.confirm(`${month}を月次確定しますか？\n確定後は日次承認・差戻し・経理入力を変更できません。`)) return;
     void run(async () => {
       const fingerprint = await monthlySourceFingerprint(data, month, adjustments, data.introducerEntryEvents);
@@ -237,7 +248,8 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
     setMonth(nextMonth);
   };
   return <div className="grid">
-    <Card><div className="month-toolbar"><Field label="対象月"><input className="input" type="month" value={month} onChange={(event) => changeMonth(event.target.value)} /></Field><span>承認済み営業日 <strong>{results?.approvedDays ?? approved.length}日</strong></span>{state?.status === "closed" ? <StatusPill tone="good">月次確定済み 第{state.currentSnapshotRevision}版</StatusPill> : state?.status === "closing" ? <StatusPill tone="warn">月次確定処理中</StatusPill> : <StatusPill>未確定</StatusPill>}{!closed && state?.status !== "closing" && (section !== "castSales" || adjustmentsDirty) && <button className="button" disabled={busy || !adjustmentsDirty} onClick={() => void save()}>経理入力を保存</button>}{!closed && state?.status !== "closing" && <button className="button secondary" disabled={busy || adjustmentsDirty || calculationsBlocked || !finalizeCheck.allowed} onClick={finalize}>月次確定</button>}{state?.status === "closing" && <button className="button danger" disabled={busy} onClick={cancelClosing}>確定処理を中止</button>}{closed && <button className="button danger" disabled={busy} onClick={reopen}>確定解除</button>}</div></Card>
+    <Card><div className="month-toolbar"><Field label="対象月"><input className="input" type="month" value={month} onChange={(event) => changeMonth(event.target.value)} /></Field><span>承認済み営業日 <strong>{results?.approvedDays ?? approved.length}日</strong></span>{state?.status === "closed" ? <StatusPill tone="good">月次確定済み 第{state.currentSnapshotRevision}版</StatusPill> : state?.status === "closing" ? <StatusPill tone="warn">月次確定処理中</StatusPill> : <StatusPill>未確定</StatusPill>}{!closed && state?.status !== "closing" && (section !== "castSales" || adjustmentsDirty) && <button className="button" disabled={busy || adjustmentsStale || !adjustmentsDirty} onClick={() => void save()}>経理入力を保存</button>}{!closed && state?.status !== "closing" && <button className="button secondary" disabled={busy || adjustmentsDirty || adjustmentsStale || calculationsBlocked || !finalizeCheck.allowed} onClick={finalize}>月次確定</button>}{state?.status === "closing" && <button className="button danger" disabled={busy} onClick={cancelClosing}>確定処理を中止</button>}{closed && <button className="button danger" disabled={busy} onClick={reopen}>確定解除</button>}</div></Card>
+    {adjustmentsStale && <div className="notice error" role="alert">別の操作で対象月の入力が更新されています。未保存の入力は保持しています。古い版からの上書きを防ぐため、保存・確定・出力を停止しています。<button className="button secondary mini top-gap" disabled={busy} onClick={() => { if (window.confirm("未保存の経理入力を破棄して、最新の対象月データを読み込みますか？")) setAdjustments(storedAdjustments); }}>未保存入力を破棄して最新データを表示</button></div>}
     {state?.status === "closing" && <div className="notice error">月次確定処理中です。画面を更新しても解消しない場合は、処理を行った担当者と通信状態を確認してください。</div>}
     {!closed && finalizeCheck.unresolvedDaily.length > 0 && <div className="notice error"><strong>未承認・差戻し中・店舗編集中の日次データがあるため月次確定できません。</strong><ul>{finalizeCheck.unresolvedDaily.map((row) => <li key={row.id}>{row.businessDate}：{statusLabel[row.status]}</li>)}</ul></div>}
     {monthlyCashProblems.length > 0 && <div className="notice error"><strong>現金補充・返済の未入力または前営業日との不整合があります。</strong><p>該当日を日付順に再確認してください。補充・返済額や後続日の支払実績は自動補完・変更しません。</p><ul>{monthlyCashProblems.map((issue) => <li key={issue}>{issue}</li>)}</ul></div>}
@@ -250,6 +262,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
       results={results} month={month}
       sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
       disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"
+        : adjustmentsStale ? "別の操作で月次入力が更新されています。最新データを確認してください。"
         : adjustmentsDirty ? "未保存の経理入力を保存してください。"
         : calculationsBlocked ? "ボトル区分を確認して保存してください。"
         : !results ? "出力する月次データを読み込めません。"
@@ -260,6 +273,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
       rows={results?.castRewards} casts={data.casts} month={month}
       sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
       disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"
+        : adjustmentsStale ? "別の操作で月次入力が更新されています。最新データを確認してください。"
         : adjustmentsDirty ? "未保存の経理入力を保存してください。"
         : calculationsBlocked ? "ボトル区分を確認して保存してください。"
         : !results ? "出力する月次データを読み込めません。"
@@ -269,6 +283,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
       results={results} month={month}
       sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
       disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"
+        : adjustmentsStale ? "別の操作で月次入力が更新されています。最新データを確認してください。"
         : adjustmentsDirty ? "未保存の経理入力を保存してください。"
         : calculationsBlocked ? "ボトル区分を確認して保存してください。"
         : !results ? "出力する月次データを読み込めません。"
@@ -279,6 +294,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
       month={month}
       sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
       disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"
+        : adjustmentsStale ? "別の操作で月次入力が更新されています。最新データを確認してください。"
         : adjustmentsDirty ? "未保存の経理入力を保存してください。"
         : calculationsBlocked ? "ボトル区分を確認して保存してください。"
         : !results ? "出力する月次データを読み込めません。"
@@ -289,13 +305,14 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
       month={month}
       sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
       disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"
+        : adjustmentsStale ? "別の操作で月次入力が更新されています。最新データを確認してください。"
         : adjustmentsDirty ? "未保存の経理入力を保存してください。"
         : calculationsBlocked ? "ボトル区分を確認して保存してください。"
         : !results ? "出力する月次データを読み込めません。"
         : results.warnings.length || (!closed && finalizeCheck.integrityIssues.length) ? "データの警告を解消してから出力してください。" : ""}
     />}
     {results && section === "castSales" && <CastSalesReports rows={results.castSalesReports} month={month} />}
-    {results && section === "castRewards" && <CastRewards rows={results.castRewards} disabled={busy || locked} onWithholding={(id, value) => setMap("withholdingByCast", id, value)} />}
+    {results && section === "castRewards" && <CastRewards rows={results.castRewards} reports={results.castSalesReports} disabled={busy || locked} onWithholding={(id, value) => setMap("withholdingByCast", id, value)} />}
     {results && section === "introducers" && <IntroducerPayments key={month} rows={results.introducerPayments} castRewards={results.castRewards} />}
     {results && section === "staffPayroll" && <StaffPayroll rows={results.staffPayroll} disabled={busy || locked} onSales={(id, value) => setMap("staffSalesAllowance", id, value)} onBottle={(id, value) => setMap("staffBottleAllowance", id, value)} />}
     {results && section === "driverPayroll" && <DriverPayroll rows={results.driverPayroll} disabled={busy || locked} onRemote={(id, value) => setMap("driverRemoteAllowance", id, value)} />}
@@ -439,30 +456,44 @@ const businessDateLabel = (value: string) => { const [, month, day] = value.spli
 function BackBreakdown({ rows }: { rows: CastSalesBackBreakdown[] }) { return <div className="back-breakdown">{rows.map((row) => <span key={row.key}><small>{row.label}</small><strong>{yen.format(row.amount)}</strong></span>)}</div>; }
 function BottleSummary({ rows }: { rows: CastSalesBottleSummary[] }) { return rows.length ? <div className="bottle-summary">{rows.map((row) => <span key={row.name}>{row.name}<small>×{row.quantity}</small></span>)}</div> : <>—</>; }
 
+function CastInputBreakdown({ rows = [], kind, total = 0 }: { rows?: ResolvedCastAccountingInput[]; kind: CastAccountingInput["kind"]; total?: number }) {
+  const inputs = rows.filter((row) => row.kind === kind);
+  if (!inputs.length) return <>{yen.format(total)}</>;
+  return <div className="back-breakdown">{inputs.map((row) => <span key={row.id}><small>{row.label}</small><strong>{yen.format(row.amount)}</strong></span>)}<span className="cell-total"><small>計</small><strong>{yen.format(total)}</strong></span></div>;
+}
+
+function CastRewardInputDetails({ rows, reports = [] }: { rows: CastReward[]; reports?: CastSalesReport[] }) {
+  const items = rows.flatMap((cast) => (reports.find((report) => report.id === cast.id)?.totals.accountingInputs || []).map((input) => ({ castName: cast.name, input })));
+  if (!items.length) return null;
+  return <details className="top-gap"><summary>売上・手当・追加送迎の名目別明細</summary><Table headers={["キャスト", "計上日", "区分", "名目", "金額"]}>{items.map(({ castName, input }) => <tr key={input.id}><td>{castName}</td><td>{businessDateLabel(input.businessDate)}</td><td>{{ sales: "追加売上", allowance: "追加手当", transport: "追加送迎" }[input.kind]}</td><td className="wrap-cell">{input.label}</td><td>{yen.format(input.amount)}</td></tr>)}</Table></details>;
+}
+
 function CastSalesReports({ rows, month }: { rows: CastSalesReport[]; month: string }) {
   const totals = rows.reduce((result, row) => ({ attendanceDays: result.attendanceDays + row.attendanceDays, sales: result.sales + row.totals.totalSales, liquorCost: result.liquorCost + row.totals.totalLiquorCost, backs: result.backs + row.totals.backTotal }), { attendanceDays: 0, sales: 0, liquorCost: 0, backs: 0 });
   if (!rows.length) return <Card title="キャスト売上" description={`${month}の承認済みキャスト売上はありません。`}><div className="notice">店舗送信データを承認すると、この画面へ反映されます。</div></Card>;
-  return <div className="grid cast-sales-report"><div className="grid metrics"><Metric label="対象キャスト" value={`${rows.length}名`} /><Metric label="延べ出勤" value={`${totals.attendanceDays}日`} /><Metric label="キャスト合計売上" value={yen.format(totals.sales)} /><Metric label="バック合計" value={yen.format(totals.backs)} /></div>{rows.map((report, index) => <details className="card cast-sales-card" key={report.id} open={index === 0}><summary className="cast-sales-summary"><strong>{report.name}</strong><span>{report.totals.attendanceDays}日 / {report.totals.hours}時間</span><span>合計売上 <b>{yen.format(report.totals.totalSales)}</b></span><span>バック <b>{yen.format(report.totals.backTotal)}</b></span></summary><div className="cast-sales-content"><Table headers={["出勤日", "出勤時刻", "退勤時刻", "勤務時間", "本指名売上", "場内延長売上", "合計売上", "本指名酒代原価", "場内延長酒代原価", "合計酒代原価", "本指名/場内指名", "同伴", "各種バック", "ボトル銘柄", "美容室手当"]}>{report.days.map((day) => <tr key={`${report.id}-${day.businessDate}`}><td>{businessDateLabel(day.businessDate)}</td><td>{day.startTime || "—"}</td><td>{day.endTime || "—"}</td><td>{day.hours}時間</td><td>{yen.format(day.honShimeiSales)}</td><td>{yen.format(day.jonaiExtensionSales)}</td><td><strong>{yen.format(day.totalSales)}</strong></td><td>{yen.format(day.honShimeiLiquorCost)}</td><td>{yen.format(day.jonaiExtensionLiquorCost)}</td><td>{yen.format(day.totalLiquorCost)}</td><td>{day.honShimeiCount}本 / {day.banaiShimeiCount}本<br /><small>計 {day.nominationCount}本</small></td><td>{day.dohanCount}本</td><td className="wrap-cell"><BackBreakdown rows={day.backs} /><div className="cell-total">計 {yen.format(day.backTotal)}</div></td><td className="wrap-cell"><BottleSummary rows={day.bottles} /></td><td>{day.beautyAllowance > 0 ? <><StatusPill tone="good">あり</StatusPill><br />{yen.format(day.beautyAllowance)}</> : "なし"}</td></tr>)}<tr className="total-row"><td>{month} 合計<br /><strong>{report.totals.attendanceDays}日</strong></td><td>—</td><td>—</td><td>{report.totals.hours}時間</td><td>{yen.format(report.totals.honShimeiSales)}</td><td>{yen.format(report.totals.jonaiExtensionSales)}</td><td><strong>{yen.format(report.totals.totalSales)}</strong></td><td>{yen.format(report.totals.honShimeiLiquorCost)}</td><td>{yen.format(report.totals.jonaiExtensionLiquorCost)}</td><td>{yen.format(report.totals.totalLiquorCost)}</td><td>{report.totals.honShimeiCount}本 / {report.totals.banaiShimeiCount}本<br /><small>計 {report.totals.nominationCount}本</small></td><td>{report.totals.dohanCount}本</td><td className="wrap-cell"><BackBreakdown rows={report.totals.backs} /><div className="cell-total">計 {yen.format(report.totals.backTotal)}</div></td><td className="wrap-cell"><BottleSummary rows={report.totals.bottles} /></td><td>{report.days.filter((day) => day.beautyAllowance > 0).length}日<br />{yen.format(report.totals.beautyAllowance)}</td></tr></Table></div></details>)}</div>;
+  return <div className="grid cast-sales-report"><div className="grid metrics"><Metric label="対象キャスト" value={`${rows.length}名`} /><Metric label="延べ出勤" value={`${totals.attendanceDays}日`} /><Metric label="キャスト合計売上" value={yen.format(totals.sales)} /><Metric label="バック合計" value={yen.format(totals.backs)} /></div>{rows.map((report, index) => <details className="card cast-sales-card" key={report.id} open={index === 0}><summary className="cast-sales-summary"><strong>{report.name}</strong><span>{report.totals.attendanceDays}日 / {report.totals.hours}時間</span><span>合計売上 <b>{yen.format(report.totals.totalSales)}</b></span><span>バック <b>{yen.format(report.totals.backTotal)}</b></span></summary><div className="cast-sales-content"><Table headers={["出勤日", "出勤時刻", "退勤時刻", "勤務時間", "本指名売上", "場内延長売上", "追加売上", "合計売上", "本指名酒代原価", "場内延長酒代原価", "合計酒代原価", "本指名/場内指名", "同伴", "各種バック", "ボトル銘柄", "美容室手当", "追加手当", "追加送迎"]}>{report.days.map((day) => <tr key={`${report.id}-${day.businessDate}`}><td>{businessDateLabel(day.businessDate)}</td><td>{day.startTime || "—"}</td><td>{day.endTime || "—"}</td><td>{day.hours}時間</td><td>{yen.format(day.honShimeiSales)}</td><td>{yen.format(day.jonaiExtensionSales)}</td><td className="wrap-cell"><CastInputBreakdown rows={day.accountingInputs} kind="sales" total={day.additionalSales} /></td><td><strong>{yen.format(day.totalSales)}</strong></td><td>{yen.format(day.honShimeiLiquorCost)}</td><td>{yen.format(day.jonaiExtensionLiquorCost)}</td><td>{yen.format(day.totalLiquorCost)}</td><td>{day.honShimeiCount}本 / {day.banaiShimeiCount}本<br /><small>計 {day.nominationCount}本</small></td><td>{day.dohanCount}本</td><td className="wrap-cell"><BackBreakdown rows={day.backs} /><div className="cell-total">計 {yen.format(day.backTotal)}</div></td><td className="wrap-cell"><BottleSummary rows={day.bottles} /></td><td>{day.beautyAllowance > 0 ? <><StatusPill tone="good">あり</StatusPill><br />{yen.format(day.beautyAllowance)}</> : "なし"}</td><td className="wrap-cell"><CastInputBreakdown rows={day.accountingInputs} kind="allowance" total={day.additionalAllowance} /></td><td className="wrap-cell"><CastInputBreakdown rows={day.accountingInputs} kind="transport" total={day.additionalTransportFee} /></td></tr>)}<tr className="total-row"><td>{month} 合計<br /><strong>{report.totals.attendanceDays}日</strong></td><td>—</td><td>—</td><td>{report.totals.hours}時間</td><td>{yen.format(report.totals.honShimeiSales)}</td><td>{yen.format(report.totals.jonaiExtensionSales)}</td><td>{yen.format(report.totals.additionalSales || 0)}</td><td><strong>{yen.format(report.totals.totalSales)}</strong></td><td>{yen.format(report.totals.honShimeiLiquorCost)}</td><td>{yen.format(report.totals.jonaiExtensionLiquorCost)}</td><td>{yen.format(report.totals.totalLiquorCost)}</td><td>{report.totals.honShimeiCount}本 / {report.totals.banaiShimeiCount}本<br /><small>計 {report.totals.nominationCount}本</small></td><td>{report.totals.dohanCount}本</td><td className="wrap-cell"><BackBreakdown rows={report.totals.backs} /><div className="cell-total">計 {yen.format(report.totals.backTotal)}</div></td><td className="wrap-cell"><BottleSummary rows={report.totals.bottles} /></td><td>{report.days.filter((day) => day.beautyAllowance > 0).length}日<br />{yen.format(report.totals.beautyAllowance)}</td><td>{yen.format(report.totals.additionalAllowance || 0)}</td><td>{yen.format(report.totals.additionalTransportFee || 0)}</td></tr></Table></div></details>)}</div>;
 }
 
-type CastRewardsProps = { rows: CastReward[]; disabled: boolean; onWithholding: (id: string, value: number) => void };
+type CastRewardsProps = { rows: CastReward[]; reports?: CastSalesReport[]; disabled: boolean; onWithholding: (id: string, value: number) => void };
 
-export function CastRewards({ rows, disabled, onWithholding }: CastRewardsProps) {
+export function CastRewards({ rows, reports, disabled, onWithholding }: CastRewardsProps) {
   // 現在のマスタ区分でなく、対象月の計算結果（確定月は保存値）で分類する。
   const regular = rows.filter((row) => !row.trialOnly);
   const trial = rows.filter((row) => row.trialOnly);
   return <div className="grid">
-    <Card title={`在籍キャスト報酬（${regular.length}名）`} description="時給＋各種バックと売上報酬を比較し、高い方へ美容室手当を加算します。同月に入店したキャストの体入分も、こちらにまとめています。">
+    <Card title={`在籍キャスト報酬（${regular.length}名）`} description="時給＋各種バックと売上報酬を比較し、高い方へ美容室手当・追加手当を加算します。同月に入店したキャストの体入分も、こちらにまとめています。">
       <CastRewardTable rows={regular} disabled={disabled} onWithholding={onWithholding} empty="当月の在籍キャスト報酬データはありません。" />
+      <CastRewardInputDetails rows={regular} reports={reports} />
     </Card>
     <Card title={`体入キャスト報酬（${trial.length}名）`} description="当月は体入時給のみが対象のキャストです。同月に入店したキャストは在籍側に表示します。">
       <CastRewardTable rows={trial} disabled={disabled} onWithholding={onWithholding} empty="当月の体入キャスト報酬データはありません。" />
+      <CastRewardInputDetails rows={trial} reports={reports} />
     </Card>
   </div>;
 }
 
 function CastRewardTable({ rows, disabled, onWithholding, empty }: CastRewardsProps & { empty: string }) {
-  return <Table empty={empty} headers={["キャスト", "勤務", "基本報酬", "指名・同伴内訳", "ボトル", "ドリンク", "酒代原価", "売上報酬", "採用", "美容室", "総支給", "日払・立替・送迎内訳", "源泉所得税", "差引支給"]}>{rows.map((row) => <tr key={row.id}>
+  return <Table empty={empty} headers={["キャスト", "勤務", "基本報酬", "指名・同伴内訳", "ボトル", "ドリンク", "酒代原価", "売上報酬", "採用", "美容室", "追加手当", "総支給", "日払・立替・送迎内訳", "源泉所得税", "差引支給"]}>{rows.map((row) => <tr key={row.id}>
     <td><strong>{row.name}</strong>{row.trialOnly && <><br /><StatusPill>体入時給のみ</StatusPill></>}</td>
     <td>{row.days}日 / {row.hours}時間</td>
     <td>{yen.format(row.hourlyPay)}</td>
@@ -470,11 +501,12 @@ function CastRewardTable({ rows, disabled, onWithholding, empty }: CastRewardsPr
     <td>{yen.format(row.bottleBack)}</td>
     <td>{yen.format(row.drinkBack)}</td>
     <td>{yen.format(row.liquorCost)}</td>
-    <td>{row.rewardRate ? `${Math.round(row.rewardRate * 100)}% / ${yen.format(row.salesReward)}` : "対象外"}</td>
+    <td>{row.rewardRate ? `${Math.round(row.rewardRate * 100)}% / ${yen.format(row.salesReward)}` : "対象外"}{Boolean(row.additionalSales) && <><br /><small>追加売上 {yen.format(row.additionalSales || 0)}</small></>}</td>
     <td><StatusPill tone="good">{row.trialOnly ? "体入時給" : row.adoptedSystem === "salesReward" ? "売上報酬" : "時給＋バック"} {yen.format(row.adoptedReward)}</StatusPill></td>
     <td>{yen.format(row.beautyAllowance)}</td>
+    <td>{yen.format(row.additionalAllowance || 0)}</td>
     <td><strong>{yen.format(row.grossPay)}</strong></td>
-    <td className="wrap-cell"><div className="back-breakdown"><span><small>日払い</small><strong>{yen.format(row.dailyPayment)}</strong></span><span><small>立替</small><strong>{yen.format(row.advancePayment)}</strong></span><span><small>送迎</small><strong>{yen.format(row.transportFee)}</strong></span></div></td>
+    <td className="wrap-cell"><div className="back-breakdown"><span><small>日払い</small><strong>{yen.format(row.dailyPayment)}</strong></span><span><small>立替</small><strong>{yen.format(row.advancePayment)}</strong></span><span><small>送迎</small><strong>{yen.format(row.transportFee)}</strong></span>{Boolean(row.additionalTransportFee) && <span><small>うち追加送迎</small><strong>{yen.format(row.additionalTransportFee || 0)}</strong></span>}</div></td>
     <td><MoneyInput value={row.withholding} disabled={disabled} onChange={(value) => onWithholding(row.id, value)} /></td>
     <td><strong>{yen.format(row.netPay)}</strong></td>
   </tr>)}</Table>;
@@ -509,6 +541,6 @@ function Balance({ results }: { results: MonthlyAccountingResults }) { return <d
 
 function mapSignature(value: Record<string, unknown> | undefined) { return JSON.stringify(Object.entries(value || {}).sort(([left], [right]) => left.localeCompare(right))); }
 function classificationSignature(value: MonthlyAdjustments) { return mapSignature(value.legacyBottleClassifications); }
-function adjustmentSignature(value: MonthlyAdjustments) { return JSON.stringify({ withholdingByCast: mapSignature(value.withholdingByCast), staffSalesAllowance: mapSignature(value.staffSalesAllowance), staffBottleAllowance: mapSignature(value.staffBottleAllowance), driverRemoteAllowance: mapSignature(value.driverRemoteAllowance), fixedExpenses: value.fixedExpenses, liquorDeliveryAmount: value.liquorDeliveryAmount, cardFee: value.cardFee, legacyBottleClassifications: classificationSignature(value) }); }
+function adjustmentSignature(value: MonthlyAdjustments) { return JSON.stringify({ withholdingByCast: mapSignature(value.withholdingByCast), staffSalesAllowance: mapSignature(value.staffSalesAllowance), staffBottleAllowance: mapSignature(value.staffBottleAllowance), driverRemoteAllowance: mapSignature(value.driverRemoteAllowance), fixedExpenses: value.fixedExpenses, liquorDeliveryAmount: value.liquorDeliveryAmount, cardFee: value.cardFee, legacyBottleClassifications: classificationSignature(value), castInputs: value.castInputs || [] }); }
 function blankAdjustments(month: string, stored?: MonthlyAdjustments): MonthlyAdjustments { return normalizeMonthlyAdjustments(stored || { month, withholdingByCast: {}, staffSalesAllowance: {}, staffBottleAllowance: {}, driverRemoteAllowance: {}, fixedExpenses: [], cardFee: 0, legacyBottleClassifications: {}, revision: 0 }); }
 function Metric({ label, value }: { label: string; value: string }) { return <div className="card metric-card"><small>{label}</small><strong>{value}</strong></div>; }

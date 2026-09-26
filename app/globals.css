@@ -308,3 +308,8 @@ details summary { list-style: none; cursor: pointer; }
   .modal-backdrop { padding: 10px; }
   .modal { max-height: calc(100vh - 20px); }
 }
+
+.cast-input-selection { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
+.cast-input-selection button { text-align: left; font: inherit; }
+.cast-input-selection .selected { border-color: var(--primary, #355b6b); background: #eef4f6; }
+.cast-input-fields { border: 0; padding: 0; margin: 0; min-width: 0; }

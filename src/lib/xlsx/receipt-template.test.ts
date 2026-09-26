@@ -165,8 +165,8 @@ describe("受領書と明細書の分割出力", () => {
     const invalidCells: Record<string, string | number>[] = document === "receipt"
       ? [{ C16: "署名" }, { G8: NaN }, { G10: "あ\u0001" }, { G10: "\uD800" }]
       : [{ F23: 100 }, { F26: NaN }, { E5: "あ\u0001" }, { E5: "\uD800" }];
-    for (const invalid of invalidCells) await expect(fillReceiptTemplate(bytes, [{ template: "hourlyAndBack", name: "テスト", cells, statementCells,
-      ...(document === "receipt" ? { cells: invalid } : { statementCells: invalid }),
+    for (const invalid of invalidCells) await expect(fillReceiptTemplate(bytes, [{ template: "hourlyAndBack", name: "テスト",
+      cells: document === "receipt" ? invalid : cells, statementCells: document === "statement" ? invalid : statementCells,
     }], document)).rejects.toThrow();
     for (const printer of [true, false]) {
       const missing = await JSZip.loadAsync(bytes);

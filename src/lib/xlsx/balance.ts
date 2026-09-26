@@ -63,7 +63,7 @@ export function createMonthlyBalanceWorkbook(input: BalanceExportInput, sourceLa
   const meanCastRatio = sales === 0 ? "" : ratio(report.days.reduce((sum, day) => sum + (day.totalSales === 0 ? 0 : (day.castHourly + day.castSalesReward + day.dispatchCastPayment) / day.totalSales), 0), report.approvedDays);
   const meanExpenseRatio = sales === 0 ? "" : ratio(report.days.reduce((sum, day) => sum + (day.totalSales === 0 ? 0 : day.expenses / day.totalSales), 0), report.approvedDays);
   const book = new ExcelJS.Workbook();
-  book.creator = "GENESIS Management System Ver2.36.0";
+  book.creator = "GENESIS Management System Ver2.37.0";
   book.created = new Date();
   book.calcProperties.fullCalcOnLoad = true;
   const sheet = book.addWorksheet("ジェネシス収支表");
@@ -206,7 +206,15 @@ export function createMonthlyBalanceWorkbook(input: BalanceExportInput, sourceLa
   label(sheet, "C43", "場内売上");
   sheet.getCell("D43").value = report.jonaiExtensionSales;
   label(sheet, "C44", "キャスト総売上");
-  sheet.getCell("D44").value = formula("SUM(D42:D43)", report.honShimeiSales + report.jonaiExtensionSales);
+  const additionalSales = report.additionalSales ?? 0;
+  if (additionalSales) {
+    label(sheet, "C45", "追加売上");
+    sheet.getCell("D45").value = additionalSales;
+    sheet.getRow(45).height = Math.max(sheet.getRow(45).height || 0, 30);
+    for (const column of ["C", "D"]) sheet.getCell(`${column}45`).border = { ...sheet.getCell(`${column}43`).border };
+  }
+  sheet.getCell("D44").value = formula(additionalSales ? "SUM(D42:D43,D45)" : "SUM(D42:D43)",
+    report.honShimeiSales + report.jonaiExtensionSales + additionalSales);
   label(sheet, "R41:T41", "キャスト報酬額");
   merge(sheet, "U41:V41", formula("M37", report.castNet));
   label(sheet, "R42:T42", "源泉税");
