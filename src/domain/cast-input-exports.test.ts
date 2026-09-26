@@ -121,6 +121,24 @@ function featureInput(salesAmount = 90000, feeType: IntroducerFeeType = "gross10
   return { ...source, data, baseline, adjustments, results: calculateMonthlyAccounting(data, source.month, adjustments) };
 }
 
+function expectCastInputDailyColumns(sheet: ExcelJS.Worksheet) {
+  // 店舗の送迎・美容室を重複計上せず、経理入力分だけを X / AA に載せる。
+  for (const [row, values] of [[4, [1000, 0, 1500, null, 0]], [6, [1000, 1500, 1500, null, 100001]]] as const) {
+    ["W", "X", "Y", "Z", "AA"].forEach((column, index) => {
+      expect(sheet.getCell(column + row).value, column + row).toBe(values[index]);
+    });
+    expect(sheet.getCell("V" + row).value).toBe(500);
+  }
+  for (const [column, total] of [["W", 2000], ["X", 1500], ["Y", 3000], ["AA", 100001]] as const) {
+    expect(sheet.getCell(column + "34").value).toEqual({ formula: "SUM(" + column + "3:" + column + "33)", result: total });
+  }
+  expect(sheet.getCell("Z34").value).toBeNull();
+  for (const row of [3, 5]) {
+    for (const column of ["W", "X", "Y", "Z", "AA"]) expect(sheet.getCell(column + row).value).toBeNull();
+  }
+  expect(sheet.pageSetup.printArea).toMatch(/^B1:AA\d+$/);
+}
+
 describe("キャストデータ入力から全帳票への統合", () => {
   it.each([90000, 1210000])("追加売上 %i 円を報酬へ反映し店売上・現金原本を変えない", (sales) => {
     const input = featureInput(sales);
@@ -147,6 +165,30 @@ describe("キャストデータ入力から全帳票への統合", () => {
     expect(closings).toEqual(original);
   });
 
+  it.each([90000, 1210000])("売上入力 %i 円でも日別の支払・追加控除・手当列を正しく出力し給与を変えない", (sales) => {
+    const input = featureInput(sales);
+    const originalResults = structuredClone(input.results);
+    const originalClosings = structuredClone(input.closings);
+    const sheet = createCastSalesWorkbook(input.results, input.month, "未確定").worksheets[0];
+    expectCastInputDailyColumns(sheet);
+    const reward = input.results.castRewards[0];
+    expect(sheet.getCell("I36").value).toBe(reward.hourlyPay);
+    expect(sheet.getCell("I37").value).toBe(9000);
+    expect(sheet.getCell("I38").value).toBe(101001);
+    expect(sheet.getCell("I39").value).toEqual({ formula: "SUM(I36:I38)", result: 134001 });
+    expect(sheet.getCell("I40").value).toBe(7500);
+    expect(sheet.getCell("I41").value).toBe(333);
+    expect(sheet.getCell("I42").value).toEqual({ formula: "I39-I40-I41", result: 126168 });
+    expect(sheet.getCell("U36").value).toBe(reward.salesReward);
+    expect(sheet.getCell("U37").value).toBe(101001);
+    expect(sheet.getCell("U39").value).toBe(7500);
+    expect(sheet.getCell("U40").value).toBe(333);
+    expect(sheet.getCell("U44").value).toBe(reward.netPay);
+    expect(input.results.sales).toEqual(input.baseline.sales);
+    expect(input.results).toEqual(originalResults);
+    expect(input.closings).toEqual(originalClosings);
+  });
+
   it.each(["sales10", "netSales10", "gross10", "higherSalesGross10", "higherNetSalesGross10"] as const)
     ("紹介者 %s の売上基準を増やさず総支給基準には追加手当を含む", (feeType) => {
       const input = featureInput(90000, feeType);
@@ -165,6 +207,8 @@ describe("キャストデータ入力から全帳票への統合", () => {
     const saved = normalizeMonthlyAccountingSnapshot(JSON.parse(JSON.stringify(snapshot)), input.month, 1);
     expect(saved).toBeDefined();
     expect(saved!.castRewards).toEqual(input.results.castRewards);
+    expect(saved!.castSalesReports).toEqual(input.results.castSalesReports);
+    expect(saved!.sales).toEqual(input.baseline.sales);
     const exported = { ...input, results: saved!, snapshot: saved! };
     validateExpenseExport(exported);
     const sheets = buildCastReceiptSheets(saved!.castRewards, input.month);
@@ -181,9 +225,15 @@ describe("キャストデータ入力から全帳票への統合", () => {
       const restored = new ExcelJS.Workbook();
       await restored.xlsx.load(buffer);
       expect(restored.worksheets.length).toBeGreaterThan(0);
+      if (name === "cast-sales") {
+        expectCastInputDailyColumns(restored.worksheets[0]);
+        expect(restored.worksheets[0].getCell("I40").value).toBe(7500);
+        expect(restored.worksheets[0].getCell("U44").value).toBe(847968);
+      }
       buffers.set(name, new Uint8Array(buffer));
     }
     const castSheet = books["cast-sales"].worksheets[0];
+    expectCastInputDailyColumns(castSheet);
     expect(castSheet.getCell("T4").value).toBe(1234000);
     expect(castSheet.getCell("J49").value).toBe("アフター売上");
     expect(castSheet.getCell("S49").value).toBe(1210000);

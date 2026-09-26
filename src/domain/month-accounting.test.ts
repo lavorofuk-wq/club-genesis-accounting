@@ -235,6 +235,120 @@ describe("月次会計ドメイン", () => {
     return { source, input, results, snapshot };
   }
 
+  it("日別日払い・立替は承認済み原額を丸めず転記し、月額控除と一致させる", () => {
+    const { source, input } = hourlyYenSnapshot();
+    source.closings[0].casts[0].dailyPayment = 14870.25;
+    source.closings[0].casts[0].advancePayment = 87.75;
+    source.closings.push(approvedClosing({ id: "day-3", businessDate: "2026-09-03",
+      casts: [dailyCast({ dailyPayment: 12.5, advancePayment: 99.5 })] }));
+    source.closings.push(approvedClosing({ id: "pending", status: "submitted", businessDate: "2026-09-04",
+      casts: [dailyCast({ dailyPayment: 99999, advancePayment: 99999 })] }));
+    const before = structuredClone(source);
+    const results = calculateMonthlyAccounting(source, month, input);
+    const report = results.castSalesReports[0];
+    expect(report.days.map(({ dailyPayment, advancePayment }) => ({ dailyPayment, advancePayment })))
+      .toEqual([{ dailyPayment: 14870.25, advancePayment: 87.75 }, { dailyPayment: 12.5, advancePayment: 99.5 }]);
+    expect(report.totals).toMatchObject({ dailyPayment: 14882.75, advancePayment: 187.25 });
+    expect(results.castRewards[0]).toMatchObject({ dailyPayment: 14882.75, advancePayment: 187.25 });
+    expect(source).toEqual(before);
+  });
+
+  it("同月体入から在籍への集約でも日別支払を移動・再計算しない", () => {
+    const trial = cast({ id: "trial-1", status: "trial", convertedToCastId: "cast-1" });
+    const member = cast({ convertedFromTrialId: "trial-1", hiredAt: "2026-09-03" });
+    const source = workspace({ casts: [trial, member], closings: [
+      approvedClosing({ casts: [dailyCast({ masterId: trial.id, kind: "trial", dailyPayment: 9001, advancePayment: 123 })] }),
+      approvedClosing({ id: "regular-day", businessDate: "2026-09-03",
+        casts: [dailyCast({ dailyPayment: 2003, advancePayment: 456 })] }),
+    ] });
+    const results = calculateMonthlyAccounting(source, month, adjustments());
+    expect(results.castSalesReports).toHaveLength(1);
+    expect(results.castSalesReports[0]).toMatchObject({ id: member.id,
+      totals: { dailyPayment: 11004, advancePayment: 579 } });
+    expect(results.castSalesReports[0].days.map((day) => day.dailyPayment)).toEqual([9001, 2003]);
+    expect(results.castRewards[0]).toMatchObject({ trialOnly: false, dailyPayment: 11004, advancePayment: 579 });
+  });
+
+  it("2.39確定には0円も明示保存し、後の原本変更から日別・月額を独立させる", () => {
+    const { source, snapshot } = hourlyYenSnapshot();
+    expect(snapshot.calculationVersion).toBe("2.39.0");
+    expect(snapshot.schemaVersion).toBe(3);
+    expect(snapshot.castSalesReports[0].days[0]).toMatchObject({ dailyPayment: 14870, advancePayment: 0 });
+    expect(snapshot.castSalesReports[0].totals).toMatchObject({ dailyPayment: 14870, advancePayment: 0 });
+    const before = structuredClone(snapshot);
+    source.closings[0].casts[0].dailyPayment = 99999;
+    source.closings[0].casts[0].advancePayment = 88888;
+    const restored = normalizeMonthlyAccountingSnapshot(snapshot, month, 1)!;
+    expect(restored.castSalesReports).toEqual(before.castSalesReports);
+    expect(restored.castRewards).toEqual(before.castRewards);
+    expect(snapshot).toEqual(before);
+  });
+
+  it("Firebaseのオブジェクト形式の日別支払も0円・小数原額を保持する", () => {
+    const { source, input } = hourlyYenSnapshot();
+    source.closings[0].casts[0].dailyPayment = 14870.25;
+    source.closings[0].casts[0].advancePayment = 87.75;
+    const results = calculateMonthlyAccounting(source, month, input);
+    const snapshot = buildMonthlySnapshot(month, 1, "a".repeat(64), input, results, source.closings, "op", "2026-10-01T00:00:00Z");
+    const saved = JSON.parse(JSON.stringify(snapshot));
+    saved.castSalesReports = { 0: { ...saved.castSalesReports[0], days: { 0: saved.castSalesReports[0].days[0] } } };
+    const restored = normalizeMonthlyAccountingSnapshot(saved, month, 1)!;
+    expect(restored).toBeDefined();
+    expect(restored.castSalesReports[0].days[0]).toMatchObject({ dailyPayment: 14870.25, advancePayment: 87.75 });
+    expect(restored.castSalesReports[0].totals).toMatchObject({ dailyPayment: 14870.25, advancePayment: 87.75 });
+    expect(restored.castRewards).toEqual(snapshot.castRewards);
+  });
+
+  it.each(["2.38.0", "2.37.0", "2.31.0"])("旧確定%sの日別欠損を0円で埋めず、保存月額を保持する", (version) => {
+    const { snapshot } = hourlyYenSnapshot();
+    snapshot.calculationVersion = version;
+    for (const report of snapshot.castSalesReports) {
+      for (const row of [...report.days, report.totals]) {
+        delete row.dailyPayment;
+        delete row.advancePayment;
+      }
+    }
+    const before = structuredClone(snapshot);
+    const restored = normalizeMonthlyAccountingSnapshot(snapshot, month, 1)!;
+    expect(restored).toBeDefined();
+    expect(restored.castSalesReports[0].days[0]).not.toHaveProperty("dailyPayment");
+    expect(restored.castSalesReports[0].totals).not.toHaveProperty("advancePayment");
+    expect(restored.castRewards[0].dailyPayment).toBe(14870);
+    expect(restored).toEqual(before);
+    expect(snapshot).toEqual(before);
+  });
+
+  const corruptDailyPayment: Array<[string, (snapshot: MonthlyAccountingSnapshot) => void]> = [
+    ["新形式の全内訳欠損", (s) => { for (const row of [...s.castSalesReports[0].days, s.castSalesReports[0].totals]) { delete row.dailyPayment; delete row.advancePayment; } }],
+    ["日別片方欠損", (s) => { delete s.castSalesReports[0].days[0].advancePayment; }],
+    ["月計欠損", (s) => { delete s.castSalesReports[0].totals.dailyPayment; }],
+    ["旧形式の部分欠損", (s) => { s.calculationVersion = "2.38.0"; delete s.castSalesReports[0].days[0].dailyPayment; }],
+    ["負数", (s) => { s.castSalesReports[0].days[0].dailyPayment = -1; }],
+    ["NaN", (s) => { s.castSalesReports[0].days[0].advancePayment = NaN; }],
+    ["無限値", (s) => { s.castSalesReports[0].days[0].dailyPayment = Infinity; }],
+    ["文字列金額", (s) => { s.castSalesReports[0].days[0].dailyPayment = "14870" as unknown as number; }],
+    ["null金額", (s) => { s.castSalesReports[0].days[0].advancePayment = null as unknown as number; }],
+    ["金額上限超過", (s) => { s.castSalesReports[0].days[0].dailyPayment = Number.MAX_SAFE_INTEGER + 1; }],
+    ["日別月額の不一致", (s) => { s.castSalesReports[0].days[0].dailyPayment! += 1; }],
+    ["報酬月額の不一致", (s) => { s.castSalesReports[0].days[0].dailyPayment! += 1; s.castSalesReports[0].totals.dailyPayment! += 1; }],
+    ["立替報酬月額の不一致", (s) => { s.castSalesReports[0].days[0].advancePayment = 1; s.castSalesReports[0].totals.advancePayment = 1; }],
+  ];
+  it.each(corruptDailyPayment)("不正な日別支払内訳を拒否する：%s", (_name, corrupt) => {
+    const { snapshot } = hourlyYenSnapshot();
+    corrupt(snapshot);
+    expect(normalizeMonthlyAccountingSnapshot(snapshot, month, 1)).toBeUndefined();
+  });
+
+  it("大きな支払額でも1円差を浮動小数誤差として見逃さない", () => {
+    const { snapshot } = hourlyYenSnapshot();
+    const reward = snapshot.castRewards[0];
+    reward.dailyPayment = Number.MAX_SAFE_INTEGER - 10;
+    reward.netPay = reward.grossPay - reward.dailyPayment;
+    snapshot.castSalesReports[0].days[0].dailyPayment = reward.dailyPayment + 1;
+    snapshot.castSalesReports[0].totals.dailyPayment = reward.dailyPayment + 1;
+    expect(normalizeMonthlyAccountingSnapshot(snapshot, month, 1)).toBeUndefined();
+  });
+
   it("未確定月は店舗送信原本だけを計算し、廃止済みの編集データを適用しない", () => {
     const { source, input, results } = hourlyYenSnapshot();
     const stored = { ...structuredClone(source), castCorrections: [{

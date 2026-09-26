@@ -57,6 +57,16 @@ function outsideRetiredRules(value) {
     assert.ok(node[".validate"].includes(additionalSales));
     node[".validate"] = node[".validate"].replace(additionalSales, originalSales);
   }
+  // Ver2.39のdev専用必須条件だけを除き、本番・旧版の元式は指紋で保護する。
+  const paymentVersion = "/^(2[.](39|[4-9][0-9]|[1-9][0-9]{2,})[.][0-9]+|([3-9]|[1-9][0-9]+)[.][0-9]+[.][0-9]+)$/";
+  for (const [node, depth] of [[snapshots.castSalesReports.$index.days.$dayIndex, 4], [snapshots.castSalesReports.$index.totals, 3]]) {
+    const paymentPresence = " && ($workspace !== 'accounting-dev' || !newData" + ".parent()".repeat(depth)
+      + ".child('calculationVersion').val().matches(" + paymentVersion + ") || newData.hasChildren(['dailyPayment', 'advancePayment']))";
+    assert.ok(node[".validate"].endsWith(paymentPresence));
+    node[".validate"] = node[".validate"].slice(0, -paymentPresence.length);
+    delete node.dailyPayment;
+    delete node.advancePayment;
+  }
   delete workspace.dailyClosingDeletionLock[".validate"];
   delete workspace.history.$id.$field[".validate"];
   delete workspace.history.$id.casts;

@@ -60,6 +60,16 @@ function validateReport(report: CastSalesReport, reward: CastReward) {
     if (monthly !== additionalCastAmounts(reward)[key]
       || monthly !== report.days.reduce((sum, day) => sum + additionalCastAmounts(day)[key], 0)) fail();
   }
+  const paymentRows = [...report.days, report.totals];
+  const paymentKeys = ["dailyPayment", "advancePayment"] as const;
+  // 旧確定分の未保存内訳は0円と区別する。部分欠損や月額との不一致は出力しない。
+  if (paymentRows.some((row) => paymentKeys.some((key) => row[key] !== undefined))) {
+    if (paymentRows.some((row) => paymentKeys.some((key) => !Number.isFinite(row[key]) || row[key]! < 0 || row[key]! > Number.MAX_SAFE_INTEGER))) fail();
+    for (const key of paymentKeys) {
+      if (!closeEnough(report.totals[key]!, reward[key])
+        || !closeEnough(report.totals[key]!, report.days.reduce((sum, day) => sum + day[key]!, 0))) fail();
+    }
+  }
 }
 
 function safeSheetName(name: string, used: Set<string>) {
@@ -150,9 +160,11 @@ function addPayroll(sheet: ExcelJS.Worksheet, reward: CastReward, report: CastSa
   sheet.getRow(44).font = { ...font, bold: true };
   sheet.getRow(44).alignment = { vertical: "middle" };
   const notes = ["金額は円。日払い・その他＝日払い＋立替＋送迎代。給与欄はキャスト報酬の月次計算結果。"];
+  notes.push("X送迎・AA手当はキャストデータ入力の追加分のみ（店舗送迎・美容室手当は含みません）。Z減給は空欄です。");
+  if (report.totals.dailyPayment === undefined) notes.push("W日払い・Y立替：日別内訳未保存のため日別欄は空欄。合計欄は確定時に保存された月合計です。");
   if (report.totals.beautyAllowance !== reward.beautyAllowance) notes.push("日別の美容室欄には、即日支払済みの体入手当を含みます。");
   if (report.totals.backTotal !== totalBack) notes.push("日別バック合計と給与欄の総バックが異なるため、それぞれの月次計算結果を記載しています。");
-  mergeValue(sheet, "B45:V45", notes.join("\n"));
+  mergeValue(sheet, "B45:AA45", notes.join("\n"));
   sheet.getCell("B45").font = { ...font, size: 9 };
   sheet.getCell("B45").alignment = { vertical: "middle", wrapText: true };
   sheet.getRow(45).height = 15 * notes.length;
@@ -163,7 +175,7 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error("対象月を選択してください。");
   if (!results.castSalesReports.length) throw new Error("対象月の承認済みキャスト売上がありません。");
   const book = new ExcelJS.Workbook();
-  book.creator = "GENESIS Management System Ver2.37.0";
+  book.creator = "GENESIS Management System Ver2.39.0";
   book.created = new Date();
   book.calcProperties.fullCalcOnLoad = true;
   const used = new Set<string>();
@@ -187,17 +199,17 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
       byDate.set(day.businessDate, day);
     }
     const sheet = book.addWorksheet(safeSheetName(report.name, used));
-    sheet.columns = [3, 5, 8, 8, 9, 6, 12, 13, 6, 12, 13, 6, 12, 12, 12, 25, 25, 29, 13, 14, 12, 11].map((width) => ({ width }));
+    sheet.columns = [3, 5, 8, 8, 9, 6, 12, 13, 6, 12, 13, 6, 12, 12, 12, 25, 25, 29, 13, 14, 12, 11, 11, 11, 11, 11, 11].map((width) => ({ width }));
     sheet.views = [{ state: "frozen", xSplit: 2, ySplit: 2, showGridLines: false }];
     sheet.pageSetup = {
       paperSize: 9, orientation: "landscape", fitToPage: true, fitToWidth: 1, fitToHeight: 0,
-      horizontalCentered: true, printArea: "B1:V45", printTitlesRow: "1:2",
+      horizontalCentered: true, printArea: "B1:AA45", printTitlesRow: "1:2",
       margins: { left: .25, right: .25, top: .35, bottom: .35, header: .15, footer: .15 },
     };
     sheet.headerFooter.oddFooter = `&"${font.name},Regular"${sourceLabel.replace(/&/g, "&&")} &R&P / &N`;
     for (let row = 1; row <= 34; row += 1) {
       sheet.getRow(row).height = row === 2 ? 32 : row === 1 ? 27 : 21;
-      for (let col = 2; col <= 22; col += 1) {
+      for (let col = 2; col <= 27; col += 1) {
         const cell = sheet.getRow(row).getCell(col);
         cell.font = { ...font, bold: row <= 2 || row === 34 };
         cell.border = border;
@@ -220,6 +232,7 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
       B: "日", C: "出勤", D: "退勤", E: "勤務時間", F: "本指", G: "バック", H: "本指売上",
       I: "場内", J: "バック", K: "場延売上", L: "同伴", M: "バック",
       N: "本指酒代", O: "場内酒代", R: "ボトル名", S: "酒代計", T: "日売上", U: "ドリンク10%", V: "美容室",
+      W: "日払い", X: "送迎", Y: "立替", Z: "減給", AA: "手当",
     };
     Object.entries(headings).forEach(([column, value]) => { sheet.getCell(`${column}2`).value = value; });
     sheet.getRow(2).alignment = { horizontal: "center", vertical: "middle", wrapText: true };
@@ -239,6 +252,8 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
         L: day.dohanCount, M: back(day, "dohan"), N: day.honShimeiLiquorCost, O: day.jonaiExtensionLiquorCost,
         R: day.bottles.map((bottle) => `${bottle.name} ×${bottle.quantity}`).join("\n"),
         S: day.totalLiquorCost, T: day.totalSales, U: back(day, "drink"), V: day.beautyAllowance,
+        W: day.dailyPayment ?? null, X: additionalCastAmounts(day).transport,
+        Y: day.advancePayment ?? null, AA: additionalCastAmounts(day).allowance,
       };
       Object.entries(values).forEach(([column, value]) => { row.getCell(column).value = value; });
       row.getCell("C").numFmt = "[h]:mm";
@@ -257,13 +272,21 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
     }
 
     sheet.getCell("B34").value = "合計";
-    const sumColumns = ["E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "S", "T", "U", "V"];
+    const sumColumns = ["E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "S", "T", "U", "V", "X", "AA"];
     for (const column of sumColumns) {
       const total = report.days.reduce((sum, day) => {
         const date = Number(day.businessDate.slice(8));
         return sum + Number(sheet.getCell(`${column}${date + 2}`).value || 0);
       }, 0);
       sumCell(sheet, column, total);
+    }
+    for (const [column, key] of [["W", "dailyPayment"], ["Y", "advancePayment"]] as const) {
+      if (report.totals[key] === undefined) {
+        sheet.getCell(`${column}34`).value = reward[key];
+        sheet.getCell(`${column}34`).note = "日別内訳未保存。確定時に保存された月合計です。";
+      } else {
+        sumCell(sheet, column, report.totals[key]);
+      }
     }
     sheet.getCell("E34").numFmt = "[h]:mm";
     if (unknownBottleBreakdown) {
@@ -321,5 +344,5 @@ function addAccountingInputs(sheet: ExcelJS.Worksheet, report: CastSalesReport) 
       cell.numFmt = amountFormat;
     }
   });
-  sheet.pageSetup.printArea = `B1:V${47 + lines.length}`;
+  sheet.pageSetup.printArea = `B1:AA${47 + lines.length}`;
 }

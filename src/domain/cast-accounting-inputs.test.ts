@@ -5,7 +5,7 @@ import { calculateCastRewards, calculateCastSalesReports, normalizeMonthlyAdjust
   type CastAccountingInput, type CastRecord, type DailyCast, type DailyClosing, type IntroducerFeeType,
   type MonthlyAdjustments, type WorkspaceData } from "./gms";
 import { buildMonthlySnapshot, calculateMonthlyAccounting, canFinalizeMonthlyAccounting,
-  monthlySourceFingerprint, normalizeMonthlyAccountingSnapshot } from "./month-accounting";
+  monthlySourceFingerprint, normalizeMonthlyAccountingSnapshot, MONTHLY_CALCULATION_VERSION } from "./month-accounting";
 import { calculateCashFunding, cashFundingContext } from "./cash-funding";
 
 const month = "2026-09";
@@ -159,7 +159,7 @@ describe("追加売上・手当・送迎の月次反映", () => {
     const results = calculateMonthlyAccounting(data, month, settings);
     const snapshot = buildMonthlySnapshot(month, 1, "a".repeat(64), settings, results, data.closings, "op", "2026-10-01T00:00:00Z");
     const before = structuredClone(snapshot);
-    expect(snapshot.schemaVersion).toBe(3); expect(snapshot.calculationVersion).toBe("2.37.0");
+    expect(snapshot.schemaVersion).toBe(3); expect(snapshot.calculationVersion).toBe(MONTHLY_CALCULATION_VERSION);
     data.casts[0].hourlyRates[month] = 9999; data.closings[1].status = "returned";
     const restored = normalizeMonthlyAccountingSnapshot(snapshot, month, 1)!;
     expect(restored).toBeDefined(); expect(restored.castRewards).toEqual(before.castRewards);

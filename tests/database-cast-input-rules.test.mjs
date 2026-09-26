@@ -195,6 +195,89 @@ test("本番の既存合計式は追加売上が混入しても本指名＋場�
   }
 });
 
+function paymentTargets(f) {
+  return [
+    [snapshotRules.castSalesReports.$index.days.$dayIndex, "castSalesReports/0/days/0", f.snapshot.castSalesReports[0].days[0]],
+    [snapshotRules.castSalesReports.$index.totals, "castSalesReports/0/totals", f.snapshot.castSalesReports[0].totals],
+  ];
+}
+
+test("devの2.39以降の確定明細は日次と月合計に日払い・立替を両方要求する", () => {
+  for (const version of ["2.39.0", "2.39.1", "2.40.0", "2.100.0", "3.0.0", "10.0.0"]) {
+    const f = snapshotFixture(); f.snapshot.calculationVersion = version;
+    for (const [node, path, row] of paymentTargets(f)) {
+      assert.equal(evaluate(node[".validate"], {}, f.tree, f.prefix + path), false, version + " " + path);
+      row.dailyPayment = 0;
+      assert.equal(evaluate(node[".validate"], {}, f.tree, f.prefix + path), false, "立替欠損を拒否");
+      row.advancePayment = 0;
+      assert.equal(evaluate(node[".validate"], {}, f.tree, f.prefix + path), true, "0円も記録する");
+      delete row.dailyPayment;
+      assert.equal(evaluate(node[".validate"], {}, f.tree, f.prefix + path), false, "日払い欠損を拒否");
+    }
+  }
+});
+
+test("devのsnapshot日払い・立替は負数・非数値・安全上限超過を拒否する", () => {
+  const f = snapshotFixture(); f.snapshot.calculationVersion = "2.39.0";
+  for (const [node, path, row] of paymentTargets(f)) {
+    Object.assign(row, { dailyPayment: 0, advancePayment: 0 });
+    for (const field of ["dailyPayment", "advancePayment"]) {
+      for (const amount of [0, 1, 1234, Number.MAX_SAFE_INTEGER]) {
+        row[field] = amount;
+        assert.equal(evaluate(node[field][".validate"], {}, f.tree, f.prefix + path + "/" + field), true,
+          path + "/" + field + "=" + amount);
+      }
+      for (const amount of [-1, "1000", true, {}, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN]) {
+        row[field] = amount;
+        assert.equal(evaluate(node[field][".validate"], {}, f.tree, f.prefix + path + "/" + field), false,
+          path + "/" + field + "=" + String(amount));
+      }
+      row[field] = 0;
+    }
+  }
+});
+
+test("既存の日払い・立替に小数がある場合も承認済み原額を丸めずsnapshotへ保持する", () => {
+  const f = snapshotFixture(); f.snapshot.calculationVersion = "2.39.0";
+  for (const [node, path, row] of paymentTargets(f)) {
+    Object.assign(row, { dailyPayment: 1000.75, advancePayment: 250.25 });
+    const original = structuredClone(row);
+    assert.equal(evaluate(node[".validate"], {}, f.tree, f.prefix + path), true);
+    for (const field of ["dailyPayment", "advancePayment"]) {
+      assert.equal(evaluate(node[field][".validate"], {}, f.tree, f.prefix + path + "/" + field), true);
+    }
+    assert.deepEqual(row, original, "支払済み金額へ新たな切捨て・丸めを加えない");
+  }
+});
+
+test("2.38以前のsnapshotは日払い・立替明細の欠損を許容し過去形式を維持する", () => {
+  for (const version of ["2.27.0", "2.37.0", "2.38.0", "2.38.99"]) {
+    const f = snapshotFixture(); f.snapshot.calculationVersion = version;
+    for (const [node, path] of paymentTargets(f)) {
+      assert.equal(evaluate(node[".validate"], {}, f.tree, f.prefix + path), true, version + " " + path);
+    }
+  }
+});
+
+test("本番のsnapshotには新しい日払い・立替項目を必須化せず既存の検証を変えない", () => {
+  const f = snapshotFixture(); f.snapshot.calculationVersion = "2.39.0";
+  const tree = { accounting: f.tree["accounting-dev"] };
+  const prefix = f.prefix.replace("accounting-dev", "accounting");
+  for (const [node, path, row] of paymentTargets(f)) {
+    // 本番は元の本指名＋場内売上の式を維持する。
+    delete row.additionalSales; delete row.additionalAllowance; delete row.additionalTransportFee; delete row.accountingInputs;
+    row.totalSales = 0;
+    assert.equal(evaluate(node[".validate"], {}, tree, prefix + path, "accounting"), true);
+    for (const field of ["dailyPayment", "advancePayment"]) {
+      for (const value of [0, 1, 0.5, -1, "legacy"]) {
+        row[field] = value;
+        assert.equal(evaluate(node[field][".validate"], {}, tree, prefix + path + "/" + field, "accounting"), true,
+          "本番で従来未検証だった追加キーの意味を変更しない");
+      }
+    }
+  }
+});
+
 test("Rulesの新保護式は有効な構文で、入れ子の同名ワイルドカードを作らない", () => {
   function inspect(node, ancestors = []) {
     for (const [key, value] of Object.entries(node)) {

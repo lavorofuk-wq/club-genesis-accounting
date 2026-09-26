@@ -34,7 +34,7 @@ import { STAFF_MONTHLY_RATES_START_MONTH, staffMonthlyRateForMonth } from "./sta
 import { sha256Hex } from "../lib/crypto-compat";
 import { resolveCastAccountingInputs, normalizeCastAccountingInputs, castAccountingInputTotals } from "./cast-accounting-inputs";
 
-export const MONTHLY_CALCULATION_VERSION = "2.37.0";
+export const MONTHLY_CALCULATION_VERSION = "2.39.0";
 export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 3 as const;
 
 export type IntroducerEntryEvent = {
@@ -221,6 +221,12 @@ export const supportsMonthlyStaffRatesSnapshot = (value: string) => {
   const [major, minor] = match.slice(1).map(Number);
   return major > 2 || (major === 2 && minor >= 25);
 };
+const requiresCastDailyPaymentsSnapshot = (value: string) => {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(value);
+  if (!match) return false;
+  const [major, minor] = match.slice(1).map(Number);
+  return major > 2 || (major === 2 && minor >= 39);
+};
 const snapshotMillisecondsInstant = (value: unknown) => {
   if (!snapshotInteger(value)) return undefined;
   const date = new Date(Number(value));
@@ -300,7 +306,23 @@ function normalizeSnapshotCastInputs(row: Record<string, unknown>, month: string
   return inputs as NonNullable<CastSalesReport["days"][number]["accountingInputs"]>;
 }
 
-function normalizeSnapshotCastSales(value: unknown, month: string, requireTenYen: boolean): CastSalesReport[] | undefined {
+const castDailyPaymentKeys = ["dailyPayment", "advancePayment"] as const;
+const snapshotPaymentAmount = (value: unknown): value is number => snapshotNonNegative(value) && value <= Number.MAX_SAFE_INTEGER;
+const sameSnapshotPaymentAmount = (actual: unknown, expected: number) => snapshotPaymentAmount(actual)
+  && snapshotPaymentAmount(expected)
+  && (actual === expected || (!Number.isInteger(actual) || !Number.isInteger(expected))
+    && Math.abs(actual - expected) <= Math.min(0.000001, Number.EPSILON * Math.max(1, actual, expected) * 8));
+
+/** 原額を丸めず保持する。旧確定の全欠損だけを許容し、部分欠損を0円扱いしない。 */
+function validSnapshotCastDailyPayments(report: CastSalesReport, required: boolean) {
+  const rows = [...report.days, report.totals];
+  if (!rows.some((row) => castDailyPaymentKeys.some((key) => row[key] !== undefined))) return !required;
+  return rows.every((row) => castDailyPaymentKeys.every((key) => snapshotPaymentAmount(row[key])))
+    && castDailyPaymentKeys.every((key) => sameSnapshotPaymentAmount(report.totals[key],
+      report.days.reduce((sum, day) => sum + day[key]!, 0)));
+}
+
+function normalizeSnapshotCastSales(value: unknown, month: string, requireTenYen: boolean, requireDailyPayments: boolean): CastSalesReport[] | undefined {
   const tenYenKeys = ["honShimeiSales", "jonaiExtensionSales", "totalSales", "backTotal"];
   const reports = snapshotList<unknown>(value);
   const normalized: CastSalesReport[] = [];
@@ -343,12 +365,14 @@ function normalizeSnapshotCastSales(value: unknown, month: string, requireTenYen
       || !validSnapshotBottleBackByKind(totals.bottleBackByKind, backs, requireTenYen)
       || item.attendanceDays !== totals.attendanceDays
       || item.attendanceDays !== new Set(days.map((day) => day.businessDate)).size) return undefined;
-    normalized.push({
+    const report: CastSalesReport = {
       ...(item as unknown as CastSalesReport),
       days,
       totals: { ...(totals as unknown as CastSalesReport["totals"]), backs, bottles,
         ...(accountingInputs === undefined ? {} : { accountingInputs }) },
-    });
+    };
+    if (!validSnapshotCastDailyPayments(report, requireDailyPayments)) return undefined;
+    normalized.push(report);
   }
   return normalized;
 }
@@ -463,7 +487,8 @@ export function normalizeMonthlyAccountingSnapshot(
 
   const requireTenYen = row.schemaVersion >= 2;
   const requireDailyHourlyYen = row.schemaVersion === 3;
-  const castSalesReports = normalizeSnapshotCastSales(row.castSalesReports, pathMonth, requireTenYen);
+  const castSalesReports = normalizeSnapshotCastSales(row.castSalesReports, pathMonth, requireTenYen,
+    requiresCastDailyPaymentsSnapshot(row.calculationVersion));
   const storedCastRewards = validSnapshotRows(row.castRewards, ["id", "name", "adoptedSystem"], [
     "hours", "hourlyPay", "honShimeiSales", "jonaiExtensionSales", "liquorCost", "honShimeiLiquorCost",
     "honShimeiBack", "banaiShimeiBack", "dohanBack", "bottleBack", "drinkBack", "hourlyAndBack",
@@ -498,6 +523,8 @@ export function normalizeMonthlyAccountingSnapshot(
   const castRewardsValid = Boolean(castRewards?.every((item) => {
     if (!snapshotObject(item)) return false;
     const report = castSalesReports?.find((report) => report.id === item.id);
+    if (report && castDailyPaymentKeys.some((key) => report.totals[key] !== undefined
+      && !sameSnapshotPaymentAmount(report.totals[key], Number(item[key])))) return false;
     if (!validSnapshotCastAdditions(item) || additionalCastKeys.some((key) => Number(item[key] || 0) !== Number(report?.totals[key] || 0))
       || Number(item.additionalTransportFee || 0) > Number(item.transportFee)) return false;
     if (item.appliedHourlyRates !== undefined) {

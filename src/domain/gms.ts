@@ -945,6 +945,9 @@ export type CastSalesDay = {
   startTime: string;
   endTime: string;
   hours: number;
+  /** Ver2.39以降の確定結果。未保存の旧確定日別額は0円で補完しない。 */
+  dailyPayment?: number;
+  advancePayment?: number;
   honShimeiSales: number;
   jonaiExtensionSales: number;
   additionalSales?: number;
@@ -2129,6 +2132,8 @@ export function calculateCastSalesReports(
         startTime: row.startTime,
         endTime: row.endTime,
         hours: asNumber(row.hours),
+        dailyPayment: asNumber(row.dailyPayment),
+        advancePayment: asNumber(row.advancePayment),
         honShimeiSales: floorTen(asNumber(row.honShimeiSales)),
         jonaiExtensionSales: floorTen(asNumber(row.jonaiExtensionSales)),
         totalSales: floorTen(asNumber(row.honShimeiSales)) + floorTen(asNumber(row.jonaiExtensionSales)) + additions.additionalSales,
@@ -2166,6 +2171,8 @@ export function calculateCastSalesReports(
       totals: {
         attendanceDays: new Set(days.map((day) => day.businessDate)).size,
         hours: total("hours"),
+        dailyPayment: total("dailyPayment"),
+        advancePayment: total("advancePayment"),
         honShimeiSales: total("honShimeiSales"),
         jonaiExtensionSales: total("jonaiExtensionSales"),
         totalSales: total("totalSales"),
