@@ -34,6 +34,7 @@ vi.mock("./update-drafts", () => ({
 vi.mock("@/lib/firebase/client", () => ({ isProductionEnvironment: () => false }));
 vi.mock("@/lib/firebase/repository", () => ({ saveCastAccountingInputs: vi.fn() }));
 import { CastAccountingInputs, castInputSourceKey } from "./cast-accounting-inputs";
+import { saveCastAccountingInputs } from "@/lib/firebase/repository";
 import { CastInputPicker, CastInputPickerTable, filterCastInputPickerRows } from "./cast-input-picker";
 
 type Element = ReactElement<Record<string, any>>; // JSX callbacks are invoked deliberately by this harness.
@@ -58,9 +59,9 @@ function fixture() {
     adjustments: [{ month, revision: 2, castInputs: [entry] }], monthStates: [], monthSnapshots: [],
   } as unknown as AccountingWorkspaceData;
 }
-function renderForm(data = fixture(), busy = false) {
+function renderForm(data = fixture(), busy = false, run: Parameters<typeof CastAccountingInputs>[0]["run"] = vi.fn(async () => true)) {
   hooks.cursor = 0; hooks.effects = [];
-  const element = CastAccountingInputs({ data, user: { uid: "qa" } as never, busy, run: vi.fn(async () => true) });
+  const element = CastAccountingInputs({ data, user: { uid: "qa" } as never, busy, run });
   return (element.type as (props: typeof element.props) => ReactNode)(element.props);
 }
 function recover(data: AccountingWorkspaceData) {
@@ -70,11 +71,46 @@ function recover(data: AccountingWorkspaceData) {
 function picker(node: ReactNode) { return find(node, (item) => item.type === CastInputPicker); }
 beforeEach(() => {
   hooks.values = []; hooks.cursor = 0; hooks.effects = []; hooks.drafts.clear(); hooks.drafts.set("accounting.castInputs.month", month);
+  vi.mocked(saveCastAccountingInputs).mockReset();
   vi.stubGlobal("window", { confirm: vi.fn(() => true) });
 });
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe("キャスト選択・明細のイベント", () => {
+  it("保存時に参照した月次版を渡し、他人の入力を保持する", async () => {
+    const data = fixture();
+    const other: CastAccountingInput = { ...entry, id: "other", castId: "B", castName: "べに", label: "他人の保存済み手当", kind: "allowance", amount: 700 };
+    data.adjustments[0].castInputs!.push(other);
+    recover(data);
+    const run: Parameters<typeof CastAccountingInputs>[0]["run"] = vi.fn(async (action) => { await action(); return true; });
+    button(renderForm(data, false, run), "この入力を保存").props.onClick();
+    await vi.waitFor(() => expect(hooks.drafts.get("accounting.castInputs.editing")).toBeNull());
+    expect(saveCastAccountingInputs).toHaveBeenCalledExactlyOnceWith(month, [other, entry], 2, { uid: "qa" });
+    expect(data.adjustments[0].castInputs).toEqual([entry, other]);
+  });
+  it("保存が失敗した場合は入力内容と参照版を保持する", async () => {
+    const data = fixture(); recover(data);
+    const before = hooks.drafts.get("accounting.castInputs.editing");
+    vi.mocked(saveCastAccountingInputs).mockRejectedValue(new Error("他の処理で更新されました"));
+    const run: Parameters<typeof CastAccountingInputs>[0]["run"] = vi.fn(async (action) => { try { await action(); return true; } catch { return false; } });
+    button(renderForm(data, false, run), "この入力を保存").props.onClick();
+    await vi.waitFor(() => expect(saveCastAccountingInputs).toHaveBeenCalledOnce());
+    expect(hooks.drafts.get("accounting.castInputs.editing")).toBe(before);
+    expect(saveCastAccountingInputs).toHaveBeenCalledWith(month, [entry], 2, { uid: "qa" });
+  });
+  it.each(["busy", "closed", "stale"] as const)("%sでは保存イベント自体も書込みを実行しない", (condition) => {
+    const data = fixture(); recover(data);
+    const before = hooks.drafts.get("accounting.castInputs.editing");
+    if (condition === "closed") data.monthStates = [{ month, status: "closed", revision: 1, updatedAt: "", updatedBy: "" }];
+    if (condition === "stale") data.adjustments[0].revision = 3;
+    const run: Parameters<typeof CastAccountingInputs>[0]["run"] = vi.fn(async (action) => { await action(); return true; });
+    const saveButton = button(renderForm(data, condition === "busy", run), "この入力を保存");
+    expect(saveButton.props.disabled).toBe(true);
+    saveButton.props.onClick();
+    expect(run).not.toHaveBeenCalled();
+    expect(saveCastAccountingInputs).not.toHaveBeenCalled();
+    expect(hooks.drafts.get("accounting.castInputs.editing")).toBe(before);
+  });
   it("モーダルに現在の在籍者だけを渡し、承認済み本人出勤を集計する", () => {
     button(renderForm(), "キャストを選ぶ").props.onClick();
     const options = picker(renderForm()).props.rows;

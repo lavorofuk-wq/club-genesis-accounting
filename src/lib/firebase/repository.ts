@@ -2,7 +2,7 @@
 
 import { get, onValue, serverTimestamp, set, update, ref } from "firebase/database";
 import type { User } from "firebase/auth";
-import { database, environmentRoot, rootRef } from "./client";
+import { database, rootRef } from "./client";
 import { readOneShotValue } from "./one-shot-value";
 import { runReadyTransaction } from "./ready-transaction";
 import { assertCurrentClientRelease } from "../client-release";
@@ -2235,7 +2235,6 @@ function castInputUserFields(row: CastAccountingInput) {
 /** 店舗原本・現金記録を変えず、月次の追加額だけを共通revisionで保存する。 */
 export async function saveCastAccountingInputs(month: string, inputs: CastAccountingInput[], expectedRevision: number, user: User) {
   await requireUser(user, ["accounting", "op"]);
-  if (environmentRoot() !== "accounting-dev") throw new Error("キャストデータ入力は開発環境でのみ利用できます。");
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error("対象月を正しく選択してください。");
   if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) throw new Error("月次入力の版番号が正しくありません。最新データを読み込んでください。");
   if (!Array.isArray(inputs)) throw new Error("キャストの追加入力を確認できません。");

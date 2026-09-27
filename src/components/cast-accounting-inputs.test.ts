@@ -54,7 +54,8 @@ function recover(data: AccountingWorkspaceData, row = input, amountText = String
 }
 beforeEach(() => { drafts.clear(); drafts.set("accounting.castInputs.month", month); production.value = false; });
 
-describe("キャストデータ入力の表示・入力保護", () => {
+describe.each([false, true])("キャストデータ入力の表示・入力保護（本番=%s）", (productionEnvironment) => {
+  beforeEach(() => { production.value = productionEnvironment; });
   it("常設の全員ボタンを描画せず選択モーダルへの入口を表示する", () => {
     const html = render();
     expect(html).not.toContain("在籍花子");
@@ -171,11 +172,13 @@ describe("キャストデータ入力の表示・入力保護", () => {
     expect(html).not.toContain("承認済み出勤がありません");
     expect(html).toContain("￥35,000");
   });
-  it("本番では入力画面を描画しない", () => {
+  it("本番でも選択したキャストの各入力画面を表示する", () => {
     production.value = true;
+    drafts.set("accounting.castInputs.selected", "cast1");
     const html = render();
-    expect(html).toContain("開発環境で確認中");
-    expect(html).not.toContain('type="month"');
-    expect(html).not.toContain("在籍花子");
+    expect(html).not.toContain("開発環境で確認中");
+    expect(html).toContain('type="month"');
+    expect(html).toContain("在籍花子");
+    for (const label of ["キャストを変更", "売上入力", "手当入力", "送迎入力"]) expect(html).toContain(label);
   });
 });

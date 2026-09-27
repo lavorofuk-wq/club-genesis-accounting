@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import test from "node:test";
+import { createHash } from "node:crypto";
+import nodeTest from "node:test";
 import ts from "typescript";
 
 const rules = JSON.parse(await readFile(new URL("../database.rules.json", import.meta.url), "utf8")).rules;
@@ -19,7 +20,9 @@ class Snapshot {
   hasChildren(keys = []) { const value = this.val(); return value && typeof value === "object"
     && Object.keys(value).length > 0 && keys.every((key) => this.child(key).exists()); }
 }
-function evaluate(rule, old, next, path, workspace = "accounting-dev", variables = {}) {
+for (const workspaceUnderTest of ["accounting-dev", "accounting"]) {
+const test = (name, run) => nodeTest(workspaceUnderTest + ": " + name, run);
+function evaluate(rule, old, next, path, workspace = workspaceUnderTest, variables = {}) {
   return Boolean(new Function("root", "data", "newData", "auth", "now", "$workspace", "$month", "$inputId", "$inputIndex", "$field", "$index", "$dayIndex",
     "return (" + rule.replaceAll(".matches(", ".match(").replaceAll(".beginsWith(", ".startsWith(") + ");")(
     new Snapshot(old), new Snapshot(old, path.split("/")), new Snapshot(next, path.split("/")),
@@ -29,7 +32,7 @@ function evaluate(rule, old, next, path, workspace = "accounting-dev", variables
 const input = (extra = {}) => ({ id: "input_1", castId: "cast_1", castName: "テスト",
   kind: "sales", label: "追加売上", amount: 1230, businessDate: "2026-09-02",
   attendanceClosingId: "daily_20260902", attendanceIndex: 0, ...extra });
-function fixture(workspace = "accounting-dev") {
+function fixture(workspace = workspaceUnderTest) {
   const base = { revision: 1, updatedAt: "before", updatedBy: "user", cardFee: 0 };
   const old = { users: { user: { role: "accounting" } }, [workspace]: {
     casts: { cast_1: { name: "テスト", status: "active", hiredAt: "2026-08-01" } },
@@ -40,7 +43,7 @@ function fixture(workspace = "accounting-dev") {
   Object.assign(next[workspace].accountingAdjustments[month], { revision: 2, updatedAt: "after", castInputs: { input_1: input() } });
   return { old, next, workspace };
 }
-function allowed({ old, next, workspace = "accounting-dev" }, options = {}) {
+function allowed({ old, next, workspace = workspaceUnderTest }, options = {}) {
   const path = workspace + "/accountingAdjustments/" + month;
   if (!evaluate(monthly[".write"], old, next, path, workspace, options)
     || !evaluate(monthly[".validate"], old, next, path, workspace, options)) return false;
@@ -58,11 +61,11 @@ function allowed({ old, next, workspace = "accounting-dev" }, options = {}) {
 }
 function row(f) { return f.next[f.workspace].accountingAdjustments[month].castInputs.input_1; }
 
-test("devの経理/OPだけ本人の承認済み出勤を根拠に追加できる（0時間も出勤扱い）", () => {
+test("経理/OPだけ本人の承認済み出勤を根拠に追加できる（0時間も出勤扱い）", () => {
   for (const role of ["accounting", "op"]) { const f = fixture(); f.old.users.user.role = role; assert.equal(allowed(f), true); }
   const shop = fixture(); shop.old.users.user.role = "shop"; assert.equal(allowed(shop), false);
   assert.equal(allowed(fixture(), { auth: null }), false);
-  assert.equal(allowed(fixture("accounting")), false);
+  assert.equal(allowed(fixture("other-workspace")), false);
 });
 test("月次CAS、更新者、全体確定ロックと確定月保護をそのまま要求する", () => {
   for (const patch of [{ revision: 1 }, { revision: 3 }, { updatedBy: "other" }, { updatedAt: "before" }]) {
@@ -136,8 +139,8 @@ function snapshotFixture() {
   const snapshot = { schemaVersion: 3, calculationVersion: "2.37.0",
     castSalesReports: [{ id: "cast_1", days: [{ ...record, businessDate: "2026-09-02" }], totals: record }],
     castRewards: [{ ...record, adoptedReward: 3000, beautyAllowance: 500, grossPay: 3600, transportFee: 1000 }] };
-  const tree = { "accounting-dev": { accountingMonthSnapshots: { [month]: { 1: snapshot } } } };
-  return { tree, snapshot, prefix: "accounting-dev/accountingMonthSnapshots/" + month + "/1/" };
+  const tree = { [workspaceUnderTest]: { accountingMonthSnapshots: { [month]: { 1: snapshot } } } };
+  return { tree, snapshot, prefix: workspaceUnderTest + "/accountingMonthSnapshots/" + month + "/1/" };
 }
 test("snapshot新項目はschema3の対応版だけで金額・本人・日別計上を検証する", () => {
   const f = snapshotFixture();
@@ -180,19 +183,14 @@ test("本指名0円でも追加売上がある月の確定snapshotを日別・�
     assert.equal(evaluate(node[".validate"], {}, f.tree, f.prefix + path), true, "追加入力のない既存形式を維持");
   }
 });
-test("本番の既存合計式は追加売上が混入しても本指名＋場内のまま変更しない", () => {
-  const f = snapshotFixture();
-  const tree = { accounting: f.tree["accounting-dev"] };
-  const prefix = f.prefix.replace("accounting-dev", "accounting");
-  for (const [node, path, row] of [
-    [snapshotRules.castSalesReports.$index.days.$dayIndex, "castSalesReports/0/days/0", f.snapshot.castSalesReports[0].days[0]],
-    [snapshotRules.castSalesReports.$index.totals, "castSalesReports/0/totals", f.snapshot.castSalesReports[0].totals],
-  ]) {
-    assert.equal(evaluate(node[".validate"], {}, tree, prefix + path, "accounting"), false);
-    assert.equal(evaluate(node.additionalSales[".validate"], {}, tree, prefix + path + "/additionalSales", "accounting"), false);
-    row.totalSales = 0;
-    assert.equal(evaluate(node[".validate"], {}, tree, prefix + path, "accounting"), true);
-  }
+test("本人の在籍・承認済み出勤は別環境のデータでは代用できない", () => {
+  const f = fixture(), other = workspaceUnderTest === "accounting" ? "accounting-dev" : "accounting";
+  f.old[other] = structuredClone(f.old[workspaceUnderTest]);
+  f.old[workspaceUnderTest].history = {};
+  assert.equal(allowed(f), false);
+  f.old[workspaceUnderTest].history = structuredClone(f.old[other].history);
+  f.old[workspaceUnderTest].casts = {};
+  assert.equal(allowed(f), false);
 });
 
 function paymentTargets(f) {
@@ -202,7 +200,7 @@ function paymentTargets(f) {
   ];
 }
 
-test("devの2.39以降の確定明細は日次と月合計に日払い・立替を両方要求する", () => {
+test("2.39以降の確定明細は日次と月合計に日払い・立替を両方要求する", () => {
   for (const version of ["2.39.0", "2.39.1", "2.40.0", "2.100.0", "3.0.0", "10.0.0"]) {
     const f = snapshotFixture(); f.snapshot.calculationVersion = version;
     for (const [node, path, row] of paymentTargets(f)) {
@@ -217,7 +215,7 @@ test("devの2.39以降の確定明細は日次と月合計に日払い・立替�
   }
 });
 
-test("devのsnapshot日払い・立替は負数・非数値・安全上限超過を拒否する", () => {
+test("snapshot日払い・立替は負数・非数値・安全上限超過を拒否する", () => {
   const f = snapshotFixture(); f.snapshot.calculationVersion = "2.39.0";
   for (const [node, path, row] of paymentTargets(f)) {
     Object.assign(row, { dailyPayment: 0, advancePayment: 0 });
@@ -259,20 +257,21 @@ test("2.38以前のsnapshotは日払い・立替明細の欠損を許容し過�
   }
 });
 
-test("本番のsnapshotには新しい日払い・立替項目を必須化せず既存の検証を変えない", () => {
-  const f = snapshotFixture(); f.snapshot.calculationVersion = "2.39.0";
-  const tree = { accounting: f.tree["accounting-dev"] };
-  const prefix = f.prefix.replace("accounting-dev", "accounting");
-  for (const [node, path, row] of paymentTargets(f)) {
-    // 本番は元の本指名＋場内売上の式を維持する。
-    delete row.additionalSales; delete row.additionalAllowance; delete row.additionalTransportFee; delete row.accountingInputs;
-    row.totalSales = 0;
-    assert.equal(evaluate(node[".validate"], {}, tree, prefix + path, "accounting"), true);
-    for (const field of ["dailyPayment", "advancePayment"]) {
-      for (const value of [0, 1, 0.5, -1, "legacy"]) {
-        row[field] = value;
-        assert.equal(evaluate(node[field][".validate"], {}, tree, prefix + path + "/" + field, "accounting"), true,
-          "本番で従来未検証だった追加キーの意味を変更しない");
+test("追加項目のない旧確定snapshotは欠損のまま保持し、旧小数も丸めない", () => {
+  for (const version of ["2.27.0", "2.36.0", "2.37.0", "2.38.0"]) {
+    const f = snapshotFixture(); f.snapshot.calculationVersion = version;
+    for (const [node, path, row] of paymentTargets(f)) {
+      delete row.additionalSales; delete row.additionalAllowance; delete row.additionalTransportFee; delete row.accountingInputs;
+      row.totalSales = row.honShimeiSales + row.jonaiExtensionSales;
+      const before = structuredClone(row);
+      assert.equal(evaluate(node[".validate"], {}, f.tree, f.prefix + path), true);
+      assert.deepEqual(row, before);
+      assert.equal(Object.hasOwn(row, "dailyPayment"), false);
+      assert.equal(Object.hasOwn(row, "advancePayment"), false);
+      for (const field of ["dailyPayment", "advancePayment"]) {
+        row[field] = 1234.75;
+        assert.equal(evaluate(node[field][".validate"], {}, f.tree, f.prefix + path + "/" + field), true);
+        assert.equal(row[field], 1234.75);
       }
     }
   }
@@ -294,4 +293,34 @@ test("Rulesの新保護式は有効な構文で、入れ子の同名ワイルド
   }
   inspect(collection, ["$workspace", "$month"]);
   inspect(snapshotRules, ["$workspace", "$month", "$revision"]);
+});
+}
+
+nodeTest("本番公開の変更は承認された18個の環境条件だけで、他の保護式を変更しない", () => {
+  const restored = structuredClone(rules), targets = [];
+  const base = ["$workspace", "accountingMonthSnapshots", "$month", "$revision"];
+  targets.push(["$workspace", "accountingAdjustments", "$month", "castInputs", ".validate"]);
+  for (const section of [["castSalesReports", "$index", "days", "$dayIndex"], ["castSalesReports", "$index", "totals"]]) {
+    targets.push([...base, ...section, ".validate"]);
+    for (const key of ["dailyPayment", "advancePayment", "additionalSales", "additionalAllowance", "additionalTransportFee", "accountingInputs"]) {
+      targets.push([...base, ...section, key, ".validate"]);
+    }
+  }
+  for (const key of ["additionalSales", "additionalAllowance", "additionalTransportFee"]) {
+    targets.push([...base, "castRewards", "$index", key, ".validate"]);
+  }
+  assert.equal(targets.length, 18);
+  for (const keys of targets) {
+    const parent = keys.slice(0, -1).reduce((node, key) => node[key], restored), key = keys.at(-1);
+    const after = parent[key], before = after
+      .replaceAll("($workspace === 'accounting-dev' || $workspace === 'accounting')", "$workspace === 'accounting-dev'")
+      .replaceAll("($workspace !== 'accounting-dev' && $workspace !== 'accounting')", "$workspace !== 'accounting-dev'");
+    assert.notEqual(before, after, keys.join("/"));
+    parent[key] = before;
+  }
+  const canonical = (value) => !value || typeof value !== "object" ? value : Array.isArray(value) ? value.map(canonical)
+    : Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
+  // Ver2.40.1 / 8adba62 の全Rules。許可した環境拡張以外は一字も変えない。
+  assert.equal(createHash("sha256").update(JSON.stringify(canonical(restored))).digest("hex"),
+    "b35f6bbff6a1a1ce2a1e70af01958740e2a216f09a526315e6499a3fe4362720");
 });

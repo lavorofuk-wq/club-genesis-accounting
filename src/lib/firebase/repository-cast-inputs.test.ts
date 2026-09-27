@@ -6,7 +6,7 @@ const memory = vi.hoisted(() => ({ values: new Map<string, unknown>(), get: vi.f
   environment: "accounting-dev", release: vi.fn() }));
 vi.mock("firebase/database", () => ({ get: memory.get, ref: (_db: unknown, path: string) => ({ path }),
   set: vi.fn(), update: vi.fn(), onValue: vi.fn(), serverTimestamp: vi.fn() }));
-vi.mock("./client", () => ({ database: {}, rootRef: (path = "") => ({ path }), environmentRoot: () => memory.environment }));
+vi.mock("./client", () => ({ database: {}, rootRef: (path = "") => ({ path: [memory.environment, path].filter(Boolean).join("/") }) }));
 vi.mock("./ready-transaction", () => ({ runReadyTransaction: memory.transaction }));
 vi.mock("../client-release", () => ({ assertCurrentClientRelease: memory.release }));
 import { saveCastAccountingInputs, saveMonthlyAdjustments } from "./repository";
@@ -36,45 +36,52 @@ const closing = (date = "2026-09-02", extra: Partial<DailyClosing> = {}): DailyC
 const defaults = (): MonthlyAdjustments => ({ month, withholdingByCast: {}, staffSalesAllowance: {},
   staffBottleAllowance: {}, driverRemoteAllowance: {}, fixedExpenses: [], cardFee: 0, revision: 0 });
 const path = "accountingAdjustments/" + month;
-const saved = () => structuredClone(memory.values.get(path)) as MonthlyAdjustments & { castInputs: Record<string, CastAccountingInput> };
+const scoped = (path: string) => memory.environment + "/" + path;
+const saved = () => structuredClone(memory.values.get(scoped(path))) as MonthlyAdjustments & { castInputs: Record<string, CastAccountingInput> };
 const seed = (rows: DailyClosing[] = [closing()], masters: CastRecord[] = [cast()]) => {
-  memory.values.set("history", Object.fromEntries(rows.map((row) => [row.id, row])));
-  memory.values.set("casts", Object.fromEntries(masters.map((row) => [row.id, row])));
+  memory.values.set(scoped("history"), Object.fromEntries(rows.map((row) => [row.id, row])));
+  memory.values.set(scoped("casts"), Object.fromEntries(masters.map((row) => [row.id, row])));
 };
-beforeEach(() => {
-  vi.clearAllMocks(); memory.values.clear(); memory.environment = "accounting-dev";
-  memory.release.mockResolvedValue(undefined); memory.values.set("users/accountant/role", "accounting"); seed();
-  memory.get.mockImplementation(async ({ path }: { path: string }) => ({ val: () => structuredClone(memory.values.get(path) ?? null) }));
-  memory.transaction.mockImplementation(async ({ path }: { path: string }, callback: (v: unknown) => unknown) => {
-    const result = callback(structuredClone(memory.values.get(path) ?? null));
-    if (result !== undefined) memory.values.set(path, structuredClone(result));
-    return { committed: result !== undefined, snapshot: { val: () => result } };
+describe.each(["accounting-dev", "accounting"])("キャストデータ入力の保存境界（%s）", (environment) => {
+  beforeEach(() => {
+    vi.clearAllMocks(); memory.values.clear(); memory.environment = environment;
+    memory.release.mockResolvedValue(undefined); memory.values.set("users/accountant/role", "accounting"); seed();
+    memory.get.mockImplementation(async ({ path }: { path: string }) => ({ val: () => structuredClone(memory.values.get(path) ?? null) }));
+    memory.transaction.mockImplementation(async ({ path }: { path: string }, callback: (v: unknown) => unknown) => {
+      const result = callback(structuredClone(memory.values.get(path) ?? null));
+      if (result !== undefined) memory.values.set(path, structuredClone(result));
+      return { committed: result !== undefined, snapshot: { val: () => result } };
+    });
   });
-});
 
-describe("キャストデータ入力の保存境界", () => {
   it.each(["accounting", "op"])("%sは未確定月へIDキー付きで保存し、店舗原本を変更しない", async (role) => {
     memory.values.set("users/accountant/role", role);
-    const before = structuredClone(memory.values.get("history"));
+    const before = structuredClone(memory.values.get(scoped("history")));
     await saveCastAccountingInputs(month, [input()], 0, user);
     expect(saved()).toMatchObject({ revision: 1, updatedBy: user.uid, cardFee: 0,
       castInputs: { input_1: { ...input(), attendanceClosingId: "daily_20260902", attendanceIndex: 0 } } });
-    expect(memory.values.get("history")).toEqual(before);
+    expect(memory.values.get(scoped("history"))).toEqual(before);
     expect(memory.transaction).toHaveBeenCalledTimes(1);
-    expect(memory.transaction.mock.calls[0][0].path).toBe(path);
+    expect(memory.transaction.mock.calls[0][0].path).toBe(scoped(path));
   });
   it("店舗ユーザーを拒否する", async () => {
     memory.values.set("users/accountant/role", "shop");
     await expect(saveCastAccountingInputs(month, [input()], 0, user)).rejects.toThrow();
     expect(memory.transaction).not.toHaveBeenCalled();
   });
-  it("本番を拒否する", async () => {
-    memory.environment = "accounting";
-    await expect(saveCastAccountingInputs(month, [input()], 0, user)).rejects.toThrow("開発環境");
-    expect(memory.transaction).not.toHaveBeenCalled();
+  it("保存先を現在の環境に限定し、別環境の同月データには触れない", async () => {
+    const otherRoot = environment === "accounting" ? "accounting-dev" : "accounting";
+    const otherPath = otherRoot + "/" + path;
+    const other = { ...defaults(), revision: 27, cardFee: 135, castInputs: { input_1: input({ amount: 9900 }) } };
+    memory.values.set(otherPath, structuredClone(other));
+    await saveCastAccountingInputs(month, [input()], 0, user);
+    expect(saved().castInputs.input_1.amount).toBe(1230);
+    expect(memory.transaction.mock.calls[0][0].path).toBe(scoped(path));
+    expect(memory.values.get(otherPath)).toEqual(other);
+    expect(memory.get.mock.calls.every(([ref]) => !ref.path.startsWith(otherRoot + "/"))).toBe(true);
   });
   it.each(["closed", "closing"])("%s月を拒否する", async (status) => {
-    memory.values.set("accountingMonthStates/" + month, { status });
+    memory.values.set(scoped("accountingMonthStates/" + month), { status });
     await expect(saveCastAccountingInputs(month, [input()], 0, user)).rejects.toThrow("確定");
     expect(memory.transaction).not.toHaveBeenCalled();
   });
@@ -102,7 +109,7 @@ describe("キャストデータ入力の保存境界", () => {
     { castId: "other_1" }, { castName: "別名" },
   ])("不正・未承認出勤入力を拒否する %j", async (extra) => {
     await expect(saveCastAccountingInputs(month, [input(extra)], 0, user)).rejects.toThrow();
-    expect(memory.values.has(path)).toBe(false);
+    expect(memory.values.has(scoped(path))).toBe(false);
   });
   it("重複IDを拒否する", async () => {
     await expect(saveCastAccountingInputs(month, [input(), input()], 0, user)).rejects.toThrow("重複");
@@ -133,7 +140,7 @@ describe("キャストデータ入力の保存境界", () => {
     expect(saved().castInputs).toBeUndefined();
   });
   it("共通revisionの競合で他画面の源泉・経費を上書きしない", async () => {
-    memory.values.set(path, { ...defaults(), revision: 5, cardFee: 321, withholdingByCast: { cast_1: 456 } });
+    memory.values.set(scoped(path), { ...defaults(), revision: 5, cardFee: 321, withholdingByCast: { cast_1: 456 } });
     await expect(saveCastAccountingInputs(month, [input()], 4, user)).rejects.toThrow("別の端末");
     await saveCastAccountingInputs(month, [input()], 5, user);
     expect(saved()).toMatchObject({ revision: 6, cardFee: 321, withholdingByCast: { cast_1: 456 } });

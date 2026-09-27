@@ -7,7 +7,6 @@ import type { AccountingWorkspaceData } from "@/domain/month-accounting";
 import { castAccountingAttendanceDays, castAccountingInputAmount, castAccountingInputTotals, normalizeCastAccountingInputs, resolveCastAccountingInputs } from "@/domain/cast-accounting-inputs";
 import { secureRandomUUID } from "@/lib/crypto-compat";
 import { saveCastAccountingInputs } from "@/lib/firebase/repository";
-import { isProductionEnvironment } from "@/lib/firebase/client";
 import { Card, Field, StatusPill, Table, currentMonth, yen } from "./ui";
 import { useRecoverableState } from "./update-drafts";
 import { CastInputPicker } from "./cast-input-picker";
@@ -32,7 +31,6 @@ export function castInputSourceKey(data: AccountingWorkspaceData, month: string)
 }
 
 export function CastAccountingInputs(props: Props) {
-  if (isProductionEnvironment()) return <Card title="キャストデータ入力"><p>この機能は開発環境で確認中です。</p></Card>;
   return <CastAccountingInputForm {...props} />;
 }
 

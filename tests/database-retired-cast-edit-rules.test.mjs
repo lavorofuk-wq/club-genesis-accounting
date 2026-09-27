@@ -49,18 +49,18 @@ function outsideRetiredRules(value) {
   for (const node of [snapshots.castRewards.$index, snapshots.castSalesReports.$index.days.$dayIndex, snapshots.castSalesReports.$index.totals]) {
     for (const key of ["additionalSales", "additionalAllowance", "additionalTransportFee", "accountingInputs"]) delete node[key];
   }
-  // 追加売上を持つdevの分岐だけを除去し、本番/既存データの元式を指紋に含める。
+  // 承認済みの追加売上分岐だけを除去し、入力なしの既存式を指紋に含める。
   const originalSales = "newData.child('totalSales').val() === newData.child('honShimeiSales').val() + newData.child('jonaiExtensionSales').val()";
-  const additionalSales = "(($workspace === 'accounting-dev' && newData.child('additionalSales').exists()) ? "
+  const additionalSales = "((($workspace === 'accounting-dev' || $workspace === 'accounting') && newData.child('additionalSales').exists()) ? "
     + originalSales + " + newData.child('additionalSales').val() : " + originalSales + ")";
   for (const node of [snapshots.castSalesReports.$index.days.$dayIndex, snapshots.castSalesReports.$index.totals]) {
     assert.ok(node[".validate"].includes(additionalSales));
     node[".validate"] = node[".validate"].replace(additionalSales, originalSales);
   }
-  // Ver2.39のdev専用必須条件だけを除き、本番・旧版の元式は指紋で保護する。
+  // Ver2.39の両環境の必須条件だけを除き、旧版の元式は指紋で保護する。
   const paymentVersion = "/^(2[.](39|[4-9][0-9]|[1-9][0-9]{2,})[.][0-9]+|([3-9]|[1-9][0-9]+)[.][0-9]+[.][0-9]+)$/";
   for (const [node, depth] of [[snapshots.castSalesReports.$index.days.$dayIndex, 4], [snapshots.castSalesReports.$index.totals, 3]]) {
-    const paymentPresence = " && ($workspace !== 'accounting-dev' || !newData" + ".parent()".repeat(depth)
+    const paymentPresence = " && (($workspace !== 'accounting-dev' && $workspace !== 'accounting') || !newData" + ".parent()".repeat(depth)
       + ".child('calculationVersion').val().matches(" + paymentVersion + ") || newData.hasChildren(['dailyPayment', 'advancePayment']))";
     assert.ok(node[".validate"].endsWith(paymentPresence));
     node[".validate"] = node[".validate"].slice(0, -paymentPresence.length);

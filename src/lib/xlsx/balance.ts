@@ -155,9 +155,11 @@ export function createMonthlyBalanceWorkbook(input: BalanceExportInput, sourceLa
   merge(sheet, "M37:N37", formula("F37-D39-N36-P35-U42", report.castNet));
   label(sheet, "O37:T37", "キャスト総支給額＋総従業員給＋紹介料＋経費＝総支出");
   merge(sheet, "U37:V37", formula("SUM(M35:N35,P35,R35:T35)", totalCosts));
-  label(sheet, "A38:L38", "現金売上＋前期・後期カード入金－キャスト差引支給額－紹介者支払額－従業員差引支給額（送迎含む）－キャスト日払・立替－従業員日払－源泉所得税－派遣支払・手数料－変動費－固定費" + (cashFunding ? "＋会社補充＋個人補充＋会社送金－個人返済" : "") + "＝現状現金残高");
-  // 総支出に含まれる日払い・源泉税は別途引かず、実際の支出ではない送迎控除だけを戻す。
-  merge(sheet, "M38:N38", formula("SUM(D35,J42,O42)-U37+N36" + (cashFunding ? "+SUM(J43,O43,J44)-O44" : ""), cash - totalCosts + report.castTransport + (cashFunding?.netCashMovement || 0)));
+  label(sheet, "A38:L38", "現金売上＋カード実入金（手数料控除後）－キャスト差引支給額－紹介者支払額－従業員差引支給額（送迎含む）－キャスト日払・立替－従業員日払－源泉所得税－派遣支払・手数料－経費（カード手数料除く）" + (cashFunding ? "＋会社補充＋個人補充＋会社送金－個人返済" : "") + "＝現状現金残高");
+  // 総支出に含む日払い・源泉税は別途引かず、送迎控除と実入金で控除済みのカード手数料を戻す。
+  // 手数料は検証済み月額の定数。入金2欄の直接参照は保持し、Excelでの入力後も再計算する。
+  merge(sheet, "M38:N38", formula("SUM(D35,J42,O42)-U37+N36" + (report.cardFee ? `+${report.cardFee}` : "")
+    + (cashFunding ? "+SUM(J43,O43,J44)-O44" : ""), cash - totalCosts + report.castTransport + report.cardFee + (cashFunding?.netCashMovement || 0)));
   label(sheet, "O38:U38", "現金売上－総支出＝現金残");
   merge(sheet, "V38:W38", formula("D35-U37", cash - totalCosts));
   label(sheet, "A39:C39", "キャスト（日払・立替）計");
