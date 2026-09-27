@@ -380,6 +380,35 @@ describe("主要ページのSSRスモーク", () => {
     expect(render({ ...changed, casts: [], closings: [] })).toBe(markup);
   });
 
+  it.each([false, true])("同月入店スタッフは体入分も在籍へまとめ、確定後の現マスタ・日次変更で区分や金額を変えない（在籍勤務=%s）", (hasRegularWork) => {
+    const source = structuredClone(data);
+    const member = source.staff[0];
+    member.convertedFromTrialId = "staff-converted-trial";
+    member.hiredAt = `${month}-03`;
+    source.staff.push({ ...member, id: "staff-converted-trial", status: "trial", hiredAt: undefined,
+      convertedFromTrialId: undefined, convertedToStaffId: member.id, trialDate: businessDate, trialHourlyRate: 1500 });
+    const regularWork = source.closings[0].staffWork[0];
+    source.closings[0].staffWork = [{ ...regularWork, staffId: "staff-converted-trial", kind: "trial", hours: 4, hourlyRate: 1500, dailyPayment: 6000 }];
+    if (hasRegularWork) source.closings.push({ ...structuredClone(source.closings[0]), id: "staff-regular-day",
+      businessDate: `${month}-04`, staffWork: [regularWork] });
+    const result = calculateMonthlyAccounting(source, month, source.adjustments[0]);
+    expect(result.staffPayroll).toHaveLength(1);
+    expect(result.staffPayroll[0]).toMatchObject({ id: member.id, hours: hasRegularWork ? 10 : 4,
+      hourly: hasRegularWork ? 18000 : 6000, daily: hasRegularWork ? 7000 : 6000, net: hasRegularWork ? 11000 : 0 });
+    const snapshot = buildMonthlySnapshot(month, 1, "a".repeat(64), source.adjustments[0], result, source.closings, user.uid, new Date().toISOString());
+    source.monthStates = [{ month, status: "closed", revision: 1, currentSnapshotRevision: 1, updatedAt: "", updatedBy: user.uid }];
+    source.monthSnapshots = [snapshot];
+    const render = () => renderToStaticMarkup(createElement(AccountingForms, { section: "staffPayroll", data: source, user, busy: false, run }));
+    const before = render();
+    expect(before).toContain("在籍スタッフ給与（1名）");
+    expect(before).toContain("体入スタッフ給与（0名）");
+    expect(before).toContain("￥1,500（体入・4時間）");
+    source.staff = [];
+    source.closings = [];
+    expect(render()).toBe(before);
+    expect(source.monthSnapshots[0].staffPayroll).toEqual(result.staffPayroll);
+  });
+
   it("スタッフ給与の確定済み日別内訳は現在マスタ変更後も保存基準を表示する", () => {
     const source = structuredClone(data);
     const result = calculateMonthlyAccounting(source, month, source.adjustments[0]);
@@ -394,6 +423,7 @@ describe("主要ページのSSRスモーク", () => {
     expect(render()).not.toContain("￥9,999");
     snapshot.calculationVersion = "2.24.0";
     delete snapshot.staffPayroll[0].hourlySources;
+    expect(render()).toContain("区分記録なし（1名）");
     expect(render()).toContain("確定時の単価記録なし");
     expect(render()).toContain("￥12,000");
     expect(render()).not.toContain("￥9,999");
