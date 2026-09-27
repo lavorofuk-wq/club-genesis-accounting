@@ -31,7 +31,7 @@ function cell(sheet: ExcelJS.Worksheet, row: number, col: number, width: number,
   target.font = { ...font, size: typeof value === "string" ? 9 : 10, bold: Boolean(tone) };
   target.alignment = { horizontal: typeof value === "number" ? "right" : "center", vertical: "middle",
     ...(typeof value === "string" ? { wrapText: true } : { shrinkToFit: true }) };
-  // 日別売上以外は、確定済みの旧小数も整数表示に丸めて隠さない。
+  // 売上の表示以外は、確定済みの旧小数も整数表示に丸めて隠さない。
   target.numFmt = typeof value === "number" && !Number.isInteger(value)
     ? '#,##0.###############;[Red]-#,##0.###############;0' : '#,##0;[Red]-#,##0;0';
   for (let current = col; current < col + width; current += 1) {
@@ -82,12 +82,13 @@ function sales(sheet: ExcelJS.Worksheet, cast: Exclude<IntroducerExportCast, { l
     const entry = dates.get(day);
     cell(sheet, row + 2 + day, col, dayWidth, day <= lastDay ? day : null).alignment.horizontal = "center";
     cell(sheet, row + 2 + day, countCol, countWidth, day <= lastDay ? entry?.honShimeiCount ?? 0 : null);
-    // 日別売上の帳票表示だけ小数部分を除去する。月計・紹介料・元データは再計算しない。
+    // 日別売上の帳票表示だけ小数部分を除去する。紹介料・元データは再計算しない。
     cell(sheet, row + 2 + day, amountCol, salesWidth, day <= lastDay ? Math.trunc(entry?.sales ?? 0) || 0 : null);
   }
   cell(sheet, row + 34, col, dayWidth, "合計", "total");
   cell(sheet, row + 34, countCol, countWidth, cast.honShimeiCount, "total");
-  cell(sheet, row + 34, amountCol, salesWidth, cast.salesTotal, "total");
+  // 未丸めの月合計から表示用に切り捨てる。日別の整数表示額を足し直さない。
+  cell(sheet, row + 34, amountCol, salesWidth, Math.trunc(cast.salesTotal) || 0, "total");
   const selected = cast.adopted === "売上10%";
   const totals: Array<[string, number, (keyof typeof fills)?]> = [
     ["売上10%", cast.salesFee], ["顧問料", cast.advisory],

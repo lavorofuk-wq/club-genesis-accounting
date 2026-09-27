@@ -12,7 +12,7 @@ function CastPaymentDetails({ rows }: Pick<Props, "rows">) {
   return <Table headers={["紹介者", "対象キャスト", "本指名酒代原価", "売上算定額", "売上10%", "総支給額", "総支給10%", "採用タイプ", "出勤顧問料", "入店顧問料", "支払合計"]}>
     {rows.map((row, index) => <tr key={`${row.id}:${index}`}>
       <td>{row.introducer}</td><td>{row.cast}</td>
-      <td>{yen.format(row.honShimeiLiquorCost)}</td><td>{yen.format(row.salesBase)}</td>
+      <td>{yen.format(row.honShimeiLiquorCost)}</td><td>{yen.format(Math.trunc(row.salesBase) || 0)}</td>
       <td>{yen.format(row.salesFee)}</td><td>{yen.format(row.grossBase)}</td>
       <td>{yen.format(row.grossFee)}</td><td>{row.adopted}</td>
       <td>{yen.format(row.attendanceAdvisory)}</td><td>{yen.format(row.entryAdvisory)}</td>
