@@ -89,7 +89,8 @@ export function addStatementAllowancePages(xml: string, layout: Layout, allowanc
   const put = (source: string, logical: number, value?: Line, plain = false) => {
     source = replaceCell(source, address("B", logical), value?.label, style(labelStyle, "label", plain));
     source = replaceCell(source, address("F", logical), value?.amount, style(amountStyle, "amount", plain, value?.amount !== undefined && !Number.isInteger(value.amount)));
-    return replaceCell(source, address("J", logical), value?.amount !== undefined ? "円" : undefined, style(labelStyle, "label", plain));
+    // 1頁目の単位欄は元の書式（右罫線を含む）を保持する。
+    return replaceCell(source, address("J", logical), value?.amount !== undefined ? "円" : undefined, plain ? style(labelStyle, "label", true) : undefined);
   };
   xml = put(put(xml, 16, pages[0][0]), 17, pages[0][1]);
   if (pages.length === 1) return { xml, printAreas: [layout.statementPrintArea] };

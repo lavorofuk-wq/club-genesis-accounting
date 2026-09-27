@@ -241,6 +241,26 @@ describe("明細書の美容室と名目別手当・固定寸法の続き頁", (
     }
   });
 
+  it.each(kinds)("%s: 初頁の手当単位欄は件数・空欄・0円によらず元様式の右罫線を保持する", async (kind) => {
+    const sourceBook = await open(await template()), sourceSheet = sourceBook.worksheets[layouts[kind].source - 1];
+    const cases: NonNullable<ReceiptSheet["statementAllowances"]>[] = [
+      [], [{ label: "売上手当", amount: 0 }], [{ label: "売上手当", amount: 1500 }],
+      [{ label: "売上手当", amount: 1500 }, { label: "特別手当", amount: 2000 }],
+      Array.from({ length: 43 }, (_, i) => ({ label: "手当" + (i + 1), amount: i * 100 })),
+    ];
+    for (const allowances of cases) {
+      const result = await inspect(kind, allowances);
+      for (const logical of [16, 17]) {
+        const physical = layouts[kind].statementRows[logical - 1];
+        const unit = result.sheet.getCell("J" + physical), sourceUnit = sourceSheet.getCell("S" + physical);
+        expect(sourceUnit.border.right?.style).toBeTruthy();
+        expect(unit.border.right, `${kind} J${physical}, 手当${allowances.length}件`).toEqual(sourceUnit.border.right);
+        expect(unit.style).toEqual(sourceUnit.style);
+        expect(unit.value).toBe(allowances[logical - 16] ? "円" : null);
+      }
+    }
+  });
+
   it.each(kinds)("%s: 多数の手当は同じ用紙・幅・各行高の離散印刷領域へ1回ずつ出力する", async (kind) => {
     const allowances = Array.from({ length: 43 }, (_, i) => ({ label: "手当" + (i + 1), amount: i === 0 ? 0 : i + .5 }));
     const result = await inspect(kind, allowances);
