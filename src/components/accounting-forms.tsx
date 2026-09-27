@@ -9,7 +9,7 @@ import { validateExpenseExport, type ExpenseExportInput } from "@/domain/expense
 import { buildBalanceExportReport, type BalanceExportInput } from "@/domain/balance-export";
 import {
   buildMonthlySnapshot, calculateMonthlyAccounting, canFinalizeMonthlyAccounting, monthlySourceFingerprint,
-  type AccountingWorkspaceData, type MonthlyAccountingResults, type StaffPayrollRow,
+  type AccountingWorkspaceData, type MonthlyAccountingResults,
 } from "@/domain/month-accounting";
 import { approveClosing, cancelAccountingMonthClosing, finalizeAccountingMonth, reopenAccountingMonth, returnClosing, saveMonthlyAdjustments } from "@/lib/firebase/repository";
 import { Card, Field, MoneyInput, StatusPill, Table, currentMonth, yen } from "./ui";
@@ -17,6 +17,7 @@ import { summarizeCastDrinksByPrice } from "./store-work";
 import { useRecoverableState, useUpdateDraftBusy } from "./update-drafts";
 import { cashDayIssues, cashFundingIssues, cashLedgerIssues, type CashFundingSummary } from "@/domain/cash-funding";
 import { IntroducerPayments } from "./introducer-payments";
+import { StaffPayroll } from "./staff-payroll";
 import { CastReceiptExport } from "./cast-receipt-export";
 import { IntroducerStatementExport } from "./introducer-statement-export";
 import { CastAccountingInputs } from "./cast-accounting-inputs";
@@ -510,26 +511,6 @@ function CastRewardTable({ rows, disabled, onWithholding, empty }: CastRewardsPr
     <td><MoneyInput value={row.withholding} disabled={disabled} onChange={(value) => onWithholding(row.id, value)} /></td>
     <td><strong>{yen.format(row.netPay)}</strong></td>
   </tr>)}</Table>;
-}
-function StaffPayroll({ rows, disabled, onSales, onBottle }: { rows: StaffPayrollRow[]; disabled: boolean; onSales: (id: string, value: number) => void; onBottle: (id: string, value: number) => void }) {
-  return <Card title="スタッフ給与データ" description="日別内訳で計算に使った時給を確認できます。日払いは支払済みの記録を保持し、給与との差額は差引支給額に反映します。">
-    <Table headers={["スタッフ", "勤務時間", "基本給与", "売上手当", "ボトル手当", "総支給", "日払い", "差引支給"]}>
-      {rows.map((row) => <tr key={row.id}><td>{row.name}</td><td>{row.hours}時間</td><td>{yen.format(row.hourly)}</td><td><MoneyInput value={row.sales} disabled={disabled} onChange={(value) => onSales(row.id, value)} /></td><td><MoneyInput value={row.bottle} disabled={disabled} onChange={(value) => onBottle(row.id, value)} /></td><td>{yen.format(row.gross)}</td><td>{yen.format(row.daily)}</td><td><strong>{yen.format(row.net)}</strong></td></tr>)}
-    </Table>
-    {rows.map((row) => <details key={row.id} className="cast-sales-card">
-      <summary className="cast-sales-summary"><strong>{row.name}</strong><span>日別内訳</span><span>基本給与 {yen.format(row.hourly)}</span></summary>
-      <div className="cast-sales-content">
-        {row.hourlyByDay ? <Table headers={["営業日", "勤務時間", "適用時給（区分・時間）", "基本給与"]}>
-          {row.hourlyByDay.map((day) => {
-            const sources = row.hourlySources?.filter((source) => source.businessDate === day.businessDate);
-            return <tr key={day.businessDate}><td>{businessDateLabel(day.businessDate)}</td><td>{day.hours}時間</td>
-              <td>{sources?.length ? sources.map((source) => <div key={`${source.staffId}-${source.kind}`}>{yen.format(source.hourlyRate)}（{source.kind === "trial" ? "体入" : "在籍"}・{source.hours}時間）</div>) : "確定時の単価記録なし"}</td>
-              <td>{yen.format(day.amount)}</td></tr>;
-          })}
-        </Table> : <p className="muted">この確定データには日別内訳が保存されていません。確定時の月額を表示しています。</p>}
-      </div>
-    </details>)}
-  </Card>;
 }
 function DriverPayroll({ rows, disabled, onRemote }: { rows: MonthlyAccountingResults["driverPayroll"]; disabled: boolean; onRemote: (id: string, value: number) => void }) { return <Card title="送迎ドライバー給与データ"><Table headers={["ドライバー", "出勤日数", "基本給与", "遠方手当", "総支給", "日払い", "差引支給"]}>{rows.map((row) => <tr key={row.id}><td>{row.name}</td><td>{row.days}日</td><td>{yen.format(row.basic)}</td><td><MoneyInput value={row.remote} disabled={disabled} onChange={(value) => onRemote(row.id, value)} /></td><td>{yen.format(row.gross)}</td><td>{yen.format(row.dailyPayment)}</td><td><strong>{yen.format(row.net)}</strong></td></tr>)}</Table></Card>; }
 
