@@ -40,7 +40,10 @@ export type BalanceExportReport = {
   castWithholding: number;
   castNet: number;
   employeeDaily: number;
+  /** カード実入金は手数料控除後。M38では損益経費に含まれるこの金額を戻す。 */
+  cardFee: number;
   honShimeiSales: number;
+  additionalSales?: number;
   jonaiExtensionSales: number;
   /** 損益には含めず、現状現金残高だけに加減する。旧確定分には後付けしない。 */
   cashFunding?: CashFundingSummary;
@@ -229,18 +232,21 @@ export function buildBalanceExportReport(input: BalanceExportInput): BalanceExpo
   same(castDailyAndAdvance, sum(approved, (closing) => sum(closing.casts,
     (cast) => amount(cast.dailyPayment, "キャスト日払い") + amount(cast.advancePayment, "キャスト立替"))),
   "キャスト日払い・立替合計");
-  same(castTransport, sum(approved, (closing) => sum(closing.casts, (cast) => amount(cast.transportFee, "キャスト送迎控除"))),
+  same(castTransport, sum(approved, (closing) => sum(closing.casts, (cast) => amount(cast.transportFee, "キャスト送迎控除")))
+    + sum(results.castRewards, (reward) => amount(reward.additionalTransportFee ?? 0, "キャスト追加送迎控除")),
     "キャスト送迎控除合計");
-  // スタッフ/ドライバーの日払い控除後給与と日払いを別々に引き、派遣支払も各1回だけ引く。
+  // 日払い・派遣支払は各1回だけ引く。カード実入金で控除済みの手数料は現金残高から二重に引かない。
   const expandedCash = results.sales.cash - castNet - castWithholding - results.balance.introducer
     - employeeNet - castDailyAndAdvance - employeeDaily - results.expenses.dispatchCast
     - results.expenses.dispatchStaff - results.expenses.dispatchFee - results.expenses.dailyExpenseTotal
-    - monthlyExpenses + (cashFunding?.netCashMovement || 0);
-  same(expandedCash, results.sales.cash - totalCosts + castTransport + (cashFunding?.netCashMovement || 0), "現状現金残高の控除内訳");
+    - monthlyExpenses + results.expenses.cardFee + (cashFunding?.netCashMovement || 0);
+  same(expandedCash, results.sales.cash - totalCosts + castTransport + results.expenses.cardFee
+    + (cashFunding?.netCashMovement || 0), "現状現金残高の控除内訳");
   return {
     month, days, approvedDays: results.approvedDays,
-    castDailyAndAdvance, castTransport, castWithholding, castNet, employeeDaily,
+    castDailyAndAdvance, castTransport, castWithholding, castNet, employeeDaily, cardFee: results.expenses.cardFee,
     honShimeiSales: sum(results.castRewards, (row) => amount(row.honShimeiSales, "キャスト本指名売上")),
+    additionalSales: sum(results.castRewards, (row) => amount(row.additionalSales ?? 0, "キャスト追加売上")),
     jonaiExtensionSales: sum(results.castRewards, (row) => amount(row.jonaiExtensionSales, "キャスト場内延長売上")),
     ...(cashFunding ? { cashFunding } : {}),
   };

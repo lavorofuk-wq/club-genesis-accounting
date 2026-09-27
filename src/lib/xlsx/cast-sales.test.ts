@@ -19,6 +19,7 @@ const day: CastSalesDay = {
   backTotal: 8832,
   bottles: [{ name: "テスト通常ボトル", quantity: 1 }, { name: "テストシャンパン", quantity: 2 }],
   beautyAllowance: 500,
+  dailyPayment: 1000, advancePayment: 2000,
 };
 const { businessDate: _date, startTime: _start, endTime: _end, ...dayTotals } = day;
 const report: CastSalesReport = {
@@ -39,7 +40,7 @@ describe("キャスト売上XLSX", () => {
   it("指定の列・勤務時間・月合計・左右両方の給与を保存値どおり出力する", () => {
     const book = createCastSalesWorkbook(input(), "2026-09", "承認済みデータ（未確定）");
     const sheet = book.worksheets[0];
-    expect(book.creator).toBe("GENESIS Management System Ver2.36.0");
+    expect(book.creator).toBe("GENESIS Management System Ver2.39.0");
     expect(sheet.getCell("G4").value).toBe(2000);
     expect(sheet.getCell("J4").value).toBe(500);
     expect(sheet.getCell("M4").value).toBe(4000);
@@ -169,7 +170,7 @@ describe("キャスト売上XLSX", () => {
       expect(sheet.getCell("U44").value).toBe(17532);
       expect(sheet.getCell("G4").font.name).toBe("Yu Gothic");
       expect(sheet.views[0]).toMatchObject({ xSplit: 2, ySplit: 2 });
-      expect(sheet.pageSetup.printArea).toBe("B1:V45");
+      expect(sheet.pageSetup.printArea).toBe("B1:AA45");
     });
   });
 
@@ -180,6 +181,89 @@ describe("キャスト売上XLSX", () => {
     const sheet = createCastSalesWorkbook(data, "2026-09", "未確定").worksheets[0];
     expect(sheet.getCell("E34").value).toEqual({ formula: "SUM(E3:E33)", result: 28.5 / 24 });
     expect(sheet.getCell("T1").numFmt).toBe('[h]"時間"mm"分"');
+  });
+
+  it("W～AAを美容室と同じ幅・書式で追加し、減給は合計も含め全て空欄にする", async () => {
+    const book = createCastSalesWorkbook(input(), "2026-09", "未確定");
+    const restored = new ExcelJS.Workbook();
+    await restored.xlsx.load(await book.xlsx.writeBuffer());
+    const sheet = restored.worksheets[0];
+    for (const [column, label] of [["W", "日払い"], ["X", "送迎"], ["Y", "立替"], ["Z", "減給"], ["AA", "手当"]]) {
+      expect(sheet.getCell(`${column}2`).value).toBe(label);
+      expect(sheet.getColumn(column).width).toBe(sheet.getColumn("V").width);
+      for (const row of [2, 4, 34]) {
+        expect(sheet.getCell(`${column}${row}`).style).toEqual(sheet.getCell(`V${row}`).style);
+      }
+      expect(sheet.getCell(`${column}3`).value).toBeNull();
+    }
+    expect(sheet.getCell("W4").value).toBe(1000);
+    expect(sheet.getCell("Y4").value).toBe(2000);
+    // 店舗送迎500円と美容室500円を追加入力欄へ混ぜない。
+    expect(sheet.getCell("X4").value).toBe(0);
+    expect(sheet.getCell("AA4").value).toBe(0);
+    for (const [column, result] of [["W", 1000], ["X", 0], ["Y", 2000], ["AA", 0]] as const) {
+      // ExcelJS.valueのコピーは0のresultを省略するため、保存モデルのresultを検証する。
+      expect(sheet.getCell(`${column}34`).formula).toBe(`SUM(${column}3:${column}33)`);
+      expect(sheet.getCell(`${column}34`).result).toBe(result);
+    }
+    for (let row = 3; row <= 34; row++) expect(sheet.getCell(`Z${row}`).value).toBeNull();
+    expect(sheet.getCell("B45").value).toContain("追加分のみ");
+    expect(sheet.getCell("B45").value).not.toContain("日別内訳未保存");
+    expect(sheet.pageSetup.printArea).toBe("B1:AA45");
+  });
+
+  it("旧確定の日別日払い・立替を推定せず、保存された月合計を保持する", async () => {
+    const data = input();
+    for (const row of [...data.castSalesReports[0].days, data.castSalesReports[0].totals]) {
+      delete row.dailyPayment;
+      delete row.advancePayment;
+    }
+    const before = structuredClone(data);
+    const book = createCastSalesWorkbook(data, "2026-09", "月次確定済み 第1版");
+    const restored = new ExcelJS.Workbook();
+    await restored.xlsx.load(await book.xlsx.writeBuffer());
+    const sheet = restored.worksheets[0];
+    for (let row = 3; row <= 33; row++) {
+      expect(sheet.getCell(`W${row}`).value).toBeNull();
+      expect(sheet.getCell(`Y${row}`).value).toBeNull();
+    }
+    expect(sheet.getCell("W34").value).toBe(1000);
+    expect(sheet.getCell("Y34").value).toBe(2000);
+    expect(sheet.getCell("B45").value).toContain("日別内訳未保存");
+    expect(sheet.getCell("W34").note).toBeTruthy();
+    expect(sheet.getCell("Y34").note).toBeTruthy();
+    expect(sheet.getCell("U44").value).toBe(17532);
+    expect(data).toEqual(before);
+  });
+
+  it("保存済み0円は空欄と区別し、金額を丸め直さない", () => {
+    const data = input();
+    for (const row of [...data.castSalesReports[0].days, data.castSalesReports[0].totals, data.castRewards[0]]) {
+      row.dailyPayment = 0;
+      row.advancePayment = 2000.5;
+    }
+    data.castRewards[0].netPay = 18531.5;
+    const sheet = createCastSalesWorkbook(data, "2026-09", "確定済み").worksheets[0];
+    expect(sheet.getCell("W4").value).toBe(0);
+    expect(sheet.getCell("Y4").value).toBe(2000.5);
+    expect(sheet.getCell("W34").formula).toBe("SUM(W3:W33)");
+    expect(sheet.getCell("W34").result).toBe(0);
+    expect(sheet.getCell("Y34").value).toEqual({ formula: "SUM(Y3:Y33)", result: 2000.5 });
+  });
+
+  it.each(["dailyPayment", "advancePayment"] as const)("%sの日別・合計・報酬の不一致や部分欠損を拒否する", (key) => {
+    for (const value of [undefined, NaN, Infinity, -1, Number.MAX_SAFE_INTEGER + 1, 999]) {
+      const data = input();
+      data.castSalesReports[0].days[0][key] = value;
+      expect(() => createCastSalesWorkbook(data, "2026-09", "")).toThrow("不一致");
+    }
+    const noTotals = input();
+    delete noTotals.castSalesReports[0].totals[key];
+    expect(() => createCastSalesWorkbook(noTotals, "2026-09", "")).toThrow("不一致");
+    const mismatch = input();
+    mismatch.castSalesReports[0].days[0][key]! += 1;
+    mismatch.castSalesReports[0].totals[key]! += 1;
+    expect(() => createCastSalesWorkbook(mismatch, "2026-09", "")).toThrow("不一致");
   });
 
   it("欠損・重複・合計不一致のあるデータの出力を拒否する", () => {

@@ -103,7 +103,7 @@ function sales(sheet: ExcelJS.Worksheet, cast: Exclude<IntroducerExportCast, { l
 export function createIntroducerWorkbook(results: IntroducerExportResults, month: string) {
   const report = buildIntroducerExport(results, month);
   const book = new ExcelJS.Workbook();
-  book.creator = "GENESIS Management System Ver2.36.0";
+  book.creator = "GENESIS Management System Ver2.37.0";
   book.created = new Date();
   const used = new Set<string>();
   for (const group of report.sheets) {

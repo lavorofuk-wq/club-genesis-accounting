@@ -1,6 +1,7 @@
 import { cashFundingIssues } from "./cash-funding";
 import type { CashFunding } from "./cash-funding";
 import { sha256Hex } from "../lib/crypto-compat";
+import { resolveCastAccountingInputs, castAccountingInputTotals, normalizeCastAccountingInputs } from "./cast-accounting-inputs";
 
 export type Role = "shop" | "accounting" | "op";
 export type PersonStatus = "active" | "trial" | "departed";
@@ -793,8 +794,24 @@ export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
   };
 }
 
+export type CastAccountingInput = {
+  id: string;
+  castId: string;
+  castName: string;
+  kind: "sales" | "allowance" | "transport";
+  label: string;
+  amount: number;
+  businessDate?: string;
+  /** 保存権限の本人出勤検証用。計算時の日付はbusinessDateまたは最終承認出勤日から再解決する。 */
+  attendanceClosingId?: string;
+  attendanceIndex?: number;
+};
+
+export type ResolvedCastAccountingInput = CastAccountingInput & { businessDate: string };
+
 export type MonthlyAdjustments = {
   month: string;
+  castInputs?: CastAccountingInput[];
   withholdingByCast: Record<string, number>;
   staffSalesAllowance: Record<string, number>;
   staffBottleAllowance: Record<string, number>;
@@ -834,6 +851,8 @@ export function normalizeMonthlyAdjustments(
   return {
     ...value,
     month: String(value.month || ""),
+    // Firebase表現を厳密に復元する。不正行や端数を黙って消したり丸めたりしない。
+    ...(value.castInputs === undefined ? {} : { castInputs: normalizeCastAccountingInputs(value.castInputs) }),
     withholdingByCast: storedNumberMap(value.withholdingByCast),
     staffSalesAllowance: storedNumberMap(value.staffSalesAllowance),
     staffBottleAllowance: storedNumberMap(value.staffBottleAllowance),
@@ -882,6 +901,9 @@ export type CastReward = {
   hourlyByDay?: DailyHourlyPay[];
   honShimeiSales: number;
   jonaiExtensionSales: number;
+  additionalSales?: number;
+  additionalAllowance?: number;
+  additionalTransportFee?: number;
   liquorCost: number;
   honShimeiLiquorCost: number;
   honShimeiBack: number;
@@ -923,8 +945,15 @@ export type CastSalesDay = {
   startTime: string;
   endTime: string;
   hours: number;
+  /** Ver2.39以降の確定結果。未保存の旧確定日別額は0円で補完しない。 */
+  dailyPayment?: number;
+  advancePayment?: number;
   honShimeiSales: number;
   jonaiExtensionSales: number;
+  additionalSales?: number;
+  additionalAllowance?: number;
+  additionalTransportFee?: number;
+  accountingInputs?: ResolvedCastAccountingInput[];
   totalSales: number;
   honShimeiLiquorCost: number;
   jonaiExtensionLiquorCost: number;
@@ -2069,6 +2098,7 @@ export function calculateCastSalesReports(
   adjustments?: MonthlyAdjustments,
 ): CastSalesReport[] {
   const castById = new Map(casts.map((row) => [row.id, row]));
+  const resolvedInputs = resolveCastAccountingInputs(adjustments, closings, casts, month).inputs;
   const grouped = new Map<string, { closing: DailyClosing; row: DailyCast }[]>();
   const approved = closings.filter((closing) => closing.status === "approved" && closing.businessDate.startsWith(month));
   const monthDailyMasterIds = new Set(approved.flatMap((closing) => (closing.casts || [])
@@ -2083,7 +2113,11 @@ export function calculateCastSalesReports(
     const rows = entries.map((entry) => entry.row);
     const convertedMember = rows.map((row) => convertedCastForMonth(row.masterId, castById, casts, month)).find(Boolean);
     const trialOnly = rows.every((row) => row.kind === "trial") && !convertedMember;
-    const days = entries.map(({ closing, row }): CastSalesDay => {
+    const days = entries.map(({ closing, row }, entryIndex): CastSalesDay => {
+      // 同日に同一人物の出勤行が複数あっても経理入力は一度だけ付与する。
+      const accountingInputs = entries.findIndex((entry) => entry.closing.businessDate === closing.businessDate) === entryIndex
+        ? resolvedInputs.filter((input) => input.castId === id && input.businessDate === closing.businessDate) : [];
+      const additions = castAccountingInputTotals(accountingInputs);
       const bottleAllocations = bottleAllocationsBySalesType(closing, row, adjustments);
       const eligibleBottles = [...bottleAllocations.honShimei, ...bottleAllocations.jonaiExtension];
       const allocationCost = (bottles: BottleAllocation[]) => bottles.reduce((sum, bottle) => sum + asNumber(bottle.costAmount), 0);
@@ -2098,9 +2132,12 @@ export function calculateCastSalesReports(
         startTime: row.startTime,
         endTime: row.endTime,
         hours: asNumber(row.hours),
+        dailyPayment: asNumber(row.dailyPayment),
+        advancePayment: asNumber(row.advancePayment),
         honShimeiSales: floorTen(asNumber(row.honShimeiSales)),
         jonaiExtensionSales: floorTen(asNumber(row.jonaiExtensionSales)),
-        totalSales: floorTen(asNumber(row.honShimeiSales)) + floorTen(asNumber(row.jonaiExtensionSales)),
+        totalSales: floorTen(asNumber(row.honShimeiSales)) + floorTen(asNumber(row.jonaiExtensionSales)) + additions.additionalSales,
+        ...(accountingInputs.length ? { ...additions, accountingInputs } : {}),
         honShimeiLiquorCost: liquorCosts.honShimei,
         jonaiExtensionLiquorCost: liquorCosts.jonaiExtension,
         totalLiquorCost,
@@ -2134,6 +2171,8 @@ export function calculateCastSalesReports(
       totals: {
         attendanceDays: new Set(days.map((day) => day.businessDate)).size,
         hours: total("hours"),
+        dailyPayment: total("dailyPayment"),
+        advancePayment: total("advancePayment"),
         honShimeiSales: total("honShimeiSales"),
         jonaiExtensionSales: total("jonaiExtensionSales"),
         totalSales: total("totalSales"),
@@ -2152,6 +2191,10 @@ export function calculateCastSalesReports(
         },
         bottles: summarizeBottles(days.flatMap((day) => day.bottles)),
         beautyAllowance: total("beautyAllowance"),
+        ...(days.some((day) => day.accountingInputs?.length) ? {
+          additionalSales: total("additionalSales"), additionalAllowance: total("additionalAllowance"),
+          additionalTransportFee: total("additionalTransportFee"), accountingInputs: days.flatMap((day) => day.accountingInputs || []),
+        } : {}),
       },
     };
   }).sort((left, right) => right.totals.totalSales - left.totals.totalSales || left.name.localeCompare(right.name, "ja"));
@@ -2166,6 +2209,7 @@ export function calculateCastRewards(
   introducerDeletionCommits: IntroducerDeletionCommit[] = [],
 ): CastReward[] {
   const approved = closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(month));
+  const resolvedInputs = resolveCastAccountingInputs(adjustments, closings, casts, month).inputs;
   const castById = new Map(casts.map((row) => [row.id, row]));
   const grouped = new Map<string, { businessDate: string; row: DailyCast; closing: DailyClosing }[]>();
   const monthDailyMasterIds = new Set(approved.flatMap((closing) => (closing.casts || [])
@@ -2176,6 +2220,8 @@ export function calculateCastRewards(
     grouped.set(key, [...(grouped.get(key) || []), { businessDate: closing.businessDate, row, closing }]);
   }));
   return [...grouped.entries()].map(([id, entries]): CastReward => {
+    const accountingInputs = resolvedInputs.filter((input) => input.castId === id);
+    const additions = castAccountingInputTotals(accountingInputs);
     const member = castById.get(id);
     const rows = entries.map((entry) => entry.row);
     const convertedMember = rows.map((row) => convertedCastForMonth(row.masterId, castById, casts, month)).find(Boolean);
@@ -2206,16 +2252,16 @@ export function calculateCastRewards(
     // 各商品バックは商品全体で10円単位へ切捨て後、個人額も10円単位へ切捨て済み。
     // 月次では保存済みの各商品分を単純合計する。
     const hourlyAndBack = hourlyPay + honShimeiBack + banaiShimeiBack + totalDohanBack + totalBottleBack + totalDrinkBack;
-    const salesRewardBase = trialOnly ? 0 : floorTen(Math.max(0, honShimeiSales + jonaiExtensionSales - liquorCost * 0.5));
+    const salesRewardBase = trialOnly ? 0 : floorTen(Math.max(0, honShimeiSales + jonaiExtensionSales + additions.additionalSales - liquorCost * 0.5));
     const rewardRate = trialOnly ? 0 : rewardRateForSales(salesRewardBase);
     const salesReward = floorTen(salesRewardBase * rewardRate);
     const adoptedSystem = salesReward > hourlyAndBack ? "salesReward" as const : "hourlyAndBack" as const;
     const adoptedReward = Math.max(hourlyAndBack, salesReward);
     const beautyAllowance = sum("beautyAllowance");
-    const grossPay = adoptedReward + beautyAllowance;
+    const grossPay = adoptedReward + beautyAllowance + additions.additionalAllowance;
     const dailyPayment = sum("dailyPayment");
     const advancePayment = sum("advancePayment");
-    const transportFee = sum("transportFee");
+    const transportFee = sum("transportFee") + additions.additionalTransportFee;
     const withholding = asNumber(adjustments?.withholdingByCast?.[id]);
     // 月途中で条件が変わった場合は営業日・在籍区分ではなく、体入日も含めて
     // 「最後に店舗保存された日次」に実際に入っている条件を正とする。
@@ -2280,6 +2326,7 @@ export function calculateCastRewards(
       hourlyByDay,
       honShimeiSales,
       jonaiExtensionSales,
+      ...(accountingInputs.length ? additions : {}),
       liquorCost,
       honShimeiLiquorCost,
       honShimeiBack,

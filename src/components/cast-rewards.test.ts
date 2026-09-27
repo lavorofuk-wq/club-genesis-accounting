@@ -22,7 +22,7 @@ function render(rows: CastReward[], disabled = false) {
 function groups(markup: string) {
   const sections = markup.match(/<section\b[\s\S]*?<\/section>/g) || [];
   expect(sections).toHaveLength(2);
-  return sections;
+  return sections as [string, string];
 }
 
 describe("キャスト報酬の在籍・体入別表示", () => {

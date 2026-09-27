@@ -34,6 +34,7 @@ import {
   normalizeMonthlyAccountingSnapshot,
 } from "@/domain/month-accounting";
 import type {
+  CastAccountingInput,
   CastRecord,
   DailyClosing,
   DriverRecord,
@@ -58,6 +59,7 @@ import {
   validateStaffMonthlyPaySetting,
 } from "@/domain/master-pay-validation";
 import { staffMonthlyRates } from "@/domain/staff-rates";
+import { castAccountingAttendanceSources, castAccountingInputTotals, normalizeCastAccountingInputs } from "@/domain/cast-accounting-inputs";
 import { assertCashLedgerChange, cashDayIssues, cashFundingIssues, cashLedgerIssues, sameCashReconciliation } from "@/domain/cash-funding";
 
 export type WorkspaceData = AccountingWorkspaceData;
@@ -2211,9 +2213,63 @@ export async function saveMonthlyAdjustments(value: MonthlyAdjustments, user: Us
     const currentRevision = Number(existing?.revision || 0);
     const expectedRevision = Number(value.revision || 0);
     if (currentRevision !== expectedRevision) throw new Error("別の端末で月次入力が更新されています。入力内容を控え、最新データを読み込んでから反映し直してください。");
+    if (castInputSignature(value.castInputs) !== castInputSignature(existing?.castInputs)) {
+      throw new Error("キャストの追加入力は専用画面から保存してください。月次入力とあわせて最新データを読み込んでください。");
+    }
     const { month: _month, ...stored } = value;
-    return clean({ ...stored, revision: currentRevision + 1, updatedAt: timestamp, updatedBy: user.uid });
+    return clean({ ...stored, castInputs: existing?.castInputs, revision: currentRevision + 1,
+      updatedAt: nextEventTimestamp(timestamp, existing?.updatedAt), updatedBy: user.uid });
   }, { applyLocally: false });
+}
+
+function castInputSignature(value: unknown) {
+  return JSON.stringify(canonicalComparisonValue(normalizeCastAccountingInputs(value)
+    .sort((left, right) => left.id.localeCompare(right.id))));
+}
+
+function castInputUserFields(row: CastAccountingInput) {
+  return { id: row.id, castId: row.castId, castName: row.castName, kind: row.kind,
+    label: row.label, amount: row.amount, ...(row.businessDate ? { businessDate: row.businessDate } : {}) };
+}
+
+/** 店舗原本・現金記録を変えず、月次の追加額だけを共通revisionで保存する。 */
+export async function saveCastAccountingInputs(month: string, inputs: CastAccountingInput[], expectedRevision: number, user: User) {
+  await requireUser(user, ["accounting", "op"]);
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error("対象月を正しく選択してください。");
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) throw new Error("月次入力の版番号が正しくありません。最新データを読み込んでください。");
+  if (!Array.isArray(inputs)) throw new Error("キャストの追加入力を確認できません。");
+  const requested = normalizeCastAccountingInputs(inputs);
+  castAccountingInputTotals(requested);
+  if (requested.some((row) => row.businessDate && (!validDate(row.businessDate) || !row.businessDate.startsWith(month + "-")))) {
+    throw new Error("入力日は対象月の正しい日付を選択してください。");
+  }
+  await assertMonthOpen(month);
+  const [castSnapshot, historySnapshot] = await Promise.all([get(rootRef("casts")), get(rootRef("history"))]);
+  const casts = asArray<CastRecord>(castSnapshot.val());
+  const closings = asArray<DailyClosing>(historySnapshot.val()).map(normalizeDailyClosing);
+  const timestamp = now();
+  const result = await runReadyTransaction(rootRef(`accountingAdjustments/${month}`), (current) => {
+    const existing = current as Omit<MonthlyAdjustments, "month"> | null;
+    const revision = Number(existing?.revision || 0);
+    if (revision !== expectedRevision) throw new Error("別の端末で月次入力が更新されています。入力内容を控え、最新データを読み込んでから反映し直してください。");
+    const previous = new Map(normalizeCastAccountingInputs(existing?.castInputs).map((row) => [row.id, row]));
+    const prepared = requested.map((row) => {
+      const before = previous.get(row.id);
+      if (before && JSON.stringify(castInputUserFields(before)) === JSON.stringify(castInputUserFields(row))) return before;
+      const member = casts.find((cast) => cast.id === row.castId && cast.status === "active" && !cast.deletedAt);
+      if (!member || member.name !== row.castName) throw new Error(`${row.castName}の在籍情報が現在の登録と一致しません。最新データを読み込んでください。`);
+      const sources = castAccountingAttendanceSources(closings, casts, month, row.castId)
+        .filter((source) => !row.businessDate || source.businessDate === row.businessDate);
+      const source = sources.at(-1);
+      if (!source) throw new Error(`${row.castName}の${row.businessDate || month}に承認済みの出勤がありません。先に店舗データを承認してください。`);
+      return { ...castInputUserFields(row), attendanceClosingId: source.closingId, attendanceIndex: source.castIndex };
+    });
+    const initial = existing || { withholdingByCast: {}, staffSalesAllowance: {}, staffBottleAllowance: {},
+      driverRemoteAllowance: {}, fixedExpenses: [], cardFee: 0 };
+    return clean({ ...initial, castInputs: prepared.length ? Object.fromEntries(prepared.map((row) => [row.id, row])) : undefined,
+      revision: revision + 1, updatedAt: nextEventTimestamp(timestamp, existing?.updatedAt), updatedBy: user.uid });
+  }, { applyLocally: false });
+  if (!result.committed) throw new Error("キャストの追加入力を保存できませんでした。最新データを確認してください。");
 }
 
 async function currentMonthlySources(month: string) {

@@ -3,6 +3,7 @@
 import ExcelJS from "exceljs/dist/exceljs.min.js";
 import type { CastReward, CastSalesDay, CastSalesReport } from "@/domain/gms";
 import type { MonthlyAccountingResults } from "@/domain/month-accounting";
+import { additionalCastAmounts } from "@/domain/cast-input-export";
 
 const amountFormat = '#,##0;[Red]-#,##0;0';
 const font = { name: "Yu Gothic", size: 10 };
@@ -29,10 +30,11 @@ function validateReport(report: CastSalesReport, reward: CastReward) {
   // 新規計算は10円単位だが、確定済みスナップショットには旧仕様の333円等が残る。
   // 帳票では保存済み結果を再計算しないため、金額は安全な整数と合計整合だけを検証する。
   for (const row of [...report.days, report.totals]) {
+    const additional = additionalCastAmounts(row);
     if (dailyNumberKeys.some((key) => !Number.isFinite(row[key]) || row[key] < 0)
       || row.backs.some((item) => !Number.isSafeInteger(item.amount) || item.amount < 0)
       || new Set(row.backs.map((item) => item.key)).size !== row.backs.length
-      || !closeEnough(row.totalSales, row.honShimeiSales + row.jonaiExtensionSales)
+      || !closeEnough(row.totalSales, row.honShimeiSales + row.jonaiExtensionSales + additional.sales)
       || !closeEnough(row.totalLiquorCost, row.honShimeiLiquorCost + row.jonaiExtensionLiquorCost)
       || !closeEnough(row.backTotal, row.backs.reduce((sum, item) => sum + item.amount, 0))) fail();
     if (row.bottleBackByKind && (!Number.isSafeInteger(row.bottleBackByKind.keepBottle)
@@ -51,8 +53,23 @@ function validateReport(report: CastSalesReport, reward: CastReward) {
     || !Number.isFinite(reward.rewardRate) || reward.rewardRate < 0 || reward.rewardRate > 1
     || !closeEnough(reward.hourlyAndBack, reward.hourlyPay + reward.honShimeiBack + reward.banaiShimeiBack + reward.dohanBack + reward.bottleBack + reward.drinkBack)
     || !closeEnough(reward.adoptedReward, reward.adoptedSystem === "hourlyAndBack" ? reward.hourlyAndBack : reward.salesReward)
-    || !closeEnough(reward.grossPay, reward.adoptedReward + reward.beautyAllowance)
+    || !closeEnough(reward.grossPay, reward.adoptedReward + reward.beautyAllowance + additionalCastAmounts(reward).allowance)
     || !closeEnough(reward.netPay, reward.grossPay - reward.dailyPayment - reward.advancePayment - reward.transportFee - reward.withholding)) fail();
+  for (const key of ["sales", "allowance", "transport"] as const) {
+    const monthly = additionalCastAmounts(report.totals)[key];
+    if (monthly !== additionalCastAmounts(reward)[key]
+      || monthly !== report.days.reduce((sum, day) => sum + additionalCastAmounts(day)[key], 0)) fail();
+  }
+  const paymentRows = [...report.days, report.totals];
+  const paymentKeys = ["dailyPayment", "advancePayment"] as const;
+  // 旧確定分の未保存内訳は0円と区別する。部分欠損や月額との不一致は出力しない。
+  if (paymentRows.some((row) => paymentKeys.some((key) => row[key] !== undefined))) {
+    if (paymentRows.some((row) => paymentKeys.some((key) => !Number.isFinite(row[key]) || row[key]! < 0 || row[key]! > Number.MAX_SAFE_INTEGER))) fail();
+    for (const key of paymentKeys) {
+      if (!closeEnough(report.totals[key]!, reward[key])
+        || !closeEnough(report.totals[key]!, report.days.reduce((sum, day) => sum + day[key]!, 0))) fail();
+    }
+  }
 }
 
 function safeSheetName(name: string, used: Set<string>) {
@@ -91,12 +108,13 @@ function addPayroll(sheet: ExcelJS.Worksheet, reward: CastReward, report: CastSa
   mergeValue(sheet, "R35:V35", `売上報酬${!reward.rewardRate ? "（対象外）" : hourlyAdopted ? "（比較用）" : "（採用）"}`);
   const deductions = reward.dailyPayment + reward.advancePayment + reward.transportFee;
   const totalBack = reward.honShimeiBack + reward.banaiShimeiBack + reward.dohanBack + reward.bottleBack + reward.drinkBack;
-  const hourlyGross = reward.hourlyAndBack + reward.beautyAllowance;
-  const salesGross = reward.salesReward + reward.beautyAllowance;
+  const allowances = reward.beautyAllowance + additionalCastAmounts(reward).allowance;
+  const hourlyGross = reward.hourlyAndBack + allowances;
+  const salesGross = reward.salesReward + allowances;
   const left: Array<[string, ExcelJS.CellValue]> = [
     ["① 時給 計", reward.hourlyPay],
     ["② 総バック 計", totalBack],
-    ["③ 美容室・手当て等", reward.beautyAllowance],
+    ["③ 美容室・手当て等", allowances],
     ["④ 総支給額", { formula: "SUM(I36:I38)", result: hourlyGross }],
     ["⑤ 日払い・その他", deductions],
     ["⑥ 源泉所得税", reward.withholding],
@@ -104,7 +122,7 @@ function addPayroll(sheet: ExcelJS.Worksheet, reward: CastReward, report: CastSa
   ];
   const right: Array<[string, ExcelJS.CellValue]> = [
     [reward.rewardRate ? `① 売上報酬（売上－酒代×50%）×${Math.round(reward.rewardRate * 100)}%` : "① 売上報酬（対象外）", reward.salesReward],
-    ["② 美容室・手当て等", reward.beautyAllowance],
+    ["② 美容室・手当て等", allowances],
     ["③ 総支給額", { formula: "SUM(U36:U37)", result: salesGross }],
     ["④ 日払い・その他", deductions],
     ["⑤ 源泉所得税", reward.withholding],
@@ -142,9 +160,11 @@ function addPayroll(sheet: ExcelJS.Worksheet, reward: CastReward, report: CastSa
   sheet.getRow(44).font = { ...font, bold: true };
   sheet.getRow(44).alignment = { vertical: "middle" };
   const notes = ["金額は円。日払い・その他＝日払い＋立替＋送迎代。給与欄はキャスト報酬の月次計算結果。"];
+  notes.push("X送迎・AA手当はキャストデータ入力の追加分のみ（店舗送迎・美容室手当は含みません）。Z減給は空欄です。");
+  if (report.totals.dailyPayment === undefined) notes.push("W日払い・Y立替：日別内訳未保存のため日別欄は空欄。合計欄は確定時に保存された月合計です。");
   if (report.totals.beautyAllowance !== reward.beautyAllowance) notes.push("日別の美容室欄には、即日支払済みの体入手当を含みます。");
   if (report.totals.backTotal !== totalBack) notes.push("日別バック合計と給与欄の総バックが異なるため、それぞれの月次計算結果を記載しています。");
-  mergeValue(sheet, "B45:V45", notes.join("\n"));
+  mergeValue(sheet, "B45:AA45", notes.join("\n"));
   sheet.getCell("B45").font = { ...font, size: 9 };
   sheet.getCell("B45").alignment = { vertical: "middle", wrapText: true };
   sheet.getRow(45).height = 15 * notes.length;
@@ -155,7 +175,7 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error("対象月を選択してください。");
   if (!results.castSalesReports.length) throw new Error("対象月の承認済みキャスト売上がありません。");
   const book = new ExcelJS.Workbook();
-  book.creator = "GENESIS Management System Ver2.36.0";
+  book.creator = "GENESIS Management System Ver2.39.0";
   book.created = new Date();
   book.calcProperties.fullCalcOnLoad = true;
   const used = new Set<string>();
@@ -179,17 +199,17 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
       byDate.set(day.businessDate, day);
     }
     const sheet = book.addWorksheet(safeSheetName(report.name, used));
-    sheet.columns = [3, 5, 8, 8, 9, 6, 12, 13, 6, 12, 13, 6, 12, 12, 12, 25, 25, 29, 13, 14, 12, 11].map((width) => ({ width }));
+    sheet.columns = [3, 5, 8, 8, 9, 6, 12, 13, 6, 12, 13, 6, 12, 12, 12, 25, 25, 29, 13, 14, 12, 11, 11, 11, 11, 11, 11].map((width) => ({ width }));
     sheet.views = [{ state: "frozen", xSplit: 2, ySplit: 2, showGridLines: false }];
     sheet.pageSetup = {
       paperSize: 9, orientation: "landscape", fitToPage: true, fitToWidth: 1, fitToHeight: 0,
-      horizontalCentered: true, printArea: "B1:V45", printTitlesRow: "1:2",
+      horizontalCentered: true, printArea: "B1:AA45", printTitlesRow: "1:2",
       margins: { left: .25, right: .25, top: .35, bottom: .35, header: .15, footer: .15 },
     };
     sheet.headerFooter.oddFooter = `&"${font.name},Regular"${sourceLabel.replace(/&/g, "&&")} &R&P / &N`;
     for (let row = 1; row <= 34; row += 1) {
       sheet.getRow(row).height = row === 2 ? 32 : row === 1 ? 27 : 21;
-      for (let col = 2; col <= 22; col += 1) {
+      for (let col = 2; col <= 27; col += 1) {
         const cell = sheet.getRow(row).getCell(col);
         cell.font = { ...font, bold: row <= 2 || row === 34 };
         cell.border = border;
@@ -212,6 +232,7 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
       B: "日", C: "出勤", D: "退勤", E: "勤務時間", F: "本指", G: "バック", H: "本指売上",
       I: "場内", J: "バック", K: "場延売上", L: "同伴", M: "バック",
       N: "本指酒代", O: "場内酒代", R: "ボトル名", S: "酒代計", T: "日売上", U: "ドリンク10%", V: "美容室",
+      W: "日払い", X: "送迎", Y: "立替", Z: "減給", AA: "手当",
     };
     Object.entries(headings).forEach(([column, value]) => { sheet.getCell(`${column}2`).value = value; });
     sheet.getRow(2).alignment = { horizontal: "center", vertical: "middle", wrapText: true };
@@ -231,6 +252,8 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
         L: day.dohanCount, M: back(day, "dohan"), N: day.honShimeiLiquorCost, O: day.jonaiExtensionLiquorCost,
         R: day.bottles.map((bottle) => `${bottle.name} ×${bottle.quantity}`).join("\n"),
         S: day.totalLiquorCost, T: day.totalSales, U: back(day, "drink"), V: day.beautyAllowance,
+        W: day.dailyPayment ?? null, X: additionalCastAmounts(day).transport,
+        Y: day.advancePayment ?? null, AA: additionalCastAmounts(day).allowance,
       };
       Object.entries(values).forEach(([column, value]) => { row.getCell(column).value = value; });
       row.getCell("C").numFmt = "[h]:mm";
@@ -249,13 +272,21 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
     }
 
     sheet.getCell("B34").value = "合計";
-    const sumColumns = ["E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "S", "T", "U", "V"];
+    const sumColumns = ["E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "S", "T", "U", "V", "X", "AA"];
     for (const column of sumColumns) {
       const total = report.days.reduce((sum, day) => {
         const date = Number(day.businessDate.slice(8));
         return sum + Number(sheet.getCell(`${column}${date + 2}`).value || 0);
       }, 0);
       sumCell(sheet, column, total);
+    }
+    for (const [column, key] of [["W", "dailyPayment"], ["Y", "advancePayment"]] as const) {
+      if (report.totals[key] === undefined) {
+        sheet.getCell(`${column}34`).value = reward[key];
+        sheet.getCell(`${column}34`).note = "日別内訳未保存。確定時に保存された月合計です。";
+      } else {
+        sumCell(sheet, column, report.totals[key]);
+      }
     }
     sheet.getCell("E34").numFmt = "[h]:mm";
     if (unknownBottleBreakdown) {
@@ -266,6 +297,52 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
       sumCell(sheet, "Q", report.days.reduce((sum, day) => sum + day.bottleBackByKind!.champagneWine, 0));
     }
     addPayroll(sheet, reward, report);
+    addAccountingInputs(sheet, report);
   }
   return book;
+}
+
+/** 既存の日次表を崩さず、任意名目を同じキャストのシート下部へ全件表示する。 */
+function addAccountingInputs(sheet: ExcelJS.Worksheet, report: CastSalesReport) {
+  const entries = report.days.flatMap((day) => (day.accountingInputs || []).map((entry) => ({ ...entry, businessDate: day.businessDate })));
+  const totals = additionalCastAmounts(report.totals);
+  if (!entries.length) {
+    if (totals.sales || totals.allowance || totals.transport) throw new Error(`${report.name}の追加売上・手当・送迎の明細がありません。`);
+    return;
+  }
+  const labels = { sales: "追加売上", allowance: "追加手当", transport: "追加送迎控除" };
+  const seen = new Set<string>();
+  const sums = { sales: 0, allowance: 0, transport: 0 };
+  entries.forEach((entry) => {
+    if (!entry.id || seen.has(entry.id) || !Object.hasOwn(labels, entry.kind) || !entry.label?.trim()
+      || !Number.isSafeInteger(entry.amount) || entry.amount < 0) throw new Error(`${report.name}の経理入力明細が不正です。`);
+    seen.add(entry.id);
+    sums[entry.kind] += entry.amount;
+  });
+  for (const kind of ["sales", "allowance", "transport"] as const) {
+    if (sums[kind] !== totals[kind]) throw new Error(`${report.name}の${labels[kind]}の明細と合計が一致しません。`);
+  }
+  mergeValue(sheet, "B47:V47", "キャストデータ入力 明細（追加売上は店舗売上に含みません）");
+  sheet.getRow(47).font = { ...font, bold: true };
+  sheet.getRow(47).height = 24;
+  const lines = [
+    ["営業日", "区分", "名目", "金額"],
+    ...entries.sort((a, b) => a.businessDate.localeCompare(b.businessDate) || a.id.localeCompare(b.id))
+      .map((entry) => [entry.businessDate, labels[entry.kind], entry.label, entry.amount]),
+    ...(["sales", "allowance", "transport"] as const).map((kind) => ["合計", labels[kind], "", sums[kind]]),
+  ];
+  lines.forEach((values, index) => {
+    const row = 48 + index;
+    for (const [range, value] of [[`B${row}:E${row}`, values[0]], [`F${row}:I${row}`, values[1]],
+      [`J${row}:R${row}`, values[2]], [`S${row}:V${row}`, values[3]]] as const) mergeValue(sheet, range, value);
+    sheet.getRow(row).height = Math.max(23, Math.ceil(String(values[2]).length / 45) * 16);
+    for (let col = 2; col <= 22; col++) {
+      const cell = sheet.getCell(row, col);
+      cell.font = { ...font, bold: index === 0 || index > entries.length };
+      cell.alignment = { vertical: "middle", horizontal: col >= 19 ? "right" : "left", wrapText: true };
+      cell.border = border;
+      cell.numFmt = amountFormat;
+    }
+  });
+  sheet.pageSetup.printArea = `B1:AA${47 + lines.length}`;
 }

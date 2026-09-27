@@ -37,6 +37,7 @@ type View =
   | "home"
   | "store"
   | "approval"
+  | "castInputs"
   | "castSales"
   | "castRewards"
   | "introducersPay"
@@ -139,6 +140,13 @@ const viewInfo: Record<
     label: "受信・承認",
     title: "店舗データ確認",
     description: "店舗から送信された日次データを承認または差し戻します。",
+    roles: ["accounting", "op"],
+  },
+  castInputs: {
+    group: "経理作業",
+    label: "キャストデータ入力",
+    title: "キャストデータ入力",
+    description: "在籍キャストの売上・手当・追加送迎を名目別に登録します。",
     roles: ["accounting", "op"],
   },
   castSales: {
@@ -477,6 +485,7 @@ export function AccountingApp() {
   const accountingSection = (
     [
       "approval",
+      "castInputs",
       "castSales",
       "castRewards",
       "introducersPay",
@@ -617,6 +626,7 @@ export function AccountingApp() {
                   section={
                     (view === "introducersPay" ? "introducers" : view) as
                       | "approval"
+                      | "castInputs"
                       | "castSales"
                       | "castRewards"
                       | "introducers"

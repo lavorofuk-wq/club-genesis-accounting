@@ -1,4 +1,5 @@
 import type { CastReward, CastSalesReport, IntroducerFeeType } from "./gms";
+import { additionalCastAmounts } from "./cast-input-export";
 import { groupIntroducerPayments } from "./expense-export";
 import type { IntroducerPaymentRow, MonthlyAccountingResults } from "./month-accounting";
 
@@ -93,7 +94,7 @@ function remuneration(reward: CastReward | undefined, label: string): Introducer
   const hourly = amount(reward.hourlyPay, `${label}の基本給`);
   const backs = [reward.honShimeiBack, reward.banaiShimeiBack, reward.dohanBack, reward.bottleBack, reward.drinkBack]
     .reduce((sum, value) => sum + amount(value, `${label}のバック`), 0);
-  const allowance = amount(reward.beautyAllowance, `${label}の手当て等`);
+  const allowance = amount(reward.beautyAllowance, `${label}の美容室手当`) + additionalCastAmounts(reward).allowance;
   const deductions = [reward.dailyPayment, reward.advancePayment, reward.transportFee]
     .reduce((sum, value) => sum + amount(value, `${label}の日払い・その他`), 0);
   const withholding = amount(reward.withholding, `${label}の源泉所得税`);

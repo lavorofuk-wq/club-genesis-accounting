@@ -1,5 +1,6 @@
 import type { CastReward, CastSalesDay, CastSalesReport, DailyClosing, DailyHourlyPay, DailyStaffWork, StaffRecord } from "./gms";
 import { floorYen } from "./gms";
+import { additionalCastAmounts } from "./cast-input-export";
 import type { MonthlyAccountingResults, MonthlyAccountingSnapshot, StaffHourlySource } from "./month-accounting";
 import { supportsMonthlyStaffRatesSnapshot } from "./month-accounting";
 import { STAFF_MONTHLY_RATES_START_MONTH, staffMonthlyRateForMonth } from "./staff-rates";
@@ -108,10 +109,12 @@ function dailyHourlyAmounts(value: DailyHourlyPay[] | undefined, days: Array<{ b
 
 function castDays(report: CastSalesReport, reward: CastReward, approved: Map<string, DailyClosing>) {
   requireValue(rows(report.days, `${reward.name}の出勤日`).length > 0, `${reward.name}の最終出勤日を確認できません。`);
-  const grouped = new Map<string, { businessDate: string; hours: number; sales: number; backs: number; beauty: number }>();
+  const grouped = new Map<string, { businessDate: string; hours: number; sales: number; backs: number; beauty: number; allowance: number }>();
   const monthlyBacks = Object.fromEntries(backKeys.map((key) => [key, 0])) as Record<typeof backKeys[number], number>;
   let honShimeiSales = 0;
   let jonaiSales = 0;
+  let additionalSales = 0;
+  let additionalTransport = 0;
   let liquorCost = 0;
   let honShimeiLiquorCost = 0;
   for (const day of report.days) {
@@ -120,7 +123,10 @@ function castDays(report: CastSalesReport, reward: CastReward, approved: Map<str
     const hours = amount(day.hours, `${label}の勤務時間`);
     const hon = amount(day.honShimeiSales, `${label}の本指名売上`);
     const jonai = amount(day.jonaiExtensionSales, `${label}の場内延長売上`);
-    same(day.totalSales, hon + jonai, `${label}の売上合計`);
+    const additional = additionalCastAmounts(day);
+    same(day.totalSales, hon + jonai + additional.sales, `${label}の売上合計`);
+    additionalSales += additional.sales;
+    additionalTransport += additional.transport;
     honShimeiSales += hon;
     jonaiSales += jonai;
     liquorCost += amount(day.totalLiquorCost, `${label}の酒代原価`);
@@ -128,11 +134,12 @@ function castDays(report: CastSalesReport, reward: CastReward, approved: Map<str
     same(day.totalLiquorCost, day.honShimeiLiquorCost + amount(day.jonaiExtensionLiquorCost, `${label}の場内延長酒代原価`), `${label}の酒代原価合計`);
     const backs = backAmounts(day, label);
     backKeys.forEach((key) => { monthlyBacks[key] += backs[key]; });
-    const entry = grouped.get(day.businessDate) || { businessDate: day.businessDate, hours: 0, sales: 0, backs: 0, beauty: 0 };
+    const entry = grouped.get(day.businessDate) || { businessDate: day.businessDate, hours: 0, sales: 0, backs: 0, beauty: 0, allowance: 0 };
     entry.hours += hours;
     entry.sales += day.totalSales;
     entry.backs += day.backTotal;
     entry.beauty += amount(day.beautyAllowance, `${label}の美容室手当表示`);
+    entry.allowance += additional.allowance;
     grouped.set(day.businessDate, entry);
   }
   const result = [...grouped.values()].sort((left, right) => left.businessDate.localeCompare(right.businessDate));
@@ -153,7 +160,15 @@ function castDays(report: CastSalesReport, reward: CastReward, approved: Map<str
   same(report.totals.attendanceDays, result.length, `${reward.name}の売上明細の月間出勤日数`);
   same(report.totals.honShimeiSales, honShimeiSales, `${reward.name}の売上明細の月間本指名売上`);
   same(report.totals.jonaiExtensionSales, jonaiSales, `${reward.name}の売上明細の月間場内売上`);
-  same(report.totals.totalSales, honShimeiSales + jonaiSales, `${reward.name}の売上明細の月間売上`);
+  same(report.totals.totalSales, honShimeiSales + jonaiSales + additionalSales, `${reward.name}の売上明細の月間売上`);
+  const additional = additionalCastAmounts(reward);
+  const reportAdditional = additionalCastAmounts(report.totals);
+  same(additional.sales, additionalSales, `${reward.name}の追加売上合計`);
+  same(additional.allowance, result.reduce((sum, day) => sum + day.allowance, 0), `${reward.name}の追加手当合計`);
+  same(additional.transport, additionalTransport, `${reward.name}の追加送迎合計`);
+  same(reportAdditional.sales, additional.sales, `${reward.name}の月間追加売上`);
+  same(reportAdditional.allowance, additional.allowance, `${reward.name}の月間追加手当`);
+  same(reportAdditional.transport, additional.transport, `${reward.name}の月間追加送迎`);
   same(report.totals.totalLiquorCost, liquorCost, `${reward.name}の売上明細の月間酒代原価`);
   same(report.totals.honShimeiLiquorCost, honShimeiLiquorCost, `${reward.name}の売上明細の月間本指名酒代原価`);
   same(report.totals.beautyAllowance, result.reduce((sum, day) => sum + day.beauty, 0), `${reward.name}の美容室手当表示合計`);
@@ -195,7 +210,7 @@ function allocateCast(reward: CastReward, report: CastSalesReport, approved: Map
     `${reward.name}の給与分美容室手当が日別表示額を超えています。`));
   const backTotal = days.reduce((sum, day) => sum + day.backs, 0);
   same(reward.hourlyAndBack, amount(reward.hourlyPay, `${reward.name}の月間時給報酬`) + backTotal, `${reward.name}の時給・バック合計`);
-  same(reward.grossPay, reward.adoptedReward + reward.beautyAllowance, `${reward.name}の総支給額`);
+  same(reward.grossPay, reward.adoptedReward + reward.beautyAllowance + additionalCastAmounts(reward).allowance, `${reward.name}の総支給額`);
   requireValue(reward.adoptedSystem === "hourlyAndBack" || reward.adoptedSystem === "salesReward", `${reward.name}の採用報酬方式を確認できません。`);
   same(reward.adoptedReward, reward.adoptedSystem === "hourlyAndBack" ? reward.hourlyAndBack : reward.salesReward, `${reward.name}の採用報酬`);
   let base: number[];
@@ -223,7 +238,7 @@ function allocateCast(reward: CastReward, report: CastSalesReport, approved: Map
       : weightedTenYen(reward.salesReward, days.map((day) => day.sales), `${reward.name}の売上報酬`);
   }
   days.forEach((day, index) => {
-    const value = base[index] + (reward.adoptedSystem === "hourlyAndBack" ? day.backs : 0) + (beauties.get(day.businessDate) || 0);
+    const value = base[index] + (reward.adoptedSystem === "hourlyAndBack" ? day.backs : 0) + (beauties.get(day.businessDate) || 0) + day.allowance;
     amount(value, `${reward.name}の日別報酬`, true);
     const target = output.get(day.businessDate)!;
     if (reward.adoptedSystem === "hourlyAndBack") target.castHourly += value;

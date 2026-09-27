@@ -276,15 +276,33 @@ describe("収支帳票の月次突合", () => {
     expect(report.castWithholding).toBe(333);
     expect(data).toEqual(before);
   });
-  it("現金残高の展開式はキャスト控除・従業員日払い・派遣・手数料を各1回だけ引く", () => {
+  it("現金残高の展開式は各支払を1回だけ引き、実入金控除済みカード手数料を除く", () => {
     const data = fullInput();
     const report = buildBalanceExportReport(data);
     const result = data.results;
     const employeeNet = result.staffPayroll.reduce((sum, row) => sum + row.net, 0)
       + result.driverPayroll.reduce((sum, row) => sum + row.net, 0);
     const expanded = result.sales.cash - report.castNet - report.castWithholding - result.balance.introducer
-      - employeeNet - report.castDailyAndAdvance - report.employeeDaily - result.expenses.total;
-    expect(expanded).toBe(result.sales.cash - result.balance.totalCosts + report.castTransport);
+      - employeeNet - report.castDailyAndAdvance - report.employeeDaily - result.expenses.total + report.cardFee;
+    expect(report.cardFee).toBe(400);
+    expect(expanded).toBe(result.sales.cash - result.balance.totalCosts + report.castTransport + report.cardFee);
+  });
+  it.each([false, true])("カード手数料は現金残高用に渡すだけで元の損益・旧確定額を変えない（確定=%s）", (closed) => {
+    const data = fullInput();
+    if (closed) {
+      data.snapshot = buildMonthlySnapshot(data.month, 1, "b".repeat(64), data.adjustments,
+        structuredClone(data.results), data.closings, "user", "2026-09-30T12:00:00.000Z");
+      data.snapshot.calculationVersion = "2.36.0";
+    }
+    const before = structuredClone(data);
+    const report = buildBalanceExportReport(data);
+    expect(report.cardFee).toBe(data.results.expenses.cardFee);
+    expect(report.days.map((day) => day.expenses)).toEqual([2034, 65934]);
+    const costs = report.days.reduce((sum, day) => sum + day.castHourly + day.castSalesReward
+      + day.dispatchCastPayment + day.employeeGross + day.introducerPayment + day.expenses, 0);
+    expect(costs).toBe(before.results.balance.totalCosts);
+    expect(report.days.reduce((sum, day) => sum + day.totalSales, 0) - costs).toBe(before.results.balance.profit);
+    expect(data).toEqual(before);
   });
   it("承認操作順や一覧順は計上先を変えず、対象月の未確認日次追加は出力を停止する", () => {
     const data = fullInput();

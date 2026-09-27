@@ -60,6 +60,7 @@ const operations: Record<string, () => Promise<unknown>> = {
   approveClosing: () => repository.approveClosing("closing-1", expected, user),
   returnClosing: () => repository.returnClosing("closing-1", expected, "再確認", user),
   saveMonthlyAdjustments: () => repository.saveMonthlyAdjustments(adjustments, user),
+  saveCastAccountingInputs: () => repository.saveCastAccountingInputs(month, [], 0, user),
   finalizeAccountingMonth: () => repository.finalizeAccountingMonth(month, snapshot, 0, user),
   reopenAccountingMonth: () => repository.reopenAccountingMonth(month, 0, user),
   cancelAccountingMonthClosing: () => repository.cancelAccountingMonthClosing(month, 0, user),

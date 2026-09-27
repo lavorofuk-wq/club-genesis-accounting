@@ -8,7 +8,7 @@ vi.mock("@/domain/balance-export", () => ({ buildBalanceExportReport: vi.fn() })
 function report(): BalanceExportReport {
   return {
     month: "2026-09", approvedDays: 2, castDailyAndAdvance: 3000, castTransport: 500,
-    castWithholding: 123, castNet: 43877, employeeDaily: 1200, honShimeiSales: 180000, jonaiExtensionSales: 10000,
+    castWithholding: 123, castNet: 43877, employeeDaily: 1200, cardFee: 0, honShimeiSales: 180000, jonaiExtensionSales: 10000,
     days: [
       {
         businessDate: "2026-09-02", cashSales: 100000, cardSales: 50000, totalSales: 150000,
@@ -126,7 +126,7 @@ describe("見本形式の月次収支XLSX", () => {
   it("検証済み日別データを紹介料列追加後の正しい列へ出力する", () => {
     const book = createMonthlyBalanceWorkbook(input, "承認済みデータ（未確定）");
     expect(mockedBuild).toHaveBeenCalledWith(input);
-    expect(book.creator).toBe("GENESIS Management System Ver2.36.0");
+    expect(book.creator).toBe("GENESIS Management System Ver2.37.0");
     expect(book.worksheets).toHaveLength(1);
     const sheet = book.worksheets[0];
     expect(sheet.name).toBe("ジェネシス収支表");
@@ -202,6 +202,45 @@ describe("見本形式の月次収支XLSX", () => {
     expect(sheet.getCell("K42").master.address).toBe("J42");
     expect(sheet.getCell("P42").master.address).toBe("O42");
     expect(sheet.getCell("M38").formula).toContain("J42,O42");
+  });
+
+  it.each([0, 300, 300.25])("カード手数料%s円はM38だけへ戻し、損益・総支出・用紙設定を変えない", async (cardFee) => {
+    const baseline = createMonthlyBalanceWorkbook(input, "同一元データ").worksheets[0];
+    const data = report();
+    data.cardFee = cardFee;
+    const before = structuredClone(data);
+    mockedBuild.mockReturnValue(data);
+    const book = createMonthlyBalanceWorkbook(input, "同一元データ");
+    const restored = new ExcelJS.Workbook();
+    await restored.xlsx.load(await book.xlsx.writeBuffer());
+    const sheet = restored.worksheets[0];
+    expect(sheet.getCell("M38").value).toEqual({
+      formula: "SUM(D35,J42,O42)-U37+N36" + (cardFee ? `+${cardFee}` : ""), result: 35000 + cardFee,
+    });
+    for (const address of ["C35", "D35", "E35", "T35", "V35", "U37", "V38", "V39", "M37", "N36", "J42", "O42"]) {
+      expect(sheet.getCell(address).value, address).toEqual(baseline.getCell(address).value);
+    }
+    expect(book.worksheets[0].pageSetup).toEqual(baseline.pageSetup);
+    expect(book.worksheets[0].columns.map((column) => column.width)).toEqual(baseline.columns.map((column) => column.width));
+    expect(book.worksheets[0].getRow(38).height).toBe(baseline.getRow(38).height);
+    expect(sheet.getCell("A38").value).toContain("手数料控除後");
+    expect(sheet.getCell("A38").value).toContain("カード手数料除く");
+    expect(data).toEqual(before);
+  });
+
+  it("手数料を戻す場合も補充・返済と前期後期入金の式を保持する", () => {
+    const data = report();
+    data.cardFee = 300;
+    data.cashFunding = { managedDays: 2, openingPersonalDebt: 10000, companyReplenishment: 20000, personalReplenishment: 30000,
+      companyTransfer: 5000, personalRepayment: 15000, closingPersonalDebt: 25000, netCashMovement: 40000 };
+    mockedBuild.mockReturnValue(data);
+    const sheet = createMonthlyBalanceWorkbook(input, "補充と手数料あり").worksheets[0];
+    expect(sheet.getCell("M38").value).toEqual({
+      formula: "SUM(D35,J42,O42)-U37+N36+300+SUM(J43,O43,J44)-O44", result: 75300,
+    });
+    expect(value(sheet, "U37")).toBe(85500);
+    expect(value(sheet, "V35")).toBe(94500);
+    expect(sheet.pageSetup.printArea).toBe("A1:W46");
   });
 
   it("売上・客数0円でも比率や客単価を0として取り繕わず空欄にする", () => {
