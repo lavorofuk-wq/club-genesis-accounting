@@ -108,6 +108,8 @@ describe("紹介者支払明細XLSX", () => {
       expect(sheet.getColumn("B").width).toBe(15);
     } else {
       const column = "C";
+      expect(sheet.getCell(`${column}6`).value).toBe(feeType.includes("Net") || feeType === "netSales10" ? 15000 : 20000);
+      expect(sheet.getCell(`${column}7`).value).toBe(feeType.includes("Net") || feeType === "netSales10" ? 8000 : 10000);
       expect(sheet.getCell(`${column}37`).value).toBe(feeType.includes("Net") || feeType === "netSales10" ? 23000 : 30000);
       expect(sheet.getCell(`${column}38`).value).toBe(input.introducerPayments[0].salesFee);
       expect(sheet.getCell(`${column}39`).value).toBe(600);
@@ -181,6 +183,85 @@ describe("紹介者支払明細XLSX", () => {
     expect(sheet.getCell("C40").value).toBe(fee + 600);
     expect(sheet.getCell("C6").numFmt).toContain("[Red]-");
   });
+
+  it.each([["netSales10", "Q1"], ["higherNetSalesGross10", "K1"]] as const)
+    ("%sは日別売上だけ小数部分を除去し月額・支払・元データ・用紙を保持する", async (feeType, headerTotal) => {
+      const dates = [
+        day(`${month}-01`, 200, 99.3), day(`${month}-02`, 200, 300.7),
+        day(`${month}-03`, .7, 0), day(`${month}-04`, 0, .7),
+        day(`${month}-05`, 0, 0), day(`${month}-06`, -0, 0),
+        day(`${month}-07`, 10000, 4995.1), day(`${month}-08`, 10000, 4994.1),
+      ];
+      const input = fixture(feeType, dates);
+      const before = structuredClone(input);
+      const originalTotal = dates.reduce((sum, row) => sum + row.honShimeiSales - row.honShimeiLiquorCost, 0);
+      const { book } = await reload(input);
+      const sheet = book.worksheets[0];
+      const values = [100, -100, 0, 0, 0, 0, 5004, 5005];
+      values.forEach((expected, index) => {
+        const cell = sheet.getCell(`C${index + 6}`);
+        expect(cell.value, cell.address).toBe(expected);
+        expect(Object.is(cell.value, -0), cell.address).toBe(false);
+        expect(cell.numFmt).toBe('#,##0;[Red]-#,##0;0');
+      });
+      expect(sheet.getCell("C37").value).toBeCloseTo(originalTotal, 10);
+      expect(Number.isInteger(sheet.getCell("C37").value)).toBe(false);
+      expect(sheet.getCell("C37").numFmt).toContain("0.###");
+      expect(sheet.getCell("C38").value).toBe(1001);
+      expect(sheet.getCell("C38").value).toBe(input.introducerPayments[0].salesFee);
+      expect(sheet.getCell("C40").value).toBe(input.introducerPayments[0].salesFee + 600);
+      expect(sheet.getCell(headerTotal).value).toBe(input.balance.introducer);
+      expect(values.reduce((sum, value) => sum + value, 0)).toBe(10009);
+      expect(input).toEqual(before);
+      expect(Object.is(input.castSalesReports[0].days[5].honShimeiSales, -0)).toBe(true);
+
+      const baseline = (await reload(fixture(feeType))).book.worksheets[0];
+      expect(sheet.pageSetup).toEqual(baseline.pageSetup);
+      expect(sheet.columns.map((column) => column.width)).toEqual(baseline.columns.map((column) => column.width));
+      for (let row = 1; row <= 40; row += 1) expect(sheet.getRow(row).height, `row ${row}`).toBe(baseline.getRow(row).height);
+    });
+
+  it.each(["netSales10", "higherNetSalesGross10"] as const)
+    ("%sは同じ営業日の複数行を合算してから日別表示の小数部分を除去する", async (feeType) => {
+      const input = fixture(feeType, [
+        day(`${month}-01`, .7, 0), day(`${month}-01`, .7, 0),
+        day(`${month}-02`, 0, .7), day(`${month}-02`, 0, .7),
+        day(`${month}-03`, 10000, 4995.1), day(`${month}-03`, 10000, 4994.1),
+      ]);
+      const before = structuredClone(input);
+      const { book } = await reload(input);
+      const sheet = book.worksheets[0];
+      expect(sheet.getCell("C4").value).toBe(3);
+      expect(["C6", "C7", "C8"].map((address) => sheet.getCell(address).value)).toEqual([1, -1, 10010]);
+      expect(["B6", "B7", "B8"].map((address) => sheet.getCell(address).value)).toEqual([2, 2, 2]);
+      expect(sheet.getCell("C37").value).toBeCloseTo(10010.8, 10);
+      expect(sheet.getCell("C38").value).toBe(1001);
+      expect(input).toEqual(before);
+    });
+
+  it("日別売上を整数表示しても比較様式の旧小数報酬・月合計・保存支払額は再丸めしない", async () => {
+    const input = fixture("higherNetSalesGross10", [day(`${month}-01`, 200, 99.3)]);
+    Object.assign(input.castRewards[0], { hourlyPay: 1200.5, hourlyAndBack: 1500.5, adoptedReward: 1500.5,
+      grossPay: 2000.5, netPay: 1190.5 });
+    Object.assign(input.introducerPayments[0], { grossBase: 2000.5, grossFee: 201, total: 801 });
+    input.balance.introducer = 801;
+    const before = structuredClone(input);
+    const { book } = await reload(input);
+    const sheet = book.worksheets[0];
+    expect(sheet.getCell("C6").value).toBe(100);
+    expect(sheet.getCell("C37").value).toBeCloseTo(100.7, 10);
+    expect(sheet.getCell("C38").value).toBe(10);
+    expect(sheet.getCell("C40").value).toBe(610);
+    for (const [address, expected] of [["F30", 1200.5], ["F33", 2000.5], ["F36", 1190.5]] as const) {
+      expect(sheet.getCell(address).value).toBe(expected);
+      expect(sheet.getCell(address).numFmt).toContain("0.###");
+    }
+    expect(sheet.getCell("F38").value).toBe(201);
+    expect(sheet.getCell("F40").value).toBe(801);
+    expect(sheet.getCell("K1").value).toBe(801);
+    expect(input).toEqual(before);
+  });
+
 
   it("ZIP全体に元原価・内部契約種別・ID・本名や数式を残さない", async () => {
     const input = fixture("higherNetSalesGross10", [day(`${month}-01`, 800000, 123457), day(`${month}-02`, 600000, 234567)]);
