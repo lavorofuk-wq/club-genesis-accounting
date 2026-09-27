@@ -129,6 +129,36 @@ describe("紹介者支払の合計一覧と詳細", () => {
     expect(harness.buttons.filter((button) => button.label === "閉じる")).toHaveLength(1);
   });
 
+  it.each([
+    { salesBase: 112500.9, display: "￥112,500" },
+    { salesBase: -112500.9, display: "-￥112,500" },
+    { salesBase: -0.9, display: "￥0" },
+  ])("売上算定額 $salesBase だけを小数以下切り捨て表示し、他の金額と元データを維持する", ({ salesBase, display }) => {
+    const rows = [payment("intro-a", "cast-1", {
+      honShimeiLiquorCost: 12500.9, salesBase, salesFee: 11250.9,
+      grossBase: 88000.9, grossFee: 8800.9, attendanceAdvisory: 2000.9,
+      entryAdvisory: 3000.9, total: 16250.9,
+    })];
+    const before = structuredClone(rows);
+    render(rows);
+    click("詳細");
+    const expanded = render(rows);
+    expect(expanded).toContain(`<td>￥12,501</td><td>${display}</td><td>￥11,251</td><td>￥88,001</td><td>￥8,801</td><td>原価引き売上10%</td><td>￥2,001</td><td>￥3,001</td><td><strong>￥16,251</strong></td>`);
+    expect(rows).toEqual(before);
+  });
+
+  it("集約できない旧形式の売上算定額も小数以下切り捨て表示し、元データを維持する", () => {
+    const legacy = payment("unknown", "cast-1", { salesBase: 112500.9, salesFee: 11250.9, total: 16250.9 });
+    delete legacy.introducerId;
+    delete legacy.castId;
+    const before = structuredClone(legacy);
+    const markup = render([legacy]);
+    expect(markup).toContain('role="alert"');
+    expect(markup).toContain("<td>￥112,500</td><td>￥11,251</td>");
+    expect(markup).toContain("<strong>￥16,251</strong>");
+    expect(legacy).toEqual(before);
+  });
+
   it("同名の別紹介者IDを別々の一覧・詳細として表示する", () => {
     const rows = [payment("intro-a", "cast-1", { total: 1234 }), payment("intro-b", "cast-2", { total: 5678 })];
     const markup = render(rows);
