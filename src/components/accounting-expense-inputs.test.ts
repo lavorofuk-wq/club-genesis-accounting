@@ -31,6 +31,7 @@ const results: MonthlyAccountingResults = {
   balance: { cast: 0, introducer: 0, staff: 0, driver: 0, expenses: 90959, totalCosts: 90959, profit: 10040 },
 };
 const noChange = () => undefined;
+const noSave = async () => true;
 type Element = ReactElement<Record<string, any>>;
 function elements(node: ReactNode): Element[] {
   if (Array.isArray(node)) return node.flatMap(elements);
@@ -47,7 +48,7 @@ function field(node: ReactNode, label: string) {
   return find(node, (item) => item.type === Field && item.props.label === label).props.children as Element;
 }
 function form(rows = [first, second], disabled = false, onChange: Parameters<typeof AccountingExpenseInputs>[0]["onChange"] = noChange) {
-  return AccountingExpenseInputs({ month, rows, closings, total: 1630, consumptionTax: 3029, disabled, onChange });
+  return AccountingExpenseInputs({ month, rows, closings, total: 1630, consumptionTax: 3029, disabled, saveDisabled: false, onSave: noSave, onChange });
 }
 beforeEach(() => drafts.clear());
 
@@ -55,6 +56,8 @@ describe("経理の追加経費入力", () => {
   it("既存科目で入力し、当月の承認済み日または日付なしを選択できる", () => {
     const markup = renderToStaticMarkup(form());
     expect(markup).toContain("営業日（任意）");
+    expect(markup).toContain("編集中の経理入力をまとめて保存");
+    expect((markup.match(/>削除<\/button><button[^>]*>保存<\/button>/g) || [])).toHaveLength(2);
     expect(markup).toContain("未指定（日付がない行に表示）");
     expect(markup).toContain('value="2026-09-02"');
     expect(markup).toContain('value="2026-09-28"');
@@ -122,7 +125,7 @@ describe("経理の追加経費入力", () => {
 
 describe("経費画面の月次入力との接続", () => {
   it("固定経費の直前に経費入力を表示し、店舗経費の金額を保つ", () => {
-    const markup = renderToStaticMarkup(createElement(Expenses, { results, adjustments, closings, disabled: false, setAdjustments: noChange }));
+    const markup = renderToStaticMarkup(createElement(Expenses, { results, adjustments, closings, disabled: false, setAdjustments: noChange, saveDisabled: false, onSave: noSave }));
     expect(markup.indexOf("<h2>経費入力</h2>")).toBeLessThan(markup.indexOf("<h2>固定経費・月締め調整</h2>"));
     expect(markup).toContain('日次経費計 <strong>￥1,000</strong>');
     expect(markup).toContain('経費総合計 <strong>￥90,959</strong>');
@@ -133,7 +136,7 @@ describe("経費画面の月次入力との接続", () => {
   it("確定月は確定時の入力と税額を表示し、後から渡された入力で補完しない", () => {
     const markup = renderToStaticMarkup(createElement(Expenses, {
       results, adjustments: { ...adjustments, expenseInputs: [{ ...first, payee: "現在の別入力" }] }, closings,
-      closed: true, disabled: true, setAdjustments: noChange,
+      closed: true, disabled: true, setAdjustments: noChange, saveDisabled: false, onSave: noSave,
     }));
     expect(markup).toContain("備品追加");
     expect(markup).not.toContain("現在の別入力");
@@ -142,7 +145,7 @@ describe("経費画面の月次入力との接続", () => {
     delete old.expenses.accountingExpenseInputs;
     delete old.expenses.accountingExpenseTotal;
     delete old.expenses.consumptionTax;
-    const previous = renderToStaticMarkup(createElement(Expenses, { results: old, adjustments, closings, closed: true, disabled: true, setAdjustments: noChange }));
+    const previous = renderToStaticMarkup(createElement(Expenses, { results: old, adjustments, closings, closed: true, disabled: true, setAdjustments: noChange, saveDisabled: false, onSave: noSave }));
     expect(previous).not.toContain("預かり消費税");
     expect(previous).not.toContain("備品追加");
     expect(previous).not.toContain("￥3,029");

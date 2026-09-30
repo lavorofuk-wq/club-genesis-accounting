@@ -232,7 +232,8 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
   const finalizeCheck = canFinalizeMonthlyAccounting(data, month, adjustments, true);
   const monthlyCashProblems = closed ? [] : cashLedgerIssues(data.closings, month);
   const setMap = (key: "withholdingByCast" | "staffSalesAllowance" | "staffBottleAllowance" | "driverRemoteAllowance", id: string, value: number) => setAdjustments((row) => ({ ...row, [key]: { ...row[key], [id]: value } }));
-  const save = () => adjustmentsStale || expenseInputError || busy || closed || state?.status === "closing" ? Promise.resolve(false) : run(() => saveMonthlyAdjustments(adjustments, user), `${month}の経理入力を保存しました。`);
+  const saveDisabled = busy || closed || state?.status === "closing" || adjustmentsStale || Boolean(expenseInputError) || !adjustmentsDirty;
+  const save = () => saveDisabled ? Promise.resolve(false) : run(() => saveMonthlyAdjustments(adjustments, user), `${month}の経理入力を保存しました。`);
   const finalize = () => {
     if (adjustmentsDirty || adjustmentsStale || calculationsBlocked || !finalizeCheck.allowed) return;
     if (!window.confirm(`${month}を月次確定しますか？\n確定後は日次承認・差戻し・経理入力を変更できません。`)) return;
@@ -257,7 +258,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
     setMonth(nextMonth);
   };
   return <div className="grid">
-    <Card><div className="month-toolbar"><Field label="対象月"><input className="input" type="month" value={month} onChange={(event) => changeMonth(event.target.value)} /></Field><span>承認済み営業日 <strong>{results?.approvedDays ?? approved.length}日</strong></span>{state?.status === "closed" ? <StatusPill tone="good">月次確定済み 第{state.currentSnapshotRevision}版</StatusPill> : state?.status === "closing" ? <StatusPill tone="warn">月次確定処理中</StatusPill> : <StatusPill>未確定</StatusPill>}{!closed && state?.status !== "closing" && (section !== "castSales" || adjustmentsDirty) && <button className="button" disabled={busy || adjustmentsStale || Boolean(expenseInputError) || !adjustmentsDirty} onClick={() => void save()}>経理入力を保存</button>}{!closed && state?.status !== "closing" && <button className="button secondary" disabled={busy || adjustmentsDirty || adjustmentsStale || calculationsBlocked || !finalizeCheck.allowed} onClick={finalize}>月次確定</button>}{state?.status === "closing" && <button className="button danger" disabled={busy} onClick={cancelClosing}>確定処理を中止</button>}{closed && <button className="button danger" disabled={busy} onClick={reopen}>確定解除</button>}</div></Card>
+    <Card><div className="month-toolbar"><Field label="対象月"><input className="input" type="month" value={month} onChange={(event) => changeMonth(event.target.value)} /></Field><span>承認済み営業日 <strong>{results?.approvedDays ?? approved.length}日</strong></span>{state?.status === "closed" ? <StatusPill tone="good">月次確定済み 第{state.currentSnapshotRevision}版</StatusPill> : state?.status === "closing" ? <StatusPill tone="warn">月次確定処理中</StatusPill> : <StatusPill>未確定</StatusPill>}{!closed && state?.status !== "closing" && (section !== "castSales" || adjustmentsDirty) && <button className="button" disabled={saveDisabled} onClick={() => void save()}>経理入力を保存</button>}{!closed && state?.status !== "closing" && <button className="button secondary" disabled={busy || adjustmentsDirty || adjustmentsStale || calculationsBlocked || !finalizeCheck.allowed} onClick={finalize}>月次確定</button>}{state?.status === "closing" && <button className="button danger" disabled={busy} onClick={cancelClosing}>確定処理を中止</button>}{closed && <button className="button danger" disabled={busy} onClick={reopen}>確定解除</button>}</div></Card>
     {expenseInputError && <div className="notice error" role="alert">経費入力：{expenseInputError}</div>}
     {adjustmentsStale && <div className="notice error" role="alert">別の操作で対象月の入力が更新されています。未保存の入力は保持しています。古い版からの上書きを防ぐため、保存・確定・出力を停止しています。<button className="button secondary mini top-gap" disabled={busy} onClick={() => { if (window.confirm("未保存の経理入力を破棄して、最新の対象月データを読み込みますか？")) setAdjustments(storedAdjustments); }}>未保存入力を破棄して最新データを表示</button></div>}
     {state?.status === "closing" && <div className="notice error">月次確定処理中です。画面を更新しても解消しない場合は、処理を行った担当者と通信状態を確認してください。</div>}
@@ -326,7 +327,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
     {results && section === "introducers" && <IntroducerPayments key={month} rows={results.introducerPayments} castRewards={results.castRewards} />}
     {results && section === "staffPayroll" && <StaffPayroll rows={results.staffPayroll} disabled={busy || locked} onSales={(id, value) => setMap("staffSalesAllowance", id, value)} onBottle={(id, value) => setMap("staffBottleAllowance", id, value)} />}
     {results && section === "driverPayroll" && <DriverPayroll rows={results.driverPayroll} disabled={busy || locked} onRemote={(id, value) => setMap("driverRemoteAllowance", id, value)} />}
-    {results && section === "expenses" && <Expenses results={results} adjustments={adjustments} setAdjustments={setAdjustments} closings={data.closings} closed={closed} disabled={busy || locked} />}
+    {results && section === "expenses" && <Expenses results={results} adjustments={adjustments} setAdjustments={setAdjustments} closings={data.closings} closed={closed} disabled={busy || locked} saveDisabled={saveDisabled} onSave={save} />}
     {results && section === "balance" && <><Balance results={results} /><MonthlyCashFunding summary={results.cashFunding} /></>}
   </div>;
 }
@@ -524,13 +525,15 @@ function CastRewardTable({ rows, disabled, onWithholding, empty }: CastRewardsPr
 }
 function DriverPayroll({ rows, disabled, onRemote }: { rows: MonthlyAccountingResults["driverPayroll"]; disabled: boolean; onRemote: (id: string, value: number) => void }) { return <Card title="送迎ドライバー給与データ"><Table headers={["ドライバー", "出勤日数", "基本給与", "遠方手当", "総支給", "日払い", "差引支給"]}>{rows.map((row) => <tr key={row.id}><td>{row.name}</td><td>{row.days}日</td><td>{yen.format(row.basic)}</td><td><MoneyInput value={row.remote} disabled={disabled} onChange={(value) => onRemote(row.id, value)} /></td><td>{yen.format(row.gross)}</td><td>{yen.format(row.dailyPayment)}</td><td><strong>{yen.format(row.net)}</strong></td></tr>)}</Table></Card>; }
 
-export function Expenses({ results, adjustments, setAdjustments, closings, closed = false, disabled }: {
+export function Expenses({ results, adjustments, setAdjustments, closings, closed = false, disabled, saveDisabled, onSave }: {
   results: MonthlyAccountingResults;
   adjustments: MonthlyAdjustments;
   setAdjustments: (value: MonthlyAdjustments | ((row: MonthlyAdjustments) => MonthlyAdjustments)) => void;
   closings: DailyClosing[];
   closed?: boolean;
   disabled: boolean;
+  saveDisabled: boolean;
+  onSave: () => Promise<boolean>;
 }) {
   const addFixed = () => setAdjustments((row) => ({ ...row, fixedExpenses: [...row.fixedExpenses, { id: secureRandomUUID(), account: "", amount: 0 }] }));
   return <div className="grid">
@@ -547,7 +550,7 @@ export function Expenses({ results, adjustments, setAdjustments, closings, close
     <AccountingExpenseInputs month={adjustments.month}
       rows={closed ? results.expenses.accountingExpenseInputs || [] : adjustments.expenseInputs || []}
       closings={closings} total={results.expenses.accountingExpenseTotal} consumptionTax={results.expenses.consumptionTax}
-      disabled={disabled} onChange={(update) => setAdjustments((row) => ({ ...row, expenseInputs: update(row.expenseInputs || []) }))} />
+      disabled={disabled} saveDisabled={saveDisabled} onSave={onSave} onChange={(update) => setAdjustments((row) => ({ ...row, expenseInputs: update(row.expenseInputs || []) }))} />
     <Card title="固定経費・月締め調整" action={!disabled ? <button className="button secondary" onClick={addFixed}>固定経費を追加</button> : null}>
       <div className="stack">{adjustments.fixedExpenses.map((row) => <div className="grid form-row" key={row.id}>
         <Field label="科目"><input className="input" disabled={disabled} value={row.account} onChange={(event) => setAdjustments((value) => ({ ...value, fixedExpenses: value.fixedExpenses.map((item) => item.id === row.id ? { ...item, account: event.target.value } : item) }))} /></Field>

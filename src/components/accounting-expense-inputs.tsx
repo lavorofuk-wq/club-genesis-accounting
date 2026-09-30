@@ -12,10 +12,12 @@ type Props = {
   total?: number;
   consumptionTax?: number;
   disabled: boolean;
+  saveDisabled: boolean;
+  onSave: () => Promise<boolean>;
   onChange: (update: (rows: AccountingExpenseInput[]) => AccountingExpenseInput[]) => void;
 };
 
-export function AccountingExpenseInputs({ month, rows, closings, total, consumptionTax, disabled, onChange }: Props) {
+export function AccountingExpenseInputs({ month, rows, closings, total, consumptionTax, disabled, saveDisabled, onSave, onChange }: Props) {
   const days = [...new Set(closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(`${month}-`)).map((row) => row.businessDate))].sort();
   const patch = (id: string, change: Partial<AccountingExpenseInput>) => {
     if (disabled) return;
@@ -29,7 +31,7 @@ export function AccountingExpenseInputs({ month, rows, closings, total, consumpt
     if (disabled) return;
     onChange((current) => current.filter((row) => row.id !== id));
   };
-  return <Card title="経費入力" description="営業日を指定すると経費表の指定日に、未指定の場合は月末の日付行の下にある、日付がない行に表示します。入力後は上部の「経理入力を保存」で保存してください。"
+  return <Card title="経費入力" description="営業日を指定すると経費表の指定日に、未指定の場合は月末の日付行の下にある、日付がない行に表示します。各行の「保存」で、編集中の経理入力をまとめて保存します。行を削除した後は、残っている行か上部の保存ボタンで保存してください。"
     action={<button type="button" className="button secondary" disabled={disabled} onClick={add}>経費を追加</button>}>
     <div className="stack">{rows.map((row, index) => <div className="detail-panel" key={row.id}>
       <fieldset className="cast-input-fields" disabled={disabled} aria-label={`追加経費 ${index + 1}`}>
@@ -45,7 +47,10 @@ export function AccountingExpenseInputs({ month, rows, closings, total, consumpt
             {row.businessDate && !days.includes(row.businessDate) && <option value={row.businessDate}>{row.businessDate}{disabled ? "" : "（現在は対象外）"}</option>}
           </select></Field>
         </div>
-        <div className="actions top-gap"><button type="button" className="button danger mini" aria-label={`追加経費 ${index + 1} を削除`} onClick={() => remove(row.id)}>削除</button></div>
+        <div className="actions top-gap">
+          <button type="button" className="button danger mini" aria-label={`追加経費 ${index + 1} を削除`} onClick={() => remove(row.id)}>削除</button>
+          <button type="button" className="button mini" aria-label={`追加経費 ${index + 1} の保存`} disabled={disabled || saveDisabled} onClick={() => { if (!disabled && !saveDisabled) void onSave(); }}>保存</button>
+        </div>
       </fieldset>
     </div>)}</div>
     {!rows.length && <p className="muted">追加で入力した経費はありません。</p>}
