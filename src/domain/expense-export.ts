@@ -1,6 +1,7 @@
 import type { DailyClosing, ExpenseCategory, MonthlyAdjustments } from "./gms";
 import type { IntroducerPaymentRow, MonthlyAccountingResults, MonthlyAccountingSnapshot } from "./month-accounting";
-import { requiresCompleteCashFundingSnapshot } from "./month-accounting";
+import { consumptionTaxForSales, validateAccountingExpenseInputs } from "./accounting-expenses";
+import { requiresAccountingExpensesSnapshot, requiresCompleteCashFundingSnapshot } from "./month-accounting";
 import { cashLedgerIssues } from "./cash-funding";
 
 export type ExpenseExportInput = {
@@ -194,7 +195,29 @@ export function validateExpenseExport({ results, closings, adjustments, month, s
   sameAmount(summary.fixed, fixed, "固定経費計");
   sameAmount(summary.liquorDelivery, liquorDelivery, "酒代納品書分");
   sameAmount(summary.cardFee, cardFee, "カード決済手数料");
-  sameAmount(summary.total, dailyExpenseTotal + dispatchCast + dispatchStaff + dispatchFee + liquorDelivery + fixed + cardFee, "経費総合計");
+  const accountingInputs = validateAccountingExpenseInputs(adjustments.expenseInputs, month, closings);
+  const hasAccountingExpenses = !snapshot || requiresAccountingExpensesSnapshot(snapshot.calculationVersion)
+    || summary.accountingExpenseInputs !== undefined || summary.accountingExpenseTotal !== undefined || summary.consumptionTax !== undefined;
+  requireValue(!snapshot || requiresAccountingExpensesSnapshot(snapshot.calculationVersion) || !hasAccountingExpenses,
+    "旧計算版の確定月へ経費入力・預かり消費税を後付けして出力することはできません。");
+  let accountingExpenseTotal = 0;
+  let consumptionTax = 0;
+  if (hasAccountingExpenses) {
+    const savedInputs = validateAccountingExpenseInputs(summary.accountingExpenseInputs, month, closings);
+    requireValue(JSON.stringify(canonical([...savedInputs].sort((a, b) => a.id.localeCompare(b.id))))
+      === JSON.stringify(canonical([...accountingInputs].sort((a, b) => a.id.localeCompare(b.id)))),
+      "経費入力の明細が計算時の保存明細と一致しません。最新データを読み込んでください。");
+    accountingExpenseTotal = accountingInputs.reduce((sum, row) => sum + row.amount, 0);
+    consumptionTax = consumptionTaxForSales(results.sales.total);
+    requireValue(Number.isSafeInteger(summary.accountingExpenseTotal) && Number.isSafeInteger(summary.consumptionTax),
+      "経費入力合計・預かり消費税の保存金額が不正です。");
+    sameAmount(summary.accountingExpenseTotal, accountingExpenseTotal, "経費入力計");
+    sameAmount(summary.consumptionTax, consumptionTax, "預かり消費税");
+  } else {
+    requireValue(accountingInputs.length === 0, "経費入力の保存明細がない旧確定月へ新しい経費を後付けして出力することはできません。");
+  }
+  sameAmount(summary.total, dailyExpenseTotal + dispatchCast + dispatchStaff + dispatchFee + liquorDelivery + fixed + cardFee
+    + accountingExpenseTotal + consumptionTax, "経費総合計");
   sameAmount(results.sales.cash, cashSales, "月次現金売上");
   sameAmount(results.sales.card, cardSales, "月次カード売上");
   sameAmount(results.sales.total, cashSales + cardSales, "月次合計売上");

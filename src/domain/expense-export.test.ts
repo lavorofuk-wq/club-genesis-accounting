@@ -1,3 +1,4 @@
+import { removeNewExpensesForLegacy } from "./legacy-expense-fixture.test-helper";
 import { describe, expect, it } from "vitest";
 import type { CastReward, DailyClosing, MonthlyAdjustments, WorkspaceData } from "./gms";
 import { buildMonthlySnapshot, calculateMonthlyAccounting } from "./month-accounting";
@@ -96,11 +97,11 @@ describe("経費XLSXの出力元検査", () => {
     const input = fixture();
     delete input.closings[0].cash.funding;
     finalize(input);
-    input.snapshot!.calculationVersion = version;
+    input.snapshot!.calculationVersion = version; removeNewExpensesForLegacy(input.snapshot!); removeNewExpensesForLegacy(input.results);
     const before = structuredClone(input);
     expect(() => validateExpenseExport(input)).not.toThrow();
     expect(input).toEqual(before);
-    input.snapshot!.calculationVersion = "2.22.0";
+    input.snapshot!.calculationVersion = "2.22.0"; removeNewExpensesForLegacy(input.snapshot!); removeNewExpensesForLegacy(input.results);
     expect(() => validateExpenseExport(input)).toThrow(/確認記録がありません/);
   });
 
@@ -130,7 +131,7 @@ describe("経費XLSXの出力元検査", () => {
     input.results.castRewards[0].introducer = { id: "intro-1", name: "紹介者", feeType: "gross10", attendanceAdvisoryFee: 100, entryAdvisoryFee: 3_000 };
     finalize(input);
     input.snapshot!.schemaVersion = 1;
-    input.snapshot!.calculationVersion = "2.12.0";
+    input.snapshot!.calculationVersion = "2.12.0"; removeNewExpensesForLegacy(input.snapshot!); removeNewExpensesForLegacy(input.results);
     const before = structuredClone(input);
     expect(() => validateExpenseExport(input)).not.toThrow();
     expect(input).toEqual(before);

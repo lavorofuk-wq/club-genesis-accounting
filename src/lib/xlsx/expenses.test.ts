@@ -56,8 +56,16 @@ function refresh(data: ExpenseExportInput): ExpenseExportInput {
   const liquorDelivery = data.adjustments.liquorDeliveryAmount ?? sum(approved, (row) => row.liquorDeliveryAmount);
   const fixed = sum(data.adjustments.fixedExpenses, (row) => row.amount);
   const cardFee = data.adjustments.cardFee;
+  const accountingExpenseInputs = data.adjustments.expenseInputs;
+  const accountingExpenseTotal = sum(accountingExpenseInputs || [], (row) => row.amount);
+  const consumptionTax = data.results.expenses.consumptionTax;
   data.results.approvedDays = approved.length;
-  data.results.expenses = { byCategory, dailyExpenseTotal, dispatchCast, dispatchStaff, dispatchFee, dispatchTotal, liquorDelivery, fixed, cardFee, total: dailyExpenseTotal + dispatchTotal + liquorDelivery + fixed + cardFee };
+  data.results.expenses = {
+    byCategory, dailyExpenseTotal, dispatchCast, dispatchStaff, dispatchFee, dispatchTotal, liquorDelivery, fixed, cardFee,
+    total: dailyExpenseTotal + dispatchTotal + liquorDelivery + fixed + cardFee + accountingExpenseTotal + (consumptionTax ?? 0),
+    ...(accountingExpenseInputs !== undefined || consumptionTax !== undefined
+      ? { accountingExpenseInputs: accountingExpenseInputs || [], accountingExpenseTotal, consumptionTax } : {}),
+  };
   const cash = sum(approved, (row) => row.sales.cashSales);
   const card = sum(approved, (row) => row.sales.cardSales);
   data.results.sales = { cash, card, total: cash + card };
@@ -68,6 +76,15 @@ function refresh(data: ExpenseExportInput): ExpenseExportInput {
   const expenses = data.results.expenses.total;
   const totalCosts = cast + introducer + staff + driver + expenses;
   data.results.balance = { cast, introducer, staff, driver, expenses, totalCosts, profit: data.results.sales.total - totalCosts };
+  if (consumptionTax === undefined && accountingExpenseInputs === undefined) {
+    // 既存配置のfixtureは新計算ではなく、当時の税計上がない保存済み確定月として検証する。
+    data.snapshot = {
+      ...structuredClone(data.results), schemaVersion: 3, calculationVersion: "2.42.0", month: data.month,
+      revision: 1, sourceFingerprint: "b".repeat(64), adjustmentsRevision: data.adjustments.revision || 0,
+      approvedClosings: approved.map(({ id, checksum, updatedAt }) => ({ id, checksum, updatedAt })),
+      createdAt: "2026-09-30T12:00:00.000Z", createdBy: "accounting-user",
+    };
+  } else delete data.snapshot;
   return data;
 }
 
@@ -102,6 +119,38 @@ function unmergedCells(sheet: ExcelJS.Worksheet) {
     if (!cell.isMerged || cell.master.address === cell.address) cells.push(cell);
   }));
   return cells;
+}
+
+/** Excelの参照先から式を評価し、保存済みキャッシュと実際の再計算結果を照合する。 */
+function expectFormulaCachesToMatch(sheet: ExcelJS.Worksheet) {
+  const visiting = new Set<string>();
+  const calculated = new Map<string, number>();
+  function evaluate(address: string): number {
+    const cached = calculated.get(address);
+    if (cached !== undefined) return cached;
+    const cell = sheet.getCell(address);
+    if (cell.type !== ExcelJS.ValueType.Formula) return typeof cell.value === "number" ? cell.value : 0;
+    expect(visiting.has(address), `循環参照: ${address}`).toBe(false);
+    visiting.add(address);
+    const expression = (cell.value as ExcelJS.CellFormulaValue).formula;
+    const parsed = /^SUM\(([A-R0-9:,]+)\)(?:-([A-R][0-9]+))?$/.exec(expression);
+    expect(parsed, `未対応の式: ${address} ${expression}`).not.toBeNull();
+    const result = parsed![1].split(",").reduce((total, reference) => {
+      if (!reference.includes(":")) return total + evaluate(reference);
+      const [first, last] = reference.split(":").map((part) => sheet.getCell(part));
+      for (let row = Number(first.row); row <= Number(last.row); row += 1) {
+        for (let column = Number(first.col); column <= Number(last.col); column += 1) {
+          total += evaluate(sheet.getCell(row, column).address);
+        }
+      }
+      return total;
+    }, 0) - (parsed![2] ? evaluate(parsed![2]) : 0);
+    visiting.delete(address);
+    calculated.set(address, result);
+    expect(cell.result, `${address}: ${expression}`).toBeCloseTo(result, 8);
+    return result;
+  }
+  for (const cell of unmergedCells(sheet)) if (cell.type === ExcelJS.ValueType.Formula) evaluate(cell.address);
 }
 
 describe("見本形式の月次経費XLSX", () => {
@@ -313,6 +362,124 @@ describe("見本形式の月次経費XLSX", () => {
         expect(Number.isFinite(cell.result), `${cell.address}: ${JSON.stringify(cell.value)}`).toBe(true);
       }
     }
+  });
+
+  it("追加経費を指定日または日付なし行へ一度だけ加算し、預かり消費税をその他欄へ表示する", () => {
+    const data = input();
+    data.adjustments.expenseInputs = [
+      { id: "dated-same", category: "liquor", payee: "liquor支払先", amount: 100, businessDate: "2026-09-02" },
+      { id: "dated-other", category: "liquor", payee: "追加酒屋", amount: 200, businessDate: "2026-09-02" },
+      { id: "dated-advertising", category: "advertising", payee: "広告業者", amount: 30, businessDate: "2026-09-02" },
+      { id: "monthly-first", category: "supplies", payee: "備品業者", amount: 50 },
+      { id: "monthly-second", category: "supplies", payee: "別の備品業者", amount: 60 },
+    ];
+    data.results.expenses.consumptionTax = 9000;
+    refresh(data);
+    const sheet = createMonthlyExpenseWorkbook(data, "未確定").worksheets[0];
+    expect(sheet.getCell("B4").value).toBe("liquor支払先\n追加酒屋");
+    expect(value(sheet, "C4")).toBe(401);
+    expect(value(sheet, "R4")).toBe(3966);
+    expect(sheet.getCell("F4").value).toBe("advertising支払先\n広告業者");
+    expect(value(sheet, "G4")).toBe(333);
+    expect(sheet.getCell("A32").value).toBe(30);
+    expect(sheet.getCell("A33").value).toBeNull();
+    expect(sheet.getCell("H33").value).toBe("備品業者\n別の備品業者");
+    expect(value(sheet, "I33")).toBe(110);
+    expect(sheet.getCell("N33").value).toBe("預かり消費税");
+    expect(value(sheet, "O33")).toBe(9000);
+    expect(value(sheet, "R33")).toBe(9110);
+    expect(value(sheet, "R34")).toBe(13076);
+    expect(value(sheet, "C43")).toBe(2222);
+    expect(value(sheet, "M36")).toBe(4400);
+    expect(value(sheet, "G45")).toBe(86919);
+    expect(value(sheet, "P45")).toBe(105233 + 9440);
+    expectFormulaCachesToMatch(sheet);
+  });
+
+  it.each([["2026-02", 28], ["2028-02", 29], ["2026-04", 30], ["2026-12", 31]])("%sの月末日の直下へ日付なし経費を配置し、下段と数式を維持する", (targetMonth, lastDay) => {
+    const data = input();
+    data.month = String(targetMonth);
+    data.adjustments.month = data.month;
+    data.closings[0].businessDate = `${targetMonth}-${lastDay}`;
+    data.adjustments.expenseInputs = [
+      { id: "dated", category: "liquor", payee: "月末支払先", amount: 10, businessDate: data.closings[0].businessDate },
+      { id: "undated", category: "liquor", payee: "月間支払先", amount: 20 },
+    ];
+    data.results.expenses.consumptionTax = 9000;
+    refresh(data);
+    const sheet = createMonthlyExpenseWorkbook(data, "未確定").worksheets[0];
+    const monthlyRow = Number(lastDay) + 3;
+    const offset = Number(lastDay) === 31 ? 1 : 0;
+    expect(sheet.getCell(`A${monthlyRow - 1}`).value).toBe(lastDay);
+    expect(value(sheet, `C${monthlyRow - 1}`)).toBe(111);
+    expect(sheet.getCell(`A${monthlyRow}`).value).toBeNull();
+    expect(sheet.getCell(`B${monthlyRow}`).value).toBe("月間支払先");
+    expect(value(sheet, `C${monthlyRow}`)).toBe(20);
+    expect(sheet.getCell(`N${monthlyRow}`).value).toBe("預かり消費税");
+    expect(value(sheet, `O${monthlyRow}`)).toBe(9000);
+    for (let row = monthlyRow + 1; row < 34 + offset; row += 1) expect(sheet.getCell(`A${row}`).value).toBeNull();
+    expect(sheet.getCell(`C${34 + offset}`).value).toEqual({ formula: `SUM(C3:C${33 + offset})`, result: 131 });
+    expect(sheet.getCell(`B${35 + offset}`).value).toBe("固定費");
+    expect(value(sheet, `M${36 + offset}`)).toBe(4400);
+    expect(value(sheet, `G${37 + offset}`)).toBe(14000);
+    expect(value(sheet, `I${37 + offset}`)).toBe(2200);
+    expect(value(sheet, `M${42 + offset}`)).toBe(3300);
+    expect(value(sheet, `C${43 + offset}`)).toBe(2222);
+    expect(value(sheet, `P${45 + offset}`)).toBe(data.results.balance.totalCosts);
+    expect(sheet.getCell(`G${36 + offset}`).master.address).toBe(`F${36 + offset}`);
+    expect(sheet.pageSetup.printArea).toBe(`A1:R${45 + offset}`);
+    expect(sheet.rowCount).toBe(45 + offset);
+    expectFormulaCachesToMatch(sheet);
+  });
+
+  it("新項目のない31日月の旧データは日付行・集計行・下段の配置を維持する", () => {
+    const data = input();
+    data.month = data.adjustments.month = "2026-12";
+    data.closings[0].businessDate = "2026-12-31";
+    refresh(data);
+    const sheet = createMonthlyExpenseWorkbook(data, "旧確定データ").worksheets[0];
+    expect(sheet.getCell("A33").value).toBe(31);
+    expect(sheet.getCell("B34").value).toBe("合計");
+    expect(sheet.getCell("B35").value).toBe("固定費");
+    expect(sheet.rowCount).toBe(45);
+    expect(value(sheet, "P45")).toBe(105233);
+    expectFormulaCachesToMatch(sheet);
+  });
+
+  it("売上も追加入力もゼロの新計算は日付なし行にゼロの預かり消費税を表示する", () => {
+    const data = input();
+    data.closings[0].sales = { cashSales: 0, cardSales: 0, totalSales: 0 };
+    data.adjustments.expenseInputs = [];
+    data.results.expenses.consumptionTax = 0;
+    refresh(data);
+    const sheet = createMonthlyExpenseWorkbook(data, "未確定").worksheets[0];
+    expect(sheet.getCell("A33").value).toBeNull();
+    expect(sheet.getCell("N33").value).toBe("預かり消費税");
+    expect(value(sheet, "O33")).toBe(0);
+    expect(value(sheet, "R33")).toBe(0);
+    expect(value(sheet, "P45")).toBe(105233);
+    expectFormulaCachesToMatch(sheet);
+  });
+
+  it("31日月の拡張帳票はXLSX往復後も新経費・下段の結合・印刷範囲・全数式を保持する", async () => {
+    const data = input();
+    data.month = data.adjustments.month = "2026-12";
+    data.closings[0].businessDate = "2026-12-31";
+    data.adjustments.expenseInputs = [{ id: "monthly", category: "advertising", payee: "=1+1", amount: 123 }];
+    data.results.expenses.consumptionTax = 9000;
+    refresh(data);
+    const book = createMonthlyExpenseWorkbook(data, "月次確定済み 第3版");
+    const restored = new ExcelJS.Workbook();
+    await restored.xlsx.load(await book.xlsx.writeBuffer());
+    const sheet = restored.worksheets[0];
+    expect(sheet.getCell("F34").value).toBe("=1+1");
+    expect(sheet.getCell("N34").value).toBe("預かり消費税");
+    expect(value(sheet, "O34")).toBe(9000);
+    expect(sheet.getCell("G37").master.address).toBe("F37");
+    expect(sheet.getCell("R46").master.address).toBe("P46");
+    expect(sheet.pageSetup.printArea).toBe("A1:R46");
+    expect(value(sheet, "P46")).toBe(105233 + 9123);
+    expectFormulaCachesToMatch(sheet);
   });
 
   it("合計が一致しない入力から正しい金額に見える帳票を作成しない", () => {

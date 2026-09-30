@@ -22,6 +22,8 @@ import { CastPayRatio } from "./cast-pay-ratio";
 import { CastReceiptExport } from "./cast-receipt-export";
 import { IntroducerStatementExport } from "./introducer-statement-export";
 import { CastAccountingInputs } from "./cast-accounting-inputs";
+import { AccountingExpenseInputs } from "./accounting-expense-inputs";
+import { validateAccountingExpenseInputs } from "@/domain/accounting-expenses";
 
 type Props = { data: AccountingWorkspaceData; user: User; busy: boolean; run: (action: () => Promise<unknown>, message: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void };
 type Section = "approval" | "castInputs" | "castSales" | "castRewards" | "introducers" | "staffPayroll" | "driverPayroll" | "expenses" | "balance";
@@ -210,6 +212,11 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
   const currentSnapshot = closed ? data.monthSnapshots.find((row) => row.month === month && row.revision === state.currentSnapshotRevision) : undefined;
   const storedAdjustments = blankAdjustments(month, stored);
   const adjustmentsDirty = adjustmentSignature(adjustments) !== adjustmentSignature(storedAdjustments);
+  const expenseInputError = useMemo(() => {
+    if (closed) return "";
+    try { validateAccountingExpenseInputs(adjustments.expenseInputs, month, data.closings); return ""; }
+    catch (error) { return error instanceof Error ? error.message : "追加入力した経費を確認してください。"; }
+  }, [adjustments.expenseInputs, closed, data.closings, month]);
   const adjustmentsStale = !closed && (adjustments.revision || 0) !== (storedAdjustments.revision || 0);
   useEffect(() => {
     onDirtyChange?.(adjustmentsDirty);
@@ -225,7 +232,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
   const finalizeCheck = canFinalizeMonthlyAccounting(data, month, adjustments, true);
   const monthlyCashProblems = closed ? [] : cashLedgerIssues(data.closings, month);
   const setMap = (key: "withholdingByCast" | "staffSalesAllowance" | "staffBottleAllowance" | "driverRemoteAllowance", id: string, value: number) => setAdjustments((row) => ({ ...row, [key]: { ...row[key], [id]: value } }));
-  const save = () => adjustmentsStale ? Promise.resolve(false) : run(() => saveMonthlyAdjustments(adjustments, user), `${month}の経理入力を保存しました。`);
+  const save = () => adjustmentsStale || expenseInputError || busy || closed || state?.status === "closing" ? Promise.resolve(false) : run(() => saveMonthlyAdjustments(adjustments, user), `${month}の経理入力を保存しました。`);
   const finalize = () => {
     if (adjustmentsDirty || adjustmentsStale || calculationsBlocked || !finalizeCheck.allowed) return;
     if (!window.confirm(`${month}を月次確定しますか？\n確定後は日次承認・差戻し・経理入力を変更できません。`)) return;
@@ -250,7 +257,8 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
     setMonth(nextMonth);
   };
   return <div className="grid">
-    <Card><div className="month-toolbar"><Field label="対象月"><input className="input" type="month" value={month} onChange={(event) => changeMonth(event.target.value)} /></Field><span>承認済み営業日 <strong>{results?.approvedDays ?? approved.length}日</strong></span>{state?.status === "closed" ? <StatusPill tone="good">月次確定済み 第{state.currentSnapshotRevision}版</StatusPill> : state?.status === "closing" ? <StatusPill tone="warn">月次確定処理中</StatusPill> : <StatusPill>未確定</StatusPill>}{!closed && state?.status !== "closing" && (section !== "castSales" || adjustmentsDirty) && <button className="button" disabled={busy || adjustmentsStale || !adjustmentsDirty} onClick={() => void save()}>経理入力を保存</button>}{!closed && state?.status !== "closing" && <button className="button secondary" disabled={busy || adjustmentsDirty || adjustmentsStale || calculationsBlocked || !finalizeCheck.allowed} onClick={finalize}>月次確定</button>}{state?.status === "closing" && <button className="button danger" disabled={busy} onClick={cancelClosing}>確定処理を中止</button>}{closed && <button className="button danger" disabled={busy} onClick={reopen}>確定解除</button>}</div></Card>
+    <Card><div className="month-toolbar"><Field label="対象月"><input className="input" type="month" value={month} onChange={(event) => changeMonth(event.target.value)} /></Field><span>承認済み営業日 <strong>{results?.approvedDays ?? approved.length}日</strong></span>{state?.status === "closed" ? <StatusPill tone="good">月次確定済み 第{state.currentSnapshotRevision}版</StatusPill> : state?.status === "closing" ? <StatusPill tone="warn">月次確定処理中</StatusPill> : <StatusPill>未確定</StatusPill>}{!closed && state?.status !== "closing" && (section !== "castSales" || adjustmentsDirty) && <button className="button" disabled={busy || adjustmentsStale || Boolean(expenseInputError) || !adjustmentsDirty} onClick={() => void save()}>経理入力を保存</button>}{!closed && state?.status !== "closing" && <button className="button secondary" disabled={busy || adjustmentsDirty || adjustmentsStale || calculationsBlocked || !finalizeCheck.allowed} onClick={finalize}>月次確定</button>}{state?.status === "closing" && <button className="button danger" disabled={busy} onClick={cancelClosing}>確定処理を中止</button>}{closed && <button className="button danger" disabled={busy} onClick={reopen}>確定解除</button>}</div></Card>
+    {expenseInputError && <div className="notice error" role="alert">経費入力：{expenseInputError}</div>}
     {adjustmentsStale && <div className="notice error" role="alert">別の操作で対象月の入力が更新されています。未保存の入力は保持しています。古い版からの上書きを防ぐため、保存・確定・出力を停止しています。<button className="button secondary mini top-gap" disabled={busy} onClick={() => { if (window.confirm("未保存の経理入力を破棄して、最新の対象月データを読み込みますか？")) setAdjustments(storedAdjustments); }}>未保存入力を破棄して最新データを表示</button></div>}
     {state?.status === "closing" && <div className="notice error">月次確定処理中です。画面を更新しても解消しない場合は、処理を行った担当者と通信状態を確認してください。</div>}
     {!closed && finalizeCheck.unresolvedDaily.length > 0 && <div className="notice error"><strong>未承認・差戻し中・店舗編集中の日次データがあるため月次確定できません。</strong><ul>{finalizeCheck.unresolvedDaily.map((row) => <li key={row.id}>{row.businessDate}：{statusLabel[row.status]}</li>)}</ul></div>}
@@ -318,7 +326,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
     {results && section === "introducers" && <IntroducerPayments key={month} rows={results.introducerPayments} castRewards={results.castRewards} />}
     {results && section === "staffPayroll" && <StaffPayroll rows={results.staffPayroll} disabled={busy || locked} onSales={(id, value) => setMap("staffSalesAllowance", id, value)} onBottle={(id, value) => setMap("staffBottleAllowance", id, value)} />}
     {results && section === "driverPayroll" && <DriverPayroll rows={results.driverPayroll} disabled={busy || locked} onRemote={(id, value) => setMap("driverRemoteAllowance", id, value)} />}
-    {results && section === "expenses" && <Expenses results={results} adjustments={adjustments} setAdjustments={setAdjustments} disabled={busy || locked} />}
+    {results && section === "expenses" && <Expenses results={results} adjustments={adjustments} setAdjustments={setAdjustments} closings={data.closings} closed={closed} disabled={busy || locked} />}
     {results && section === "balance" && <><Balance results={results} /><MonthlyCashFunding summary={results.cashFunding} /></>}
   </div>;
 }
@@ -516,14 +524,48 @@ function CastRewardTable({ rows, disabled, onWithholding, empty }: CastRewardsPr
 }
 function DriverPayroll({ rows, disabled, onRemote }: { rows: MonthlyAccountingResults["driverPayroll"]; disabled: boolean; onRemote: (id: string, value: number) => void }) { return <Card title="送迎ドライバー給与データ"><Table headers={["ドライバー", "出勤日数", "基本給与", "遠方手当", "総支給", "日払い", "差引支給"]}>{rows.map((row) => <tr key={row.id}><td>{row.name}</td><td>{row.days}日</td><td>{yen.format(row.basic)}</td><td><MoneyInput value={row.remote} disabled={disabled} onChange={(value) => onRemote(row.id, value)} /></td><td>{yen.format(row.gross)}</td><td>{yen.format(row.dailyPayment)}</td><td><strong>{yen.format(row.net)}</strong></td></tr>)}</Table></Card>; }
 
-function Expenses({ results, adjustments, setAdjustments, disabled }: { results: MonthlyAccountingResults; adjustments: MonthlyAdjustments; setAdjustments: (value: MonthlyAdjustments | ((row: MonthlyAdjustments) => MonthlyAdjustments)) => void; disabled: boolean }) {
+export function Expenses({ results, adjustments, setAdjustments, closings, closed = false, disabled }: {
+  results: MonthlyAccountingResults;
+  adjustments: MonthlyAdjustments;
+  setAdjustments: (value: MonthlyAdjustments | ((row: MonthlyAdjustments) => MonthlyAdjustments)) => void;
+  closings: DailyClosing[];
+  closed?: boolean;
+  disabled: boolean;
+}) {
   const addFixed = () => setAdjustments((row) => ({ ...row, fixedExpenses: [...row.fixedExpenses, { id: secureRandomUUID(), account: "", amount: 0 }] }));
-  return <div className="grid"><Card title="当月経費データ"><Table headers={["勘定科目", "金額"]}>{Object.entries(expenseLabels).map(([key, label]) => <tr key={key}><td>{label}</td><td>{yen.format(results.expenses.byCategory[key] || 0)}</td></tr>)}</Table><div className="right-total">日次経費計 <strong>{yen.format(results.expenses.dailyExpenseTotal)}</strong></div></Card><Card title="派遣支払"><Table headers={["区分", "金額"]}><tr><td>派遣キャスト支払</td><td>{yen.format(results.expenses.dispatchCast)}</td></tr><tr><td>派遣スタッフ支払</td><td>{yen.format(results.expenses.dispatchStaff)}</td></tr><tr><td>派遣手数料</td><td>{yen.format(results.expenses.dispatchFee)}</td></tr><tr className="total-row"><td>派遣支払計</td><td><strong>{yen.format(results.expenses.dispatchTotal)}</strong></td></tr></Table></Card><Card title="固定経費・月締め調整" action={!disabled ? <button className="button secondary" onClick={addFixed}>固定経費を追加</button> : null}><div className="stack">{adjustments.fixedExpenses.map((row) => <div className="grid form-row" key={row.id}><Field label="科目"><input className="input" disabled={disabled} value={row.account} onChange={(event) => setAdjustments((value) => ({ ...value, fixedExpenses: value.fixedExpenses.map((item) => item.id === row.id ? { ...item, account: event.target.value } : item) }))} /></Field><Field label="金額"><MoneyInput value={row.amount} disabled={disabled} onChange={(amount) => setAdjustments((value) => ({ ...value, fixedExpenses: value.fixedExpenses.map((item) => item.id === row.id ? { ...item, amount } : item) }))} /></Field>{!disabled && <button className="button danger compact" onClick={() => setAdjustments((value) => ({ ...value, fixedExpenses: value.fixedExpenses.filter((item) => item.id !== row.id) }))}>削除</button>}</div>)}</div><div className="grid two top-gap"><Field label="酒代納品書分（月締め後は確定解除して修正）"><MoneyInput value={results.expenses.liquorDelivery} disabled={disabled} onChange={(value) => setAdjustments((row) => ({ ...row, liquorDeliveryAmount: value }))} /></Field><Field label="カード決済手数料"><MoneyInput value={adjustments.cardFee} disabled={disabled} onChange={(value) => setAdjustments((row) => ({ ...row, cardFee: value }))} /></Field></div><div className="right-total">経費総合計 <strong>{yen.format(results.expenses.total)}</strong></div></Card></div>;
+  return <div className="grid">
+    <Card title="当月経費データ" description="店舗から送信された日次経費の集計です。">
+      <Table headers={["勘定科目", "金額"]}>{Object.entries(expenseLabels).map(([key, label]) => <tr key={key}><td>{label}</td><td>{yen.format(results.expenses.byCategory[key] || 0)}</td></tr>)}</Table>
+      <div className="right-total">日次経費計 <strong>{yen.format(results.expenses.dailyExpenseTotal)}</strong></div>
+    </Card>
+    <Card title="派遣支払"><Table headers={["区分", "金額"]}>
+      <tr><td>派遣キャスト支払</td><td>{yen.format(results.expenses.dispatchCast)}</td></tr>
+      <tr><td>派遣スタッフ支払</td><td>{yen.format(results.expenses.dispatchStaff)}</td></tr>
+      <tr><td>派遣手数料</td><td>{yen.format(results.expenses.dispatchFee)}</td></tr>
+      <tr className="total-row"><td>派遣支払計</td><td><strong>{yen.format(results.expenses.dispatchTotal)}</strong></td></tr>
+    </Table></Card>
+    <AccountingExpenseInputs month={adjustments.month}
+      rows={closed ? results.expenses.accountingExpenseInputs || [] : adjustments.expenseInputs || []}
+      closings={closings} total={results.expenses.accountingExpenseTotal} consumptionTax={results.expenses.consumptionTax}
+      disabled={disabled} onChange={(update) => setAdjustments((row) => ({ ...row, expenseInputs: update(row.expenseInputs || []) }))} />
+    <Card title="固定経費・月締め調整" action={!disabled ? <button className="button secondary" onClick={addFixed}>固定経費を追加</button> : null}>
+      <div className="stack">{adjustments.fixedExpenses.map((row) => <div className="grid form-row" key={row.id}>
+        <Field label="科目"><input className="input" disabled={disabled} value={row.account} onChange={(event) => setAdjustments((value) => ({ ...value, fixedExpenses: value.fixedExpenses.map((item) => item.id === row.id ? { ...item, account: event.target.value } : item) }))} /></Field>
+        <Field label="金額"><MoneyInput value={row.amount} disabled={disabled} onChange={(amount) => setAdjustments((value) => ({ ...value, fixedExpenses: value.fixedExpenses.map((item) => item.id === row.id ? { ...item, amount } : item) }))} /></Field>
+        {!disabled && <button className="button danger compact" onClick={() => setAdjustments((value) => ({ ...value, fixedExpenses: value.fixedExpenses.filter((item) => item.id !== row.id) }))}>削除</button>}
+      </div>)}</div>
+      <div className="grid two top-gap">
+        <Field label="酒代納品書分（月締め後は確定解除して修正）"><MoneyInput value={results.expenses.liquorDelivery} disabled={disabled} onChange={(value) => setAdjustments((row) => ({ ...row, liquorDeliveryAmount: value }))} /></Field>
+        <Field label="カード決済手数料"><MoneyInput value={adjustments.cardFee} disabled={disabled} onChange={(value) => setAdjustments((row) => ({ ...row, cardFee: value }))} /></Field>
+      </div>
+      <div className="right-total">経費総合計 <strong>{yen.format(results.expenses.total)}</strong></div>
+    </Card>
+  </div>;
 }
 function Balance({ results }: { results: MonthlyAccountingResults }) { return <div className="grid"><div className="grid metrics"><Metric label="現金売上" value={yen.format(results.sales.cash)} /><Metric label="カード売上" value={yen.format(results.sales.card)} /><Metric label="合計売上" value={yen.format(results.sales.total)} /><Metric label="収支" value={yen.format(results.balance.profit)} /></div><Card title="収支データ"><Table headers={["区分", "金額"]}><tr><td>現金売上</td><td>{yen.format(results.sales.cash)}</td></tr><tr><td>カード売上</td><td>{yen.format(results.sales.card)}</td></tr><tr className="total-row"><td>合計売上</td><td><strong>{yen.format(results.sales.total)}</strong></td></tr><tr><td>キャスト報酬</td><td>− {yen.format(results.balance.cast)}</td></tr><tr><td>紹介者支払</td><td>− {yen.format(results.balance.introducer)}</td></tr><tr><td>スタッフ給与</td><td>− {yen.format(results.balance.staff)}</td></tr><tr><td>送迎ドライバー給与</td><td>− {yen.format(results.balance.driver)}</td></tr><tr><td>経費・派遣支払</td><td>− {yen.format(results.balance.expenses)}</td></tr><tr className="total-row"><td>総支出</td><td><strong>− {yen.format(results.balance.totalCosts)}</strong></td></tr><tr className="total-row"><td><strong>収支</strong></td><td><strong>{yen.format(results.balance.profit)}</strong></td></tr></Table>{results.warnings.length === 0 && <div className="notice success top-gap">すべての承認済みデータから収支を算出しました。</div>}</Card></div>; }
 
 function mapSignature(value: Record<string, unknown> | undefined) { return JSON.stringify(Object.entries(value || {}).sort(([left], [right]) => left.localeCompare(right))); }
 function classificationSignature(value: MonthlyAdjustments) { return mapSignature(value.legacyBottleClassifications); }
-function adjustmentSignature(value: MonthlyAdjustments) { return JSON.stringify({ withholdingByCast: mapSignature(value.withholdingByCast), staffSalesAllowance: mapSignature(value.staffSalesAllowance), staffBottleAllowance: mapSignature(value.staffBottleAllowance), driverRemoteAllowance: mapSignature(value.driverRemoteAllowance), fixedExpenses: value.fixedExpenses, liquorDeliveryAmount: value.liquorDeliveryAmount, cardFee: value.cardFee, legacyBottleClassifications: classificationSignature(value), castInputs: value.castInputs || [] }); }
+export function adjustmentSignature(value: MonthlyAdjustments) { return JSON.stringify({ withholdingByCast: mapSignature(value.withholdingByCast), staffSalesAllowance: mapSignature(value.staffSalesAllowance), staffBottleAllowance: mapSignature(value.staffBottleAllowance), driverRemoteAllowance: mapSignature(value.driverRemoteAllowance), fixedExpenses: value.fixedExpenses, liquorDeliveryAmount: value.liquorDeliveryAmount, cardFee: value.cardFee, legacyBottleClassifications: classificationSignature(value), castInputs: value.castInputs || [], expenseInputs: [...(value.expenseInputs || [])].sort((left, right) => left.id.localeCompare(right.id)) }); }
 function blankAdjustments(month: string, stored?: MonthlyAdjustments): MonthlyAdjustments { return normalizeMonthlyAdjustments(stored || { month, withholdingByCast: {}, staffSalesAllowance: {}, staffBottleAllowance: {}, driverRemoteAllowance: {}, fixedExpenses: [], cardFee: 0, legacyBottleClassifications: {}, revision: 0 }); }
 function Metric({ label, value }: { label: string; value: string }) { return <div className="card metric-card"><small>{label}</small><strong>{value}</strong></div>; }

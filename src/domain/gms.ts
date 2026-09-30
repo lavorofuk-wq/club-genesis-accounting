@@ -1,3 +1,4 @@
+import { normalizeAccountingExpenseInputs } from "./accounting-expenses";
 import { cashFundingIssues } from "./cash-funding";
 import type { CashFunding } from "./cash-funding";
 import { sha256Hex } from "../lib/crypto-compat";
@@ -363,6 +364,14 @@ export type ExpenseCategory =
   | "entertainment"
   | "liquor"
   | "transportOther";
+
+export type AccountingExpenseInput = {
+  id: string;
+  category: ExpenseCategory;
+  payee: string;
+  amount: number;
+  businessDate?: string;
+};
 
 export type DailyExpense = {
   id: string;
@@ -812,6 +821,7 @@ export type ResolvedCastAccountingInput = CastAccountingInput & { businessDate: 
 export type MonthlyAdjustments = {
   month: string;
   castInputs?: CastAccountingInput[];
+  expenseInputs?: AccountingExpenseInput[];
   withholdingByCast: Record<string, number>;
   staffSalesAllowance: Record<string, number>;
   staffBottleAllowance: Record<string, number>;
@@ -853,6 +863,7 @@ export function normalizeMonthlyAdjustments(
     month: String(value.month || ""),
     // Firebase表現を厳密に復元する。不正行や端数を黙って消したり丸めたりしない。
     ...(value.castInputs === undefined ? {} : { castInputs: normalizeCastAccountingInputs(value.castInputs) }),
+    ...(value.expenseInputs === undefined ? {} : { expenseInputs: normalizeAccountingExpenseInputs(value.expenseInputs) }),
     withholdingByCast: storedNumberMap(value.withholdingByCast),
     staffSalesAllowance: storedNumberMap(value.staffSalesAllowance),
     staffBottleAllowance: storedNumberMap(value.staffBottleAllowance),

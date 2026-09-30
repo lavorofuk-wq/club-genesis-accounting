@@ -47,6 +47,15 @@ export function createMonthlyExpenseWorkbook(input: ExpenseExportInput, sourceLa
   const byDate = new Map(approved.map((row) => [row.businessDate, row]));
   const [year, monthNumber] = month.split("-").map(Number);
   const lastDay = new Date(year, monthNumber, 0).getDate();
+  const expenseInputs = adjustments.expenseInputs || [];
+  const monthlyInputs = expenseInputs.filter((row) => !row.businessDate);
+  const hasMonthlyExpenseRow = results.expenses.consumptionTax !== undefined || monthlyInputs.length > 0;
+  // 旧確定データの配置を維持し、31日月で新しい月次経費がある場合だけ下段を1行伸ばす。
+  const rowOffset = hasMonthlyExpenseRow && lastDay === 31 ? 1 : 0;
+  const variableTotalRow = 34 + rowOffset;
+  const sectionHeaderRow = 35 + rowOffset;
+  const detailHeaderRow = 36 + rowOffset;
+  const detailStart = 37 + rowOffset;
   const fixed = ["賃料", "カラオケ", "おしぼり", "リースキン", "固定電話", "西部ガス", "USEN", "酒代", "カード決済手数料"]
     .map((account) => ({ account, amount: 0 }));
   for (const item of adjustments.fixedExpenses) {
@@ -59,9 +68,9 @@ export function createMonthlyExpenseWorkbook(input: ExpenseExportInput, sourceLa
   fixed[8].amount += results.expenses.cardFee;
 
   // 見本の定員を超える場合は下段を伸ばし、金額・氏名の切捨てを避ける。
-  const driverHeader = 37 + Math.max(4, Math.ceil(introducers.length / 3));
+  const driverHeader = detailStart + Math.max(4, Math.ceil(introducers.length / 3));
   const driverStart = driverHeader + 1;
-  const totalRow = Math.max(45, 36 + fixed.length, 37 + Math.ceil(results.staffPayroll.length / 2),
+  const totalRow = Math.max(45 + rowOffset, detailHeaderRow + fixed.length, detailStart + Math.ceil(results.staffPayroll.length / 2),
     driverStart + Math.max(3, Math.ceil(results.driverPayroll.length / 2)));
   const book = new ExcelJS.Workbook();
   book.creator = "GENESIS Management System Ver2.37.0";
@@ -80,12 +89,12 @@ export function createMonthlyExpenseWorkbook(input: ExpenseExportInput, sourceLa
     sheet.getRow(row).height = row === 1 ? 24 : 21;
     for (let column = 1; column <= 18; column += 1) {
       const cell = sheet.getCell(row, column);
-      cell.font = { ...font, bold: row <= 2 || row === 34 || row === totalRow };
+      cell.font = { ...font, bold: row <= 2 || row === variableTotalRow || row === totalRow };
       cell.alignment = { vertical: "middle", horizontal: column === 1 ? "center" : "right", wrapText: true };
       cell.numFmt = amountFormat;
       if (row >= 2) cell.border = border;
-      if (row === 2 || row === 35) cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE2E8F0" } };
-      else if (row === 34 || row === totalRow || row >= 36 && row % 2 === 0) {
+      if (row === 2 || row === sectionHeaderRow) cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE2E8F0" } };
+      else if (row === variableTotalRow || row === totalRow || row >= detailHeaderRow && (row - rowOffset) % 2 === 0) {
         cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF8FAFC" } };
       }
     }
@@ -106,18 +115,19 @@ export function createMonthlyExpenseWorkbook(input: ExpenseExportInput, sourceLa
   }
   sheet.getRow(2).alignment = { horizontal: "center", vertical: "middle", wrapText: true };
   const categoryTotals = new Map<string, number>();
-  for (let day = 1; day <= 31; day += 1) {
-    const row = day + 2;
-    if (day > lastDay) continue;
-    sheet.getCell(`A${row}`).value = day;
-    const closing = byDate.get(`${month}-${String(day).padStart(2, "0")}`);
+  function writeExpenseRow(row: number, businessDate?: string) {
+    const closing = businessDate ? byDate.get(businessDate) : undefined;
+    const additions = businessDate ? expenseInputs.filter((expense) => expense.businessDate === businessDate) : monthlyInputs;
     let dailyTotal = 0;
     for (const category of categories) {
       const payments = new Map<string, number>();
       if (category.category === "dispatchFee") {
         if (closing?.dispatchFee) payments.set("派遣手数料", closing.dispatchFee);
+        if (!businessDate && results.expenses.consumptionTax !== undefined) {
+          payments.set("預かり消費税", results.expenses.consumptionTax);
+        }
       } else {
-        for (const expense of closing?.expenses || []) {
+        for (const expense of [...(closing?.expenses || []), ...additions]) {
           if (expense.category !== category.category) continue;
           const name = expense.payee;
           payments.set(name, (payments.get(name) || 0) + expense.amount);
@@ -132,51 +142,57 @@ export function createMonthlyExpenseWorkbook(input: ExpenseExportInput, sourceLa
     }
     sheet.getCell(`R${row}`).value = formula(`SUM(${categories.map((category) => `${category.amount}${row}`).join(",")})`, dailyTotal);
   }
-  for (const category of categories) {
-    label(sheet, `${category.column}34`, category.column === "P" ? "変動費合計" : "合計");
-    sheet.getCell(`${category.amount}34`).value = formula(`SUM(${category.amount}3:${category.amount}33)`, categoryTotals.get(category.amount) || 0);
+  for (let day = 1; day <= lastDay; day += 1) {
+    const row = day + 2;
+    sheet.getCell(`A${row}`).value = day;
+    writeExpenseRow(row, `${month}-${String(day).padStart(2, "0")}`);
   }
-  const variableTotal = results.expenses.dailyExpenseTotal + results.expenses.dispatchFee;
-  sheet.getCell("R34").value = formula(`SUM(${categories.map((category) => `${category.amount}34`).join(",")})`, variableTotal);
+  if (hasMonthlyExpenseRow) writeExpenseRow(lastDay + 3);
+  for (const category of categories) {
+    label(sheet, `${category.column}${variableTotalRow}`, category.column === "P" ? "変動費合計" : "合計");
+    sheet.getCell(`${category.amount}${variableTotalRow}`).value = formula(`SUM(${category.amount}3:${category.amount}${variableTotalRow - 1})`, categoryTotals.get(category.amount) || 0);
+  }
+  const variableTotal = results.expenses.dailyExpenseTotal + results.expenses.dispatchFee
+    + (results.expenses.accountingExpenseTotal || 0) + (results.expenses.consumptionTax || 0);
+  sheet.getCell(`R${variableTotalRow}`).value = formula(`SUM(${categories.map((category) => `${category.amount}${variableTotalRow}`).join(",")})`, variableTotal);
 
-  label(sheet, "B35", "固定費");
-  label(sheet, "F35", "人件費");
-  label(sheet, "H35", "人件費");
-  merge(sheet, "L35:O35", "スカウト報酬");
-  merge(sheet, "F36:G36", "女子総支給額");
-  merge(sheet, "H36:K36", "従業員給与");
-  label(sheet, "L36", "紹介料計");
-  label(sheet, "N36", "顧問料計");
+  label(sheet, `B${sectionHeaderRow}`, "固定費");
+  label(sheet, `F${sectionHeaderRow}`, "人件費");
+  label(sheet, `H${sectionHeaderRow}`, "人件費");
+  merge(sheet, `L${sectionHeaderRow}:O${sectionHeaderRow}`, "スカウト報酬");
+  merge(sheet, `F${detailHeaderRow}:G${detailHeaderRow}`, "女子総支給額");
+  merge(sheet, `H${detailHeaderRow}:K${detailHeaderRow}`, "従業員給与");
+  label(sheet, `L${detailHeaderRow}`, "紹介料計");
+  label(sheet, `N${detailHeaderRow}`, "顧問料計");
   const advisoryTotal = sum(results.introducerPayments, (row) => row.advisory);
   const introducerTotal = sum(results.introducerPayments, (row) => row.total);
-  sheet.getCell("M36").value = introducerTotal - advisoryTotal;
-  sheet.getCell("O36").value = advisoryTotal;
-  sheet.getCell("R35").value = formula("SUM(R34,M36,O36)", variableTotal + introducerTotal);
+  sheet.getCell(`O${detailHeaderRow}`).value = advisoryTotal;
+  sheet.getCell(`R${sectionHeaderRow}`).value = formula(`SUM(R${variableTotalRow},M${detailHeaderRow},O${detailHeaderRow})`, variableTotal + introducerTotal);
   fixed.forEach((row, index) => {
-    label(sheet, `B${36 + index}`, row.account);
-    sheet.getCell(`C${36 + index}`).value = row.amount;
+    label(sheet, `B${detailHeaderRow + index}`, row.account);
+    sheet.getCell(`C${detailHeaderRow + index}`).value = row.amount;
   });
-  label(sheet, "F37", "時給");
-  label(sheet, "F38", "売上報酬");
-  label(sheet, "F40", "派遣支払");
-  sheet.getCell("G37").value = sum(results.castRewards.filter((row) => row.adoptedSystem === "hourlyAndBack"), (row) => row.grossPay);
-  sheet.getCell("G38").value = sum(results.castRewards.filter((row) => row.adoptedSystem === "salesReward"), (row) => row.grossPay);
+  label(sheet, `F${detailStart}`, "時給");
+  label(sheet, `F${detailStart + 1}`, "売上報酬");
+  label(sheet, `F${detailStart + 3}`, "派遣支払");
+  sheet.getCell(`G${detailStart}`).value = sum(results.castRewards.filter((row) => row.adoptedSystem === "hourlyAndBack"), (row) => row.grossPay);
+  sheet.getCell(`G${detailStart + 1}`).value = sum(results.castRewards.filter((row) => row.adoptedSystem === "salesReward"), (row) => row.grossPay);
   const dispatchPayment = results.expenses.dispatchCast + results.expenses.dispatchStaff;
-  sheet.getCell("G40").value = dispatchPayment;
+  sheet.getCell(`G${detailStart + 3}`).value = dispatchPayment;
   results.staffPayroll.forEach((person, index) => {
-    const row = 37 + Math.floor(index / 2);
+    const row = detailStart + Math.floor(index / 2);
     label(sheet, `${index % 2 ? "J" : "H"}${row}`, person.name);
     sheet.getCell(`${index % 2 ? "K" : "I"}${row}`).value = person.gross;
   });
   introducers.forEach((person, index) => {
-    const row = 37 + Math.floor(index / 3);
+    const row = detailStart + Math.floor(index / 3);
     const column = ["L", "N", "P"][index % 3];
     const amount = `${["M", "O", "Q"][index % 3]}${row}`;
     label(sheet, `${column}${row}`, person.name);
     sheet.getCell(amount).value = person.total;
   });
   // 明細全件の合計から顧問料を引き、紹介料計の式と表示済みキャッシュを一致させる。
-  sheet.getCell("M36").value = formula(`SUM(M37:M${driverHeader - 1},O37:O${driverHeader - 1},Q37:Q${driverHeader - 1})-O36`, introducerTotal - advisoryTotal);
+  sheet.getCell(`M${detailHeaderRow}`).value = formula(`SUM(M${detailStart}:M${driverHeader - 1},O${detailStart}:O${driverHeader - 1},Q${detailStart}:Q${driverHeader - 1})-O${detailHeaderRow}`, introducerTotal - advisoryTotal);
   merge(sheet, `L${driverHeader}:O${driverHeader}`, "送迎給与");
   results.driverPayroll.forEach((person, index) => {
     const row = driverStart + Math.floor(index / 2);
@@ -187,14 +203,14 @@ export function createMonthlyExpenseWorkbook(input: ExpenseExportInput, sourceLa
   label(sheet, `F${totalRow}`, "女子給合計");
   merge(sheet, `H${totalRow}:I${totalRow}`, "従業員給合計");
   merge(sheet, `L${totalRow}:M${totalRow}`, "送迎給合計");
-  sheet.getCell(`C${totalRow}`).value = formula(`SUM(C36:C${totalRow - 1})`, results.expenses.fixed + results.expenses.liquorDelivery + results.expenses.cardFee);
-  sheet.getCell(`G${totalRow}`).value = formula(`SUM(G37:G${totalRow - 1})`, results.balance.cast + dispatchPayment);
-  sheet.getCell(`J${totalRow}`).value = formula(`SUM(I37:I${totalRow - 1},K37:K${totalRow - 1})`, results.balance.staff);
+  sheet.getCell(`C${totalRow}`).value = formula(`SUM(C${detailHeaderRow}:C${totalRow - 1})`, results.expenses.fixed + results.expenses.liquorDelivery + results.expenses.cardFee);
+  sheet.getCell(`G${totalRow}`).value = formula(`SUM(G${detailStart}:G${totalRow - 1})`, results.balance.cast + dispatchPayment);
+  sheet.getCell(`J${totalRow}`).value = formula(`SUM(I${detailStart}:I${totalRow - 1},K${detailStart}:K${totalRow - 1})`, results.balance.staff);
   sheet.getCell(`N${totalRow}`).value = formula(`SUM(M${driverStart}:M${totalRow - 1},O${driverStart}:O${totalRow - 1})`, results.balance.driver);
   merge(sheet, `P${totalRow - 2}:R${totalRow - 1}`, "総支出合計");
-  merge(sheet, `P${totalRow}:R${totalRow}`, formula(`SUM(R34,C${totalRow},G${totalRow},J${totalRow},M36,O36,N${totalRow})`, results.balance.totalCosts));
+  merge(sheet, `P${totalRow}:R${totalRow}`, formula(`SUM(R${variableTotalRow},C${totalRow},G${totalRow},J${totalRow},M${detailHeaderRow},O${detailHeaderRow},N${totalRow})`, results.balance.totalCosts));
   sheet.getCell(`P${totalRow}`).font = { ...font, bold: true, size: 12 };
-  for (const address of ["L35", "F36", "H36", `L${driverHeader}`, `H${totalRow}`, `L${totalRow}`, `P${totalRow - 2}`]) {
+  for (const address of [`L${sectionHeaderRow}`, `F${detailHeaderRow}`, `H${detailHeaderRow}`, `L${driverHeader}`, `H${totalRow}`, `L${totalRow}`, `P${totalRow - 2}`]) {
     sheet.getCell(address).font = { ...font, bold: true };
     sheet.getCell(address).alignment = { horizontal: "center", vertical: "middle", wrapText: true };
   }

@@ -44,7 +44,9 @@ function totalCells(section: string): string[] {
   const body = table.match(/<tbody>([\s\S]*?)<\/tbody>/)?.[1] || "";
   expect((body.match(/<tr\b[^>]*>[\s\S]*?<\/tr>/g) || []).at(-1)).toBe(totals[0]);
   expect(totals[0]).not.toContain("<input");
-  return [...totals[0].matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/g)]
+  const totalRow = totals[0];
+  if (!totalRow) throw new Error("給与合計行がありません。");
+  return [...totalRow.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/g)]
     .map((cell) => cell[1].replace(/<[^>]*>/g, ""));
 }
 

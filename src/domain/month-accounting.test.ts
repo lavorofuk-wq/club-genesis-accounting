@@ -1,3 +1,4 @@
+import { removeNewExpensesForLegacy } from "./legacy-expense-fixture.test-helper";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { calculateCashFunding, cashFundingContext } from "./cash-funding";
 import type {
@@ -269,9 +270,9 @@ describe("月次会計ドメイン", () => {
     expect(results.castRewards[0]).toMatchObject({ trialOnly: false, dailyPayment: 11004, advancePayment: 579 });
   });
 
-  it("2.39確定には0円も明示保存し、後の原本変更から日別・月額を独立させる", () => {
+  it("現行確定には0円も明示保存し、後の原本変更から日別・月額を独立させる", () => {
     const { source, snapshot } = hourlyYenSnapshot();
-    expect(snapshot.calculationVersion).toBe("2.39.0");
+    expect(snapshot.calculationVersion).toBe(MONTHLY_CALCULATION_VERSION);
     expect(snapshot.schemaVersion).toBe(3);
     expect(snapshot.castSalesReports[0].days[0]).toMatchObject({ dailyPayment: 14870, advancePayment: 0 });
     expect(snapshot.castSalesReports[0].totals).toMatchObject({ dailyPayment: 14870, advancePayment: 0 });
@@ -301,7 +302,7 @@ describe("月次会計ドメイン", () => {
 
   it.each(["2.38.0", "2.37.0", "2.31.0"])("旧確定%sの日別欠損を0円で埋めず、保存月額を保持する", (version) => {
     const { snapshot } = hourlyYenSnapshot();
-    snapshot.calculationVersion = version;
+    snapshot.calculationVersion = version; removeNewExpensesForLegacy(snapshot);
     for (const report of snapshot.castSalesReports) {
       for (const row of [...report.days, report.totals]) {
         delete row.dailyPayment;
@@ -322,7 +323,7 @@ describe("月次会計ドメイン", () => {
     ["新形式の全内訳欠損", (s) => { for (const row of [...s.castSalesReports[0].days, s.castSalesReports[0].totals]) { delete row.dailyPayment; delete row.advancePayment; } }],
     ["日別片方欠損", (s) => { delete s.castSalesReports[0].days[0].advancePayment; }],
     ["月計欠損", (s) => { delete s.castSalesReports[0].totals.dailyPayment; }],
-    ["旧形式の部分欠損", (s) => { s.calculationVersion = "2.38.0"; delete s.castSalesReports[0].days[0].dailyPayment; }],
+    ["旧形式の部分欠損", (s) => { s.calculationVersion = "2.38.0"; removeNewExpensesForLegacy(s); delete s.castSalesReports[0].days[0].dailyPayment; }],
     ["負数", (s) => { s.castSalesReports[0].days[0].dailyPayment = -1; }],
     ["NaN", (s) => { s.castSalesReports[0].days[0].advancePayment = NaN; }],
     ["無限値", (s) => { s.castSalesReports[0].days[0].dailyPayment = Infinity; }],
@@ -375,7 +376,7 @@ describe("月次会計ドメイン", () => {
 
   it("確定済み月の保存金額は編集撤去後も現在マスタ・原本から再計算しない", () => {
     const { source, input, snapshot } = hourlyYenSnapshot();
-    snapshot.calculationVersion = "2.31.0";
+    snapshot.calculationVersion = "2.31.0"; removeNewExpensesForLegacy(snapshot);
     const before = structuredClone(snapshot);
     source.casts[0].hourlyRates[month] = 9000;
     source.closings[0].casts[0].honShimeiSales = 2000000;
@@ -471,7 +472,7 @@ describe("月次会計ドメイン", () => {
       expect(normalizeMonthlyAccountingSnapshot(invalid, month, 1)).toBeUndefined();
     }
     const legacy = structuredClone(snapshot);
-    legacy.calculationVersion = "2.24.0";
+    legacy.calculationVersion = "2.24.0"; removeNewExpensesForLegacy(legacy);
     delete legacy.staffPayroll[0].hourlySources;
     expect(normalizeMonthlyAccountingSnapshot(legacy, month, 1)?.staffPayroll).toEqual(legacy.staffPayroll);
   });
@@ -587,7 +588,7 @@ describe("月次会計ドメイン", () => {
     ["勤務合計不一致", (s) => { s.staffPayroll[0].hourlyByDay![0].hours += 0.25; }],
     ["15分以外", (s) => { s.staffPayroll[0].hourlyByDay![0].hours = 4.1; }],
     ["月間時給に1円未満", (s) => { s.staffPayroll[0].hourly += 0.5; }],
-    ["旧計算version", (s) => { s.calculationVersion = "2.19.0"; }],
+    ["旧計算version", (s) => { s.calculationVersion = "2.19.0"; removeNewExpensesForLegacy(s); }],
   ];
   it.each(corruptHourlyDay)("schema 3の不正な日別時給を拒否する：%s", (_name, corrupt) => {
     const { snapshot } = hourlyYenSnapshot();
@@ -606,7 +607,7 @@ describe("月次会計ドメイン", () => {
   it.each([1, 2] as const)("schema %sで確定済みの旧時給・日払い・差引額は再計算しない", (schemaVersion) => {
     const { snapshot } = hourlyYenSnapshot();
     snapshot.schemaVersion = schemaVersion;
-    snapshot.calculationVersion = schemaVersion === 1 ? "2.12.0" : "2.19.0";
+    snapshot.calculationVersion = schemaVersion === 1 ? "2.12.0" : "2.19.0"; removeNewExpensesForLegacy(snapshot);
     const reward = snapshot.castRewards[0];
     Object.assign(reward, { hourlyPay: 14870, hourlyAndBack: 14870, adoptedReward: 14870, grossPay: 15370, netPay: 500 });
     const payroll = snapshot.staffPayroll[0];
@@ -880,13 +881,14 @@ describe("月次会計ドメイン", () => {
       dispatchStaff: 20_000,
       dispatchFee: 3_000,
       dispatchTotal: 33_000,
-      total: 38_000,
+      consumptionTax: 3_000,
+      total: 41_000,
     });
     expect(result.sales).toEqual({ cash: 60_000, card: 40_000, total: 100_000 });
     expect(result.balance).toMatchObject({
-      expenses: 38_000,
-      totalCosts: 38_000,
-      profit: 62_000,
+      expenses: 41_000,
+      totalCosts: 41_000,
+      profit: 59_000,
     });
     expect(result.balance.profit).toBe(result.sales.total - result.balance.totalCosts);
   });
@@ -910,7 +912,8 @@ describe("月次会計ドメイン", () => {
     const result = calculateMonthlyAccounting(workspace({ closings: [closing] }), month, adjustments());
 
     expect(result.sales).toEqual({ cash: 60_003, card: 40_004, total: 100_007 });
-    expect(result.balance.profit).toBe(100_007);
+    expect(result.expenses.consumptionTax).toBe(3_000);
+    expect(result.balance.profit).toBe(97_007);
   });
 
   it("酒代納品書の月締め修正・固定経費・カード手数料を収支へ一度ずつ反映する", () => {
@@ -933,9 +936,10 @@ describe("月次会計ドメイン", () => {
       liquorDelivery: 11_000,
       fixed: 30_000,
       cardFee: 3_000,
-      total: 44_000,
+      consumptionTax: 3_000,
+      total: 47_000,
     });
-    expect(result.balance).toMatchObject({ expenses: 44_000, totalCosts: 44_000, profit: 56_000 });
+    expect(result.balance).toMatchObject({ expenses: 47_000, totalCosts: 47_000, profit: 53_000 });
   });
 
   it("完全削除後のアーカイブ済みキャストを結合して過去報酬を維持する", () => {
@@ -1288,7 +1292,7 @@ describe("月次会計ドメイン", () => {
 
     const legacy = structuredClone(snapshot);
     legacy.schemaVersion = 1;
-    legacy.calculationVersion = "2.12.0";
+    legacy.calculationVersion = "2.12.0"; removeNewExpensesForLegacy(legacy);
     delete legacy.introducerPayments[0].introducerId;
     delete legacy.introducerPayments[0].castId;
     const before = structuredClone(legacy);
@@ -1359,7 +1363,7 @@ describe("月次会計ドメイン", () => {
       calculateMonthlyAccounting(source, month, input), source.closings,
       "accounting-user", "2026-09-30T23:59:59.000Z");
     base.schemaVersion = 2;
-    base.calculationVersion = "2.19.0";
+    base.calculationVersion = "2.19.0"; removeNewExpensesForLegacy(base);
 
     const oneYenSales = structuredClone(base);
     const salesDay = oneYenSales.castSalesReports[0].days[0];
@@ -1385,7 +1389,7 @@ describe("月次会計ドメイン", () => {
 
     const legacy = structuredClone(oneYenBack);
     legacy.schemaVersion = 1;
-    legacy.calculationVersion = "2.12.0";
+    legacy.calculationVersion = "2.12.0"; removeNewExpensesForLegacy(legacy);
     expect(normalizeMonthlyAccountingSnapshot(legacy, month, 1)).toBeDefined();
   });
 
@@ -1397,12 +1401,13 @@ describe("月次会計ドメイン", () => {
       "accounting-user", "2026-09-30T23:59:59.000Z");
     snapshot.schemaVersion = 2;
 
+    removeNewExpensesForLegacy(snapshot);
     expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "2.12.9" }, month, 1)).toBeUndefined();
     // Ver2.13.0で確定済みのschema 2は、過去金額を保持して互換読込する。
     expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "2.13.0" }, month, 1)).toBeDefined();
     expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "2.13.1" }, month, 1)).toBeDefined();
     expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "2.14.0" }, month, 1)).toBeDefined();
-    expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "3.0.0" }, month, 1)).toBeDefined();
+    expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "3.0.0", expenses: { ...snapshot.expenses, accountingExpenseInputs: [], accountingExpenseTotal: 0, consumptionTax: 0 } }, month, 1)).toBeDefined();
   });
 
   it("種類別ボトルバックを確定保存し、旧確定データと金額不正を区別する", () => {
