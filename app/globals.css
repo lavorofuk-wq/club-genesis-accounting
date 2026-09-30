@@ -179,6 +179,11 @@ tbody tr:hover { background: #f8f9f9; }
 .text-danger { color: var(--red); font-weight: 700; }
 .text-good { color: var(--green); font-weight: 700; }
 
+.cast-pay-ratio { display: inline-block; border: 1px solid; border-radius: 2px; padding: 4px 8px; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.cast-pay-ratio--blue { color: var(--blue); background: var(--blue-soft); border-color: #a9c4d1; }
+.cast-pay-ratio--yellow { color: #715600; background: #ffedb0; border-color: #d7b947; }
+.cast-pay-ratio--red { color: var(--red); background: var(--red-soft); border-color: #ddb0b0; }
+
 .dashboard-metric { border-top: 3px solid #7d959f; }
 .dashboard-metric span, .metric-card small { display: block; color: var(--muted); font-size: 11px; }
 .dashboard-metric strong, .metric-card strong { display: block; margin-top: 6px; color: var(--navy); font-size: 22px; }
