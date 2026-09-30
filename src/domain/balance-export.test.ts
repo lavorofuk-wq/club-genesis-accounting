@@ -1,3 +1,4 @@
+import { removeNewExpensesForLegacy } from "./legacy-expense-fixture.test-helper";
 import { describe, expect, it } from "vitest";
 import { balanceDailyCounts, buildBalanceExportReport, type BalanceExportInput } from "./balance-export";
 import type { DailyCast, DailyClosing, MonthlyAdjustments, PosCastWork, PosItem } from "./gms";
@@ -164,8 +165,9 @@ describe("収支帳票の月次突合", () => {
     expect(legacy.results.warnings.some((warning) => warning.includes("確認記録がありません"))).toBe(true);
     legacy.results.warnings = [];
     legacy.snapshot = buildMonthlySnapshot(legacy.month, 1, "b".repeat(64), legacy.adjustments, structuredClone(legacy.results), legacy.closings, "accounting", "2026-09-30T12:00:00.000Z");
-    legacy.snapshot.calculationVersion = "2.20.0";
-    expect(report.days).toEqual(buildBalanceExportReport(legacy).days);
+    legacy.snapshot.calculationVersion = "2.20.0"; removeNewExpensesForLegacy(legacy.snapshot); removeNewExpensesForLegacy(legacy.results);
+    const legacyDays = buildBalanceExportReport(legacy).days;
+    expect(report.days.map((day, index) => ({ ...day, expenses: day.expenses - (index === report.days.length - 1 ? data.results.expenses.consumptionTax! : 0) }))).toEqual(legacyDays);
     expect(report.castDailyAndAdvance).toBe(5000);
     expect(report.employeeDaily).toBe(6000);
     expect(data).toEqual(before);
@@ -198,7 +200,7 @@ describe("収支帳票の月次突合", () => {
     data.closings.forEach((row) => { delete row.cash.funding; });
     delete data.results.cashFunding;
     data.snapshot = buildMonthlySnapshot(data.month, 1, "b".repeat(64), data.adjustments, structuredClone(data.results), data.closings, "accounting", "2026-09-30T12:00:00.000Z");
-    data.snapshot.calculationVersion = "2.20.0";
+    data.snapshot.calculationVersion = "2.20.0"; removeNewExpensesForLegacy(data.snapshot); removeNewExpensesForLegacy(data.results);
     const report = buildBalanceExportReport(data);
     expect(Object.hasOwn(report, "cashFunding")).toBe(false);
     expect(Object.hasOwn(data.snapshot, "cashFunding")).toBe(false);
@@ -210,11 +212,11 @@ describe("収支帳票の月次突合", () => {
     data.results.cashFunding = { managedDays: 0, openingPersonalDebt: 0, closingPersonalDebt: 0,
       companyReplenishment: 0, personalReplenishment: 0, companyTransfer: 0, personalRepayment: 0, netCashMovement: 0 };
     data.snapshot = buildMonthlySnapshot(data.month, 1, "b".repeat(64), data.adjustments, structuredClone(data.results), data.closings, "accounting", "2026-09-30T12:00:00.000Z");
-    data.snapshot.calculationVersion = version;
+    data.snapshot.calculationVersion = version; removeNewExpensesForLegacy(data.snapshot); removeNewExpensesForLegacy(data.results);
     const before = structuredClone(data);
     expect(buildBalanceExportReport(data).cashFunding).toEqual(data.snapshot.cashFunding);
     expect(data).toEqual(before);
-    data.snapshot.calculationVersion = "2.22.0";
+    data.snapshot.calculationVersion = "2.22.0"; removeNewExpensesForLegacy(data.snapshot); removeNewExpensesForLegacy(data.results);
     expect(() => buildBalanceExportReport(data)).toThrow(/確認記録がありません/);
   });
 
@@ -263,7 +265,7 @@ describe("収支帳票の月次突合", () => {
     const report = buildBalanceExportReport(data);
     expect(report.days.map((day) => day.businessDate)).toEqual(["2026-09-02", "2026-09-04"]);
     expect(report.days.map((day) => day.introducerPayment)).toEqual([0, 4300]);
-    expect(report.days.map((day) => day.expenses)).toEqual([2034, 65934]);
+    expect(report.days.map((day) => day.expenses)).toEqual([2034, 74934]);
     expect(report.days.map((day) => day.employeeGross)).toEqual([20000, 22000]);
     expect(report.days.map((day) => day.dispatchCastPayment)).toEqual([6000, 6000]);
     expect(report.days.map((day) => day.dispatchCastCount)).toEqual([3, 3]);
@@ -292,12 +294,12 @@ describe("収支帳票の月次突合", () => {
     if (closed) {
       data.snapshot = buildMonthlySnapshot(data.month, 1, "b".repeat(64), data.adjustments,
         structuredClone(data.results), data.closings, "user", "2026-09-30T12:00:00.000Z");
-      data.snapshot.calculationVersion = "2.36.0";
+      data.snapshot.calculationVersion = "2.36.0"; removeNewExpensesForLegacy(data.snapshot); removeNewExpensesForLegacy(data.results);
     }
     const before = structuredClone(data);
     const report = buildBalanceExportReport(data);
     expect(report.cardFee).toBe(data.results.expenses.cardFee);
-    expect(report.days.map((day) => day.expenses)).toEqual([2034, 65934]);
+    expect(report.days.map((day) => day.expenses)).toEqual([2034, closed ? 65934 : 74934]);
     const costs = report.days.reduce((sum, day) => sum + day.castHourly + day.castSalesReward
       + day.dispatchCastPayment + day.employeeGross + day.introducerPayment + day.expenses, 0);
     expect(costs).toBe(before.results.balance.totalCosts);

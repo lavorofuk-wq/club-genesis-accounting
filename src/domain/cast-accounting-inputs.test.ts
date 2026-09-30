@@ -1,3 +1,4 @@
+import { removeNewExpensesForLegacy } from "./legacy-expense-fixture.test-helper";
 import { describe, expect, it } from "vitest";
 import { castAccountingAttendanceDays, castAccountingAttendanceSources, castAccountingInputAmount,
   normalizeCastAccountingInputs, resolveCastAccountingInputs } from "./cast-accounting-inputs";
@@ -182,7 +183,7 @@ describe("追加売上・手当・送迎の月次反映", () => {
   it("追加項目のない旧確定月は金額も保存形式も変更しない", () => {
     const data = workspace(); const settings = adjustments();
     const snapshot = buildMonthlySnapshot(month, 1, "a".repeat(64), settings, calculateMonthlyAccounting(data, month, settings), data.closings, "op", "2026-10-01T00:00:00Z");
-    snapshot.calculationVersion = "2.36.0"; const before = structuredClone(snapshot);
+    snapshot.calculationVersion = "2.36.0"; removeNewExpensesForLegacy(snapshot); const before = structuredClone(snapshot);
     const restored = normalizeMonthlyAccountingSnapshot(snapshot, month, 1)!;
     expect(restored.castRewards).toEqual(before.castRewards); expect(restored.castSalesReports).toEqual(before.castSalesReports);
     expect(restored.castRewards[0]).not.toHaveProperty("additionalSales");
@@ -190,7 +191,7 @@ describe("追加売上・手当・送迎の月次反映", () => {
   it("旧計算版へ追加入力を後付けした不整合snapshotを拒否する", () => {
     const data = workspace(); const settings = adjustments(allInputs());
     const snapshot = buildMonthlySnapshot(month, 1, "a".repeat(64), settings, calculateMonthlyAccounting(data, month, settings), data.closings, "op", "2026-10-01T00:00:00Z");
-    snapshot.calculationVersion = "2.36.0";
+    snapshot.calculationVersion = "2.36.0"; removeNewExpensesForLegacy(snapshot);
     expect(normalizeMonthlyAccountingSnapshot(snapshot, month, 1)).toBeUndefined();
   });
   it("追加金額・指定日・最終出勤の変更を月次確定の競合ハッシュで検知する", async () => {

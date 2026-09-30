@@ -188,12 +188,16 @@ export function buildBalanceExportReport(input: BalanceExportInput): BalanceExpo
   const approved = input.closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(`${month}-`))
     .sort((a, b) => a.businessDate.localeCompare(b.businessDate));
   const payroll = new Map(allocateBalancePayroll(input).byDate.map((day) => [day.businessDate, day]));
-  const monthlyExpenses = results.expenses.fixed + results.expenses.liquorDelivery + results.expenses.cardFee;
+  const accountingInputs = results.expenses.accountingExpenseInputs ?? [];
+  const datedAccountingExpenses = sum(accountingInputs.filter((row) => row.businessDate !== undefined), (row) => row.amount);
+  const monthlyExpenses = results.expenses.fixed + results.expenses.liquorDelivery + results.expenses.cardFee
+    + sum(accountingInputs.filter((row) => row.businessDate === undefined), (row) => row.amount)
+    + (results.expenses.consumptionTax ?? 0);
   // 月額費用は営業日順で最後の承認済み日へまとめる。承認操作の順番や暦の月末ではない。
   const monthlyChargeDate = approved.at(-1)?.businessDate;
   if (monthlyExpenses !== 0 || results.balance.introducer !== 0) {
     requireValue(monthlyChargeDate,
-      "対象月の承認済み営業日がないため、月額の紹介料・固定費・納品酒代・カード手数料を日別に計上できません。");
+      "対象月の承認済み営業日がないため、月額の経費・紹介料・預かり消費税を日別に計上できません。");
   }
   const days = approved.map((closing): BalanceExportDay => {
     const dailyPayroll = payroll.get(closing.businessDate);
@@ -210,7 +214,9 @@ export function buildBalanceExportReport(input: BalanceExportInput): BalanceExpo
       dispatchCastPayment: closing.dispatchCastPayment,
       employeeGross: dailyPayroll.employeeGross + closing.dispatchStaffPayment,
       introducerPayment: monthlyDate ? results.balance.introducer : 0,
-      expenses: sum(closing.expenses, (row) => row.amount) + closing.dispatchFee + (monthlyDate ? monthlyExpenses : 0),
+      expenses: sum(closing.expenses, (row) => row.amount) + closing.dispatchFee
+        + sum(accountingInputs.filter((row) => row.businessDate === closing.businessDate), (row) => row.amount)
+        + (monthlyDate ? monthlyExpenses : 0),
     };
   });
   same(sum(days, (row) => row.castHourly + row.castSalesReward), results.balance.cast, "日別キャスト報酬の合計");
@@ -239,7 +245,7 @@ export function buildBalanceExportReport(input: BalanceExportInput): BalanceExpo
   const expandedCash = results.sales.cash - castNet - castWithholding - results.balance.introducer
     - employeeNet - castDailyAndAdvance - employeeDaily - results.expenses.dispatchCast
     - results.expenses.dispatchStaff - results.expenses.dispatchFee - results.expenses.dailyExpenseTotal
-    - monthlyExpenses + results.expenses.cardFee + (cashFunding?.netCashMovement || 0);
+    - monthlyExpenses - datedAccountingExpenses + results.expenses.cardFee + (cashFunding?.netCashMovement || 0);
   same(expandedCash, results.sales.cash - totalCosts + castTransport + results.expenses.cardFee
     + (cashFunding?.netCashMovement || 0), "現状現金残高の控除内訳");
   return {

@@ -16,6 +16,7 @@ import {
   japanMonthFromTimestamp,
 } from "./gms";
 import type {
+  AccountingExpenseInput,
   CastRecord,
   CastReward,
   CastSalesReport,
@@ -29,12 +30,13 @@ import type {
   StaffRecord,
   WorkspaceData,
 } from "./gms";
+import { consumptionTaxForSales, validateAccountingExpenseInputs } from "./accounting-expenses";
 import { cashLedgerIssues, summarizeCashFunding, type CashFundingSummary } from "./cash-funding";
 import { STAFF_MONTHLY_RATES_START_MONTH, staffMonthlyRateForMonth } from "./staff-rates";
 import { sha256Hex } from "../lib/crypto-compat";
 import { resolveCastAccountingInputs, normalizeCastAccountingInputs, castAccountingInputTotals } from "./cast-accounting-inputs";
 
-export const MONTHLY_CALCULATION_VERSION = "2.39.0";
+export const MONTHLY_CALCULATION_VERSION = "2.43.0";
 export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 3 as const;
 
 export type IntroducerEntryEvent = {
@@ -100,6 +102,11 @@ export type StaffPayrollRow = {
 export type MonthlyExpenseSummary = {
   byCategory: Record<string, number>;
   dailyExpenseTotal: number;
+  /** 2.43以降の経理追加入力。店舗経費byCategoryとは分離する。 */
+  accountingExpenseInputs?: AccountingExpenseInput[];
+  accountingExpenseTotal?: number;
+  /** 2.43以降の月額合計売上3%（1円未満切捨て）。 */
+  consumptionTax?: number;
   dispatchCast: number;
   dispatchStaff: number;
   dispatchFee: number;
@@ -226,6 +233,12 @@ const requiresCastDailyPaymentsSnapshot = (value: string) => {
   if (!match) return false;
   const [major, minor] = match.slice(1).map(Number);
   return major > 2 || (major === 2 && minor >= 39);
+};
+export const requiresAccountingExpensesSnapshot = (value: string) => {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(value);
+  if (!match) return false;
+  const [major, minor] = match.slice(1).map(Number);
+  return major > 2 || (major === 2 && minor >= 43);
 };
 const snapshotMillisecondsInstant = (value: unknown) => {
   if (!snapshotInteger(value)) return undefined;
@@ -481,6 +494,22 @@ export function normalizeMonthlyAccountingSnapshot(
     row.sales.cash, row.sales.card, row.sales.total,
     row.balance.cast, row.balance.introducer, row.balance.staff, row.balance.driver,
     row.balance.expenses, row.balance.totalCosts, row.balance.profit].every(snapshotNumber)) return undefined;
+  const hasAccountingExpenses = requiresAccountingExpensesSnapshot(row.calculationVersion)
+    || row.expenses.accountingExpenseInputs !== undefined || row.expenses.accountingExpenseTotal !== undefined || row.expenses.consumptionTax !== undefined;
+  if (hasAccountingExpenses && !requiresAccountingExpensesSnapshot(row.calculationVersion)) return undefined;
+  let accountingExpenseInputs: AccountingExpenseInput[] | undefined;
+  if (hasAccountingExpenses) {
+    if (!snapshotInteger(row.expenses.accountingExpenseTotal) || !snapshotInteger(row.expenses.consumptionTax)) return undefined;
+    // Firebaseは空配列を保存しないため、合計0円の空明細だけは欠損を復元できる。
+    if (row.expenses.accountingExpenseInputs === undefined && row.expenses.accountingExpenseTotal !== 0) return undefined;
+    try {
+      if (row.expenses.accountingExpenseInputs !== undefined && !Array.isArray(row.expenses.accountingExpenseInputs)
+        && !snapshotObject(row.expenses.accountingExpenseInputs)) return undefined;
+      accountingExpenseInputs = validateAccountingExpenseInputs(snapshotList(row.expenses.accountingExpenseInputs), pathMonth);
+      if (row.expenses.accountingExpenseTotal !== accountingExpenseInputs.reduce((sum, input) => sum + input.amount, 0)
+        || row.expenses.consumptionTax !== consumptionTaxForSales(row.sales.total)) return undefined;
+    } catch { return undefined; }
+  }
   if ((row.schemaVersion === 3 && requiresCashFundingSnapshot(row.calculationVersion) || row.cashFunding !== undefined)
     && !validSnapshotCashFunding(row.cashFunding, row.approvedDays)) return undefined;
   if (requiresCompleteCashFundingSnapshot(row.calculationVersion) && row.cashFunding?.managedDays !== row.approvedDays) return undefined;
@@ -568,6 +597,7 @@ export function normalizeMonthlyAccountingSnapshot(
     || row.sales.total !== row.sales.cash + row.sales.card
     || row.expenses.dispatchTotal !== row.expenses.dispatchCast + row.expenses.dispatchStaff + row.expenses.dispatchFee
     || row.expenses.total !== row.expenses.dailyExpenseTotal + row.expenses.dispatchTotal + row.expenses.liquorDelivery + row.expenses.fixed + row.expenses.cardFee
+      + (row.expenses.accountingExpenseTotal ?? 0) + (row.expenses.consumptionTax ?? 0)
     || row.balance.expenses !== row.expenses.total
     || row.balance.totalCosts !== row.balance.cast + row.balance.introducer + row.balance.staff + row.balance.driver + row.balance.expenses
     || row.balance.profit !== row.sales.total - row.balance.totalCosts) return undefined;
@@ -582,7 +612,8 @@ export function normalizeMonthlyAccountingSnapshot(
     driverPayroll: driverPayroll as DriverPayrollRow[],
     warnings: warnings as string[],
     approvedClosings: approvedClosings as MonthlyAccountingSnapshot["approvedClosings"],
-    expenses: { ...row.expenses, byCategory: snapshotObject(row.expenses.byCategory) ? row.expenses.byCategory : {} },
+    expenses: { ...row.expenses, byCategory: snapshotObject(row.expenses.byCategory) ? row.expenses.byCategory : {},
+      ...(accountingExpenseInputs === undefined ? {} : { accountingExpenseInputs }) },
   };
 }
 
@@ -1288,6 +1319,26 @@ function castAccountingAmountIssues(rewards: CastReward[]): string[] {
     .map((reward) => `${reward.name}のキャストデータ入力を反映した計算額が処理可能な範囲を超えています。入力金額を確認してください。`);
 }
 
+function resolveAccountingExpenses(adjustments: MonthlyAdjustments, month: string, closings: DailyClosing[]) {
+  try {
+    if (adjustments.month !== month) throw new Error("経費入力と計算対象月が一致しません。");
+    const inputs = validateAccountingExpenseInputs(adjustments.expenseInputs, month, closings);
+    const total = inputs.reduce((sum, row) => sum + row.amount, 0);
+    const approved = closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(month));
+    const tax = consumptionTaxForSales(approved.reduce((sum, row) => sum + row.sales.totalSales, 0));
+    const fullTotal = total + tax + approved.reduce((sum, row) => sum
+      + (row.expenses ?? []).reduce((expenseSum, expense) => expenseSum + expense.amount, 0)
+      + row.dispatchCastPayment + row.dispatchStaffPayment + row.dispatchFee, 0)
+      + (adjustments.liquorDeliveryAmount ?? approved.reduce((sum, row) => sum + row.liquorDeliveryAmount, 0))
+      + adjustments.fixedExpenses.reduce((sum, row) => sum + row.amount, 0) + adjustments.cardFee;
+    const issues = Number.isFinite(fullTotal) && fullTotal >= 0 && fullTotal <= Number.MAX_SAFE_INTEGER
+      ? [] : ["経費の合計金額が処理可能な範囲を超えています。"];
+    return { inputs, total, issues };
+  } catch (error) {
+    return { inputs: [] as AccountingExpenseInput[], total: 0, issues: [error instanceof Error ? error.message : "経費入力を確認できません。"] };
+  }
+}
+
 export function calculateMonthlyAccounting(
   data: WorkspaceData & { archivedCasts?: CastRecord[]; archivedStaff?: StaffRecord[]; introducerMonthEvents?: IntroducerMonthEvent[]; introducerDeletionCommits?: IntroducerDeletionCommit[] },
   month: string,
@@ -1315,9 +1366,22 @@ export function calculateMonthlyAccounting(
   const liquorDelivery = adjustments.liquorDeliveryAmount
     ?? approved.reduce((sum, row) => sum + row.liquorDeliveryAmount, 0);
   const fixed = adjustments.fixedExpenses.reduce((sum, row) => sum + row.amount, 0);
+  const accountingExpenses = resolveAccountingExpenses(adjustments, month, calculationData.closings);
+  const sales: MonthlySalesSummary = {
+    cash: approved.reduce((sum, row) => sum + row.sales.cashSales, 0),
+    card: approved.reduce((sum, row) => sum + row.sales.cardSales, 0),
+    total: approved.reduce((sum, row) => sum + row.sales.totalSales, 0),
+  };
+  let consumptionTax = 0;
+  const accountingExpenseIssues = [...accountingExpenses.issues];
+  try { consumptionTax = consumptionTaxForSales(sales.total); }
+  catch (error) { accountingExpenseIssues.push(error instanceof Error ? error.message : "預かり消費税を計算できません。"); }
   const expenses: MonthlyExpenseSummary = {
     byCategory,
     dailyExpenseTotal,
+    accountingExpenseInputs: accountingExpenses.inputs,
+    accountingExpenseTotal: accountingExpenses.total,
+    consumptionTax,
     dispatchCast,
     dispatchStaff,
     dispatchFee,
@@ -1325,13 +1389,11 @@ export function calculateMonthlyAccounting(
     liquorDelivery,
     fixed,
     cardFee: adjustments.cardFee,
-    total: dailyExpenseTotal + dispatchTotal + liquorDelivery + fixed + adjustments.cardFee,
+    total: dailyExpenseTotal + dispatchTotal + liquorDelivery + fixed + adjustments.cardFee + accountingExpenses.total + consumptionTax,
   };
-  const sales: MonthlySalesSummary = {
-    cash: approved.reduce((sum, row) => sum + row.sales.cashSales, 0),
-    card: approved.reduce((sum, row) => sum + row.sales.cardSales, 0),
-    total: approved.reduce((sum, row) => sum + row.sales.totalSales, 0),
-  };
+  if (!Number.isFinite(expenses.total) || Math.abs(expenses.total) > Number.MAX_SAFE_INTEGER) {
+    accountingExpenseIssues.push("経費の合計金額が処理可能な範囲を超えています。");
+  }
   const balanceWithoutProfit = {
     cast: castRewards.reduce((sum, row) => sum + row.grossPay, 0),
     introducer: introducerPayments.reduce((sum, row) => sum + row.total, 0),
@@ -1356,6 +1418,7 @@ export function calculateMonthlyAccounting(
     balance: { ...balanceWithoutProfit, totalCosts, profit: sales.total - totalCosts },
     cashFunding,
     warnings: [...new Set([
+      ...accountingExpenseIssues,
       ...resolveCastAccountingInputs(adjustments, calculationData.closings, calculationData.casts, month).issues,
       ...castAccountingAmountIssues(castRewards),
       ...monthlyAccountingWarnings(approved, calculationData.casts, month, calculationData.staff),
@@ -1452,6 +1515,7 @@ export function canFinalizeMonthlyAccounting(
     .filter(([, count]) => count > 1)
     .map(([businessDate]) => `${businessDate}の承認済み日次データが複数あります。重複データを差し戻してから確定してください。`);
   const integrityIssues = [
+    ...resolveAccountingExpenses(adjustments, month, calculationData.closings).issues,
     ...resolveCastAccountingInputs(adjustments, calculationData.closings, calculationData.casts, month).issues,
     ...castAccountingAmountIssues(castRewards),
     ...approved.flatMap((row) => row.integrityIssues || []),

@@ -1,3 +1,4 @@
+import { removeNewExpensesForLegacy } from "./legacy-expense-fixture.test-helper";
 import { describe, expect, it } from "vitest";
 import { legacyBottleSourceKey, type CastReward, type CastSalesDay, type CastSalesReport, type DailyCast,
   type DailyClosing, type IntroducerFeeType, type MonthlyAdjustments, type WorkspaceData } from "./gms";
@@ -302,7 +303,7 @@ describe("実際の月次計算・確定snapshotから紹介者明細への結�
     ]));
     const snapshot = buildMonthlySnapshot(month, 1, "c".repeat(64), adjustment, results, data.closings, "test-user", `${month}-30T12:00:00Z`);
     snapshot.schemaVersion = 1;
-    snapshot.calculationVersion = "2.11.0";
+    snapshot.calculationVersion = "2.11.0"; removeNewExpensesForLegacy(snapshot);
     for (const reward of snapshot.castRewards) { delete reward.hourlyByDay; delete reward.appliedHourlyRates; }
     // 出勤済み旧snapshotは保存rewardの紹介者IDから同一人物を復元する。
     const workingPayment = snapshot.introducerPayments.find((payment) => payment.castId === "active-generated")!;

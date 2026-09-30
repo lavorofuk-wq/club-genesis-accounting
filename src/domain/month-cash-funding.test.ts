@@ -1,3 +1,4 @@
+import { removeNewExpensesForLegacy } from "./legacy-expense-fixture.test-helper";
 import { describe, expect, it } from "vitest";
 import { calculateCash, type DailyClosing, type MonthlyAdjustments, type WorkspaceData } from "./gms";
 import { calculateCashFunding, cashFundingContext, type CashFundingInputs } from "./cash-funding";
@@ -49,7 +50,8 @@ describe("経理月次の現金補充・返済", () => {
     expect(result.sales).toEqual(legacy.sales);
     expect(result.expenses).toEqual(legacy.expenses);
     expect(result.balance).toEqual(legacy.balance);
-    expect(result.balance.profit).toBe(0);
+    expect(result.expenses.consumptionTax).toBe(300);
+    expect(result.balance.profit).toBe(-300);
     const next = calculateMonthlyAccounting(source, "2026-10", { ...adjustments, month: "2026-10" });
     expect(next.cashFunding).toMatchObject({ openingPersonalDebt: 15000, personalReplenishment: 10000, personalRepayment: 6000, closingPersonalDebt: 19000 });
     expect(source).toEqual(before);
@@ -72,7 +74,8 @@ describe("経理月次の現金補充・返済", () => {
     const result = calculateMonthlyAccounting(source, month, adjustments);
     expect(result.cashFunding).toBeUndefined();
     expect(result.warnings.join("\n")).toContain("現金繰越");
-    expect(result.balance.profit).toBe(0);
+    expect(result.expenses.consumptionTax).toBe(300);
+    expect(result.balance.profit).toBe(-300);
     const check = canFinalizeMonthlyAccounting(source, month, adjustments, true);
     expect(check.allowed).toBe(false);
     expect(check.integrityIssues.join("\n")).toContain("現金繰越");
@@ -115,7 +118,7 @@ describe("経理月次の現金補充・返済", () => {
     expect(result.cashFunding).toEqual({ managedDays: 0, openingPersonalDebt: 19000, companyReplenishment: 0, personalReplenishment: 0,
       companyTransfer: 0, personalRepayment: 0, closingPersonalDebt: 19000, netCashMovement: 0 });
     const snapshot = buildMonthlySnapshot(targetMonth, 1, "a".repeat(64), input, result, source.closings, "accounting", "2026-11-30T12:00:00.000Z");
-    snapshot.calculationVersion = "2.21.0";
+    snapshot.calculationVersion = "2.21.0"; removeNewExpensesForLegacy(snapshot);
     expect(normalizeMonthlyAccountingSnapshot(snapshot, targetMonth, 1)?.cashFunding).toEqual(result.cashFunding);
   });
 
@@ -154,10 +157,10 @@ describe("経理月次の現金補充・返済", () => {
     expect(normalizeMonthlyAccountingSnapshot(snapshot, month, 1)?.cashFunding).toEqual(result.cashFunding);
     const legacy = structuredClone(snapshot);
     const missing = structuredClone(snapshot);
-    missing.calculationVersion = "2.21.0";
+    missing.calculationVersion = "2.21.0"; removeNewExpensesForLegacy(missing);
     delete missing.cashFunding;
     expect(normalizeMonthlyAccountingSnapshot(missing, month, 1)).toBeUndefined();
-    legacy.calculationVersion = "2.20.0";
+    legacy.calculationVersion = "2.20.0"; removeNewExpensesForLegacy(legacy);
     delete legacy.cashFunding;
     const normalized = normalizeMonthlyAccountingSnapshot(legacy, month, 1)!;
     expect(normalized).toBeDefined();
@@ -170,9 +173,9 @@ describe("経理月次の現金補充・返済", () => {
     const snapshot = buildMonthlySnapshot(month, 1, "a".repeat(64), adjustments, result, source.closings, "accounting", "2026-09-30T12:00:00.000Z");
     snapshot.cashFunding = { managedDays: 0, openingPersonalDebt: 0, closingPersonalDebt: 0,
       companyReplenishment: 0, personalReplenishment: 0, companyTransfer: 0, personalRepayment: 0, netCashMovement: 0 };
-    snapshot.calculationVersion = "2.21.1";
+    snapshot.calculationVersion = "2.21.1"; removeNewExpensesForLegacy(snapshot);
     expect(normalizeMonthlyAccountingSnapshot(snapshot, month, 1)?.cashFunding).toEqual(snapshot.cashFunding);
-    snapshot.calculationVersion = "2.22.0";
+    snapshot.calculationVersion = "2.22.0"; removeNewExpensesForLegacy(snapshot);
     expect(normalizeMonthlyAccountingSnapshot(snapshot, month, 1)).toBeUndefined();
   });
 

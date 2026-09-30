@@ -39,6 +39,7 @@
     "node_modules",
     "club-genesis",
     "js",
-    "tests"
+    "tests",
+    "tmp"
   ]
 }

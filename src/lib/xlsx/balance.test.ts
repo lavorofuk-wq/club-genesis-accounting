@@ -300,6 +300,28 @@ describe("見本形式の月次収支XLSX", () => {
     }));
   });
 
+  it("検証済み報告の預かり消費税・経費入力を総支出と収支へ一度だけ反映する", async () => {
+    const data = report();
+    // domainで計上済みの日付指定100円、未指定200円、月次預かり消費税5400円。
+    data.days[0].expenses += 100;
+    data.days[1].expenses += 200 + 5400;
+    mockedBuild.mockReturnValue(data);
+    const restored = new ExcelJS.Workbook();
+    await restored.xlsx.load(await createMonthlyBalanceWorkbook(input, "経費入力・預かり消費税あり").xlsx.writeBuffer());
+    const sheet = restored.worksheets[0];
+    expect(value(sheet, "T4")).toBe(2100);
+    expect(value(sheet, "T22")).toBe(16600);
+    expect(sheet.getCell("T35").value).toEqual({ formula: "SUM(T3:T33)", result: 18700 });
+    expect(sheet.getCell("U37").value).toEqual({ formula: "SUM(M35:N35,P35,R35:T35)", result: 91200 });
+    expect(value(sheet, "V35")).toBe(88800);
+    expect(value(sheet, "V39")).toBe(88800);
+    expect(sheet.getCell("M38").value).toEqual({ formula: "SUM(D35,J42,O42)-U37+N36", result: 29300 });
+    expect(value(sheet, "U35")).toBeCloseTo(18700 / 180000);
+    expect(value(sheet, "S35")).toBe(6500);
+    expect(value(sheet, "F37")).toBe(55500);
+    expect(value(sheet, "R35")).toBe(10500);
+  });
+
   it("ドメイン検証で不整合とされた月次からXLSXを生成しない", () => {
     mockedBuild.mockImplementation(() => { throw new Error("月次金額が一致しません。"); });
     expect(() => createMonthlyBalanceWorkbook(input, "未確定")).toThrow("月次金額が一致しません。");
