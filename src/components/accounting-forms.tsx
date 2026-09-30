@@ -18,6 +18,7 @@ import { useRecoverableState, useUpdateDraftBusy } from "./update-drafts";
 import { cashDayIssues, cashFundingIssues, cashLedgerIssues, type CashFundingSummary } from "@/domain/cash-funding";
 import { IntroducerPayments } from "./introducer-payments";
 import { StaffPayroll } from "./staff-payroll";
+import { CastPayRatio } from "./cast-pay-ratio";
 import { CastReceiptExport } from "./cast-receipt-export";
 import { IntroducerStatementExport } from "./introducer-statement-export";
 import { CastAccountingInputs } from "./cast-accounting-inputs";
@@ -494,7 +495,7 @@ export function CastRewards({ rows, reports, disabled, onWithholding }: CastRewa
 }
 
 function CastRewardTable({ rows, disabled, onWithholding, empty }: CastRewardsProps & { empty: string }) {
-  return <Table empty={empty} headers={["キャスト", "勤務", "基本報酬", "指名・同伴内訳", "ボトル", "ドリンク", "酒代原価", "売上報酬", "採用", "美容室", "追加手当", "総支給", "日払・立替・送迎内訳", "源泉所得税", "差引支給"]}>{rows.map((row) => <tr key={row.id}>
+  return <Table empty={empty} headers={["キャスト", "勤務", "基本報酬", "指名・同伴内訳", "ボトル", "ドリンク", "酒代原価", "売上報酬", "採用", "給率", "美容室", "追加手当", "総支給", "日払・立替・送迎内訳", "源泉所得税", "差引支給"]}>{rows.map((row) => <tr key={row.id}>
     <td><strong>{row.name}</strong>{row.trialOnly && <><br /><StatusPill>体入時給のみ</StatusPill></>}</td>
     <td>{row.days}日 / {row.hours}時間</td>
     <td>{yen.format(row.hourlyPay)}</td>
@@ -504,6 +505,7 @@ function CastRewardTable({ rows, disabled, onWithholding, empty }: CastRewardsPr
     <td>{yen.format(row.liquorCost)}</td>
     <td>{row.rewardRate ? `${Math.round(row.rewardRate * 100)}% / ${yen.format(row.salesReward)}` : "対象外"}{Boolean(row.additionalSales) && <><br /><small>追加売上 {yen.format(row.additionalSales || 0)}</small></>}</td>
     <td><StatusPill tone="good">{row.trialOnly ? "体入時給" : row.adoptedSystem === "salesReward" ? "売上報酬" : "時給＋バック"} {yen.format(row.adoptedReward)}</StatusPill></td>
+    <td><CastPayRatio row={row} /></td>
     <td>{yen.format(row.beautyAllowance)}</td>
     <td>{yen.format(row.additionalAllowance || 0)}</td>
     <td><strong>{yen.format(row.grossPay)}</strong></td>
