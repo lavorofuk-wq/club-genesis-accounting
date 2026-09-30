@@ -30,13 +30,13 @@ import type {
   StaffRecord,
   WorkspaceData,
 } from "./gms";
-import { consumptionTaxForSales, validateAccountingExpenseInputs } from "./accounting-expenses";
+import { consumptionTaxForSales, validateAccountingExpenseInputs, validateConsumptionTaxRate } from "./accounting-expenses";
 import { cashLedgerIssues, summarizeCashFunding, type CashFundingSummary } from "./cash-funding";
 import { STAFF_MONTHLY_RATES_START_MONTH, staffMonthlyRateForMonth } from "./staff-rates";
 import { sha256Hex } from "../lib/crypto-compat";
 import { resolveCastAccountingInputs, normalizeCastAccountingInputs, castAccountingInputTotals } from "./cast-accounting-inputs";
 
-export const MONTHLY_CALCULATION_VERSION = "2.43.0";
+export const MONTHLY_CALCULATION_VERSION = "2.44.0";
 export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 3 as const;
 
 export type IntroducerEntryEvent = {
@@ -105,8 +105,10 @@ export type MonthlyExpenseSummary = {
   /** 2.43以降の経理追加入力。店舗経費byCategoryとは分離する。 */
   accountingExpenseInputs?: AccountingExpenseInput[];
   accountingExpenseTotal?: number;
-  /** 2.43以降の月額合計売上3%（1円未満切捨て）。 */
+  /** 月額合計売上×税率（1円未満切捨て）。2.43は固定3%。 */
   consumptionTax?: number;
+  /** 2.44以降は確定時の月別税率を保存。旧確定へ補完しない。 */
+  consumptionTaxRate?: number;
   dispatchCast: number;
   dispatchStaff: number;
   dispatchFee: number;
@@ -239,6 +241,12 @@ export const requiresAccountingExpensesSnapshot = (value: string) => {
   if (!match) return false;
   const [major, minor] = match.slice(1).map(Number);
   return major > 2 || (major === 2 && minor >= 43);
+};
+export const requiresConsumptionTaxRateSnapshot = (value: string) => {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(value);
+  if (!match) return false;
+  const [major, minor] = match.slice(1).map(Number);
+  return major > 2 || (major === 2 && minor >= 44);
 };
 const snapshotMillisecondsInstant = (value: unknown) => {
   if (!snapshotInteger(value)) return undefined;
@@ -494,6 +502,10 @@ export function normalizeMonthlyAccountingSnapshot(
     row.sales.cash, row.sales.card, row.sales.total,
     row.balance.cast, row.balance.introducer, row.balance.staff, row.balance.driver,
     row.balance.expenses, row.balance.totalCosts, row.balance.profit].every(snapshotNumber)) return undefined;
+  const requiresTaxRate = requiresConsumptionTaxRateSnapshot(row.calculationVersion);
+  if (requiresTaxRate ? row.expenses.consumptionTaxRate === undefined : row.expenses.consumptionTaxRate !== undefined) return undefined;
+  let consumptionTaxRate: number;
+  try { consumptionTaxRate = validateConsumptionTaxRate(row.expenses.consumptionTaxRate); } catch { return undefined; }
   const hasAccountingExpenses = requiresAccountingExpensesSnapshot(row.calculationVersion)
     || row.expenses.accountingExpenseInputs !== undefined || row.expenses.accountingExpenseTotal !== undefined || row.expenses.consumptionTax !== undefined;
   if (hasAccountingExpenses && !requiresAccountingExpensesSnapshot(row.calculationVersion)) return undefined;
@@ -507,7 +519,7 @@ export function normalizeMonthlyAccountingSnapshot(
         && !snapshotObject(row.expenses.accountingExpenseInputs)) return undefined;
       accountingExpenseInputs = validateAccountingExpenseInputs(snapshotList(row.expenses.accountingExpenseInputs), pathMonth);
       if (row.expenses.accountingExpenseTotal !== accountingExpenseInputs.reduce((sum, input) => sum + input.amount, 0)
-        || row.expenses.consumptionTax !== consumptionTaxForSales(row.sales.total)) return undefined;
+        || row.expenses.consumptionTax !== consumptionTaxForSales(row.sales.total, consumptionTaxRate)) return undefined;
     } catch { return undefined; }
   }
   if ((row.schemaVersion === 3 && requiresCashFundingSnapshot(row.calculationVersion) || row.cashFunding !== undefined)
@@ -1325,7 +1337,7 @@ function resolveAccountingExpenses(adjustments: MonthlyAdjustments, month: strin
     const inputs = validateAccountingExpenseInputs(adjustments.expenseInputs, month, closings);
     const total = inputs.reduce((sum, row) => sum + row.amount, 0);
     const approved = closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(month));
-    const tax = consumptionTaxForSales(approved.reduce((sum, row) => sum + row.sales.totalSales, 0));
+    const tax = consumptionTaxForSales(approved.reduce((sum, row) => sum + row.sales.totalSales, 0), validateConsumptionTaxRate(adjustments.consumptionTaxRate));
     const fullTotal = total + tax + approved.reduce((sum, row) => sum
       + (row.expenses ?? []).reduce((expenseSum, expense) => expenseSum + expense.amount, 0)
       + row.dispatchCastPayment + row.dispatchStaffPayment + row.dispatchFee, 0)
@@ -1373,8 +1385,12 @@ export function calculateMonthlyAccounting(
     total: approved.reduce((sum, row) => sum + row.sales.totalSales, 0),
   };
   let consumptionTax = 0;
+  let consumptionTaxRate: number | undefined;
   const accountingExpenseIssues = [...accountingExpenses.issues];
-  try { consumptionTax = consumptionTaxForSales(sales.total); }
+  try {
+    consumptionTaxRate = validateConsumptionTaxRate(adjustments.consumptionTaxRate);
+    consumptionTax = consumptionTaxForSales(sales.total, consumptionTaxRate);
+  }
   catch (error) { accountingExpenseIssues.push(error instanceof Error ? error.message : "預かり消費税を計算できません。"); }
   const expenses: MonthlyExpenseSummary = {
     byCategory,
@@ -1382,6 +1398,7 @@ export function calculateMonthlyAccounting(
     accountingExpenseInputs: accountingExpenses.inputs,
     accountingExpenseTotal: accountingExpenses.total,
     consumptionTax,
+    ...(consumptionTaxRate === undefined ? {} : { consumptionTaxRate }),
     dispatchCast,
     dispatchStaff,
     dispatchFee,
@@ -1467,7 +1484,8 @@ export async function monthlySourceFingerprint(
     casts: [...calculationData.casts].sort((left, right) => left.id.localeCompare(right.id)),
     introducers: [...calculationData.introducers].sort((left, right) => left.id.localeCompare(right.id)),
     staff: [...calculationData.staff].sort((left, right) => left.id.localeCompare(right.id)),
-    adjustments,
+    // 未設定と明示3%は同じ計算入力。UIと保存元の表現差だけで確定を拒否しない。
+    adjustments: { ...adjustments, consumptionTaxRate: validateConsumptionTaxRate(adjustments.consumptionTaxRate) },
     entryEvents: entryEvents.filter((row) => row.month === month)
       .sort((left, right) => left.id.localeCompare(right.id)),
     introducerMonthEvents: monthEvents.filter((row) => row.month === month)

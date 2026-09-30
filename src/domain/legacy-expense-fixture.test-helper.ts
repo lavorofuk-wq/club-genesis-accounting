@@ -6,6 +6,7 @@ export function removeNewExpensesForLegacy<T extends Pick<MonthlyAccountingResul
   delete result.expenses.accountingExpenseInputs;
   delete result.expenses.accountingExpenseTotal;
   delete result.expenses.consumptionTax;
+  delete result.expenses.consumptionTaxRate;
   result.expenses.total -= difference;
   result.balance.expenses -= difference;
   result.balance.totalCosts -= difference;

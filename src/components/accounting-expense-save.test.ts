@@ -1,5 +1,5 @@
 import type { ReactElement, ReactNode } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { normalizeMonthlyAdjustments, type MonthlyAdjustments } from "@/domain/gms";
 import { buildMonthlySnapshot, calculateMonthlyAccounting, type AccountingWorkspaceData } from "@/domain/month-accounting";
 
@@ -30,6 +30,7 @@ vi.mock("@/lib/firebase/repository", async (importOriginal) => ({
 import { saveMonthlyAdjustments } from "@/lib/firebase/repository";
 import { AccountingForms, Expenses, adjustmentSignature } from "./accounting-forms";
 import { AccountingExpenseInputs } from "./accounting-expense-inputs";
+import { Field } from "./ui";
 
 type Element = ReactElement<Record<string, any>>;
 const month = "2026-09";
@@ -101,7 +102,7 @@ function rowSaveButtons(tree: ReactNode): Element[] {
   const inputs = elements(Expenses(section.props as Parameters<typeof Expenses>[0])).find((row) => row.type === AccountingExpenseInputs);
   if (!inputs) throw new Error("経費入力が見つかりません。");
   return elements(AccountingExpenseInputs(inputs.props as Parameters<typeof AccountingExpenseInputs>[0]))
-    .filter((row) => row.type === "button" && row.props.children === "保存");
+    .filter((row) => row.type === "button" && /^追加経費/.test(row.props["aria-label"] || "") && row.props.children === "保存");
 }
 function inputDraft(): MonthlyAdjustments {
   return { ...base, expenseInputs: [
@@ -164,5 +165,165 @@ describe("削除横の保存ボタン", () => {
     expect(toolbarSave?.props.disabled).toBe(false);
     toolbarSave!.props.onClick();
     await vi.waitFor(() => expect(saveMonthlyAdjustments).toHaveBeenCalledExactlyOnceWith(local, { uid: "test" }));
+  });
+});
+function taxControls(tree: ReactNode) {
+  const section = elements(tree).find((row) => row.type === Expenses);
+  if (!section) throw new Error("経費画面が見つかりません。");
+  const inputs = elements(Expenses(section.props as Parameters<typeof Expenses>[0])).find((row) => row.type === AccountingExpenseInputs);
+  if (!inputs) throw new Error("経費入力が見つかりません。");
+  const contents = elements(AccountingExpenseInputs(inputs.props as Parameters<typeof AccountingExpenseInputs>[0]));
+  const field = contents.find((row) => row.type === Field && row.props.label === "預かり消費税率（％）");
+  return { input: field?.props.children as Element | undefined,
+    save: contents.find((row) => row.type === "button" && row.props["aria-label"] === "預かり消費税率を保存"),
+    props: inputs.props as Parameters<typeof AccountingExpenseInputs>[0] };
+}
+afterEach(() => vi.unstubAllGlobals());
+
+describe("選択月の預かり消費税率入力", () => {
+  it.each([0, 0.29, 3.5, 10, 100])("経費0行でも%s%%を横の保存から対象月の入力として保存できる", async (rate) => {
+    const data = fixture(base);
+    const initial = taxControls(render(data));
+    expect(initial.input?.props.value).toBe("3");
+    expect(initial.save?.props.disabled).toBe(true);
+    initial.input!.props.onChange({ target: { value: String(rate) } });
+    const changed = taxControls(render(data));
+    expect(changed.input?.props.value).toBe(String(rate));
+    expect(changed.props.consumptionTaxRate).toBe(rate);
+    expect(changed.save?.props.disabled).toBe(false);
+    expect(dirty).toHaveBeenLastCalledWith(true);
+    changed.save!.props.onClick();
+    await vi.waitFor(() => expect(saveMonthlyAdjustments).toHaveBeenCalledExactlyOnceWith({ ...normalizeMonthlyAdjustments(base), consumptionTaxRate: rate }, { uid: "test" }));
+    const updated = fixture({ ...base, revision: 4, consumptionTaxRate: rate });
+    render(updated);
+    const saved = taxControls(render(updated));
+    expect(saved.save?.props.disabled).toBe(true);
+    expect(dirty).toHaveBeenLastCalledWith(false);
+    expect(hooks.drafts.get("accounting.monthly.adjustments")).toMatchObject({ revision: 4, consumptionTaxRate: rate });
+  });
+
+  it.each(["", ".", "0.", "3.555", "100.01", "-1", "NaN", "Infinity", "abc"])("入力途中・不正値『%s』を文字列のまま保持して全保存を止める", (text) => {
+    const data = fixture(inputDraft());
+    taxControls(render(data)).input!.props.onChange({ target: { value: text } });
+    const tree = render(data);
+    const edited = taxControls(tree);
+    expect(edited.input?.props.value).toBe(text);
+    expect(edited.input?.props["aria-invalid"]).toBe(true);
+    expect(edited.save?.props.disabled).toBe(true);
+    expect(dirty).toHaveBeenLastCalledWith(true);
+    expect(hooks.drafts.get("accounting.monthly.adjustments")).toMatchObject({ consumptionTaxRateInput: text });
+    expect((hooks.drafts.get("accounting.monthly.adjustments") as MonthlyAdjustments).consumptionTaxRate).toBeUndefined();
+    edited.save!.props.onClick();
+    for (const button of rowSaveButtons(tree)) { expect(button.props.disabled).toBe(true); button.props.onClick(); }
+    elements(tree).find((row) => row.type === "button" && row.props.children === "経理入力を保存")!.props.onClick();
+    expect(saveMonthlyAdjustments).not.toHaveBeenCalled();
+  });
+
+  it("小数入力を完成させても表示文字列を保ち、保存時は数値だけを渡す", async () => {
+    const data = fixture(base);
+    taxControls(render(data)).input!.props.onChange({ target: { value: "0." } });
+    const pending = taxControls(render(data));
+    expect(pending.input?.props.value).toBe("0.");
+    pending.input!.props.onChange({ target: { value: "0.29" } });
+    const completed = taxControls(render(data));
+    expect(completed.input?.props["aria-invalid"]).toBe(false);
+    expect(hooks.drafts.get("accounting.monthly.adjustments")).toHaveProperty("consumptionTaxRateInput", "0.29");
+    completed.save!.props.onClick();
+    await vi.waitFor(() => expect(saveMonthlyAdjustments).toHaveBeenCalledExactlyOnceWith({ ...normalizeMonthlyAdjustments(base), consumptionTaxRate: 0.29 }, { uid: "test" }));
+  });
+
+  it.each(["busy", "stale", "closing", "closed"] as const)("%sでは税率保存を停止し確定月の値はsnapshotから表示する", (condition) => {
+    const data = fixture(base); render(data);
+    const local = { ...base, consumptionTaxRate: 10 };
+    hooks.drafts.set("accounting.monthly.adjustments", local);
+    if (condition === "stale") data.adjustments = [{ ...base, revision: 4 }];
+    if (condition === "closed" || condition === "closing") {
+      data.monthStates = [{ month, status: condition, revision: 1, currentSnapshotRevision: 1, updatedAt: "2026-09-30", updatedBy: "test" }];
+      if (condition === "closed") {
+        const saved = { ...base, consumptionTaxRate: 3.5 };
+        data.monthSnapshots = [buildMonthlySnapshot(month, 1, "test", saved, calculateMonthlyAccounting(data, month, saved), [], "test", "2026-09-30T00:00:00.000Z")];
+      }
+    }
+    const controls = taxControls(render(data, condition === "busy"));
+    expect(controls.input?.props.value).toBe(condition === "closed" ? "3.5" : "10");
+    expect(controls.save?.props.disabled).toBe(true);
+    controls.save!.props.onClick();
+    if (condition !== "stale") {
+      controls.input!.props.onChange({ target: { value: "5" } });
+      expect(hooks.drafts.get("accounting.monthly.adjustments")).toBe(local);
+    }
+    expect(saveMonthlyAdjustments).not.toHaveBeenCalled();
+  });
+
+  it("月を変えるとその月の保存税率へ切り替わり、他月の税率を引き継がない", () => {
+    const data = fixture({ ...base, consumptionTaxRate: 10 });
+    data.adjustments.push({ ...base, month: "2026-10", consumptionTaxRate: 0.29 });
+    expect(taxControls(render(data)).input?.props.value).toBe("10");
+    hooks.drafts.set("accounting.monthly.month", "2026-10");
+    render(data);
+    expect(taxControls(render(data)).input?.props.value).toBe("0.29");
+    expect(hooks.drafts.get("accounting.monthly.adjustments")).toMatchObject({ month: "2026-10", consumptionTaxRate: 0.29 });
+    expect(saveMonthlyAdjustments).not.toHaveBeenCalled();
+  });
+
+  it("未保存税率の月移動には破棄確認を行いキャンセルで入力を保持する", () => {
+    vi.stubGlobal("window", { confirm: vi.fn(() => false) });
+    const data = fixture(base);
+    taxControls(render(data)).input!.props.onChange({ target: { value: "0." } });
+    const tree = render(data);
+    const monthInput = elements(tree).find((row) => row.type === "input" && row.props.type === "month");
+    monthInput!.props.onChange({ target: { value: "2026-10" } });
+    expect(window.confirm).toHaveBeenCalledOnce();
+    expect(hooks.drafts.get("accounting.monthly.month")).toBe(month);
+    expect(taxControls(render(data)).input?.props.value).toBe("0.");
+  });
+
+  it("旧2.43の確定税率は3％表示、税がない旧2.42は入力欄も補完しない", () => {
+    const data = fixture({ ...base, consumptionTaxRate: 10 });
+    const snapshot = buildMonthlySnapshot(month, 1, "test", base, calculateMonthlyAccounting(data, month, base), [], "test", "2026-09-30T00:00:00.000Z");
+    snapshot.calculationVersion = "2.43.0";
+    delete snapshot.expenses.consumptionTaxRate;
+    data.monthStates = [{ month, status: "closed", revision: 1, currentSnapshotRevision: 1, updatedAt: "2026-09-30", updatedBy: "test" }];
+    data.monthSnapshots = [snapshot];
+    const old = taxControls(render(data));
+    expect(old.input?.props.value).toBe("3");
+    expect(old.input?.props.disabled).toBe(true);
+    expect(old.save?.props.disabled).toBe(true);
+    snapshot.calculationVersion = "2.42.0";
+    delete snapshot.expenses.consumptionTax;
+    expect(taxControls(render(data)).input).toBeUndefined();
+    expect(taxControls(render(data)).save).toBeUndefined();
+    expect(saveMonthlyAdjustments).not.toHaveBeenCalled();
+  });
+});
+describe("税率の連続入力", () => {
+  it.each(["2.01", "0.01", "10.05"])("%sの小数先頭ゼロを再描画後も保持する", async (text) => {
+    const data = fixture(base);
+    taxControls(render(data)).input!.props.onChange({ target: { value: "" } });
+    let entered = "";
+    for (const character of text) {
+      const controls = taxControls(render(data));
+      entered += character;
+      controls.input!.props.onChange({ target: { value: controls.input!.props.value + character } });
+      expect(taxControls(render(data)).input?.props.value).toBe(entered);
+    }
+    const completed = taxControls(render(data));
+    expect(completed.save?.props.disabled).toBe(false);
+    completed.save!.props.onClick();
+    await vi.waitFor(() => expect(saveMonthlyAdjustments).toHaveBeenCalledExactlyOnceWith({ ...normalizeMonthlyAdjustments(base), consumptionTaxRate: Number(text) }, { uid: "test" }));
+    const updated = fixture({ ...base, revision: 4, consumptionTaxRate: Number(text) });
+    render(updated);
+    expect(hooks.drafts.get("accounting.monthly.adjustments")).not.toHaveProperty("consumptionTaxRateInput");
+    expect(taxControls(render(updated)).save?.props.disabled).toBe(true);
+  });
+  it("既存税率3を3.00と入力しても未保存判定は変えず、計算・確定向けに文字列を出さない", () => {
+    const data = fixture(base);
+    taxControls(render(data)).input!.props.onChange({ target: { value: "3.00" } });
+    const tree = render(data);
+    expect(taxControls(tree).input?.props.value).toBe("3.00");
+    expect(taxControls(tree).save?.props.disabled).toBe(true);
+    expect(dirty).toHaveBeenLastCalledWith(false);
+    const exportCard = elements(tree).find(row => row.props.input?.adjustments);
+    expect(exportCard?.props.input.adjustments).not.toHaveProperty("consumptionTaxRateInput");
   });
 });

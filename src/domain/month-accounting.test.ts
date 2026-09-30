@@ -1407,7 +1407,7 @@ describe("月次会計ドメイン", () => {
     expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "2.13.0" }, month, 1)).toBeDefined();
     expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "2.13.1" }, month, 1)).toBeDefined();
     expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "2.14.0" }, month, 1)).toBeDefined();
-    expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "3.0.0", expenses: { ...snapshot.expenses, accountingExpenseInputs: [], accountingExpenseTotal: 0, consumptionTax: 0 } }, month, 1)).toBeDefined();
+    expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "3.0.0", expenses: { ...snapshot.expenses, accountingExpenseInputs: [], accountingExpenseTotal: 0, consumptionTax: 0, consumptionTaxRate: 3 } }, month, 1)).toBeDefined();
   });
 
   it("種類別ボトルバックを確定保存し、旧確定データと金額不正を区別する", () => {

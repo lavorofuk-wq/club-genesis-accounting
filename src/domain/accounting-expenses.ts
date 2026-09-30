@@ -47,12 +47,30 @@ export function validateAccountingExpenseInputs(value: unknown, month: string, c
   return inputs;
 }
 
-/** 月額売上へ一度だけ3%を掛け、1円未満を切り捨てる。 */
-export function consumptionTaxForSales(totalSales: number): number {
+export const DEFAULT_CONSUMPTION_TAX_RATE = 3;
+
+/** 百分率。入力された精度を保ち、小数第3位以下や不正値を黙って丸めない。 */
+export function validateConsumptionTaxRate(value: unknown): number {
+  if (value === undefined) return DEFAULT_CONSUMPTION_TAX_RATE;
+  requireValue(typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100
+    && Math.round(value * 100) / 100 === value, "預かり消費税率は0～100%の範囲で小数2桁まで入力してください。");
+  return value;
+}
+
+/** 月額売上へ選択月の税率を一度掛け、1円未満を切り捨てる。 */
+export function consumptionTaxForSales(totalSales: number, rate: number = DEFAULT_CONSUMPTION_TAX_RATE): number {
   requireValue(Number.isFinite(totalSales) && totalSales >= 0 && totalSales <= Number.MAX_SAFE_INTEGER,
     "預かり消費税の計算対象売上が不正です。");
-  // 整数売上は浮動小数点の端数誤差・中間積の桁あふれを避ける。
-  return Number.isSafeInteger(totalSales)
-    ? Number(BigInt(totalSales) * BigInt(3) / BigInt(100))
-    : Math.floor(totalSales * 0.03);
+  const checkedRate = validateConsumptionTaxRate(rate);
+  const basisPoints = BigInt(Math.round(checkedRate * 100));
+  // 0.29等の二進表現誤差を除いた整数bpsで、中間積の桁あふれを避ける。
+  if (Number.isSafeInteger(totalSales)) return Number(BigInt(totalSales) * basisPoints / BigInt(10000));
+  // Ver2.43までの小数売上の固定3%は、当時の保存税額を変更しない。
+  if (checkedRate === DEFAULT_CONSUMPTION_TAX_RATE) return Math.floor(totalSales * 0.03);
+  const [coefficient, exponent = "0"] = String(totalSales).split("e");
+  const [whole, fraction = ""] = coefficient.split(".");
+  const scale = fraction.length - Number(exponent);
+  const numerator = BigInt(whole + fraction) * basisPoints * (scale < 0 ? BigInt(10) ** BigInt(-scale) : BigInt(1));
+  const denominator = BigInt(10000) * (scale > 0 ? BigInt(10) ** BigInt(scale) : BigInt(1));
+  return Number(numerator / denominator);
 }

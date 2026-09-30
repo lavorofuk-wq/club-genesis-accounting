@@ -23,9 +23,11 @@ import { CastReceiptExport } from "./cast-receipt-export";
 import { IntroducerStatementExport } from "./introducer-statement-export";
 import { CastAccountingInputs } from "./cast-accounting-inputs";
 import { AccountingExpenseInputs } from "./accounting-expense-inputs";
-import { validateAccountingExpenseInputs } from "@/domain/accounting-expenses";
+import { DEFAULT_CONSUMPTION_TAX_RATE, validateAccountingExpenseInputs, validateConsumptionTaxRate } from "@/domain/accounting-expenses";
 
 type Props = { data: AccountingWorkspaceData; user: User; busy: boolean; run: (action: () => Promise<unknown>, message: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void };
+/** 税率の入力文字列はUI下書きで保持し、計算・保存・確定には数値だけを渡す。 */
+type MonthlyAdjustmentDraft = MonthlyAdjustments & { consumptionTaxRateInput?: string };
 type Section = "approval" | "castInputs" | "castSales" | "castRewards" | "introducers" | "staffPayroll" | "driverPayroll" | "expenses" | "balance";
 
 const statusLabel = { submitted: "確認待ち", returned: "差戻し中", approved: "承認済み", withdrawn: "店舗編集中（取下げ）" } as const;
@@ -191,7 +193,8 @@ export function ClosingCastProductDetails({
 function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Props & { section: Exclude<Section, "approval" | "castInputs"> }) {
   const [month, setMonth] = useRecoverableState("accounting.monthly.month", currentMonth());
   const stored = data.adjustments.find((row) => row.month === month);
-  const [adjustments, setAdjustments] = useRecoverableState<MonthlyAdjustments>("accounting.monthly.adjustments", () => blankAdjustments(month, stored));
+  const [adjustments, setAdjustments] = useRecoverableState<MonthlyAdjustmentDraft>("accounting.monthly.adjustments", () => blankAdjustments(month, stored));
+  const calculationAdjustments = useMemo(() => monthlyAdjustmentsForCalculation(adjustments), [adjustments]);
   const loadedAdjustments = useRef({ month, rows: data.adjustments, value: blankAdjustments(month, stored) });
   useEffect(() => {
     const previous = loadedAdjustments.current;
@@ -217,6 +220,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
     try { validateAccountingExpenseInputs(adjustments.expenseInputs, month, data.closings); return ""; }
     catch (error) { return error instanceof Error ? error.message : "追加入力した経費を確認してください。"; }
   }, [adjustments.expenseInputs, closed, data.closings, month]);
+  const consumptionTaxRateError = closed ? "" : consumptionTaxRateDraftError(adjustments);
   const adjustmentsStale = !closed && (adjustments.revision || 0) !== (storedAdjustments.revision || 0);
   useEffect(() => {
     onDirtyChange?.(adjustmentsDirty);
@@ -226,20 +230,20 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
   const pendingLegacy = allLegacyBottles.filter((row) => !adjustments.legacyBottleClassifications?.[row.sourceKey]);
   const legacyDirty = classificationSignature(adjustments) !== classificationSignature(storedAdjustments);
   const calculationsBlocked = !closed && (pendingLegacy.length > 0 || legacyDirty);
-  const liveResults = useMemo(() => calculateMonthlyAccounting(data, month, adjustments, data.introducerEntryEvents), [adjustments, data, month]);
+  const liveResults = useMemo(() => calculateMonthlyAccounting(data, month, calculationAdjustments, data.introducerEntryEvents), [calculationAdjustments, data, month]);
   const results = closed ? currentSnapshot : calculationsBlocked ? undefined : liveResults;
   const approved = data.closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(month));
-  const finalizeCheck = canFinalizeMonthlyAccounting(data, month, adjustments, true);
+  const finalizeCheck = canFinalizeMonthlyAccounting(data, month, calculationAdjustments, true);
   const monthlyCashProblems = closed ? [] : cashLedgerIssues(data.closings, month);
   const setMap = (key: "withholdingByCast" | "staffSalesAllowance" | "staffBottleAllowance" | "driverRemoteAllowance", id: string, value: number) => setAdjustments((row) => ({ ...row, [key]: { ...row[key], [id]: value } }));
-  const saveDisabled = busy || closed || state?.status === "closing" || adjustmentsStale || Boolean(expenseInputError) || !adjustmentsDirty;
-  const save = () => saveDisabled ? Promise.resolve(false) : run(() => saveMonthlyAdjustments(adjustments, user), `${month}の経理入力を保存しました。`);
+  const saveDisabled = busy || closed || state?.status === "closing" || adjustmentsStale || Boolean(expenseInputError) || Boolean(consumptionTaxRateError) || !adjustmentsDirty;
+  const save = () => saveDisabled ? Promise.resolve(false) : run(() => saveMonthlyAdjustments(calculationAdjustments, user), `${month}の経理入力を保存しました。`);
   const finalize = () => {
-    if (adjustmentsDirty || adjustmentsStale || calculationsBlocked || !finalizeCheck.allowed) return;
+    if (adjustmentsDirty || adjustmentsStale || calculationsBlocked || consumptionTaxRateError || !finalizeCheck.allowed) return;
     if (!window.confirm(`${month}を月次確定しますか？\n確定後は日次承認・差戻し・経理入力を変更できません。`)) return;
     void run(async () => {
-      const fingerprint = await monthlySourceFingerprint(data, month, adjustments, data.introducerEntryEvents);
-      const snapshot = buildMonthlySnapshot(month, 0, fingerprint, adjustments, liveResults, data.closings, user.uid, new Date().toISOString());
+      const fingerprint = await monthlySourceFingerprint(data, month, calculationAdjustments, data.introducerEntryEvents);
+      const snapshot = buildMonthlySnapshot(month, 0, fingerprint, calculationAdjustments, liveResults, data.closings, user.uid, new Date().toISOString());
       await finalizeAccountingMonth(month, snapshot, state?.revision || 0, user);
     }, `${month}を月次確定しました。`);
   };
@@ -258,7 +262,8 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
     setMonth(nextMonth);
   };
   return <div className="grid">
-    <Card><div className="month-toolbar"><Field label="対象月"><input className="input" type="month" value={month} onChange={(event) => changeMonth(event.target.value)} /></Field><span>承認済み営業日 <strong>{results?.approvedDays ?? approved.length}日</strong></span>{state?.status === "closed" ? <StatusPill tone="good">月次確定済み 第{state.currentSnapshotRevision}版</StatusPill> : state?.status === "closing" ? <StatusPill tone="warn">月次確定処理中</StatusPill> : <StatusPill>未確定</StatusPill>}{!closed && state?.status !== "closing" && (section !== "castSales" || adjustmentsDirty) && <button className="button" disabled={saveDisabled} onClick={() => void save()}>経理入力を保存</button>}{!closed && state?.status !== "closing" && <button className="button secondary" disabled={busy || adjustmentsDirty || adjustmentsStale || calculationsBlocked || !finalizeCheck.allowed} onClick={finalize}>月次確定</button>}{state?.status === "closing" && <button className="button danger" disabled={busy} onClick={cancelClosing}>確定処理を中止</button>}{closed && <button className="button danger" disabled={busy} onClick={reopen}>確定解除</button>}</div></Card>
+    <Card><div className="month-toolbar"><Field label="対象月"><input className="input" type="month" value={month} onChange={(event) => changeMonth(event.target.value)} /></Field><span>承認済み営業日 <strong>{results?.approvedDays ?? approved.length}日</strong></span>{state?.status === "closed" ? <StatusPill tone="good">月次確定済み 第{state.currentSnapshotRevision}版</StatusPill> : state?.status === "closing" ? <StatusPill tone="warn">月次確定処理中</StatusPill> : <StatusPill>未確定</StatusPill>}{!closed && state?.status !== "closing" && (section !== "castSales" || adjustmentsDirty) && <button className="button" disabled={saveDisabled} onClick={() => void save()}>経理入力を保存</button>}{!closed && state?.status !== "closing" && <button className="button secondary" disabled={busy || adjustmentsDirty || adjustmentsStale || calculationsBlocked || Boolean(consumptionTaxRateError) || !finalizeCheck.allowed} onClick={finalize}>月次確定</button>}{state?.status === "closing" && <button className="button danger" disabled={busy} onClick={cancelClosing}>確定処理を中止</button>}{closed && <button className="button danger" disabled={busy} onClick={reopen}>確定解除</button>}</div></Card>
+    {consumptionTaxRateError && <div className="notice error" role="alert">預かり消費税：{consumptionTaxRateError}</div>}
     {expenseInputError && <div className="notice error" role="alert">経費入力：{expenseInputError}</div>}
     {adjustmentsStale && <div className="notice error" role="alert">別の操作で対象月の入力が更新されています。未保存の入力は保持しています。古い版からの上書きを防ぐため、保存・確定・出力を停止しています。<button className="button secondary mini top-gap" disabled={busy} onClick={() => { if (window.confirm("未保存の経理入力を破棄して、最新の対象月データを読み込みますか？")) setAdjustments(storedAdjustments); }}>未保存入力を破棄して最新データを表示</button></div>}
     {state?.status === "closing" && <div className="notice error">月次確定処理中です。画面を更新しても解消しない場合は、処理を行った担当者と通信状態を確認してください。</div>}
@@ -301,7 +306,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
         : results.warnings.length || (!closed && finalizeCheck.integrityIssues.length) ? "データの警告を解消してから出力してください。" : ""}
     />}
     {section === "expenses" && <ExpenseExport
-      input={results ? { results, closings: data.closings, adjustments, month, snapshot: currentSnapshot } : undefined}
+      input={results ? { results, closings: data.closings, adjustments: calculationAdjustments, month, snapshot: currentSnapshot } : undefined}
       month={month}
       sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
       disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"
@@ -312,7 +317,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
         : results.warnings.length || (!closed && finalizeCheck.integrityIssues.length) ? "データの警告を解消してから出力してください。" : ""}
     />}
     {section === "balance" && <BalanceExport
-      input={results ? { results, closings: data.closings, adjustments, month, snapshot: currentSnapshot, staff: data.staff, archivedStaff: data.archivedStaff } : undefined}
+      input={results ? { results, closings: data.closings, adjustments: calculationAdjustments, month, snapshot: currentSnapshot, staff: data.staff, archivedStaff: data.archivedStaff } : undefined}
       month={month}
       sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
       disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"
@@ -527,8 +532,8 @@ function DriverPayroll({ rows, disabled, onRemote }: { rows: MonthlyAccountingRe
 
 export function Expenses({ results, adjustments, setAdjustments, closings, closed = false, disabled, saveDisabled, onSave }: {
   results: MonthlyAccountingResults;
-  adjustments: MonthlyAdjustments;
-  setAdjustments: (value: MonthlyAdjustments | ((row: MonthlyAdjustments) => MonthlyAdjustments)) => void;
+  adjustments: MonthlyAdjustmentDraft;
+  setAdjustments: (value: MonthlyAdjustmentDraft | ((row: MonthlyAdjustmentDraft) => MonthlyAdjustmentDraft)) => void;
   closings: DailyClosing[];
   closed?: boolean;
   disabled: boolean;
@@ -550,6 +555,10 @@ export function Expenses({ results, adjustments, setAdjustments, closings, close
     <AccountingExpenseInputs month={adjustments.month}
       rows={closed ? results.expenses.accountingExpenseInputs || [] : adjustments.expenseInputs || []}
       closings={closings} total={results.expenses.accountingExpenseTotal} consumptionTax={results.expenses.consumptionTax}
+      consumptionTaxRate={results.expenses.consumptionTaxRate ?? DEFAULT_CONSUMPTION_TAX_RATE}
+      taxRateInput={closed ? String(results.expenses.consumptionTaxRate ?? DEFAULT_CONSUMPTION_TAX_RATE) : adjustments.consumptionTaxRateInput ?? String(adjustments.consumptionTaxRate ?? DEFAULT_CONSUMPTION_TAX_RATE)}
+      taxRateError={closed ? "" : consumptionTaxRateDraftError(adjustments)}
+      onTaxRateChange={(text) => { if (!disabled && !closed) setAdjustments((row) => changeConsumptionTaxRateDraft(row, text)); }}
       disabled={disabled} saveDisabled={saveDisabled} onSave={onSave} onChange={(update) => setAdjustments((row) => ({ ...row, expenseInputs: update(row.expenseInputs || []) }))} />
     <Card title="固定経費・月締め調整" action={!disabled ? <button className="button secondary" onClick={addFixed}>固定経費を追加</button> : null}>
       <div className="stack">{adjustments.fixedExpenses.map((row) => <div className="grid form-row" key={row.id}>
@@ -567,8 +576,32 @@ export function Expenses({ results, adjustments, setAdjustments, closings, close
 }
 function Balance({ results }: { results: MonthlyAccountingResults }) { return <div className="grid"><div className="grid metrics"><Metric label="現金売上" value={yen.format(results.sales.cash)} /><Metric label="カード売上" value={yen.format(results.sales.card)} /><Metric label="合計売上" value={yen.format(results.sales.total)} /><Metric label="収支" value={yen.format(results.balance.profit)} /></div><Card title="収支データ"><Table headers={["区分", "金額"]}><tr><td>現金売上</td><td>{yen.format(results.sales.cash)}</td></tr><tr><td>カード売上</td><td>{yen.format(results.sales.card)}</td></tr><tr className="total-row"><td>合計売上</td><td><strong>{yen.format(results.sales.total)}</strong></td></tr><tr><td>キャスト報酬</td><td>− {yen.format(results.balance.cast)}</td></tr><tr><td>紹介者支払</td><td>− {yen.format(results.balance.introducer)}</td></tr><tr><td>スタッフ給与</td><td>− {yen.format(results.balance.staff)}</td></tr><tr><td>送迎ドライバー給与</td><td>− {yen.format(results.balance.driver)}</td></tr><tr><td>経費・派遣支払</td><td>− {yen.format(results.balance.expenses)}</td></tr><tr className="total-row"><td>総支出</td><td><strong>− {yen.format(results.balance.totalCosts)}</strong></td></tr><tr className="total-row"><td><strong>収支</strong></td><td><strong>{yen.format(results.balance.profit)}</strong></td></tr></Table>{results.warnings.length === 0 && <div className="notice success top-gap">すべての承認済みデータから収支を算出しました。</div>}</Card></div>; }
 
+function parseConsumptionTaxRateInput(text: string) {
+  if (!/^\d+(?:\.\d{1,2})?$/.test(text)) throw new Error("税率は0～100％の範囲で、小数第2位まで入力してください。");
+  return validateConsumptionTaxRate(Number(text));
+}
+function consumptionTaxRateDraftError(value: MonthlyAdjustmentDraft) {
+  try {
+    if (value.consumptionTaxRateInput !== undefined) parseConsumptionTaxRateInput(value.consumptionTaxRateInput);
+    else validateConsumptionTaxRate(value.consumptionTaxRate);
+    return "";
+  } catch (error) { return error instanceof Error ? error.message : "税率を確認してください。"; }
+}
+function changeConsumptionTaxRateDraft(value: MonthlyAdjustmentDraft, text: string): MonthlyAdjustmentDraft {
+  // 2.01を入力する途中の「2.0」も保持し、再描画で「2」へ縮めない。
+  try { return { ...value, consumptionTaxRateInput: text, consumptionTaxRate: parseConsumptionTaxRateInput(text) }; }
+  catch { return { ...value, consumptionTaxRateInput: text }; }
+}
+function monthlyAdjustmentsForCalculation(value: MonthlyAdjustmentDraft): MonthlyAdjustments {
+  const { consumptionTaxRateInput, ...stored } = value;
+  if (consumptionTaxRateInput !== undefined) {
+    try { stored.consumptionTaxRate = parseConsumptionTaxRateInput(consumptionTaxRateInput); }
+    catch { /* 未完成の入力は警告と保存停止で扱い、表示計算は最後の有効税率を保つ。 */ }
+  }
+  return stored;
+}
 function mapSignature(value: Record<string, unknown> | undefined) { return JSON.stringify(Object.entries(value || {}).sort(([left], [right]) => left.localeCompare(right))); }
 function classificationSignature(value: MonthlyAdjustments) { return mapSignature(value.legacyBottleClassifications); }
-export function adjustmentSignature(value: MonthlyAdjustments) { return JSON.stringify({ withholdingByCast: mapSignature(value.withholdingByCast), staffSalesAllowance: mapSignature(value.staffSalesAllowance), staffBottleAllowance: mapSignature(value.staffBottleAllowance), driverRemoteAllowance: mapSignature(value.driverRemoteAllowance), fixedExpenses: value.fixedExpenses, liquorDeliveryAmount: value.liquorDeliveryAmount, cardFee: value.cardFee, legacyBottleClassifications: classificationSignature(value), castInputs: value.castInputs || [], expenseInputs: [...(value.expenseInputs || [])].sort((left, right) => left.id.localeCompare(right.id)) }); }
+export function adjustmentSignature(value: MonthlyAdjustmentDraft) { return JSON.stringify({ withholdingByCast: mapSignature(value.withholdingByCast), staffSalesAllowance: mapSignature(value.staffSalesAllowance), staffBottleAllowance: mapSignature(value.staffBottleAllowance), driverRemoteAllowance: mapSignature(value.driverRemoteAllowance), fixedExpenses: value.fixedExpenses, liquorDeliveryAmount: value.liquorDeliveryAmount, cardFee: value.cardFee, consumptionTaxRate: monthlyAdjustmentsForCalculation(value).consumptionTaxRate ?? DEFAULT_CONSUMPTION_TAX_RATE, consumptionTaxRateInput: consumptionTaxRateDraftError(value) ? value.consumptionTaxRateInput : undefined, legacyBottleClassifications: classificationSignature(value), castInputs: value.castInputs || [], expenseInputs: [...(value.expenseInputs || [])].sort((left, right) => left.id.localeCompare(right.id)) }); }
 function blankAdjustments(month: string, stored?: MonthlyAdjustments): MonthlyAdjustments { return normalizeMonthlyAdjustments(stored || { month, withholdingByCast: {}, staffSalesAllowance: {}, staffBottleAllowance: {}, driverRemoteAllowance: {}, fixedExpenses: [], cardFee: 0, legacyBottleClassifications: {}, revision: 0 }); }
 function Metric({ label, value }: { label: string; value: string }) { return <div className="card metric-card"><small>{label}</small><strong>{value}</strong></div>; }

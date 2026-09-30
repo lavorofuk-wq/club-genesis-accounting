@@ -59,7 +59,7 @@ import {
   validateStaffMonthlyPaySetting,
 } from "@/domain/master-pay-validation";
 import { staffMonthlyRates } from "@/domain/staff-rates";
-import { validateAccountingExpenseInputs } from "@/domain/accounting-expenses";
+import { validateAccountingExpenseInputs, validateConsumptionTaxRate } from "@/domain/accounting-expenses";
 import { castAccountingAttendanceSources, castAccountingInputTotals, normalizeCastAccountingInputs } from "@/domain/cast-accounting-inputs";
 import { assertCashLedgerChange, cashDayIssues, cashFundingIssues, cashLedgerIssues, sameCashReconciliation } from "@/domain/cash-funding";
 
@@ -2208,6 +2208,8 @@ export async function saveMonthlyAdjustments(value: MonthlyAdjustments, user: Us
   }
   if (!nonNegative(value.cardFee) || (value.liquorDeliveryAmount !== undefined && !nonNegative(value.liquorDeliveryAmount))) throw new Error("経費金額が正しくありません。");
   if (value.fixedExpenses.some((row) => !row.account.trim() || !nonNegative(row.amount))) throw new Error("固定経費の科目と金額を確認してください。");
+  if ((value as MonthlyAdjustments & { consumptionTaxRateInput?: unknown }).consumptionTaxRateInput !== undefined) throw new Error("預かり消費税率の入力を完了してから保存してください。");
+  const consumptionTaxRate = validateConsumptionTaxRate(value.consumptionTaxRate);
   const expenseInputs = validateAccountingExpenseInputs(value.expenseInputs ?? [], value.month);
   if (expenseInputs.some((row) => row.businessDate)) {
     const historySnapshot = await get(rootRef("history"));
@@ -2223,7 +2225,7 @@ export async function saveMonthlyAdjustments(value: MonthlyAdjustments, user: Us
       throw new Error("キャストの追加入力は専用画面から保存してください。月次入力とあわせて最新データを読み込んでください。");
     }
     const { month: _month, ...stored } = value;
-    return clean({ ...stored, expenseInputs: expenseInputs.length ? Object.fromEntries(expenseInputs.map((row) => [row.id, row])) : undefined,
+    return clean({ ...stored, consumptionTaxRate, expenseInputs: expenseInputs.length ? Object.fromEntries(expenseInputs.map((row) => [row.id, row])) : undefined,
       castInputs: existing?.castInputs, revision: currentRevision + 1,
       updatedAt: nextEventTimestamp(timestamp, existing?.updatedAt), updatedBy: user.uid });
   }, { applyLocally: false });

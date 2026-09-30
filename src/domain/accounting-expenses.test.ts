@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { consumptionTaxForSales, normalizeAccountingExpenseInputs, validateAccountingExpenseInputs } from "./accounting-expenses";
+import { DEFAULT_CONSUMPTION_TAX_RATE, consumptionTaxForSales, normalizeAccountingExpenseInputs, validateAccountingExpenseInputs, validateConsumptionTaxRate } from "./accounting-expenses";
 import { normalizeMonthlyAdjustments, type AccountingExpenseInput, type DailyClosing, type MonthlyAdjustments, type WorkspaceData } from "./gms";
 import { calculateCashFunding, cashFundingContext } from "./cash-funding";
 import { buildMonthlySnapshot, calculateMonthlyAccounting, canFinalizeMonthlyAccounting, monthlySourceFingerprint, normalizeMonthlyAccountingSnapshot } from "./month-accounting";
@@ -45,6 +45,7 @@ function legacy(input: ExpenseExportInput) {
   delete input.results.expenses.accountingExpenseInputs;
   delete input.results.expenses.accountingExpenseTotal;
   delete input.results.expenses.consumptionTax;
+  delete input.results.expenses.consumptionTaxRate;
   input.results.expenses.total -= delta;
   input.results.balance.expenses -= delta;
   input.results.balance.totalCosts -= delta;
@@ -178,5 +179,114 @@ describe("経費確定の保存と旧確定互換", () => {
     expect(recalculated.expenses.total).toBe(input.results.expenses.total + 299);
     input.adjustments.expenseInputs = [expense({ businessDate: undefined })];
     expect(() => validateExpenseExport(input)).toThrow(/旧確定月/);
+  });
+});
+
+describe("月別の預かり消費税率", () => {
+  it("未設定だけ3%にし、0%・100%・0.29%・小数2桁を保持する", () => {
+    expect(DEFAULT_CONSUMPTION_TAX_RATE).toBe(3);
+    expect(validateConsumptionTaxRate(undefined)).toBe(3);
+    for (const rate of [0, 100, 0.29, 3.25, 99.99]) expect(validateConsumptionTaxRate(rate)).toBe(rate);
+    const { adjustments } = fixture();
+    expect(normalizeMonthlyAdjustments({ ...adjustments, consumptionTaxRate: 0 }).consumptionTaxRate).toBe(0);
+    expect(normalizeMonthlyAdjustments(adjustments)).not.toHaveProperty("consumptionTaxRate");
+  });
+  it.each([null, NaN, Infinity, -1, 100.01, "3", 1.001, 0.29000000000000004])("不正税率%sを丸めず拒否する", (rate) => {
+    expect(() => validateConsumptionTaxRate(rate)).toThrow(/税率/);
+    const { adjustments } = fixture();
+    expect(() => normalizeMonthlyAdjustments({ ...adjustments, consumptionTaxRate: rate as number })).toThrow(/税率/);
+  });
+  it("小数税率と高額売上は整数bpsで1円未満を切捨て、小数売上の旧3%挙動は維持する", () => {
+    expect(consumptionTaxForSales(10000, 0.29)).toBe(29);
+    expect(consumptionTaxForSales(9999, 0.29)).toBe(28);
+    expect(consumptionTaxForSales(9999, 0)).toBe(0);
+    expect(consumptionTaxForSales(9999, 100)).toBe(9999);
+    expect(consumptionTaxForSales(Number.MAX_SAFE_INTEGER, 99.99)).toBe(Number(BigInt(Number.MAX_SAFE_INTEGER) * BigInt(9999) / BigInt(10000)));
+    expect(consumptionTaxForSales(9999.99, 0.29)).toBe(28);
+    expect(consumptionTaxForSales(1e-7, 0.29)).toBe(0);
+    for (const total of [0.01, 33.33333333333333, 666.6666666666667, 9999.9]) {
+      expect(consumptionTaxForSales(total, 3)).toBe(Math.floor(total * 0.03));
+    }
+  });
+  it.each([0, 0.29, 5, 100])("選択月の%s%だけを経費・収支・帳票へ一度反映する", (rate) => {
+    const { data, adjustments, input } = fixture();
+    const original = structuredClone(input.results);
+    adjustments.consumptionTaxRate = rate;
+    input.results = calculateMonthlyAccounting(data, month, adjustments);
+    const tax = Math.floor(9999 * Math.round(rate * 100) / 10000);
+    expect(input.results.expenses.consumptionTaxRate).toBe(rate);
+    expect(input.results.expenses.consumptionTax).toBe(tax);
+    expect(input.results.expenses.total).toBe(2010 + tax);
+    expect(input.results.balance.profit).toBe(7989 - tax);
+    expect(input.results.expenses.byCategory).toEqual(original.expenses.byCategory);
+    expect(input.results.castRewards).toEqual(original.castRewards);
+    expect(() => validateExpenseExport(input)).not.toThrow();
+    const dailyCosts = buildBalanceExportReport(input).days.map((day) => day.expenses);
+    expect(dailyCosts).toEqual([210, 110, 1690 + tax]);
+    const otherMonth = { ...adjustments, month: "2026-10", consumptionTaxRate: undefined, expenseInputs: [] };
+    expect(calculateMonthlyAccounting(data, "2026-10", otherMonth).expenses.consumptionTaxRate).toBe(3);
+  });
+  it("不正編集中の税率は画面計算を落とさず警告し、確定を禁止する", () => {
+    const { data, adjustments } = fixture();
+    adjustments.consumptionTaxRate = NaN;
+    const calculated = calculateMonthlyAccounting(data, month, adjustments);
+    expect(calculated.warnings.join("\n")).toContain("税率");
+    expect(calculated.expenses.consumptionTaxRate).toBeUndefined();
+    expect(canFinalizeMonthlyAccounting(data, month, adjustments, true).allowed).toBe(false);
+  });
+  it("税額が同じでも保存税率と入力の不一致を検出し、source fingerprintも変わる", async () => {
+    const { data, adjustments, input } = fixture();
+    data.closings.forEach((row) => { row.sales = { cashSales: 1, cardSales: 0, totalSales: 1 }; });
+    input.results = calculateMonthlyAccounting(data, month, adjustments);
+    expect(consumptionTaxForSales(3, 3)).toBe(consumptionTaxForSales(3, 3.01));
+    const before = await monthlySourceFingerprint(data, month, adjustments);
+    adjustments.consumptionTaxRate = 3.01;
+    expect(await monthlySourceFingerprint(data, month, adjustments)).not.toBe(before);
+    expect(() => validateExpenseExport(input)).toThrow(/税率.*一致/);
+  });
+  it("未設定・明示3%・3.00入力後の正値は同じfingerprintで、0%や他項目の変更は区別する", async () => {
+    const { data, adjustments, input } = fixture();
+    const originalAdjustments = structuredClone(adjustments);
+    const savedSnapshot = snapshot(input);
+    const savedFingerprint = savedSnapshot.sourceFingerprint;
+    const unset = await monthlySourceFingerprint(data, month, adjustments);
+    expect(await monthlySourceFingerprint(data, month, { ...adjustments, consumptionTaxRate: 3 })).toBe(unset);
+    // UIの未保存文字列は渡さず、入力3.00から確定した数値だけを計算元に含める。
+    const committedUiValue = { ...adjustments, consumptionTaxRate: Number("3.00") };
+    expect(await monthlySourceFingerprint(data, month, committedUiValue)).toBe(unset);
+    expect(await monthlySourceFingerprint(data, month, { ...adjustments, consumptionTaxRate: 0 })).not.toBe(unset);
+    expect(await monthlySourceFingerprint(data, month, { ...adjustments, cardFee: adjustments.cardFee + 1 })).not.toBe(unset);
+    expect(adjustments).toEqual(originalAdjustments);
+    expect(savedSnapshot.sourceFingerprint).toBe(savedFingerprint);
+  });
+  it("2.44の新確定は税率必須で、欠損・不正・保存税額と異なる税率を拒否する", () => {
+    const { data, adjustments, input } = fixture();
+    adjustments.consumptionTaxRate = 0.29;
+    input.results = calculateMonthlyAccounting(data, month, adjustments);
+    const stored = snapshot(input);
+    expect(stored.calculationVersion).toBe("2.44.0");
+    expect(normalizeMonthlyAccountingSnapshot(stored, month, 1)).toEqual(stored);
+    for (const rate of [undefined, null, 0.291, 5]) {
+      const corrupted = structuredClone(stored);
+      corrupted.expenses.consumptionTaxRate = rate as number;
+      expect(normalizeMonthlyAccountingSnapshot(corrupted, month, 1)).toBeUndefined();
+    }
+  });
+  it("2.43確定は固定3%の税額を保持し、税率を補完・後付けしない", () => {
+    const { data, adjustments, input } = fixture();
+    delete input.results.expenses.consumptionTaxRate;
+    input.snapshot = snapshot(input);
+    input.snapshot.calculationVersion = "2.43.0";
+    const before = structuredClone(input);
+    expect(normalizeMonthlyAccountingSnapshot(input.snapshot, month, 1)).toEqual(input.snapshot);
+    expect(() => validateExpenseExport(input)).not.toThrow();
+    expect(input).toEqual(before);
+    const corrupt = structuredClone(input.snapshot);
+    corrupt.expenses.consumptionTaxRate = 3;
+    expect(normalizeMonthlyAccountingSnapshot(corrupt, month, 1)).toBeUndefined();
+    adjustments.consumptionTaxRate = 5;
+    expect(() => validateExpenseExport(input)).toThrow(/税率.*一致/);
+    expect(calculateMonthlyAccounting(data, month, adjustments).expenses.consumptionTax).toBe(499);
+    expect(input.snapshot.expenses.consumptionTax).toBe(299);
   });
 });

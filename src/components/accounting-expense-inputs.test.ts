@@ -48,7 +48,7 @@ function field(node: ReactNode, label: string) {
   return find(node, (item) => item.type === Field && item.props.label === label).props.children as Element;
 }
 function form(rows = [first, second], disabled = false, onChange: Parameters<typeof AccountingExpenseInputs>[0]["onChange"] = noChange) {
-  return AccountingExpenseInputs({ month, rows, closings, total: 1630, consumptionTax: 3029, disabled, saveDisabled: false, onSave: noSave, onChange });
+  return AccountingExpenseInputs({ month, rows, closings, total: 1630, consumptionTax: 3029, consumptionTaxRate: 3, taxRateInput: "3", taxRateError: "", onTaxRateChange: noChange, disabled, saveDisabled: false, onSave: noSave, onChange });
 }
 beforeEach(() => drafts.clear());
 
