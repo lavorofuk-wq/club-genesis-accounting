@@ -1,6 +1,6 @@
 {
   "name": "club-genesis-accounting",
-  "version": "2.43.1",
+  "version": "2.44.0",
   "private": true,
   "scripts": {
     "dev": "next dev",

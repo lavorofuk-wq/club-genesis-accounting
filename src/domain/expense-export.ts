@@ -1,7 +1,7 @@
 import type { DailyClosing, ExpenseCategory, MonthlyAdjustments } from "./gms";
 import type { IntroducerPaymentRow, MonthlyAccountingResults, MonthlyAccountingSnapshot } from "./month-accounting";
-import { consumptionTaxForSales, validateAccountingExpenseInputs } from "./accounting-expenses";
-import { requiresAccountingExpensesSnapshot, requiresCompleteCashFundingSnapshot } from "./month-accounting";
+import { consumptionTaxForSales, validateAccountingExpenseInputs, validateConsumptionTaxRate } from "./accounting-expenses";
+import { requiresAccountingExpensesSnapshot, requiresCompleteCashFundingSnapshot, requiresConsumptionTaxRateSnapshot } from "./month-accounting";
 import { cashLedgerIssues } from "./cash-funding";
 
 export type ExpenseExportInput = {
@@ -196,6 +196,12 @@ export function validateExpenseExport({ results, closings, adjustments, month, s
   sameAmount(summary.liquorDelivery, liquorDelivery, "酒代納品書分");
   sameAmount(summary.cardFee, cardFee, "カード決済手数料");
   const accountingInputs = validateAccountingExpenseInputs(adjustments.expenseInputs, month, closings);
+  const requiresTaxRate = !snapshot || requiresConsumptionTaxRateSnapshot(snapshot.calculationVersion);
+  requireValue(requiresTaxRate ? summary.consumptionTaxRate !== undefined : summary.consumptionTaxRate === undefined,
+    requiresTaxRate ? "預かり消費税率の保存値がありません。" : "旧計算版の確定月へ預かり消費税率を後付けして出力することはできません。");
+  const consumptionTaxRate = validateConsumptionTaxRate(summary.consumptionTaxRate);
+  const inputTaxRate = validateConsumptionTaxRate(adjustments.consumptionTaxRate);
+  requireValue(inputTaxRate === consumptionTaxRate, "預かり消費税率が計算時の保存値と一致しません。最新データを読み込んでください。");
   const hasAccountingExpenses = !snapshot || requiresAccountingExpensesSnapshot(snapshot.calculationVersion)
     || summary.accountingExpenseInputs !== undefined || summary.accountingExpenseTotal !== undefined || summary.consumptionTax !== undefined;
   requireValue(!snapshot || requiresAccountingExpensesSnapshot(snapshot.calculationVersion) || !hasAccountingExpenses,
@@ -208,7 +214,7 @@ export function validateExpenseExport({ results, closings, adjustments, month, s
       === JSON.stringify(canonical([...accountingInputs].sort((a, b) => a.id.localeCompare(b.id)))),
       "経費入力の明細が計算時の保存明細と一致しません。最新データを読み込んでください。");
     accountingExpenseTotal = accountingInputs.reduce((sum, row) => sum + row.amount, 0);
-    consumptionTax = consumptionTaxForSales(results.sales.total);
+    consumptionTax = consumptionTaxForSales(results.sales.total, consumptionTaxRate);
     requireValue(Number.isSafeInteger(summary.accountingExpenseTotal) && Number.isSafeInteger(summary.consumptionTax),
       "経費入力合計・預かり消費税の保存金額が不正です。");
     sameAmount(summary.accountingExpenseTotal, accountingExpenseTotal, "経費入力計");

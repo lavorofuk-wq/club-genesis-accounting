@@ -1,4 +1,4 @@
-import { normalizeAccountingExpenseInputs } from "./accounting-expenses";
+import { normalizeAccountingExpenseInputs, validateConsumptionTaxRate } from "./accounting-expenses";
 import { cashFundingIssues } from "./cash-funding";
 import type { CashFunding } from "./cash-funding";
 import { sha256Hex } from "../lib/crypto-compat";
@@ -822,6 +822,8 @@ export type MonthlyAdjustments = {
   month: string;
   castInputs?: CastAccountingInput[];
   expenseInputs?: AccountingExpenseInput[];
+  /** 月別の預かり消費税率（百分率）。未設定は3%。 */
+  consumptionTaxRate?: number;
   withholdingByCast: Record<string, number>;
   staffSalesAllowance: Record<string, number>;
   staffBottleAllowance: Record<string, number>;
@@ -864,6 +866,7 @@ export function normalizeMonthlyAdjustments(
     // Firebase表現を厳密に復元する。不正行や端数を黙って消したり丸めたりしない。
     ...(value.castInputs === undefined ? {} : { castInputs: normalizeCastAccountingInputs(value.castInputs) }),
     ...(value.expenseInputs === undefined ? {} : { expenseInputs: normalizeAccountingExpenseInputs(value.expenseInputs) }),
+    ...(value.consumptionTaxRate === undefined ? {} : { consumptionTaxRate: validateConsumptionTaxRate(value.consumptionTaxRate) }),
     withholdingByCast: storedNumberMap(value.withholdingByCast),
     staffSalesAllowance: storedNumberMap(value.staffSalesAllowance),
     staffBottleAllowance: storedNumberMap(value.staffBottleAllowance),

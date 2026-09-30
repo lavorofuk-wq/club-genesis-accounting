@@ -46,6 +46,35 @@ describe.each(["accounting-dev", "accounting"])("追加経費の保存（%s）",
     expect(saved().expenseInputs).toBeUndefined();
     expect(saved().revision).toBe(3);
   });
+  it.each([0, 0.29, 2.01, 3, 3.5, 10, 100])("税率%s%%を選択月だけに保存する", async (consumptionTaxRate) => {
+    const otherMonth = scoped("accountingAdjustments/2026-08");
+    memory.values.set(otherMonth, { revision: 4, consumptionTaxRate: 8 });
+    await saveMonthlyAdjustments(defaults({ consumptionTaxRate }), user);
+    expect(saved()).toMatchObject({ consumptionTaxRate, revision: 1 });
+    expect(memory.values.get(otherMonth)).toEqual({ revision: 4, consumptionTaxRate: 8 });
+  });
+  it("未設定の税率は従来の3%で保存し、0%への変更と再保存も維持する", async () => {
+    await saveMonthlyAdjustments(defaults(), user);
+    expect(saved().consumptionTaxRate).toBe(3);
+    await saveMonthlyAdjustments(defaults({ revision: 1, consumptionTaxRate: 0 }), user);
+    expect(saved().consumptionTaxRate).toBe(0);
+    await saveMonthlyAdjustments(defaults({ revision: 2, consumptionTaxRate: 0, cardFee: 123 }), user);
+    expect(saved()).toMatchObject({ consumptionTaxRate: 0, cardFee: 123, revision: 3 });
+  });
+  it.each([-1, 100.01, 0.001, NaN, Infinity, null, "3", ""])("不正税率%sを保存前に拒否する", async (rate) => {
+    await expect(saveMonthlyAdjustments(defaults({ consumptionTaxRate: rate as number }), user)).rejects.toThrow("預かり消費税率");
+    expect(memory.transaction).not.toHaveBeenCalled();
+  });
+  it("編集中の税率を古い値のまま保存しない", async () => {
+    const draft = { ...defaults({ consumptionTaxRate: 3 }), consumptionTaxRateInput: "0." };
+    await expect(saveMonthlyAdjustments(draft, user)).rejects.toThrow("入力を完了");
+    expect(memory.transaction).not.toHaveBeenCalled();
+  });
+  it("税率の競合で別端末の保存内容を上書きしない", async () => {
+    memory.values.set(scoped(path), { ...defaults(), revision: 2, consumptionTaxRate: 5 });
+    await expect(saveMonthlyAdjustments(defaults({ revision: 1, consumptionTaxRate: 10 }), user)).rejects.toThrow("別の端末");
+    expect(saved().consumptionTaxRate).toBe(5);
+  });
   it("営業日指定は承認済みの当月日次だけを許可する", async () => {
     for (const status of ["submitted", "returned", "withdrawn"]) {
       memory.values.set(scoped("history"), { day_1: { ...closing, status } });

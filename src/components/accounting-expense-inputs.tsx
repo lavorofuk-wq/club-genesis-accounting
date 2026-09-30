@@ -11,13 +11,17 @@ type Props = {
   closings: DailyClosing[];
   total?: number;
   consumptionTax?: number;
+  consumptionTaxRate: number;
+  taxRateInput: string;
+  taxRateError: string;
+  onTaxRateChange: (text: string) => void;
   disabled: boolean;
   saveDisabled: boolean;
   onSave: () => Promise<boolean>;
   onChange: (update: (rows: AccountingExpenseInput[]) => AccountingExpenseInput[]) => void;
 };
 
-export function AccountingExpenseInputs({ month, rows, closings, total, consumptionTax, disabled, saveDisabled, onSave, onChange }: Props) {
+export function AccountingExpenseInputs({ month, rows, closings, total, consumptionTax, consumptionTaxRate, taxRateInput, taxRateError, onTaxRateChange, disabled, saveDisabled, onSave, onChange }: Props) {
   const days = [...new Set(closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(`${month}-`)).map((row) => row.businessDate))].sort();
   const patch = (id: string, change: Partial<AccountingExpenseInput>) => {
     if (disabled) return;
@@ -49,14 +53,20 @@ export function AccountingExpenseInputs({ month, rows, closings, total, consumpt
         </div>
         <div className="actions top-gap">
           <button type="button" className="button danger mini" aria-label={`追加経費 ${index + 1} を削除`} onClick={() => remove(row.id)}>削除</button>
-          <button type="button" className="button mini" aria-label={`追加経費 ${index + 1} の保存`} disabled={disabled || saveDisabled} onClick={() => { if (!disabled && !saveDisabled) void onSave(); }}>保存</button>
+          <button type="button" className="button mini" aria-label={`追加経費 ${index + 1} の保存`} disabled={disabled || saveDisabled || Boolean(taxRateError)} onClick={() => { if (!disabled && !saveDisabled && !taxRateError) void onSave(); }}>保存</button>
         </div>
       </fieldset>
     </div>)}</div>
     {!rows.length && <p className="muted">追加で入力した経費はありません。</p>}
     {total !== undefined && <div className="right-total">追加入力経費計 <strong>{yen.format(total)}</strong></div>}
     {consumptionTax !== undefined && <div className="top-gap">
-      <Table headers={["勘定科目", "自動計上", "金額"]}><tr><td>その他</td><td>預かり消費税<br /><small>合計売上 × 3％（1円未満切り捨て）</small></td><td>{yen.format(consumptionTax)}</td></tr></Table>
+      <div className="actions" style={{ alignItems: "end" }}>
+        <Field label="預かり消費税率（％）" hint={`${month}だけに適用・0～100％、小数第2位まで`}><input className="input" type="text" inputMode="decimal" value={taxRateInput} disabled={disabled} aria-invalid={Boolean(taxRateError)} onChange={(event) => { if (!disabled) onTaxRateChange(event.target.value); }} /></Field>
+        <button type="button" className="button mini" aria-label="預かり消費税率を保存" disabled={disabled || saveDisabled || Boolean(taxRateError)} onClick={() => { if (!disabled && !saveDisabled && !taxRateError) void onSave(); }}>保存</button>
+      </div>
+      {taxRateError && <p className="text-danger">{taxRateError}</p>}
+      <p className="muted compact-text">税率は選択中の月に保存します。保存時は編集中の経理入力をまとめて保存します。</p>
+      <Table headers={["勘定科目", "自動計上", "金額"]}><tr><td>その他</td><td>預かり消費税<br /><small>合計売上 × {consumptionTaxRate}％（1円未満切り捨て）</small></td><td>{yen.format(consumptionTax)}</td></tr></Table>
       <p className="muted compact-text">預かり消費税は経費表の月末の日付行の下にある、日付がない行に表示します。</p>
     </div>}
   </Card>;

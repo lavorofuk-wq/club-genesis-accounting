@@ -64,7 +64,7 @@ function refresh(data: ExpenseExportInput): ExpenseExportInput {
     byCategory, dailyExpenseTotal, dispatchCast, dispatchStaff, dispatchFee, dispatchTotal, liquorDelivery, fixed, cardFee,
     total: dailyExpenseTotal + dispatchTotal + liquorDelivery + fixed + cardFee + accountingExpenseTotal + (consumptionTax ?? 0),
     ...(accountingExpenseInputs !== undefined || consumptionTax !== undefined
-      ? { accountingExpenseInputs: accountingExpenseInputs || [], accountingExpenseTotal, consumptionTax } : {}),
+      ? { accountingExpenseInputs: accountingExpenseInputs || [], accountingExpenseTotal, consumptionTax, consumptionTaxRate: data.adjustments.consumptionTaxRate ?? 3 } : {}),
   };
   const cash = sum(approved, (row) => row.sales.cashSales);
   const card = sum(approved, (row) => row.sales.cardSales);
@@ -479,6 +479,25 @@ describe("見本形式の月次経費XLSX", () => {
     expect(sheet.getCell("R46").master.address).toBe("P46");
     expect(sheet.pageSetup.printArea).toBe("A1:R46");
     expect(value(sheet, "P46")).toBe(105233 + 9123);
+    expectFormulaCachesToMatch(sheet);
+  });
+
+  it.each([[0, 0], [0.29, 870], [2.01, 6030], [3.5, 10500], [100, 300000]])("月別税率%s%%の保存税額を日付なし行・総支出へ一度反映する", async (rate, tax) => {
+    const data = input();
+    data.adjustments.consumptionTaxRate = rate;
+    data.results.expenses.consumptionTax = tax;
+    refresh(data);
+    const book = createMonthlyExpenseWorkbook(data, "未確定");
+    const restored = new ExcelJS.Workbook();
+    await restored.xlsx.load(await book.xlsx.writeBuffer());
+    const sheet = restored.worksheets[0];
+    expect(sheet.getCell("A33").value).toBeNull();
+    expect(sheet.getCell("N33").value).toBe("預かり消費税");
+    expect(value(sheet, "O33")).toBe(tax);
+    expect(value(sheet, "R33")).toBe(tax);
+    expect(value(sheet, "P45")).toBe(105233 + tax);
+    expect(value(sheet, "C43")).toBe(2222);
+    expect(value(sheet, "M36")).toBe(4400);
     expectFormulaCachesToMatch(sheet);
   });
 
