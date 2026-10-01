@@ -73,7 +73,7 @@ it("入店顧問料を0にした編集欄は空欄にせず0を表示する", ()
   drafts.set("common.casts.editing", { id: "cast-1", status: "active", name: "花子", legalName: "山田花子",
     introducerId: "intro-1", entryAdvisoryFee: 0, hourlyRates: { "2026-09": 3000 } });
   const introducer = { id: "intro-1", name: "紹介者", feeType: "sales10" as const, attendanceAdvisoryEnabled: false,
-    entryAdvisoryEnabled: true, createdAt: "2026-09-01", updatedAt: "2026-09-01" };
+    entryAdvisoryEnabled: true, note: "", createdAt: "2026-09-01", updatedAt: "2026-09-01" };
   const markup = renderToStaticMarkup(createElement(CommonForms, { section: "casts", data: { ...data, introducers: [introducer] }, user, busy: false, run }));
   expect(markup).toMatch(/入店顧問料<[^>]*><input[^>]*value="0"/);
 });
