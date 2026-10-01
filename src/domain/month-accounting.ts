@@ -37,7 +37,7 @@ import { sha256Hex } from "../lib/crypto-compat";
 import { resolveCastAccountingInputs, normalizeCastAccountingInputs, castAccountingInputTotals } from "./cast-accounting-inputs";
 import { normalizeCastSalesRankingRoster, type CastSalesRankingRoster } from "./cast-sales-ranking";
 
-export const MONTHLY_CALCULATION_VERSION = "2.44.0";
+export const MONTHLY_CALCULATION_VERSION = "2.46.3";
 export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 3 as const;
 
 export type IntroducerEntryEvent = {
@@ -850,7 +850,7 @@ export function introducerEntryEventConflicts(
     const cast = data.casts.find((row) => row.id === reward.id);
     if (!cast?.convertedFromTrialId || reward.advisoryDays !== 0 || !cast.hiredAt?.startsWith(month)) return [];
     const entry = storedEvents.find((event) => event.month === month && event.castId === cast.id);
-    if (!entry || reward.introducer?.id === entry.introducerId) return [];
+    if (!entry || entry.amount === 0 || reward.introducer?.id === entry.introducerId) return [];
     const aliases = new Set([cast.id, cast.convertedFromTrialId]);
     const event = introducerMonthEvents.filter((candidate) => candidate.month === month && aliases.has(candidate.castId))
       .sort(compareIntroducerMonthEventEffectiveOrder)
@@ -916,7 +916,7 @@ export function calculateIntroducerPayments(
         && cast.hiredAt?.startsWith(month)
         && cast.introducerId === event.introducerId
         && Number(cast.entryAdvisoryFee || 0) === event.amount;
-      if (!sameCurrentTerms || event.amount <= 0) return;
+      if (!sameCurrentTerms || event.amount < 0) return;
     }
     // 保存イベントを当時スナップショットとして優先し、後日の名称・報酬形態変更や削除で書き換えない。
     entries.set(event.castId, event);
@@ -984,7 +984,9 @@ export function calculateIntroducerPayments(
     );
     // 日次がある人物は、入店顧問料も含めて最後に保存された日次（または再設定イベント）の
     // snapshotを月全体へ適用する。保存イベントは月内に日次が一度もない入店キャスト専用。
-    const entryAdvisory = intro
+    // 明示した0円訂正は同じ紹介者の入店顧問料だけへ適用し、歩合・出勤顧問料は維持する。
+    const cancelledEntryFee = entry?.amount === 0 && entry.introducerId === intro?.id;
+    const entryAdvisory = cancelledEntryFee ? 0 : intro
       ? (hiredThisMonth && sameIntroducerEntryWithoutRegularAttendance
         ? entry!.amount
         : hiredThisMonth && intro.entryAdvisoryEnabled !== false ? intro.entryAdvisoryFee || 0 : 0)

@@ -101,7 +101,7 @@ function CastManager({ data, user, busy, run, onDirtyChange }: Props) {
           entryAdvisoryFee: selectedIntroducer?.entryAdvisoryEnabled ? editing.entryAdvisoryFee : undefined,
         });
       }}><option value="">紹介者なし</option>{data.introducers.map((row) => <option key={row.id} value={row.id}>{row.name}</option>)}</select></Field>
-      {editing.status !== "trial" && introducer && <div className="grid two">{introducer.attendanceAdvisoryEnabled && <Field label="1出勤あたり顧問料"><MoneyInput value={editing.attendanceAdvisoryFee || 0} onChange={(value) => setEditing({ ...editing, attendanceAdvisoryFee: value })} /></Field>}{introducer.entryAdvisoryEnabled && <Field label="入店顧問料"><MoneyInput value={editing.entryAdvisoryFee || 0} onChange={(value) => setEditing({ ...editing, entryAdvisoryFee: value })} /></Field>}</div>}
+      {editing.status !== "trial" && introducer && <div className="grid two">{introducer.attendanceAdvisoryEnabled && <Field label="1出勤あたり顧問料"><MoneyInput value={editing.attendanceAdvisoryFee || 0} onChange={(value) => setEditing({ ...editing, attendanceAdvisoryFee: value })} /></Field>}{introducer.entryAdvisoryEnabled && <Field label="入店顧問料"><MoneyInput showZero value={editing.entryAdvisoryFee ?? 0} onChange={(value) => setEditing({ ...editing, entryAdvisoryFee: value })} /><small>0円で保存すると、未確定の入店顧問料を取り消します。</small></Field>}</div>}
       <Field label="備考"><textarea className="input" rows={3} value={editing.note || ""} onChange={(e) => setEditing({ ...editing, note: e.target.value })} /></Field>
       <div className="actions"><button className="button" disabled={busy}>保存</button><button type="button" className="button secondary" onClick={() => setEditing(null)}>取消</button></div>
     </form></Modal>}

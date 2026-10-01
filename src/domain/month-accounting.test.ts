@@ -2540,3 +2540,26 @@ describe("月次会計ドメイン", () => {
     expect(withCommit).not.toBe(withoutEvent);
   });
 });
+
+
+describe("入店顧問料の0円訂正履歴", () => {
+  it.each(["2026-09-20T03:00:00.000Z", "2026-10-01T03:00:00.000Z"])("%sの訂正後は保存済み日次の旧顧問料だけを除外する", (updatedAt) => {
+    const member = cast({ introducerId: "introducer-1", entryAdvisoryFee: 0, convertedFromTrialId: "trial-1", updatedAt });
+    const day = approvedClosing({ casts: [dailyCast({ introducer: { id: "introducer-1", name: "紹介者A", feeType: "sales10",
+      attendanceAdvisoryEnabled: true, entryAdvisoryEnabled: true, attendanceAdvisoryFee: 500, entryAdvisoryFee: 30000 } })] });
+    const data = workspace({ casts: [member], introducers: [introducer()], closings: [day] });
+    const entry: IntroducerEntryEvent = { id: member.id, castId: member.id, castName: member.name, month,
+      hiredAt: member.hiredAt!, introducerId: "introducer-1", introducerName: "紹介者A", feeType: "sales10", amount: 0,
+      createdAt: member.createdAt, createdBy: "op-user", updatedAt, updatedBy: "op-user" };
+    const before = calculateMonthlyAccounting(data, month, adjustments()).introducerPayments[0];
+    const after = calculateMonthlyAccounting(data, month, adjustments(), [entry]).introducerPayments[0];
+    expect(before.entryAdvisory).toBe(30000);
+    expect(after).toMatchObject({ entryAdvisory: 0, attendanceAdvisory: before.attendanceAdvisory,
+      salesFee: before.salesFee, grossFee: before.grossFee, total: before.total - 30000 });
+    expect(day.casts[0].introducer!.entryAdvisoryFee).toBe(30000);
+    expect(calculateMonthlyAccounting({ ...data, closings: [] }, month, adjustments(), [entry]).introducerPayments).toEqual([]);
+    // 別紹介者の0円履歴は、日次に保存された紹介者の顧問料へ適用しない。
+    expect(calculateMonthlyAccounting(data, month, adjustments(), [{ ...entry, introducerId: "other" }])
+      .introducerPayments[0].entryAdvisory).toBe(30000);
+  });
+});
