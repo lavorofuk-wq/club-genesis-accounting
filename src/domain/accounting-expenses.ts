@@ -4,6 +4,11 @@ export const EXPENSE_LABELS: Record<ExpenseCategory, string> = {
   beautyTrial: "美容室手当", introduction: "紹介料", advertising: "広告等", supplies: "備品・消耗品他",
   entertainment: "交際費・プレゼント等", liquor: "酒代", transportOther: "交通費・その他",
 };
+/** 固定経費の新規入力で選択する科目。酒代・カード手数料は専用欄で入力する。 */
+export const FIXED_EXPENSE_ACCOUNTS: readonly string[] = ["賃料", "カラオケ", "おしぼり", "リースキン", "固定電話", "西部ガス", "USEN"];
+/** 経費表XLSXに常設する固定費の行。 */
+export const EXPENSE_WORKBOOK_FIXED_ACCOUNTS: readonly string[] = [...FIXED_EXPENSE_ACCOUNTS, "酒代", "カード決済手数料"];
+
 const object = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 const text = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;
 const date = (value: unknown): value is string => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)

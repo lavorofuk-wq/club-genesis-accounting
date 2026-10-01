@@ -9,6 +9,7 @@ function report(): BalanceExportReport {
   return {
     month: "2026-09", approvedDays: 2, castDailyAndAdvance: 3000, castTransport: 500,
     castWithholding: 123, castNet: 43877, employeeDaily: 1200, cardFee: 0, honShimeiSales: 180000, jonaiExtensionSales: 10000,
+    monthlyExpenses: { introducerPayment: 6500, expenses: 9000 },
     days: [
       {
         businessDate: "2026-09-02", cashSales: 100000, cardSales: 50000, totalSales: 150000,
@@ -20,7 +21,7 @@ function report(): BalanceExportReport {
         businessDate: "2026-09-20", cashSales: 20000, cardSales: 10000, totalSales: 30000,
         groups: 2, customers: 3, honShimeiCount: 1, jonaiCount: 2, dohanCount: 1, castCount: 2,
         castHourly: 18500, castSalesReward: 10500, dispatchCastCount: 1, dispatchCastPayment: 3000,
-        employeeGross: 7000, introducerPayment: 6500, expenses: 11000,
+        employeeGross: 7000, introducerPayment: 0, expenses: 2000,
       },
     ],
   };
@@ -141,8 +142,11 @@ describe("見本形式の月次収支XLSX", () => {
     expect(value(sheet, "Q4")).toBeCloseTo(23500 / 150000);
     expect(value(sheet, "U4")).toBeCloseTo(2000 / 150000);
     expect(value(sheet, "A22")).toBe(20);
-    expect(value(sheet, "S22")).toBe(6500);
-    expect(value(sheet, "V22")).toBe(-26500);
+    expect(value(sheet, "S22")).toBe(0);
+    expect(value(sheet, "S33")).toBe(6500);
+    expect(value(sheet, "T33")).toBe(9000);
+    expect(value(sheet, "V33")).toBe(-15500);
+    expect(value(sheet, "V22")).toBe(-11000);
     expect(value(sheet, "C3")).toBeNull();
     expect(value(sheet, "A33")).toBeNull();
   });
@@ -157,7 +161,8 @@ describe("見本形式の月次収支XLSX", () => {
     expect(value(sheet, "Q35")).toBeCloseTo(55500 / 180000);
     expect(value(sheet, "U35")).toBeCloseTo(13000 / 180000);
     expect(value(sheet, "Q34")).toBeCloseTo((23500 / 150000 + 32000 / 30000) / 2);
-    expect(value(sheet, "U34")).toBeCloseTo((2000 / 150000 + 11000 / 30000) / 2);
+    expect(value(sheet, "U34")).toBeCloseTo(13000 / 180000);
+    expect(sheet.getCell("U34").formula).toBe('IF(C35=0,"",T35/C35)');
     expect(sheet.getCell("Q35").value).toEqual({ formula: 'IF(C35=0,"",SUM(M35:N35,P35)/C35)', result: 55500 / 180000 });
     expect(value(sheet, "V35")).toBe(94500);
     expect(value(sheet, "V34")).toBe(47250);
@@ -271,7 +276,7 @@ describe("見本形式の月次収支XLSX", () => {
     expect(value(sheet, `A${Number(lastDay) + 2}`)).toBe(lastDay);
     expect(value(sheet, `C${Number(lastDay) + 2}`)).toBe(150000);
     if (Number(lastDay) < 31) expect(value(sheet, `A${Number(lastDay) + 3}`)).toBeNull();
-    expect(value(sheet, "L42")).toBe(`後期・カード入金／16日～${lastDay}日分`);
+    expect(value(sheet, `L${Number(lastDay) === 31 ? 43 : 42}`)).toBe(`後期・カード入金／16日～${lastDay}日分`);
   });
 
   it("保存後も数値・式・見本の結合セル・游ゴシック・印刷設定を保持する", async () => {
@@ -304,13 +309,14 @@ describe("見本形式の月次収支XLSX", () => {
     const data = report();
     // domainで計上済みの日付指定100円、未指定200円、月次預かり消費税5400円。
     data.days[0].expenses += 100;
-    data.days[1].expenses += 200 + 5400;
+    data.monthlyExpenses.expenses += 200 + 5400;
     mockedBuild.mockReturnValue(data);
     const restored = new ExcelJS.Workbook();
     await restored.xlsx.load(await createMonthlyBalanceWorkbook(input, "経費入力・預かり消費税あり").xlsx.writeBuffer());
     const sheet = restored.worksheets[0];
     expect(value(sheet, "T4")).toBe(2100);
-    expect(value(sheet, "T22")).toBe(16600);
+    expect(value(sheet, "T22")).toBe(2000);
+    expect(value(sheet, "T33")).toBe(14600);
     expect(sheet.getCell("T35").value).toEqual({ formula: "SUM(T3:T33)", result: 18700 });
     expect(sheet.getCell("U37").value).toEqual({ formula: "SUM(M35:N35,P35,R35:T35)", result: 91200 });
     expect(value(sheet, "V35")).toBe(88800);
@@ -320,6 +326,53 @@ describe("見本形式の月次収支XLSX", () => {
     expect(value(sheet, "S35")).toBe(6500);
     expect(value(sheet, "F37")).toBe(55500);
     expect(value(sheet, "R35")).toBe(10500);
+  });
+
+  it.each([["2026-02", 28], ["2028-02", 29], ["2026-04", 30], ["2026-12", 31]])("%sの平均直前へ月額費用を配置し、月末営業日・集計・数式を保つ", async (month, lastDay) => {
+    const data = report();
+    data.month = String(month);
+    data.days[1].businessDate = `${month}-${lastDay}`;
+    data.days[0].businessDate = `${month}-02`;
+    data.cardFee = 300;
+    data.additionalSales = 123;
+    data.cashFunding = { managedDays: 2, openingPersonalDebt: 10000, companyReplenishment: 20000,
+      personalReplenishment: 30000, companyTransfer: 5000, personalRepayment: 15000, closingPersonalDebt: 25000, netCashMovement: 40000 };
+    mockedBuild.mockReturnValue(data);
+    const before = structuredClone(data);
+    const restored = new ExcelJS.Workbook();
+    await restored.xlsx.load(await createMonthlyBalanceWorkbook(input, "月次確定済み 第2版").xlsx.writeBuffer());
+    const sheet = restored.worksheets[0];
+    const offset = lastDay === 31 ? 1 : 0;
+    const monthly = 33 + offset, average = 34 + offset, total = 35 + offset;
+    expect(value(sheet, `A${Number(lastDay) + 2}`)).toBe(lastDay);
+    expect(value(sheet, `T${Number(lastDay) + 2}`)).toBe(2000);
+    expect(value(sheet, `S${Number(lastDay) + 2}`)).toBe(0);
+    expect(value(sheet, `A${monthly}`)).toBeNull();
+    expect(value(sheet, `A${average}`)).toBe("平均");
+    expect(value(sheet, `S${monthly}`)).toBe(6500);
+    expect(value(sheet, `T${monthly}`)).toBe(9000);
+    expect(value(sheet, `V${monthly}`)).toBe(-15500);
+    for (const column of ["C", "D", "E", "F", "G", "H", "L", "M", "N", "O", "P", "Q", "R", "U"]) {
+      expect(value(sheet, `${column}${monthly}`)).toBeNull();
+    }
+    expect(sheet.getCell(`T${total}`).value).toEqual({ formula: `SUM(T3:T${monthly})`, result: 13000 });
+    expect(sheet.getCell(`V${total}`).value).toEqual({ formula: `SUM(V3:V${monthly})`, result: 94500 });
+    expect(value(sheet, `T${average}`)).toBe(6500);
+    expect(value(sheet, `S${average}`)).toBe(3250);
+    expect(value(sheet, `V${average}`)).toBe(47250);
+    expect(value(sheet, `U${average}`)).toBeCloseTo(13000 / 180000);
+    expect(sheet.getCell(`T${average}`).formula).toBe(`IF($D$${36 + offset}=0,"",T${total}/$D$${36 + offset})`);
+    expect(sheet.getCell(`M${38 + offset}`).formula).toBe(`SUM(D${total},J${42 + offset},O${42 + offset})-U${37 + offset}+N${36 + offset}+300+SUM(J${43 + offset},O${43 + offset},J${44 + offset})-O${44 + offset}`);
+    expect(value(sheet, `M${38 + offset}`)).toBe(75300);
+    expect(value(sheet, `V${39 + offset}`)).toBe(94500);
+    expect(value(sheet, `U${37 + offset}`)).toBe(85500);
+    expect(value(sheet, `D${44 + offset}`)).toBe(190123);
+    expect(sheet.getCell(`D${44 + offset}`).formula).toBe(`SUM(D${42 + offset}:D${43 + offset},D${45 + offset})`);
+    expect(sheet.getCell(`W${46 + offset}`).master.address).toBe(`U${46 + offset}`);
+    expect(sheet.getCell(`K${42 + offset}`).master.address).toBe(`J${42 + offset}`);
+    expect(sheet.getCell(`J${42 + offset}`).dataValidation).toMatchObject({ type: "decimal", operator: "greaterThanOrEqual" });
+    expect(sheet.pageSetup.printArea).toBe(`A1:W${46 + offset}`);
+    expect(data).toEqual(before);
   });
 
   it("ドメイン検証で不整合とされた月次からXLSXを生成しない", () => {
