@@ -61,6 +61,7 @@ import {
 import { staffMonthlyRates } from "@/domain/staff-rates";
 import { validateAccountingExpenseInputs, validateConsumptionTaxRate } from "@/domain/accounting-expenses";
 import { castAccountingAttendanceSources, castAccountingInputTotals, normalizeCastAccountingInputs } from "@/domain/cast-accounting-inputs";
+import { buildCastSalesRankingRoster } from "@/domain/cast-sales-ranking";
 import { assertCashLedgerChange, cashDayIssues, cashFundingIssues, cashLedgerIssues, sameCashReconciliation } from "@/domain/cash-funding";
 
 export type WorkspaceData = AccountingWorkspaceData;
@@ -2502,6 +2503,7 @@ export async function finalizeAccountingMonth(
       current.data.closings,
       user.uid,
       startedAt,
+      buildCastSalesRankingRoster(currentResults, current.data.casts, month),
     );
     assertMonthlySnapshotMatchesCurrent(snapshot, recomputedSnapshot);
     await renewAccountingFinalizeLock(month, operationId, user);
@@ -2528,6 +2530,7 @@ export async function finalizeAccountingMonth(
       finalSources.data.closings,
       user.uid,
       startedAt,
+      buildCastSalesRankingRoster(finalResults, finalSources.data.casts, month),
     );
     assertMonthlySnapshotMatchesCurrent(storedSnapshot, finalRecomputedSnapshot);
     const closedAt = now();

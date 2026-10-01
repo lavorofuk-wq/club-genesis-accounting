@@ -20,6 +20,8 @@ import { IntroducerPayments } from "./introducer-payments";
 import { StaffPayroll } from "./staff-payroll";
 import { CastPayRatio } from "./cast-pay-ratio";
 import { CastReceiptExport } from "./cast-receipt-export";
+import { CastSalesRankingExport } from "./cast-sales-ranking-export";
+import { buildCastSalesRankingRoster } from "@/domain/cast-sales-ranking";
 import { IntroducerStatementExport } from "./introducer-statement-export";
 import { CastAccountingInputs } from "./cast-accounting-inputs";
 import { AccountingExpenseInputs } from "./accounting-expense-inputs";
@@ -233,6 +235,12 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
   const calculationsBlocked = !closed && (pendingLegacy.length > 0 || legacyDirty);
   const liveResults = useMemo(() => calculateMonthlyAccounting(data, month, calculationAdjustments, data.introducerEntryEvents), [calculationAdjustments, data, month]);
   const results = closed ? currentSnapshot : calculationsBlocked ? undefined : liveResults;
+  const rankingRoster = useMemo(() => {
+    if (!results) return { value: undefined, error: "" };
+    if (closed) return { value: currentSnapshot?.castSalesRankingRoster, error: "" };
+    try { return { value: buildCastSalesRankingRoster(results, [...data.casts, ...data.archivedCasts], month), error: "" }; }
+    catch (error) { return { value: undefined, error: error instanceof Error ? error.message : "順位表の在籍者名簿を確認してください。" }; }
+  }, [results, closed, currentSnapshot, data.casts, data.archivedCasts, month]);
   const approved = data.closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(month));
   const finalizeCheck = canFinalizeMonthlyAccounting(data, month, calculationAdjustments, true);
   const monthlyCashProblems = closed ? [] : cashLedgerIssues(data.closings, month);
@@ -240,11 +248,11 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
   const saveDisabled = busy || closed || state?.status === "closing" || adjustmentsStale || Boolean(expenseInputError) || Boolean(fixedExpenseError) || Boolean(consumptionTaxRateError) || !adjustmentsDirty;
   const save = () => saveDisabled ? Promise.resolve(false) : run(() => saveMonthlyAdjustments(calculationAdjustments, user), `${month}の経理入力を保存しました。`);
   const finalize = () => {
-    if (adjustmentsDirty || adjustmentsStale || calculationsBlocked || consumptionTaxRateError || fixedExpenseError || !finalizeCheck.allowed) return;
+    if (adjustmentsDirty || adjustmentsStale || calculationsBlocked || consumptionTaxRateError || fixedExpenseError || rankingRoster.error || !finalizeCheck.allowed) return;
     if (!window.confirm(`${month}を月次確定しますか？\n確定後は日次承認・差戻し・経理入力を変更できません。`)) return;
     void run(async () => {
       const fingerprint = await monthlySourceFingerprint(data, month, calculationAdjustments, data.introducerEntryEvents);
-      const snapshot = buildMonthlySnapshot(month, 0, fingerprint, calculationAdjustments, liveResults, data.closings, user.uid, new Date().toISOString());
+      const snapshot = buildMonthlySnapshot(month, 0, fingerprint, calculationAdjustments, liveResults, data.closings, user.uid, new Date().toISOString(), rankingRoster.value);
       await finalizeAccountingMonth(month, snapshot, state?.revision || 0, user);
     }, `${month}を月次確定しました。`);
   };
@@ -263,8 +271,9 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
     setMonth(nextMonth);
   };
   return <div className="grid">
-    <Card><div className="month-toolbar"><Field label="対象月"><input className="input" type="month" value={month} onChange={(event) => changeMonth(event.target.value)} /></Field><span>承認済み営業日 <strong>{results?.approvedDays ?? approved.length}日</strong></span>{state?.status === "closed" ? <StatusPill tone="good">月次確定済み 第{state.currentSnapshotRevision}版</StatusPill> : state?.status === "closing" ? <StatusPill tone="warn">月次確定処理中</StatusPill> : <StatusPill>未確定</StatusPill>}{!closed && state?.status !== "closing" && (section !== "castSales" || adjustmentsDirty) && <button className="button" disabled={saveDisabled} onClick={() => void save()}>経理入力を保存</button>}{!closed && state?.status !== "closing" && <button className="button secondary" disabled={busy || adjustmentsDirty || adjustmentsStale || calculationsBlocked || Boolean(consumptionTaxRateError) || Boolean(fixedExpenseError) || !finalizeCheck.allowed} onClick={finalize}>月次確定</button>}{state?.status === "closing" && <button className="button danger" disabled={busy} onClick={cancelClosing}>確定処理を中止</button>}{closed && <button className="button danger" disabled={busy} onClick={reopen}>確定解除</button>}</div></Card>
+    <Card><div className="month-toolbar"><Field label="対象月"><input className="input" type="month" value={month} onChange={(event) => changeMonth(event.target.value)} /></Field><span>承認済み営業日 <strong>{results?.approvedDays ?? approved.length}日</strong></span>{state?.status === "closed" ? <StatusPill tone="good">月次確定済み 第{state.currentSnapshotRevision}版</StatusPill> : state?.status === "closing" ? <StatusPill tone="warn">月次確定処理中</StatusPill> : <StatusPill>未確定</StatusPill>}{!closed && state?.status !== "closing" && (section !== "castSales" || adjustmentsDirty) && <button className="button" disabled={saveDisabled} onClick={() => void save()}>経理入力を保存</button>}{!closed && state?.status !== "closing" && <button className="button secondary" disabled={busy || adjustmentsDirty || adjustmentsStale || calculationsBlocked || Boolean(consumptionTaxRateError) || Boolean(fixedExpenseError) || Boolean(rankingRoster.error) || !finalizeCheck.allowed} onClick={finalize}>月次確定</button>}{state?.status === "closing" && <button className="button danger" disabled={busy} onClick={cancelClosing}>確定処理を中止</button>}{closed && <button className="button danger" disabled={busy} onClick={reopen}>確定解除</button>}</div></Card>
     {fixedExpenseError && <div className="notice error" role="alert">{fixedExpenseError}</div>}
+    {rankingRoster.error && <div className="notice error" role="alert">売上順位表：{rankingRoster.error} 名簿を保存できないため月次確定も停止しています。</div>}
     {consumptionTaxRateError && <div className="notice error" role="alert">預かり消費税：{consumptionTaxRateError}</div>}
     {expenseInputError && <div className="notice error" role="alert">経費入力：{expenseInputError}</div>}
     {adjustmentsStale && <div className="notice error" role="alert">別の操作で対象月の入力が更新されています。未保存の入力は保持しています。古い版からの上書きを防ぐため、保存・確定・出力を停止しています。<button className="button secondary mini top-gap" disabled={busy} onClick={() => { if (window.confirm("未保存の経理入力を破棄して、最新の対象月データを読み込みますか？")) setAdjustments(storedAdjustments); }}>未保存入力を破棄して最新データを表示</button></div>}
@@ -286,6 +295,17 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
         : !results ? "出力する月次データを読み込めません。"
         : results.warnings.length || (!closed && finalizeCheck.integrityIssues.length) ? "データの警告を解消してから出力してください。"
         : !results.castSalesReports.length ? "対象月の承認済みキャスト売上がありません。" : ""}
+    />}
+    {section === "castSales" && <CastSalesRankingExport
+      results={results} roster={rankingRoster.value} month={month}
+      sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
+      disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"
+        : adjustmentsStale ? "別の操作で月次入力が更新されています。最新データを確認してください。"
+        : adjustmentsDirty ? "未保存の経理入力を保存してください。"
+        : calculationsBlocked ? "ボトル区分を確認して保存してください。"
+        : !results ? "出力する月次データを読み込めません。"
+        : results.warnings.length || (!closed && finalizeCheck.integrityIssues.length) ? "データの警告を解消してから出力してください。"
+        : rankingRoster.error}
     />}
     {section === "castRewards" && <CastReceiptExport
       rows={results?.castRewards} reports={results?.castSalesReports} casts={data.casts} month={month}

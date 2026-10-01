@@ -7,6 +7,13 @@ const hooks = vi.hoisted(() => ({ refs: [] as unknown[], cursor: 0, effects: [] 
 vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react")>();
   return { ...actual,
+    useState: <T,>(initial: T | (() => T)) => {
+      const index = hooks.cursor++;
+      if (!(index in hooks.refs)) hooks.refs[index] = typeof initial === "function" ? (initial as () => T)() : initial;
+      return [hooks.refs[index], (value: T | ((previous: T) => T)) => {
+        hooks.refs[index] = typeof value === "function" ? (value as (previous: T) => T)(hooks.refs[index] as T) : value;
+      }];
+    },
     useRef: <T,>(initial: T) => {
       const index = hooks.cursor++;
       if (!(index in hooks.refs)) hooks.refs[index] = { current: initial };
@@ -267,7 +274,7 @@ describe("選択月の預かり消費税率入力", () => {
   });
 
   it("未保存税率の月移動には破棄確認を行いキャンセルで入力を保持する", () => {
-    vi.stubGlobal("window", { confirm: vi.fn(() => false) });
+    vi.stubGlobal("window", { confirm: vi.fn(() => false), location: { hostname: "localhost" } });
     const data = fixture(base);
     taxControls(render(data)).input!.props.onChange({ target: { value: "0." } });
     const tree = render(data);
