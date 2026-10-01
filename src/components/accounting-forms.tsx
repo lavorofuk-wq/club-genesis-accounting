@@ -22,7 +22,6 @@ import { CastPayRatio } from "./cast-pay-ratio";
 import { CastReceiptExport } from "./cast-receipt-export";
 import { CastSalesRankingExport } from "./cast-sales-ranking-export";
 import { buildCastSalesRankingRoster } from "@/domain/cast-sales-ranking";
-import { environmentRoot } from "@/lib/firebase/client";
 import { IntroducerStatementExport } from "./introducer-statement-export";
 import { CastAccountingInputs } from "./cast-accounting-inputs";
 import { AccountingExpenseInputs } from "./accounting-expense-inputs";
@@ -236,14 +235,12 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
   const calculationsBlocked = !closed && (pendingLegacy.length > 0 || legacyDirty);
   const liveResults = useMemo(() => calculateMonthlyAccounting(data, month, calculationAdjustments, data.introducerEntryEvents), [calculationAdjustments, data, month]);
   const results = closed ? currentSnapshot : calculationsBlocked ? undefined : liveResults;
-  const [rankingEnabled, setRankingEnabled] = useState(false);
-  useEffect(() => { setRankingEnabled(environmentRoot() === "accounting-dev"); }, []);
   const rankingRoster = useMemo(() => {
-    if (!rankingEnabled || !results) return { value: undefined, error: "" };
+    if (!results) return { value: undefined, error: "" };
     if (closed) return { value: currentSnapshot?.castSalesRankingRoster, error: "" };
     try { return { value: buildCastSalesRankingRoster(results, [...data.casts, ...data.archivedCasts], month), error: "" }; }
     catch (error) { return { value: undefined, error: error instanceof Error ? error.message : "順位表の在籍者名簿を確認してください。" }; }
-  }, [rankingEnabled, results, closed, currentSnapshot, data.casts, data.archivedCasts, month]);
+  }, [results, closed, currentSnapshot, data.casts, data.archivedCasts, month]);
   const approved = data.closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(month));
   const finalizeCheck = canFinalizeMonthlyAccounting(data, month, calculationAdjustments, true);
   const monthlyCashProblems = closed ? [] : cashLedgerIssues(data.closings, month);
@@ -255,7 +252,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
     if (!window.confirm(`${month}を月次確定しますか？\n確定後は日次承認・差戻し・経理入力を変更できません。`)) return;
     void run(async () => {
       const fingerprint = await monthlySourceFingerprint(data, month, calculationAdjustments, data.introducerEntryEvents);
-      const snapshot = buildMonthlySnapshot(month, 0, fingerprint, calculationAdjustments, liveResults, data.closings, user.uid, new Date().toISOString(), rankingEnabled ? rankingRoster.value : undefined);
+      const snapshot = buildMonthlySnapshot(month, 0, fingerprint, calculationAdjustments, liveResults, data.closings, user.uid, new Date().toISOString(), rankingRoster.value);
       await finalizeAccountingMonth(month, snapshot, state?.revision || 0, user);
     }, `${month}を月次確定しました。`);
   };
@@ -299,7 +296,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
         : results.warnings.length || (!closed && finalizeCheck.integrityIssues.length) ? "データの警告を解消してから出力してください。"
         : !results.castSalesReports.length ? "対象月の承認済みキャスト売上がありません。" : ""}
     />}
-    {section === "castSales" && rankingEnabled && <CastSalesRankingExport
+    {section === "castSales" && <CastSalesRankingExport
       results={results} roster={rankingRoster.value} month={month}
       sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
       disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"

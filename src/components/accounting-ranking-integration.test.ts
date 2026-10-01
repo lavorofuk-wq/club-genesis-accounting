@@ -1,4 +1,5 @@
-import type { ReactElement, ReactNode } from "react";
+import { createElement, type ReactElement, type ReactNode } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CastRecord, MonthlyAdjustments } from "@/domain/gms";
 import { buildMonthlySnapshot, calculateMonthlyAccounting, type AccountingWorkspaceData } from "@/domain/month-accounting";
@@ -98,17 +99,17 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("キャスト売上順位表の月次画面統合", () => {
-  it("初回描画は環境を推測せず非表示、dev判定後だけ表示する", () => {
-    const data = fixture();
-    expect(ranking(renderOnce(data))).toBeUndefined();
-    expect(ranking(renderOnce(data))).toBeDefined();
+  it.each([false, true])("本番・devとも初回描画から順位表と既存キャスト別売上出力を表示する（本番=%s）", (production) => {
+    hooks.production = production;
+    const tree = renderOnce(fixture());
+    expect(ranking(tree)).toBeDefined();
+    expect(elements(tree).filter((row) => row.type === CastSalesExport)).toHaveLength(1);
   });
 
-  it("本番では順位表を表示せず、既存キャスト別売上出力を維持する", () => {
-    hooks.production = true;
-    const tree = render(fixture());
-    expect(ranking(tree)).toBeUndefined();
-    expect(elements(tree).filter((row) => row.type === CastSalesExport)).toHaveLength(1);
+  it("SSRでも環境判定やeffectを待たず順位表を表示する", () => {
+    vi.stubGlobal("window", undefined);
+    const html = renderToStaticMarkup(createElement(AccountingForms, { section: "castSales", data: fixture(), user, busy: false, run }));
+    expect(html).toContain("売上順位表をXLSX出力");
   });
 
   it.each(["castRewards", "introducers", "staffPayroll", "driverPayroll", "expenses", "balance"] as Section[])("%s画面へ順位表ボタンを増やさない", (section) => {
@@ -129,7 +130,8 @@ describe("キャスト売上順位表の月次画面統合", () => {
     expect(original.props.disabledReason).toBe("対象月の承認済みキャスト売上がありません。");
   });
 
-  it("確定済み月は現在の名簿・名前・入店者を取り込まず保存名簿を出力する", () => {
+  it.each([false, true])("確定済み月は現在の名簿・名前・入店者を取り込まず保存名簿を出力する（本番=%s）", (production) => {
+    hooks.production = production;
     const data = fixture(); const snapshot = closeMonth(data, true);
     data.casts[0].name = "現在の名前";
     data.casts.push(cast("new", "後日登録された人"));
@@ -141,7 +143,8 @@ describe("キャスト売上順位表の月次画面統合", () => {
     expect(built.rows.map((row) => row.name)).toEqual(["確定時の名前"]);
   });
 
-  it("旧確定月の未保存名簿を現在のマスタから補わない", () => {
+  it.each([false, true])("旧確定月の未保存名簿を現在のマスタから補わない（本番=%s）", (production) => {
+    hooks.production = production;
     const data = fixture(); const snapshot = closeMonth(data, false);
     const before = structuredClone(snapshot);
     const output = ranking(render(data))!;
@@ -161,7 +164,7 @@ describe("キャスト売上順位表の月次画面統合", () => {
     expect(output.props.roster.entries.map((entry: { id: string }) => entry.id)).toEqual(["october", "zero"]);
   });
 
-  it.each([false, true])("確定payloadの名簿保存はdevのみ（本番=%s）", async (production) => {
+  it.each([false, true])("本番・devとも確定payloadに名簿を保存し金額は変えない（本番=%s）", async (production) => {
     hooks.production = production;
     const data = fixture(); const before = structuredClone(data);
     const tree = render(data);
@@ -170,14 +173,14 @@ describe("キャスト売上順位表の月次画面統合", () => {
     await vi.waitFor(() => expect(finalizeAccountingMonth).toHaveBeenCalledOnce());
     const [savedMonth, payload, revision, savedUser] = vi.mocked(finalizeAccountingMonth).mock.calls[0];
     expect(savedMonth).toBe(month); expect(revision).toBe(0); expect(savedUser).toBe(user);
-    if (production) expect(payload).not.toHaveProperty("castSalesRankingRoster");
-    else expect(payload.castSalesRankingRoster).toEqual({ schemaVersion: 1, entries: [{ id: "zero", name: "出勤なし" }] });
+    expect(payload.castSalesRankingRoster).toEqual({ schemaVersion: 1, entries: [{ id: "zero", name: "出勤なし" }] });
     expect(payload.castRewards).toEqual([]);
     expect(payload.castSalesReports).toEqual([]);
     expect(data).toEqual(before);
   });
 
-  it("devで名簿を検証できなければ順位表出力・確定の両方を止める", () => {
+  it.each([false, true])("名簿を検証できなければ順位表出力・確定の両方を止める（本番=%s）", (production) => {
+    hooks.production = production;
     const data = fixture(); delete data.casts[0].hiredAt;
     const tree = render(data);
     expect(ranking(tree)!.props.disabledReason).toContain("採用日を確認できない");
@@ -187,17 +190,8 @@ describe("キャスト売上順位表の月次画面統合", () => {
     expect(window.confirm).not.toHaveBeenCalled();
   });
 
-  it("名簿追加検証が本番の既存確定を阻害しない", async () => {
-    hooks.production = true;
-    const data = fixture(); delete data.casts[0].hiredAt;
-    const tree = render(data);
-    expect(finalize(tree).props.disabled).toBe(false);
-    finalize(tree).props.onClick();
-    await vi.waitFor(() => expect(finalizeAccountingMonth).toHaveBeenCalledOnce());
-    expect(vi.mocked(finalizeAccountingMonth).mock.calls[0][1]).not.toHaveProperty("castSalesRankingRoster");
-  });
-
-  it("devの空名簿も確定payloadへ保存し未保存と区別する", async () => {
+  it.each([false, true])("空名簿も確定payloadへ保存し未保存と区別する（本番=%s）", async (production) => {
+    hooks.production = production;
     const data = fixture(); data.casts = [];
     finalize(render(data)).props.onClick();
     await vi.waitFor(() => expect(finalizeAccountingMonth).toHaveBeenCalledOnce());

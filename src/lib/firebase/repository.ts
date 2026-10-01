@@ -2,7 +2,7 @@
 
 import { get, onValue, serverTimestamp, set, update, ref } from "firebase/database";
 import type { User } from "firebase/auth";
-import { database, environmentRoot, rootRef } from "./client";
+import { database, rootRef } from "./client";
 import { readOneShotValue } from "./one-shot-value";
 import { runReadyTransaction } from "./ready-transaction";
 import { assertCurrentClientRelease } from "../client-release";
@@ -2503,8 +2503,7 @@ export async function finalizeAccountingMonth(
       current.data.closings,
       user.uid,
       startedAt,
-      environmentRoot() === "accounting-dev"
-        ? buildCastSalesRankingRoster(currentResults, current.data.casts, month) : undefined,
+      buildCastSalesRankingRoster(currentResults, current.data.casts, month),
     );
     assertMonthlySnapshotMatchesCurrent(snapshot, recomputedSnapshot);
     await renewAccountingFinalizeLock(month, operationId, user);
@@ -2531,8 +2530,7 @@ export async function finalizeAccountingMonth(
       finalSources.data.closings,
       user.uid,
       startedAt,
-      environmentRoot() === "accounting-dev"
-        ? buildCastSalesRankingRoster(finalResults, finalSources.data.casts, month) : undefined,
+      buildCastSalesRankingRoster(finalResults, finalSources.data.casts, month),
     );
     assertMonthlySnapshotMatchesCurrent(storedSnapshot, finalRecomputedSnapshot);
     const closedAt = now();

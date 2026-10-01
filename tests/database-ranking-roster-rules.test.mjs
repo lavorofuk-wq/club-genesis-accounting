@@ -14,7 +14,7 @@ test("過去指紋の比較前に名簿ルールの全内容を厳密検証し�
     (node) => { node[".validate"] = "true"; },
     (node) => { node[".write"] = "true"; },
     (node) => { delete node.entries.$index.$field; },
-    (node) => { node.entries.$index[".validate"] = node.entries.$index[".validate"].replace("!== 'accounting-dev'", "!== 'accounting'"); },
+    (node) => { node.entries.$index[".validate"] = "$workspace !== 'accounting-dev' || (" + node.entries.$index[".validate"] + ")"; },
   ]) {
     const changed = structuredClone(original);
     modify(changed.$workspace.accountingMonthSnapshots.$month.$revision.castSalesRankingRoster);
@@ -49,28 +49,26 @@ function allows(value, workspace = "accounting-dev") {
 }
 const roster = (extra = {}) => ({ schemaVersion: 1, entries: [{ id: "cast:旧ID", name: "在籍" }], ...extra });
 
-test("dev: 名簿未保存・保存済み空名簿・正常名簿・数値キー配列を許可する", () => {
+for (const workspace of ["accounting-dev", "accounting"]) {
+test(`${workspace}: 名簿未保存・保存済み空名簿・正常名簿・数値キー配列を許可する`, () => {
   for (const value of [undefined, { schemaVersion: 1 }, { schemaVersion: 1, entries: [] }, roster(),
-    roster({ entries: { 0: { id: "cast_1", name: "在籍" } } })]) assert.equal(allows(value), true);
+    roster({ entries: { 0: { id: "cast_1", name: "在籍" } } })]) assert.equal(allows(value, workspace), true);
 });
-test("dev: 不正schema・型・ID・名前・未知項目を拒否する", () => {
+test(`${workspace}: 不正schema・型・ID・名前・未知項目を拒否する`, () => {
   for (const value of [1, "invalid", { schemaVersion: 2 }, { entries: [] }, roster({ entries: "invalid" }),
     roster({ unknown: true }), roster({ entries: [{ id: "", name: "名前" }] }),
     roster({ entries: [{ id: 12, name: "名前" }] }), roster({ entries: [{ id: "a", name: "" }] }),
     roster({ entries: [{ id: "a", name: " " }] }), roster({ entries: [{ id: "a", name: 12 }] }),
     roster({ entries: [{ id: "a", name: "名前", extra: true }] }),
     roster({ entries: { "bad-index": { id: "a", name: "名前" } } })]) {
-    assert.equal(allows(value), false, JSON.stringify(value));
+    assert.equal(allows(value, workspace), false, JSON.stringify(value));
   }
 });
-test("本番: 全階層をdev限定にして既存未知フィールドの許可動作へ制約を追加しない", () => {
-  for (const value of [1, "invalid", roster({ schemaVersion: 99 }), roster({ unknown: true }),
-    roster({ entries: "invalid" }), roster({ entries: { "bad-index": { id: 5, name: null, extra: true } } })]) {
-    assert.equal(allows(value, "accounting"), true, JSON.stringify(value));
-  }
+}
+test("名簿の全階層で本番・devを同じ条件で検証し、書込・読取権限を追加しない", () => {
   function check(node) {
     for (const [key, value] of Object.entries(node)) {
-      if (key === ".validate") assert.match(value, /^\$workspace !== 'accounting-dev' \|\| /);
+      if (key === ".validate") assert.doesNotMatch(value, /\$workspace/);
       else if (typeof value === "object") check(value);
     }
     assert.equal(Object.hasOwn(node, ".write"), false);

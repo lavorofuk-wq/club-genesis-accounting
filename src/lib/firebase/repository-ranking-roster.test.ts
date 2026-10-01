@@ -13,7 +13,7 @@ vi.mock("firebase/database", () => ({
   get: memory.get, ref: (_db: unknown, path: string) => ({ path }), set: vi.fn(), update: vi.fn(), serverTimestamp: vi.fn(),
   onValue: (_ref: unknown, callback: (snap: { val: () => number }) => void) => { callback({ val: () => 0 }); return () => undefined; },
 }));
-vi.mock("./client", () => ({ database: {}, environmentRoot: () => memory.environment,
+vi.mock("./client", () => ({ database: {},
   rootRef: (path = "") => ({ path: [memory.environment, path].filter(Boolean).join("/") }) }));
 vi.mock("./ready-transaction", () => ({ runReadyTransaction: memory.transaction }));
 vi.mock("../client-release", () => ({ assertCurrentClientRelease: vi.fn().mockResolvedValue(undefined) }));
@@ -32,7 +32,7 @@ const data = (): WorkspaceData => ({
   casts: Object.values(memory.values.get(scoped("casts")) as Record<string, CastRecord> ?? {}),
   staff: [], drivers: [], introducers: [], liquor: [], closings: [], adjustments: [], cashFloat: 0,
 });
-async function candidate(withRoster = memory.environment === "accounting-dev") {
+async function candidate(withRoster = true) {
   const current = data();
   const results = calculateMonthlyAccounting(current, month, adjustments);
   return buildMonthlySnapshot(month, 1, await monthlySourceFingerprint(current, month, adjustments), adjustments,
@@ -54,17 +54,23 @@ beforeEach(() => {
   });
 });
 
-describe("売上順位表名簿のdev確定保存", () => {
-  it("出勤0の在籍名簿を保存して読み戻せ、体入を加えず他の計算と本番を変更しない", async () => {
+describe.each(["accounting-dev", "accounting"])("売上順位表名簿の%s確定保存", (environment) => {
+  beforeEach(() => {
+    memory.environment = environment;
+    memory.values.set(scoped("casts"), { "cast-1": cast(), "cast-trial": cast({ id: "cast-trial", status: "trial" }) });
+  });
+  it("出勤0の在籍名簿を保存して読み戻せ、体入を加えず他の計算と別環境を変更しない", async () => {
     const source = await candidate();
-    memory.values.set("accounting/accountingMonthSnapshots/" + month + "/1", { unchanged: true });
+    const otherEnvironment = environment === "accounting" ? "accounting-dev" : "accounting";
+    const otherSnapshotPath = otherEnvironment + "/accountingMonthSnapshots/" + month + "/1";
+    memory.values.set(otherSnapshotPath, { unchanged: true });
     const masters = structuredClone(memory.values.get(scoped("casts")));
     await finalizeAccountingMonth(month, source, 0, user);
     const saved = normalizeMonthlyAccountingSnapshot(stored(), month, 1)!;
     expect(saved.castSalesRankingRoster).toEqual({ schemaVersion: 1, entries: [{ id: "cast-1", name: "出勤ゼロ" }] });
     for (const key of ["castRewards", "castSalesReports", "sales", "balance", "expenses"] as const) expect(saved[key]).toEqual(source[key]);
     expect(memory.values.get(scoped("casts"))).toEqual(masters);
-    expect(memory.values.get("accounting/accountingMonthSnapshots/" + month + "/1")).toEqual({ unchanged: true });
+    expect(memory.values.get(otherSnapshotPath)).toEqual({ unchanged: true });
     expect(memory.values.get(scoped("accountingMonthStates/" + month))).toMatchObject({ status: "closed" });
   });
   it("空名簿もschemaで保存済みと明示する", async () => {
@@ -72,11 +78,16 @@ describe("売上順位表名簿のdev確定保存", () => {
     await finalizeAccountingMonth(month, await candidate(), 0, user);
     expect(stored()).toMatchObject({ castSalesRankingRoster: { schemaVersion: 1, entries: [] } });
   });
-  it("本番の新規確定は従来どおり名簿metadataを追加しない", async () => {
-    memory.environment = "accounting";
-    memory.values.set(scoped("casts"), { "cast-1": cast() });
-    await finalizeAccountingMonth(month, await candidate(), 0, user);
+  it("名簿なしの既存確定世代は再確定時にも変更しない", async () => {
+    const oldSnapshot = await candidate(false);
+    memory.values.set(scoped("accountingMonthSnapshots/" + month), { 1: oldSnapshot });
+    memory.values.set(scoped("accountingMonthSnapshots/" + month + "/1"), oldSnapshot);
+    const revision = await finalizeAccountingMonth(month, await candidate(), 0, user);
+    expect(revision).toBe(2);
+    expect(stored()).toEqual(oldSnapshot);
     expect(stored()).not.toHaveProperty("castSalesRankingRoster");
+    expect(memory.values.get(scoped("accountingMonthSnapshots/" + month + "/2")))
+      .toMatchObject({ castSalesRankingRoster: { schemaVersion: 1, entries: [{ id: "cast-1", name: "出勤ゼロ" }] } });
   });
   it.each(["missing", "changed", "extra"])("入力名簿の%sを再計算と比較して保存前に拒否する", async (kind) => {
     const source = await candidate();
