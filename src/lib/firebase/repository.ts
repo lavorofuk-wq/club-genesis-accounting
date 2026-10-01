@@ -2,7 +2,7 @@
 
 import { get, onValue, serverTimestamp, set, update, ref } from "firebase/database";
 import type { User } from "firebase/auth";
-import { database, rootRef } from "./client";
+import { database, environmentRoot, rootRef } from "./client";
 import { readOneShotValue } from "./one-shot-value";
 import { runReadyTransaction } from "./ready-transaction";
 import { assertCurrentClientRelease } from "../client-release";
@@ -61,6 +61,7 @@ import {
 import { staffMonthlyRates } from "@/domain/staff-rates";
 import { validateAccountingExpenseInputs, validateConsumptionTaxRate } from "@/domain/accounting-expenses";
 import { castAccountingAttendanceSources, castAccountingInputTotals, normalizeCastAccountingInputs } from "@/domain/cast-accounting-inputs";
+import { buildCastSalesRankingRoster } from "@/domain/cast-sales-ranking";
 import { assertCashLedgerChange, cashDayIssues, cashFundingIssues, cashLedgerIssues, sameCashReconciliation } from "@/domain/cash-funding";
 
 export type WorkspaceData = AccountingWorkspaceData;
@@ -2502,6 +2503,8 @@ export async function finalizeAccountingMonth(
       current.data.closings,
       user.uid,
       startedAt,
+      environmentRoot() === "accounting-dev"
+        ? buildCastSalesRankingRoster(currentResults, current.data.casts, month) : undefined,
     );
     assertMonthlySnapshotMatchesCurrent(snapshot, recomputedSnapshot);
     await renewAccountingFinalizeLock(month, operationId, user);
@@ -2528,6 +2531,8 @@ export async function finalizeAccountingMonth(
       finalSources.data.closings,
       user.uid,
       startedAt,
+      environmentRoot() === "accounting-dev"
+        ? buildCastSalesRankingRoster(finalResults, finalSources.data.casts, month) : undefined,
     );
     assertMonthlySnapshotMatchesCurrent(storedSnapshot, finalRecomputedSnapshot);
     const closedAt = now();

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { withoutAccountingExpenseRules } from "./expense-rules-baseline-helper.mjs";
+import { withoutCastSalesRankingRosterRules } from "./ranking-roster-rules-baseline-helper.mjs";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import nodeTest from "node:test";
@@ -298,7 +299,7 @@ test("Rulesの新保護式は有効な構文で、入れ子の同名ワイルド
 }
 
 nodeTest("本番公開の変更は承認された18個の環境条件だけで、他の保護式を変更しない", () => {
-  const restored = withoutAccountingExpenseRules(rules), targets = [];
+  const restored = withoutAccountingExpenseRules(withoutCastSalesRankingRosterRules(rules)), targets = [];
   const base = ["$workspace", "accountingMonthSnapshots", "$month", "$revision"];
   targets.push(["$workspace", "accountingAdjustments", "$month", "castInputs", ".validate"]);
   for (const section of [["castSalesReports", "$index", "days", "$dayIndex"], ["castSalesReports", "$index", "totals"]]) {

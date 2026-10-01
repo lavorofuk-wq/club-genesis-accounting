@@ -35,6 +35,7 @@ import { cashLedgerIssues, summarizeCashFunding, type CashFundingSummary } from 
 import { STAFF_MONTHLY_RATES_START_MONTH, staffMonthlyRateForMonth } from "./staff-rates";
 import { sha256Hex } from "../lib/crypto-compat";
 import { resolveCastAccountingInputs, normalizeCastAccountingInputs, castAccountingInputTotals } from "./cast-accounting-inputs";
+import { normalizeCastSalesRankingRoster, type CastSalesRankingRoster } from "./cast-sales-ranking";
 
 export const MONTHLY_CALCULATION_VERSION = "2.44.0";
 export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 3 as const;
@@ -165,6 +166,8 @@ export type AccountingMonthState = {
 };
 
 export type MonthlyAccountingSnapshot = MonthlyAccountingResults & {
+  /** 売上順位表用の確定時名簿。旧確定には補完しない。 */
+  castSalesRankingRoster?: CastSalesRankingRoster;
   /** schema 1は旧形式、2は10円報酬、3は日別時給1円・売上/バック/売上報酬10円。 */
   schemaVersion: 1 | 2 | 3;
   calculationVersion: string;
@@ -487,6 +490,11 @@ export function normalizeMonthlyAccountingSnapshot(
 ): MonthlyAccountingSnapshot | undefined {
   if (!snapshotObject(value)) return undefined;
   const row = value as unknown as MonthlyAccountingSnapshot;
+  let castSalesRankingRoster: CastSalesRankingRoster | undefined;
+  try {
+    if (row.castSalesRankingRoster !== undefined) castSalesRankingRoster = normalizeCastSalesRankingRoster(row.castSalesRankingRoster);
+  } catch { return undefined; }
+  if (row.castSalesRankingRoster !== undefined && castSalesRankingRoster === undefined) return undefined;
   if ((row.schemaVersion !== 1 && row.schemaVersion !== 2 && row.schemaVersion !== 3) || row.month !== pathMonth || row.revision !== pathRevision
     || !Number.isSafeInteger(pathRevision) || pathRevision <= 0
     || typeof row.calculationVersion !== "string" || !row.calculationVersion
@@ -617,6 +625,7 @@ export function normalizeMonthlyAccountingSnapshot(
   return {
     ...row,
     revision: pathRevision,
+    ...(castSalesRankingRoster === undefined ? {} : { castSalesRankingRoster }),
     castSalesReports,
     castRewards: castRewards as CastReward[],
     introducerPayments: introducerPayments as IntroducerPaymentRow[],
@@ -1570,9 +1579,11 @@ export function buildMonthlySnapshot(
   closings: DailyClosing[],
   userId: string,
   createdAt: string,
+  castSalesRankingRoster?: CastSalesRankingRoster,
 ): MonthlyAccountingSnapshot {
   return {
     ...results,
+    ...(castSalesRankingRoster === undefined ? {} : { castSalesRankingRoster }),
     schemaVersion: MONTHLY_SNAPSHOT_SCHEMA_VERSION,
     calculationVersion: MONTHLY_CALCULATION_VERSION,
     month,
