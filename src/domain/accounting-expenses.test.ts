@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DEFAULT_CONSUMPTION_TAX_RATE, consumptionTaxForSales, normalizeAccountingExpenseInputs, validateAccountingExpenseInputs, validateConsumptionTaxRate } from "./accounting-expenses";
 import { normalizeMonthlyAdjustments, type AccountingExpenseInput, type DailyClosing, type MonthlyAdjustments, type WorkspaceData } from "./gms";
 import { calculateCashFunding, cashFundingContext } from "./cash-funding";
-import { buildMonthlySnapshot, calculateMonthlyAccounting, canFinalizeMonthlyAccounting, monthlySourceFingerprint, normalizeMonthlyAccountingSnapshot } from "./month-accounting";
+import { MONTHLY_CALCULATION_VERSION, buildMonthlySnapshot, calculateMonthlyAccounting, canFinalizeMonthlyAccounting, monthlySourceFingerprint, normalizeMonthlyAccountingSnapshot } from "./month-accounting";
 import { validateExpenseExport, type ExpenseExportInput } from "./expense-export";
 import { buildBalanceExportReport } from "./balance-export";
 
@@ -268,7 +268,7 @@ describe("月別の預かり消費税率", () => {
     adjustments.consumptionTaxRate = 0.29;
     input.results = calculateMonthlyAccounting(data, month, adjustments);
     const stored = snapshot(input);
-    expect(stored.calculationVersion).toBe("2.44.0");
+    expect(stored.calculationVersion).toBe(MONTHLY_CALCULATION_VERSION);
     expect(normalizeMonthlyAccountingSnapshot(stored, month, 1)).toEqual(stored);
     for (const rate of [undefined, null, 0.291, 5]) {
       const corrupted = structuredClone(stored);

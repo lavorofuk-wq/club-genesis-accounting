@@ -943,6 +943,31 @@ async function prepareEntryEventPlan(
   const operationMonth = Number.isFinite(Date.parse(next.updatedAt || ""))
     ? japanMonthFromTimestamp(next.updatedAt)
     : "";
+  const currentEntry = existing.find((row) => row.month === desiredMonth)?.event;
+  // 同じ採用日・紹介者の0円は、一回限りの入店顧問料の明示的な取消し。
+  // 履歴を消すだけでは、日次に保存済みの旧金額が再び採用されるため0円を残す。
+  const cancelsEntryFee = Boolean(before && desiredMonth && introducer && next.introducerId
+    && next.entryAdvisoryFee === 0
+    && before.hiredAt === next.hiredAt && before.introducerId === next.introducerId
+    && (!currentEntry || (currentEntry.hiredAt === next.hiredAt && currentEntry.introducerId === next.introducerId)));
+  if (cancelsEntryFee && introducer) {
+    if (currentEntry?.amount === 0) return {};
+    if (states[desiredMonth] && states[desiredMonth].status !== "open") {
+      // 元々0円で履歴もないキャストの名称・備考編集だけは妨げない。
+      if (financialFieldsUnchanged && !currentEntry) return {};
+      throw new Error(desiredMonth + "は月次確定処理中または確定済みのため、入店顧問料を変更できません。先に月次確定を解除してください。");
+    }
+    const eventTimestamp = nextEventTimestamp(next.updatedAt, currentEntry?.updatedAt);
+    const cancelled: IntroducerEntryEvent = {
+      ...(currentEntry || {
+        id: next.id, month: desiredMonth, hiredAt: next.hiredAt!, castId: next.id, castName: next.name,
+        introducerId: introducer.id, introducerName: introducer.name, feeType: introducer.feeType,
+        createdAt: eventTimestamp, createdBy: user.uid,
+      }),
+      amount: 0, updatedAt: eventTimestamp, updatedBy: user.uid,
+    };
+    return { ["introducerEntryEvents/" + desiredMonth + "/" + next.id]: cancelled };
+  }
   const unchangedHistoricalFee = Boolean(before
     && before.hiredAt === next.hiredAt
     && before.introducerId === next.introducerId
