@@ -1,6 +1,7 @@
 import ExcelJS from "exceljs/dist/exceljs.min.js";
 import { describe, expect, it } from "vitest";
-import type { CastReward, CastSalesDay, CastSalesReport } from "@/domain/gms";
+import { calculateCastRewards, calculateCastSalesReports } from "@/domain/gms";
+import type { CastRecord, CastReward, CastSalesDay, CastSalesReport, DailyCast, DailyClosing } from "@/domain/gms";
 import { createCastSalesWorkbook } from "./cast-sales";
 
 const day: CastSalesDay = {
@@ -37,6 +38,179 @@ const reward: CastReward = {
 const input = () => structuredClone({ castSalesReports: [report], castRewards: [reward] });
 
 describe("キャスト売上XLSX", () => {
+  it.each([false, true])("勤務時間の右へ対象月の適用時給を数値で保存する（体入のみ=%s）", async (trialOnly) => {
+    const data = input();
+    data.castRewards[0].trialOnly = trialOnly;
+    data.castRewards[0].appliedHourlyRates = [3500];
+    const before = structuredClone(data);
+    const book = createCastSalesWorkbook(data, "2026-09", "未確定");
+    const restored = new ExcelJS.Workbook();
+    await restored.xlsx.load(await book.xlsx.writeBuffer());
+    expect(book.worksheets[0].getCell("T1").value).toEqual({ formula: "E34", result: 4.25 / 24 });
+    // ExcelJSは時刻書式のキャッシュ値を再読込時にDateへ復元する。
+    expect(restored.worksheets[0].getCell("T1").result).toEqual(new Date("1899-12-30T04:15:00.000Z"));
+    for (const sheet of [book.worksheets[0], restored.worksheets[0]]) {
+      expect(sheet.getCell("R1").value).toBe("勤務時間");
+      expect(sheet.getCell("T1").formula).toBe("E34");
+      expect(sheet.getCell("W1").value).toBe("設定時給");
+      expect(sheet.getCell("X1").master.address).toBe("W1");
+      expect(sheet.getCell("Y1").value).toBe(3500);
+      expect(sheet.getCell("Z1").master.address).toBe("Y1");
+      expect(sheet.getCell("AA1").master.address).toBe("Y1");
+      expect(sheet.getCell("Y1").numFmt).toContain("円");
+      expect(sheet.getCell("Y1").font.name).toBe("Yu Gothic");
+      expect(sheet.getCell("Y1").formula).toBeUndefined();
+      expect(sheet.getCell("I36").value).toBe(12700);
+      expect(sheet.getCell("U44").value).toBe(17532);
+    }
+    expect(data).toEqual(before);
+  });
+
+  it("複数の実適用時給を昇順で併記し、配列・給与計算結果を変更しない", async () => {
+    const data = input();
+    data.castRewards[0].appliedHourlyRates = [3500, 2000];
+    const before = structuredClone(data);
+    const book = createCastSalesWorkbook(data, "2026-09", "月次確定済み 第2版");
+    const restored = new ExcelJS.Workbook();
+    await restored.xlsx.load(await book.xlsx.writeBuffer());
+    for (const sheet of [book.worksheets[0], restored.worksheets[0]]) {
+      expect(sheet.getCell("Y1").value).toBe("2,000円 / 3,500円");
+      expect(sheet.getCell("I36").value).toBe(12700);
+      expect(sheet.getCell("U44").value).toBe(17532);
+    }
+    expect(data).toEqual(before);
+  });
+
+  it.each(["未確定", "月次確定済み 第1版"])("%sの時給未保存を総時給報酬÷時間から推定せず—とする", async (sourceLabel) => {
+    const data = input();
+    const before = structuredClone(data);
+    const book = createCastSalesWorkbook(data, "2026-09", sourceLabel);
+    const restored = new ExcelJS.Workbook();
+    await restored.xlsx.load(await book.xlsx.writeBuffer());
+    expect(restored.worksheets[0].getCell("Y1").value).toBe("—");
+    expect(restored.worksheets[0].getCell("I36").value).toBe(12700);
+    expect(restored.worksheets[0].getCell("U44").value).toBe(17532);
+    expect(data).toEqual(before);
+  });
+
+  it.each([0, 1500.25])("保存済み時給%s円を欠損扱いや丸め直しせず保持する", async (hourlyRate) => {
+    const data = input();
+    data.castRewards[0].appliedHourlyRates = [hourlyRate];
+    const restored = new ExcelJS.Workbook();
+    await restored.xlsx.load(await createCastSalesWorkbook(data, "2026-09", "確定済み").xlsx.writeBuffer());
+    expect(restored.worksheets[0].getCell("Y1").value).toBe(hourlyRate);
+    expect(restored.worksheets[0].getCell("Y1").numFmt).toContain("円");
+    expect(restored.worksheets[0].getCell("I36").value).toBe(12700);
+  });
+
+  it.each([
+    ["空配列", []], ["null", null], ["数値", 3000], ["文字列", "3000"],
+    ["オブジェクト", { 0: 3000 }], ["文字列要素", ["3000"]],
+    ["負数", [-1]], ["NaN", [NaN]], ["Infinity", [Infinity]],
+    ["一部不正", [3000, NaN]], ["重複", [3000, 3000]], ["上限超過", [Number.MAX_SAFE_INTEGER + 1]],
+    ["疎配列", Array<number>(1)], ["一部疎配列", [3000, ...Array<number>(1)]],
+  ])("適用時給の%sを未保存に置換せず明示的に拒否する", (_label, appliedHourlyRates) => {
+    const data = input();
+    data.castRewards[0].appliedHourlyRates = appliedHourlyRates as number[];
+    const before = structuredClone(data);
+    expect(() => createCastSalesWorkbook(data, "2026-09", "確定済み")).toThrow(/時給|不一致/);
+    expect(data).toEqual(before);
+  });
+
+  it("設定時給の有無によって既存セル・式・列幅・行高・印刷設定を変更しない", async () => {
+    const original = input();
+    // 追加入力明細を含む場合でも日別W～AA列・下部明細の場所を保持する。
+    const additions = { additionalSales: 90000, additionalAllowance: 123, additionalTransportFee: 500 };
+    const accountingInputs = [
+      { id: "sales", castId: report.id, castName: report.name, kind: "sales" as const, label: "アフター売上", amount: 90000, businessDate: day.businessDate },
+      { id: "allowance", castId: report.id, castName: report.name, kind: "allowance" as const, label: "イベント手当", amount: 123, businessDate: day.businessDate },
+      { id: "transport", castId: report.id, castName: report.name, kind: "transport" as const, label: "追加送迎", amount: 500, businessDate: day.businessDate },
+    ];
+    for (const row of [original.castSalesReports[0].days[0], original.castSalesReports[0].totals]) {
+      Object.assign(row, additions, { totalSales: 140000, accountingInputs: structuredClone(accountingInputs) });
+    }
+    Object.assign(original.castRewards[0], additions, { transportFee: 1000, grossPay: 22155, netPay: 17155 });
+    const data = structuredClone(original);
+    data.castRewards[0].appliedHourlyRates = [2000, 3500];
+    const before = structuredClone(data);
+    const baseline = new ExcelJS.Workbook();
+    await baseline.xlsx.load(await createCastSalesWorkbook(original, "2026-09", "未確定").xlsx.writeBuffer());
+    const book = createCastSalesWorkbook(data, "2026-09", "未確定");
+    const restored = new ExcelJS.Workbook();
+    await restored.xlsx.load(await book.xlsx.writeBuffer());
+    const baseSheet = baseline.worksheets[0];
+    const sheet = restored.worksheets[0];
+    expect(sheet.pageSetup).toEqual(baseSheet.pageSetup);
+    expect(sheet.pageSetup).toMatchObject({
+      paperSize: 9, orientation: "landscape", fitToPage: true, fitToWidth: 1, fitToHeight: 0,
+      horizontalCentered: true, printArea: "B1:AA54", printTitlesRow: "1:2",
+      margins: { left: .25, right: .25, top: .35, bottom: .35, header: .15, footer: .15 },
+    });
+    expect(sheet.views).toEqual(baseSheet.views);
+    expect(sheet.headerFooter).toEqual(baseSheet.headerFooter);
+    expect(book.worksheets[0].columns.map((column) => column.width)).toEqual([3, 5, 8, 8, 9, 6, 12, 13, 6, 12, 13, 6, 12, 12, 12, 25, 25, 29, 13, 14, 12, 11, 11, 11, 11, 11, 11]);
+    expect(sheet.columns.map((column) => column.width)).toEqual(baseSheet.columns.map((column) => column.width));
+    expect(sheet.getRow(1).height).toBe(27);
+    expect(sheet.getRow(2).height).toBe(32);
+    expect(sheet.rowCount).toBe(baseSheet.rowCount);
+    expect(sheet.columnCount).toBe(27);
+    for (let row = 1; row <= sheet.rowCount; row++) {
+      expect(sheet.getRow(row).height).toBe(baseSheet.getRow(row).height);
+      for (let column = 1; column <= sheet.columnCount; column++) {
+        if (row === 1 && column >= 23) continue;
+        const actual = sheet.getCell(row, column);
+        const expected = baseSheet.getCell(row, column);
+        expect(actual.value, actual.address).toEqual(expected.value);
+        expect(actual.style, actual.address).toEqual(expected.style);
+        expect(actual.note, actual.address).toEqual(expected.note);
+        expect(actual.master.address, actual.address).toBe(expected.master.address);
+      }
+    }
+    expect(sheet.getCell("W4").value).toBe(1000);
+    expect(sheet.getCell("X4").value).toBe(500);
+    expect(sheet.getCell("Y4").value).toBe(2000);
+    expect(sheet.getCell("Z4").value).toBeNull();
+    expect(sheet.getCell("AA4").value).toBe(123);
+    expect(sheet.getCell("I42").formula).toBe("I39-I40-I41");
+    expect(sheet.getCell("I42").result).toBe(17155);
+    expect(data).toEqual(before);
+  });
+
+  it("体入から同月入店した実計算の体入時給と月度時給を出力し、未承認単価を混ぜない", async () => {
+    const month = "2026-09";
+    const member: CastRecord = {
+      id: "active", name: "花子", legalName: "", status: "active", hiredAt: "2026-09-03",
+      convertedFromTrialId: "trial", hourlyRates: { [month]: 3500, "2026-10": 9000 },
+      note: "", createdAt: "", updatedAt: "",
+    };
+    const trial: CastRecord = { ...member, id: "trial", status: "trial", convertedFromTrialId: undefined, convertedToCastId: member.id };
+    const daily = (overrides: Partial<DailyCast>): DailyCast => ({
+      masterId: member.id, posCastId: "pos", name: member.name, kind: "regular",
+      startTime: "20:00", endTime: "23:15", hours: 3.25, hourlyRate: 3000,
+      honShimeiCount: 0, banaiShimeiCount: 0, dohanCount: 0, dohanBack: 0,
+      honShimeiSales: 0, jonaiExtensionSales: 0, drinkSales: 0, drinkAllocations: [], bottles: [], liquorCost: 0,
+      beautyAllowance: 0, dailyPayment: 0, advancePayment: 0, transportFee: 0, ...overrides,
+    });
+    const closings = [
+      { id: "trial-day", businessDate: "2026-09-02", status: "approved", casts: [daily({ masterId: trial.id, kind: "trial", hourlyRate: 2000, hours: 2.25, endTime: "22:15", dailyPayment: 4500 })] },
+      { id: "active-day", businessDate: "2026-09-03", status: "approved", casts: [daily({})] },
+      { id: "pending-day", businessDate: "2026-09-04", status: "submitted", casts: [daily({ hourlyRate: 8000 })] },
+    ] as DailyClosing[];
+    const casts = [trial, member];
+    const data = { castRewards: calculateCastRewards(closings, casts, month), castSalesReports: calculateCastSalesReports(closings, casts, month) };
+    expect(data.castRewards).toHaveLength(1);
+    expect(data.castRewards[0]).toMatchObject({ id: member.id, appliedHourlyRates: [2000, 3500], trialOnly: false, hourlyPay: 15875, dailyPayment: 4500, netPay: 11375 });
+    const before = structuredClone(data);
+    const book = createCastSalesWorkbook(data, month, "承認済みデータ（未確定）");
+    const restored = new ExcelJS.Workbook();
+    await restored.xlsx.load(await book.xlsx.writeBuffer());
+    expect(restored.worksheets).toHaveLength(1);
+    expect(restored.worksheets[0].getCell("Y1").value).toBe("2,000円 / 3,500円");
+    expect(restored.worksheets[0].getCell("I36").value).toBe(15875);
+    expect(restored.worksheets[0].getCell("U44").value).toBe(11375);
+    expect(data).toEqual(before);
+  });
+
   it("指定の列・勤務時間・月合計・左右両方の給与を保存値どおり出力する", () => {
     const book = createCastSalesWorkbook(input(), "2026-09", "承認済みデータ（未確定）");
     const sheet = book.worksheets[0];

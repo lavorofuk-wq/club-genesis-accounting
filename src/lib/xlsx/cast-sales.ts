@@ -102,6 +102,20 @@ function sumCell(sheet: ExcelJS.Worksheet, column: string, result: number) {
   sheet.getCell(`${column}34`).value = { formula: `SUM(${column}3:${column}33)`, result };
 }
 
+/** 月次計算・確定時に保存した適用単価のみを表示し、報酬から逆算しない。 */
+function appliedHourlyRateValue(reward: CastReward): string | number {
+  const rates = reward.appliedHourlyRates;
+  if (rates === undefined) return "—";
+  if (!Array.isArray(rates) || !rates.length
+    || [...rates].some((rate) => !Number.isFinite(rate) || rate < 0 || rate > Number.MAX_SAFE_INTEGER)
+    || new Set(rates).size !== rates.length) {
+    throw new Error(`${reward.name}の適用時給データが不正です。元データを確認してください。`);
+  }
+  if (rates.length === 1) return rates[0];
+  return [...rates].sort((a, b) => a - b)
+    .map((rate) => `${rate.toLocaleString("ja-JP", { maximumFractionDigits: 15 })}円`).join(" / ");
+}
+
 function addPayroll(sheet: ExcelJS.Worksheet, reward: CastReward, report: CastSalesReport) {
   const hourlyAdopted = reward.adoptedSystem === "hourlyAndBack";
   mergeValue(sheet, "D35:K35", `時給＋バック${hourlyAdopted ? "（採用）" : "（比較用）"}`);
@@ -228,6 +242,11 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
     mergeValue(sheet, "R1:S1", "勤務時間");
     mergeValue(sheet, "T1:V1", { formula: "E34", result: report.totals.hours / 24 });
     sheet.getCell("T1").numFmt = '[h]"時間"mm"分"';
+    const hourlyRate = appliedHourlyRateValue(reward);
+    mergeValue(sheet, "W1:X1", "設定時給");
+    mergeValue(sheet, "Y1:AA1", hourlyRate);
+    sheet.getCell("Y1").numFmt = typeof hourlyRate === "number"
+      ? Number.isInteger(hourlyRate) ? '#,##0"円"' : '#,##0.###############"円"' : "@";
     const headings: Record<string, string> = {
       B: "日", C: "出勤", D: "退勤", E: "勤務時間", F: "本指", G: "バック", H: "本指売上",
       I: "場内", J: "バック", K: "場延売上", L: "同伴", M: "バック",

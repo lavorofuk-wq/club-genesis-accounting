@@ -41,9 +41,9 @@ import type { IntroducerEntryEvent } from "@/domain/month-accounting";
 const user = { uid: "test-op" } as User;
 const initialTime = "2026-09-02T03:00:00.000Z";
 const intro: IntroducerRecord = { id: "intro-1", name: "紹介者", feeType: "sales10", attendanceAdvisoryEnabled: true,
-  entryAdvisoryEnabled: true, createdAt: initialTime, updatedAt: initialTime };
+  entryAdvisoryEnabled: true, note: "", createdAt: initialTime, updatedAt: initialTime };
 const trial: CastRecord = { id: "trial-1", name: "花子", legalName: "山田花子", status: "trial", trialDate: "2026-09-01",
-  trialHourlyRate: 2000, hourlyRates: {}, introducerId: intro.id, createdAt: initialTime, updatedAt: initialTime };
+  trialHourlyRate: 2000, hourlyRates: {}, introducerId: intro.id, note: "", createdAt: initialTime, updatedAt: initialTime };
 const entryPath = (id: string) => "introducerEntryEvents/2026-09/" + id;
 const getCast = (id: string) => ({ ...structuredClone(memory.read("casts/" + id) as CastRecord), id });
 
