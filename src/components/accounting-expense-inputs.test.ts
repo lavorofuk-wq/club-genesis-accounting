@@ -165,3 +165,48 @@ describe("経費画面の月次入力との接続", () => {
     expect(run).not.toHaveBeenCalled();
   });
 });
+
+describe("固定経費の科目選択", () => {
+  const allowed = ["賃料", "カラオケ", "おしぼり", "リースキン", "固定電話", "西部ガス", "USEN"];
+  const fixedForm = (fixedExpenses: MonthlyAdjustments["fixedExpenses"], disabled = false, setAdjustments: Parameters<typeof Expenses>[0]["setAdjustments"] = noChange) => Expenses({
+    results, adjustments: { ...adjustments, fixedExpenses }, closings, disabled, saveDisabled: false, onSave: noSave, setAdjustments,
+  });
+
+  it("新規入力ではXLSXの7科目だけを選択でき、酒代とカード決済手数料は専用欄に残る", () => {
+    const node = fixedForm([{ id: "new", account: "", amount: 0 }]);
+    const select = field(node, "科目");
+    expect(select.type).toBe("select");
+    expect(select.props.value).toBe("");
+    expect(elements(select).filter((row) => row.type === "option").map((row) => row.props.value)).toEqual(["", ...allowed]);
+    expect(field(node, "酒代納品書分（月締め後は確定解除して修正）").type).toBe(MoneyInput);
+    expect(field(node, "カード決済手数料").type).toBe(MoneyInput);
+    expect(renderToStaticMarkup(node)).toContain("保存時は編集中の経理入力をまとめて保存します。");
+  });
+
+  it.each(["家賃", "酒代", "カード決済手数料", " ＵＳＥＮ ", "既存の自由科目"])("保存済み『%s』を変換せず既存科目として表示し、金額だけ編集できる", (account) => {
+    const original = [{ id: "legacy", account, amount: 1234 }];
+    let local = { ...adjustments, fixedExpenses: original };
+    const setAdjustments: Parameters<typeof Expenses>[0]["setAdjustments"] = (update) => { local = typeof update === "function" ? update(local) : update; };
+    const node = fixedForm(local.fixedExpenses, false, setAdjustments);
+    const select = field(node, "科目");
+    expect(select.props.value).toBe(account);
+    const options = elements(select).filter((row) => row.type === "option");
+    expect(options.map((row) => row.props.value)).toEqual(["", ...allowed, account]);
+    expect(options.at(-1)?.props.children).toEqual([account, "（既存科目）"]);
+    field(node, "金額").props.onChange(5678);
+    expect(local.fixedExpenses).toEqual([{ id: "legacy", account, amount: 5678 }]);
+    expect(original).toEqual([{ id: "legacy", account, amount: 1234 }]);
+  });
+
+  it("処理中・確定済みでは新規追加と科目変更をイベントでも停止する", () => {
+    const onChange = vi.fn();
+    const node = fixedForm([{ id: "fixed", account: "賃料", amount: 80000 }], true, onChange);
+    const select = field(node, "科目");
+    expect(select.props.disabled).toBe(true);
+    select.props.onChange({ target: { value: "カラオケ" } });
+    const add = find(node, (row) => row.type === "button" && row.props.children === "固定経費を追加");
+    expect(add.props.disabled).toBe(true);
+    add.props.onClick();
+    expect(onChange).not.toHaveBeenCalled();
+  });
+});

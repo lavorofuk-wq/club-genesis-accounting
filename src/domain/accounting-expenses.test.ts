@@ -97,11 +97,12 @@ describe("月次3%と追加経費の計算・帳票突合", () => {
     expect(consumptionTaxForSales(9999)).toBe(299);
     expect(consumptionTaxForSales(0)).toBe(0);
   });
-  it("追加入力は指定日へ、未指定と税は収支表の最終承認日へ一度配分する", () => {
+  it("追加入力は指定日へ、未指定と税は収支表の月次経費行へ一度計上する", () => {
     const { input } = fixture();
     const report = buildBalanceExportReport(input);
-    expect(report.days.map((day) => day.expenses)).toEqual([210, 110, 1989]);
-    expect(report.days.reduce((sum, day) => sum + day.expenses, 0)).toBe(input.results.balance.expenses);
+    expect(report.days.map((day) => day.expenses)).toEqual([210, 110, 110]);
+    expect(report.monthlyExpenses).toEqual({ expenses: 1879, introducerPayment: 0 });
+    expect(report.days.reduce((sum, day) => sum + day.expenses, 0) + report.monthlyExpenses.expenses).toBe(input.results.balance.expenses);
   });
   it("入力不正・指定日の差戻し・経費合計の上限超過を警告して確定を拒否する", () => {
     for (const kind of ["fraction", "returned", "overflow"]) {
@@ -171,7 +172,9 @@ describe("経費確定の保存と旧確定互換", () => {
     const before = structuredClone(input);
     expect(normalizeMonthlyAccountingSnapshot(input.snapshot, month, 1)).toEqual(input.snapshot);
     expect(() => validateExpenseExport(input)).not.toThrow();
-    expect(buildBalanceExportReport(input).days.map((day) => day.expenses)).toEqual([110, 110, 1490]);
+    const legacyReport = buildBalanceExportReport(input);
+    expect(legacyReport.days.map((day) => day.expenses)).toEqual([110, 110, 110]);
+    expect(legacyReport.monthlyExpenses).toEqual({ expenses: 1380, introducerPayment: 0 });
     expect(input).toEqual(before);
     expect(input.results.expenses.consumptionTax).toBeUndefined();
     const recalculated = calculateMonthlyAccounting(data, month, adjustments);
@@ -221,8 +224,9 @@ describe("月別の預かり消費税率", () => {
     expect(input.results.expenses.byCategory).toEqual(original.expenses.byCategory);
     expect(input.results.castRewards).toEqual(original.castRewards);
     expect(() => validateExpenseExport(input)).not.toThrow();
-    const dailyCosts = buildBalanceExportReport(input).days.map((day) => day.expenses);
-    expect(dailyCosts).toEqual([210, 110, 1690 + tax]);
+    const report = buildBalanceExportReport(input);
+    expect(report.days.map((day) => day.expenses)).toEqual([210, 110, 110]);
+    expect(report.monthlyExpenses).toEqual({ expenses: 1580 + tax, introducerPayment: 0 });
     const otherMonth = { ...adjustments, month: "2026-10", consumptionTaxRate: undefined, expenseInputs: [] };
     expect(calculateMonthlyAccounting(data, "2026-10", otherMonth).expenses.consumptionTaxRate).toBe(3);
   });

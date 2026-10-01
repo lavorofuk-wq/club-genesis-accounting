@@ -166,8 +166,9 @@ describe("収支帳票の月次突合", () => {
     legacy.results.warnings = [];
     legacy.snapshot = buildMonthlySnapshot(legacy.month, 1, "b".repeat(64), legacy.adjustments, structuredClone(legacy.results), legacy.closings, "accounting", "2026-09-30T12:00:00.000Z");
     legacy.snapshot.calculationVersion = "2.20.0"; removeNewExpensesForLegacy(legacy.snapshot); removeNewExpensesForLegacy(legacy.results);
-    const legacyDays = buildBalanceExportReport(legacy).days;
-    expect(report.days.map((day, index) => ({ ...day, expenses: day.expenses - (index === report.days.length - 1 ? data.results.expenses.consumptionTax! : 0) }))).toEqual(legacyDays);
+    const legacyReport = buildBalanceExportReport(legacy);
+    expect(report.days).toEqual(legacyReport.days);
+    expect(report.monthlyExpenses.expenses).toBe(legacyReport.monthlyExpenses.expenses + data.results.expenses.consumptionTax!);
     expect(report.castDailyAndAdvance).toBe(5000);
     expect(report.employeeDaily).toBe(6000);
     expect(data).toEqual(before);
@@ -259,13 +260,14 @@ describe("収支帳票の月次突合", () => {
     expect(() => buildBalanceExportReport(data)).toThrow("日別時給内訳がありません");
   });
 
-  it("最後の承認済み営業日に月額費用を置き、派遣支払をP/Rへ分離してGMS収支に一致する", () => {
+  it("月額費用・紹介者支払を月次経費行へ分離し、派遣支払と給与の日別配賦を維持する", () => {
     const data = fullInput();
     const before = structuredClone(data);
     const report = buildBalanceExportReport(data);
     expect(report.days.map((day) => day.businessDate)).toEqual(["2026-09-02", "2026-09-04"]);
-    expect(report.days.map((day) => day.introducerPayment)).toEqual([0, 4300]);
-    expect(report.days.map((day) => day.expenses)).toEqual([2034, 74934]);
+    expect(report.days.map((day) => day.introducerPayment)).toEqual([0, 0]);
+    expect(report.monthlyExpenses).toEqual({ expenses: 72900, introducerPayment: 4300 });
+    expect(report.days.map((day) => day.expenses)).toEqual([2034, 2034]);
     expect(report.days.map((day) => day.employeeGross)).toEqual([20000, 22000]);
     expect(report.days.map((day) => day.dispatchCastPayment)).toEqual([6000, 6000]);
     expect(report.days.map((day) => day.dispatchCastCount)).toEqual([3, 3]);
@@ -277,6 +279,31 @@ describe("収支帳票の月次突合", () => {
     expect(report.castTransport).toBe(1000);
     expect(report.castWithholding).toBe(333);
     expect(data).toEqual(before);
+  });
+  it("店舗登録の酒代・紹介料と日付指定経費は当日を維持し、未指定入力だけ月次行へ加える", () => {
+    const data = fullInput();
+    const before = buildBalanceExportReport(data);
+    const introductions = structuredClone(data.results.introducerPayments);
+    const day = data.closings.find((row) => row.businessDate === "2026-09-02")!;
+    day.expenses.push({ id: "daily-liquor", category: "liquor", payee: "当日酒代", amount: 300 },
+      { id: "daily-introduction", category: "introduction", payee: "当日紹介料", amount: 400 });
+    data.adjustments.expenseInputs = [
+      { id: "dated", category: "liquor", payee: "日付指定酒代", amount: 2000, businessDate: "2026-09-02" },
+      { id: "monthly", category: "transportOther", payee: "月次入力", amount: 500 },
+    ];
+    data.results = calculateMonthlyAccounting({ casts: [], staff: [], drivers: [], introducers: [], liquor: [],
+      closings: data.closings, adjustments: [data.adjustments], cashFloat: 200000 }, data.month, data.adjustments);
+    data.results.introducerPayments = introductions;
+    data.results.balance.introducer = 4300;
+    data.results.balance.totalCosts += 4300;
+    data.results.balance.profit -= 4300;
+    const source = structuredClone(data);
+    const report = buildBalanceExportReport(data);
+    expect(report.days.map((row) => row.expenses)).toEqual([4734, 2034]);
+    expect(report.days.map((row) => row.introducerPayment)).toEqual([0, 0]);
+    expect(report.monthlyExpenses).toEqual({ expenses: 73400, introducerPayment: 4300 });
+    expect(report.days.map(({ expenses: _expenses, ...row }) => row)).toEqual(before.days.map(({ expenses: _expenses, ...row }) => row));
+    expect(data).toEqual(source);
   });
   it("現金残高の展開式は各支払を1回だけ引き、実入金控除済みカード手数料を除く", () => {
     const data = fullInput();
@@ -299,9 +326,11 @@ describe("収支帳票の月次突合", () => {
     const before = structuredClone(data);
     const report = buildBalanceExportReport(data);
     expect(report.cardFee).toBe(data.results.expenses.cardFee);
-    expect(report.days.map((day) => day.expenses)).toEqual([2034, closed ? 65934 : 74934]);
+    expect(report.days.map((day) => day.expenses)).toEqual([2034, 2034]);
+    expect(report.monthlyExpenses).toEqual({ expenses: closed ? 63900 : 72900, introducerPayment: 4300 });
     const costs = report.days.reduce((sum, day) => sum + day.castHourly + day.castSalesReward
-      + day.dispatchCastPayment + day.employeeGross + day.introducerPayment + day.expenses, 0);
+      + day.dispatchCastPayment + day.employeeGross + day.introducerPayment + day.expenses, 0)
+      + report.monthlyExpenses.expenses + report.monthlyExpenses.introducerPayment;
     expect(costs).toBe(before.results.balance.totalCosts);
     expect(report.days.reduce((sum, day) => sum + day.totalSales, 0) - costs).toBe(before.results.balance.profit);
     expect(data).toEqual(before);
@@ -333,7 +362,9 @@ describe("収支帳票の月次突合", () => {
     data.adjustments.cardFee = 0;
     data.results = calculateMonthlyAccounting({ casts: [], staff: [], drivers: [], introducers: [], liquor: [],
       closings: [], adjustments: [data.adjustments], cashFloat: 200000 }, data.month, data.adjustments);
-    expect(buildBalanceExportReport(data).days).toEqual([]);
+    const report = buildBalanceExportReport(data);
+    expect(report.days).toEqual([]);
+    expect(report.monthlyExpenses).toEqual({ expenses: 0, introducerPayment: 0 });
     expect(buildBalanceExportReport(data).approvedDays).toBe(0);
   });
   it("未来月の承認前日次は含めず、月次確定時の日次の保存世代を突合する", () => {

@@ -3,6 +3,7 @@
 import ExcelJS from "exceljs/dist/exceljs.min.js";
 import { summarizeExpenseIntroducers, validateExpenseExport, type ExpenseExportInput } from "@/domain/expense-export";
 import type { ExpenseCategory } from "@/domain/gms";
+import { EXPENSE_WORKBOOK_FIXED_ACCOUNTS } from "@/domain/accounting-expenses";
 
 const font = { name: "Yu Gothic", size: 10 };
 // 既存保存値を再丸めしない。小数を含む旧データも表示から失わない。
@@ -56,7 +57,7 @@ export function createMonthlyExpenseWorkbook(input: ExpenseExportInput, sourceLa
   const sectionHeaderRow = 35 + rowOffset;
   const detailHeaderRow = 36 + rowOffset;
   const detailStart = 37 + rowOffset;
-  const fixed = ["賃料", "カラオケ", "おしぼり", "リースキン", "固定電話", "西部ガス", "USEN", "酒代", "カード決済手数料"]
+  const fixed = EXPENSE_WORKBOOK_FIXED_ACCOUNTS
     .map((account) => ({ account, amount: 0 }));
   for (const item of adjustments.fixedExpenses) {
     const account = normalizedAccount(item.account);

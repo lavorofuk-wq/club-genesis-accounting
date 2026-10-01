@@ -30,7 +30,7 @@ vi.mock("@/lib/firebase/repository", async (importOriginal) => ({
 import { saveMonthlyAdjustments } from "@/lib/firebase/repository";
 import { AccountingForms, Expenses, adjustmentSignature } from "./accounting-forms";
 import { AccountingExpenseInputs } from "./accounting-expense-inputs";
-import { Field } from "./ui";
+import { Card, Field } from "./ui";
 
 type Element = ReactElement<Record<string, any>>;
 const month = "2026-09";
@@ -42,7 +42,7 @@ function elements(node: ReactNode): Element[] {
   if (Array.isArray(node)) return node.flatMap(elements);
   if (!node || typeof node !== "object" || !("props" in node)) return [];
   const element = node as Element;
-  return [element, ...elements(element.props.children as ReactNode)];
+  return [element, ...elements(element.props.children as ReactNode), ...elements(element.props.action as ReactNode)];
 }
 const dirty = vi.fn();
 const run = vi.fn(async (action: () => Promise<unknown>) => { await action(); return true; });
@@ -325,5 +325,99 @@ describe("税率の連続入力", () => {
     expect(dirty).toHaveBeenLastCalledWith(false);
     const exportCard = elements(tree).find(row => row.props.input?.adjustments);
     expect(exportCard?.props.input.adjustments).not.toHaveProperty("consumptionTaxRateInput");
+  });
+});
+function fixedControls(tree: ReactNode) {
+  const section = elements(tree).find((row) => row.type === Expenses);
+  if (!section) throw new Error("経費画面が見つかりません。");
+  const card = elements(Expenses(section.props as Parameters<typeof Expenses>[0]))
+    .find((row) => row.type === Card && row.props.title === "固定経費・月締め調整");
+  if (!card) throw new Error("固定経費が見つかりません。");
+  const contents = elements(card);
+  return {
+    contents,
+    save: contents.find((row) => row.type === "button" && row.props.children === "固定経費を保存")!,
+    add: contents.find((row) => row.type === "button" && row.props.children === "固定経費を追加")!,
+    account: contents.find((row) => row.type === "select"),
+    field: (label: string) => contents.find((row) => row.type === Field && row.props.label === label)?.props.children as Element,
+  };
+}
+
+describe("固定経費セクションの保存", () => {
+  it("追加・科目選択・金額入力から共通月次APIへ保存し、返却revisionで未保存を解除する", async () => {
+    const data = fixture(base);
+    const initial = fixedControls(render(data));
+    expect(initial.save.props.disabled).toBe(true);
+    initial.add.props.onClick();
+    const pendingTree = render(data);
+    const pending = fixedControls(pendingTree);
+    expect(pending.account?.props.value).toBe("");
+    expect(pending.save.props.disabled).toBe(true);
+    expect(elements(pendingTree).some((row) => row.props.role === "alert" && row.props.children === "固定経費の科目と金額を確認してください。")).toBe(true);
+    pending.save.props.onClick();
+    expect(saveMonthlyAdjustments).not.toHaveBeenCalled();
+    pending.account!.props.onChange({ target: { value: "賃料" } });
+    fixedControls(render(data)).field("金額").props.onChange(80000);
+    const ready = fixedControls(render(data));
+    expect(ready.save.props.disabled).toBe(false);
+    expect(dirty).toHaveBeenLastCalledWith(true);
+    const local = hooks.drafts.get("accounting.monthly.adjustments") as MonthlyAdjustments;
+    expect(local.fixedExpenses).toEqual([{ id: expect.any(String), account: "賃料", amount: 80000 }]);
+    ready.save.props.onClick();
+    await vi.waitFor(() => expect(saveMonthlyAdjustments).toHaveBeenCalledExactlyOnceWith(local, { uid: "test" }));
+    const updated = fixture({ ...local, revision: 4 });
+    render(updated);
+    const saved = fixedControls(render(updated));
+    expect(hooks.drafts.get("accounting.monthly.adjustments")).toMatchObject({ revision: 4 });
+    expect(dirty).toHaveBeenLastCalledWith(false);
+    expect(saved.save.props.disabled).toBe(true);
+    saved.save.props.onClick();
+    expect(saveMonthlyAdjustments).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["酒代納品書分（月締め後は確定解除して修正）", "liquorDeliveryAmount"],
+    ["カード決済手数料", "cardFee"],
+  ] as const)("固定経費0行でも%sだけ変更して同じセクションから保存できる", async (label, key) => {
+    const data = fixture(base);
+    fixedControls(render(data)).field(label).props.onChange(1234);
+    const changed = fixedControls(render(data));
+    expect(changed.account).toBeUndefined();
+    expect(changed.save.props.disabled).toBe(false);
+    changed.save.props.onClick();
+    await vi.waitFor(() => expect(saveMonthlyAdjustments).toHaveBeenCalledExactlyOnceWith({ ...normalizeMonthlyAdjustments(base), [key]: 1234 }, { uid: "test" }));
+  });
+
+  it("最後の固定経費を削除した後もセクションの保存から空配列を保存する", async () => {
+    const stored = { ...base, fixedExpenses: [{ id: "last", account: "家賃", amount: 80000 }] };
+    const data = fixture(stored);
+    const controls = fixedControls(render(data));
+    controls.contents.find((row) => row.type === "button" && row.props.children === "削除")!.props.onClick();
+    const deleted = fixedControls(render(data));
+    expect(deleted.account).toBeUndefined();
+    expect(deleted.save.props.disabled).toBe(false);
+    deleted.save.props.onClick();
+    await vi.waitFor(() => expect(saveMonthlyAdjustments).toHaveBeenCalledExactlyOnceWith({ ...normalizeMonthlyAdjustments(stored), fixedExpenses: [] }, { uid: "test" }));
+  });
+
+  it.each(["invalidExpense", "invalidTax", "blankFixed", "negativeFixed", "stale", "closed", "closing", "busy", "unchanged"] as const)("%sでは固定経費の保存イベントも停止する", (condition) => {
+    const local: MonthlyAdjustments & { consumptionTaxRateInput?: string } = { ...inputDraft(), fixedExpenses: [{ id: "fixed", account: "賃料", amount: 8000 }] };
+    const data = fixture(condition === "unchanged" ? local : base);
+    render(data);
+    if (condition === "invalidExpense") local.expenseInputs![0].payee = "";
+    if (condition === "invalidTax") local.consumptionTaxRateInput = "2.";
+    if (condition === "blankFixed") local.fixedExpenses[0].account = "";
+    if (condition === "negativeFixed") local.fixedExpenses[0].amount = -1;
+    hooks.drafts.set("accounting.monthly.adjustments", local);
+    if (condition === "stale") data.adjustments = [{ ...base, revision: 4 }];
+    if (condition === "closed" || condition === "closing") {
+      data.monthStates = [{ month, status: condition, revision: 1, currentSnapshotRevision: 1, updatedAt: "2026-09-30", updatedBy: "test" }];
+      if (condition === "closed") data.monthSnapshots = [buildMonthlySnapshot(month, 1, "test", local, calculateMonthlyAccounting(data, month, local), [], "test", "2026-09-30T00:00:00.000Z")];
+    }
+    const controls = fixedControls(render(data, condition === "busy"));
+    expect(controls.save.props.disabled).toBe(true);
+    controls.save.props.onClick();
+    expect(run).not.toHaveBeenCalled();
+    expect(saveMonthlyAdjustments).not.toHaveBeenCalled();
   });
 });

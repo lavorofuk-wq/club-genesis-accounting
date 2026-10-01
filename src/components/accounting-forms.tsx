@@ -23,7 +23,7 @@ import { CastReceiptExport } from "./cast-receipt-export";
 import { IntroducerStatementExport } from "./introducer-statement-export";
 import { CastAccountingInputs } from "./cast-accounting-inputs";
 import { AccountingExpenseInputs } from "./accounting-expense-inputs";
-import { DEFAULT_CONSUMPTION_TAX_RATE, validateAccountingExpenseInputs, validateConsumptionTaxRate } from "@/domain/accounting-expenses";
+import { DEFAULT_CONSUMPTION_TAX_RATE, FIXED_EXPENSE_ACCOUNTS, validateAccountingExpenseInputs, validateConsumptionTaxRate } from "@/domain/accounting-expenses";
 
 type Props = { data: AccountingWorkspaceData; user: User; busy: boolean; run: (action: () => Promise<unknown>, message: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void };
 /** 税率の入力文字列はUI下書きで保持し、計算・保存・確定には数値だけを渡す。 */
@@ -220,6 +220,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
     try { validateAccountingExpenseInputs(adjustments.expenseInputs, month, data.closings); return ""; }
     catch (error) { return error instanceof Error ? error.message : "追加入力した経費を確認してください。"; }
   }, [adjustments.expenseInputs, closed, data.closings, month]);
+  const fixedExpenseError = !closed && adjustments.fixedExpenses.some((row) => !row.account.trim() || !Number.isFinite(row.amount) || row.amount < 0) ? "固定経費の科目と金額を確認してください。" : "";
   const consumptionTaxRateError = closed ? "" : consumptionTaxRateDraftError(adjustments);
   const adjustmentsStale = !closed && (adjustments.revision || 0) !== (storedAdjustments.revision || 0);
   useEffect(() => {
@@ -236,10 +237,10 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
   const finalizeCheck = canFinalizeMonthlyAccounting(data, month, calculationAdjustments, true);
   const monthlyCashProblems = closed ? [] : cashLedgerIssues(data.closings, month);
   const setMap = (key: "withholdingByCast" | "staffSalesAllowance" | "staffBottleAllowance" | "driverRemoteAllowance", id: string, value: number) => setAdjustments((row) => ({ ...row, [key]: { ...row[key], [id]: value } }));
-  const saveDisabled = busy || closed || state?.status === "closing" || adjustmentsStale || Boolean(expenseInputError) || Boolean(consumptionTaxRateError) || !adjustmentsDirty;
+  const saveDisabled = busy || closed || state?.status === "closing" || adjustmentsStale || Boolean(expenseInputError) || Boolean(fixedExpenseError) || Boolean(consumptionTaxRateError) || !adjustmentsDirty;
   const save = () => saveDisabled ? Promise.resolve(false) : run(() => saveMonthlyAdjustments(calculationAdjustments, user), `${month}の経理入力を保存しました。`);
   const finalize = () => {
-    if (adjustmentsDirty || adjustmentsStale || calculationsBlocked || consumptionTaxRateError || !finalizeCheck.allowed) return;
+    if (adjustmentsDirty || adjustmentsStale || calculationsBlocked || consumptionTaxRateError || fixedExpenseError || !finalizeCheck.allowed) return;
     if (!window.confirm(`${month}を月次確定しますか？\n確定後は日次承認・差戻し・経理入力を変更できません。`)) return;
     void run(async () => {
       const fingerprint = await monthlySourceFingerprint(data, month, calculationAdjustments, data.introducerEntryEvents);
@@ -262,7 +263,8 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
     setMonth(nextMonth);
   };
   return <div className="grid">
-    <Card><div className="month-toolbar"><Field label="対象月"><input className="input" type="month" value={month} onChange={(event) => changeMonth(event.target.value)} /></Field><span>承認済み営業日 <strong>{results?.approvedDays ?? approved.length}日</strong></span>{state?.status === "closed" ? <StatusPill tone="good">月次確定済み 第{state.currentSnapshotRevision}版</StatusPill> : state?.status === "closing" ? <StatusPill tone="warn">月次確定処理中</StatusPill> : <StatusPill>未確定</StatusPill>}{!closed && state?.status !== "closing" && (section !== "castSales" || adjustmentsDirty) && <button className="button" disabled={saveDisabled} onClick={() => void save()}>経理入力を保存</button>}{!closed && state?.status !== "closing" && <button className="button secondary" disabled={busy || adjustmentsDirty || adjustmentsStale || calculationsBlocked || Boolean(consumptionTaxRateError) || !finalizeCheck.allowed} onClick={finalize}>月次確定</button>}{state?.status === "closing" && <button className="button danger" disabled={busy} onClick={cancelClosing}>確定処理を中止</button>}{closed && <button className="button danger" disabled={busy} onClick={reopen}>確定解除</button>}</div></Card>
+    <Card><div className="month-toolbar"><Field label="対象月"><input className="input" type="month" value={month} onChange={(event) => changeMonth(event.target.value)} /></Field><span>承認済み営業日 <strong>{results?.approvedDays ?? approved.length}日</strong></span>{state?.status === "closed" ? <StatusPill tone="good">月次確定済み 第{state.currentSnapshotRevision}版</StatusPill> : state?.status === "closing" ? <StatusPill tone="warn">月次確定処理中</StatusPill> : <StatusPill>未確定</StatusPill>}{!closed && state?.status !== "closing" && (section !== "castSales" || adjustmentsDirty) && <button className="button" disabled={saveDisabled} onClick={() => void save()}>経理入力を保存</button>}{!closed && state?.status !== "closing" && <button className="button secondary" disabled={busy || adjustmentsDirty || adjustmentsStale || calculationsBlocked || Boolean(consumptionTaxRateError) || Boolean(fixedExpenseError) || !finalizeCheck.allowed} onClick={finalize}>月次確定</button>}{state?.status === "closing" && <button className="button danger" disabled={busy} onClick={cancelClosing}>確定処理を中止</button>}{closed && <button className="button danger" disabled={busy} onClick={reopen}>確定解除</button>}</div></Card>
+    {fixedExpenseError && <div className="notice error" role="alert">{fixedExpenseError}</div>}
     {consumptionTaxRateError && <div className="notice error" role="alert">預かり消費税：{consumptionTaxRateError}</div>}
     {expenseInputError && <div className="notice error" role="alert">経費入力：{expenseInputError}</div>}
     {adjustmentsStale && <div className="notice error" role="alert">別の操作で対象月の入力が更新されています。未保存の入力は保持しています。古い版からの上書きを防ぐため、保存・確定・出力を停止しています。<button className="button secondary mini top-gap" disabled={busy} onClick={() => { if (window.confirm("未保存の経理入力を破棄して、最新の対象月データを読み込みますか？")) setAdjustments(storedAdjustments); }}>未保存入力を破棄して最新データを表示</button></div>}
@@ -540,7 +542,7 @@ export function Expenses({ results, adjustments, setAdjustments, closings, close
   saveDisabled: boolean;
   onSave: () => Promise<boolean>;
 }) {
-  const addFixed = () => setAdjustments((row) => ({ ...row, fixedExpenses: [...row.fixedExpenses, { id: secureRandomUUID(), account: "", amount: 0 }] }));
+  const addFixed = () => { if (!disabled) setAdjustments((row) => ({ ...row, fixedExpenses: [...row.fixedExpenses, { id: secureRandomUUID(), account: "", amount: 0 }] })); };
   return <div className="grid">
     <Card title="当月経費データ" description="店舗から送信された日次経費の集計です。">
       <Table headers={["勘定科目", "金額"]}>{Object.entries(expenseLabels).map(([key, label]) => <tr key={key}><td>{label}</td><td>{yen.format(results.expenses.byCategory[key] || 0)}</td></tr>)}</Table>
@@ -560,9 +562,16 @@ export function Expenses({ results, adjustments, setAdjustments, closings, close
       taxRateError={closed ? "" : consumptionTaxRateDraftError(adjustments)}
       onTaxRateChange={(text) => { if (!disabled && !closed) setAdjustments((row) => changeConsumptionTaxRateDraft(row, text)); }}
       disabled={disabled} saveDisabled={saveDisabled} onSave={onSave} onChange={(update) => setAdjustments((row) => ({ ...row, expenseInputs: update(row.expenseInputs || []) }))} />
-    <Card title="固定経費・月締め調整" action={!disabled ? <button className="button secondary" onClick={addFixed}>固定経費を追加</button> : null}>
+    <Card title="固定経費・月締め調整" description="科目を選択して金額を入力します。保存時は編集中の経理入力をまとめて保存します。" action={<div className="actions">
+      <button type="button" className="button secondary" disabled={disabled} onClick={addFixed}>固定経費を追加</button>
+      <button type="button" className="button" disabled={disabled || saveDisabled} onClick={() => { if (!disabled && !saveDisabled) void onSave(); }}>固定経費を保存</button>
+    </div>}>
       <div className="stack">{adjustments.fixedExpenses.map((row) => <div className="grid form-row" key={row.id}>
-        <Field label="科目"><input className="input" disabled={disabled} value={row.account} onChange={(event) => setAdjustments((value) => ({ ...value, fixedExpenses: value.fixedExpenses.map((item) => item.id === row.id ? { ...item, account: event.target.value } : item) }))} /></Field>
+        <Field label="科目"><select className="input" disabled={disabled} value={row.account} onChange={(event) => { if (!disabled) setAdjustments((value) => ({ ...value, fixedExpenses: value.fixedExpenses.map((item) => item.id === row.id ? { ...item, account: event.target.value } : item) })); }}>
+          <option value="">科目を選択してください</option>
+          {FIXED_EXPENSE_ACCOUNTS.map((account) => <option key={account} value={account}>{account}</option>)}
+          {row.account && !FIXED_EXPENSE_ACCOUNTS.includes(row.account) && <option value={row.account}>{row.account}（既存科目）</option>}
+        </select></Field>
         <Field label="金額"><MoneyInput value={row.amount} disabled={disabled} onChange={(amount) => setAdjustments((value) => ({ ...value, fixedExpenses: value.fixedExpenses.map((item) => item.id === row.id ? { ...item, amount } : item) }))} /></Field>
         {!disabled && <button className="button danger compact" onClick={() => setAdjustments((value) => ({ ...value, fixedExpenses: value.fixedExpenses.filter((item) => item.id !== row.id) }))}>削除</button>}
       </div>)}</div>
