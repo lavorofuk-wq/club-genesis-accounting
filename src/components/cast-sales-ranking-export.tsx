@@ -57,7 +57,7 @@ export function CastSalesRankingExport({ results, roster, month, sourceLabel, di
         import("@/lib/xlsx/cast-sales-ranking"), import("@/lib/xlsx/receipt-template"),
       ]);
       ensureCurrent();
-      const book = await createCastSalesRankingWorkbook(validation.ranking, month, sourceLabel);
+      const book = await createCastSalesRankingWorkbook(validation.ranking, month);
       ensureCurrent();
       const buffer = await book.xlsx.writeBuffer();
       ensureCurrent();

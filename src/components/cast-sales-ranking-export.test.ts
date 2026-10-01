@@ -81,12 +81,12 @@ beforeEach(() => {
 });
 
 describe("キャスト売上順位表の非同期出力", () => {
-  it("売上0円の在籍者も出力し、選択月・名簿・確定区分を生成処理へ渡す", async () => {
+  it("売上0円の在籍者も出力し、XLSX生成処理には確定区分の説明を渡さない", async () => {
     const value = props();
     button(render(value)).props.onClick();
     await vi.waitFor(() => expect(harness.download).toHaveBeenCalledOnce());
     expect(harness.build).toHaveBeenCalledWith(value.results, value.month, value.roster);
-    expect(harness.create).toHaveBeenCalledWith(harness.ranking, value.month, value.sourceLabel);
+    expect(harness.create).toHaveBeenCalledWith(harness.ranking, value.month);
     expect(harness.download).toHaveBeenCalledWith(new Uint8Array([1, 2, 3]), "GENESIS売上順位表_2026-09.xlsx");
     expect(notice(render(value))).toBe("2026-09の売上順位表を1名分出力しました。");
   });
@@ -108,7 +108,7 @@ describe("キャスト売上順位表の非同期出力", () => {
     expect(button(tree).props.disabled).toBe(false);
     button(tree).props.onClick();
     await vi.waitFor(() => expect(harness.download).toHaveBeenCalledOnce());
-    expect(harness.create).toHaveBeenCalledWith(harness.ranking, "2026-09", "確定済み");
+    expect(harness.create).toHaveBeenCalledWith(harness.ranking, "2026-09");
   });
 
   it("名簿が保存されている場合は旧確定月の警告を出さない", () => {

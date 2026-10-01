@@ -4,7 +4,6 @@ import ExcelJS from "exceljs/dist/exceljs.min.js";
 import type { CastSalesRanking } from "@/domain/cast-sales-ranking";
 
 export const CAST_SALES_RANKING_TEMPLATE_URL = "/templates/cast-sales-ranking-v1.xlsx";
-export const RANKING_ROSTER_MISSING_NOTE = "出勤0回の在籍者名簿は未保存です。保存済みの出勤者のみ掲載しています。";
 const font = { name: "Yu Gothic", size: 11, color: { argb: "FF223C49" } };
 const amountFormat = '#,##0;[Red]-#,##0;0';
 const decimalAmountFormat = '#,##0.###############;[Red]-#,##0.###############;0';
@@ -20,7 +19,7 @@ async function loadTemplate() {
 }
 
 /** GMSで検証済みの順位・保存値を転記する。給与や店舗の売上は変更しない。 */
-export async function createCastSalesRankingWorkbook(ranking: CastSalesRanking, month: string, sourceLabel: string) {
+export async function createCastSalesRankingWorkbook(ranking: CastSalesRanking, month: string) {
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error("対象月が正しくありません。");
   if (!ranking.rows.length) throw new Error("売上順位表に出力する在籍キャストがありません。");
   const book = new ExcelJS.Workbook();
@@ -33,8 +32,9 @@ export async function createCastSalesRankingWorkbook(ranking: CastSalesRanking, 
   book.creator = "GMS";
   book.title = `${year}年${selectedMonth}月 売上順位表`;
   sheet.getCell("A2").value = book.title;
-  sheet.getCell("A3").value = `${sourceLabel}　金額：円　勤務：時間　掲載：${ranking.rows.length}名`;
-  sheet.getCell("A4").value = ranking.rosterMissing ? RANKING_ROSTER_MISSING_NOTE : "本指名売上 ＋ 場内延長売上 ＋ 追加売上（原価控除前）の合計順";
+  // 説明・警告はGMS画面だけに表示する。セル位置と印刷寸法は維持する。
+  sheet.getCell("A3").value = null;
+  sheet.getCell("A4").value = null;
   const lastRow = 5 + ranking.rows.length;
   ranking.rows.forEach((entry, index) => {
     const rowNumber = index + 6;
