@@ -23,6 +23,7 @@ import { CastReceiptExport } from "./cast-receipt-export";
 import { CastSalesRankingExport } from "./cast-sales-ranking-export";
 import { buildCastSalesRankingRoster } from "@/domain/cast-sales-ranking";
 import { IntroducerStatementExport } from "./introducer-statement-export";
+import { PayrollExport } from "./payroll-export";
 import { CastAccountingInputs } from "./cast-accounting-inputs";
 import { AccountingExpenseInputs } from "./accounting-expense-inputs";
 import { DEFAULT_CONSUMPTION_TAX_RATE, FIXED_EXPENSE_ACCOUNTS, validateAccountingExpenseInputs, validateConsumptionTaxRate } from "@/domain/accounting-expenses";
@@ -235,6 +236,9 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
   const calculationsBlocked = !closed && (pendingLegacy.length > 0 || legacyDirty);
   const liveResults = useMemo(() => calculateMonthlyAccounting(data, month, calculationAdjustments, data.introducerEntryEvents), [calculationAdjustments, data, month]);
   const results = closed ? currentSnapshot : calculationsBlocked ? undefined : liveResults;
+  const payrollExportInput = useMemo(() => results ? {
+    results, closings: data.closings, month, snapshot: currentSnapshot, staff: data.staff, archivedStaff: data.archivedStaff,
+  } : undefined, [results, data.closings, month, currentSnapshot, data.staff, data.archivedStaff]);
   const rankingRoster = useMemo(() => {
     if (!results) return { value: undefined, error: "" };
     if (closed) return { value: currentSnapshot?.castSalesRankingRoster, error: "" };
@@ -319,6 +323,16 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
     />}
     {section === "introducers" && <IntroducerStatementExport
       results={results} month={month}
+      sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
+      disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"
+        : adjustmentsStale ? "別の操作で月次入力が更新されています。最新データを確認してください。"
+        : adjustmentsDirty ? "未保存の経理入力を保存してください。"
+        : calculationsBlocked ? "ボトル区分を確認して保存してください。"
+        : !results ? "出力する月次データを読み込めません。"
+        : results.warnings.length || (!closed && finalizeCheck.integrityIssues.length) ? "データの警告を解消してから出力してください。" : ""}
+    />}
+    {(section === "staffPayroll" || section === "driverPayroll") && <PayrollExport
+      kind={section === "staffPayroll" ? "staff" : "driver"} input={payrollExportInput} month={month}
       sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
       disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"
         : adjustmentsStale ? "別の操作で月次入力が更新されています。最新データを確認してください。"
