@@ -36,9 +36,10 @@ import { STAFF_MONTHLY_RATES_START_MONTH, staffMonthlyRateForMonth } from "./sta
 import { sha256Hex } from "../lib/crypto-compat";
 import { resolveCastAccountingInputs, normalizeCastAccountingInputs, castAccountingInputTotals } from "./cast-accounting-inputs";
 import { applyTransport, normalizeTransportMonth } from "./transport";
+import { applyBeautyAllowances, normalizeBeautyMonth } from "./beauty-allowance";
 import { normalizeCastSalesRankingRoster, type CastSalesRankingRoster } from "./cast-sales-ranking";
 
-export const MONTHLY_CALCULATION_VERSION = "2.49.1";
+export const MONTHLY_CALCULATION_VERSION = "2.50.0";
 export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 3 as const;
 
 export type IntroducerEntryEvent = {
@@ -1383,7 +1384,8 @@ export function calculateMonthlyAccounting(
   deletionCommits: IntroducerDeletionCommit[] = data.introducerDeletionCommits ?? [],
 ): MonthlyAccountingResults {
   const originalData = withArchivedMasters(data);
-  const transport = applyTransport(originalData, month, adjustments);
+  const beauty = applyBeautyAllowances(originalData, month);
+  const transport = applyTransport({ ...originalData, closings: beauty.closings }, month, adjustments);
   const calculationData = { ...originalData, closings: transport.closings };
   adjustments = transport.adjustments;
   const approved = calculationData.closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(month));
@@ -1461,6 +1463,7 @@ export function calculateMonthlyAccounting(
     balance: { ...balanceWithoutProfit, totalCosts, profit: sales.total - totalCosts },
     cashFunding,
     warnings: [...new Set([
+      ...beauty.issues,
       ...transport.issues,
       ...accountingExpenseIssues,
       ...resolveCastAccountingInputs(adjustments, calculationData.closings, calculationData.casts, month).issues,
@@ -1500,6 +1503,7 @@ export async function monthlySourceFingerprint(
     calculationVersion: MONTHLY_CALCULATION_VERSION,
     // UIの未作成月(undefined)と確定APIの空月を同じ入力として扱う。
     transport: normalizeTransportMonth(data.transportMonths?.[month]),
+    beauty: normalizeBeautyMonth(data.beautyMonths?.[month]),
     // updatedAtだけでなく計算へ入力される実値を含め、同一ミリ秒の更新や直接書込みも検出する。
     closings: calculationData.closings.filter((row) => row.businessDate.startsWith(month))
       .sort((left, right) => left.id.localeCompare(right.id)),
@@ -1541,7 +1545,8 @@ export function canFinalizeMonthlyAccounting(
   deletionCommits?: IntroducerDeletionCommit[],
 ) {
   const originalData = withArchivedMasters(data);
-  const transport = applyTransport(originalData, month, adjustments);
+  const beauty = applyBeautyAllowances(originalData, month);
+  const transport = applyTransport({ ...originalData, closings: beauty.closings }, month, adjustments);
   const calculationData = { ...originalData, closings: transport.closings };
   adjustments = transport.adjustments;
   const resolvedEntryEvents = entryEvents ?? data.introducerEntryEvents ?? [];
@@ -1565,6 +1570,7 @@ export function canFinalizeMonthlyAccounting(
     .filter(([, count]) => count > 1)
     .map(([businessDate]) => `${businessDate}の承認済み日次データが複数あります。重複データを差し戻してから確定してください。`);
   const integrityIssues = [
+    ...beauty.issues,
     ...transport.issues,
     ...resolveAccountingExpenses(adjustments, month, calculationData.closings).issues,
     ...resolveCastAccountingInputs(adjustments, calculationData.closings, calculationData.casts, month).issues,

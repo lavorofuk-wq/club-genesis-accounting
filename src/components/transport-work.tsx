@@ -74,7 +74,7 @@ export function TransportAmountChoices({ amounts = [...TRANSPORT_AMOUNTS], selec
       onClick={() => { if (!disabled) onSelect(amount); }}>{yen.format(amount)}{multiple && selected.includes(amount) && <span aria-hidden="true"> ✓</span>}</button>)}</div>;
 }
 
-function TransportModal({ title, children, busy, onClose }: { title: string; children: ReactNode; busy: boolean; onClose: () => void }) {
+export function TransportModal({ title, children, busy, onClose }: { title: string; children: ReactNode; busy: boolean; onClose: () => void }) {
   const ref = useRef<HTMLElement>(null); const titleId = useId();
   useEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;

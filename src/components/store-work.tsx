@@ -211,6 +211,41 @@ export function DailyTransportDraftRecovery({ conflicts, disabled, onRestore }: 
   </div>;
 }
 
+
+export type DailyBeautyDraftConflict = { index: number; name: string; draftAmount: number; storedAmount: number };
+
+/** 旧画面の再編集下書きに残った美容室手当の差分を、日次原本の本人対応で確認する。 */
+export function dailyBeautyDraftConflicts(initial: DailyClosing | null, rows: DailyCast[]): DailyBeautyDraftConflict[] {
+  if (!initial) return [];
+  const preserved = mergeReconciledDailyCastInputs(initial.casts || [], rows.map((row) => ({ ...row, beautyAllowance: 0 })), initial.posSnapshot).rows;
+  return rows.flatMap((row, index) => {
+    const storedAmount = preserved[index]?.beautyAllowance || 0;
+    return row.beautyAllowance === storedAmount ? [] : [{ index, name: row.name, draftAmount: row.beautyAllowance, storedAmount }];
+  });
+}
+
+export function restoreDailyBeautyDraftRows(initial: DailyClosing | null, rows: DailyCast[]): DailyCast[] {
+  const conflicts = new Map(dailyBeautyDraftConflicts(initial, rows).map((row) => [row.index, row.storedAmount]));
+  return rows.map((row, index) => conflicts.has(index) ? { ...row, beautyAllowance: conflicts.get(index)! } : row);
+}
+
+export function DailyBeautyDraftRecovery({ conflicts, disabled, onRestore }: {
+  conflicts: DailyBeautyDraftConflict[]; disabled: boolean; onRestore: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  if (!conflicts.length) return null;
+  const amounts = <Table headers={["キャスト", "復元した未保存入力", "保存済みの日次原本"]}>{conflicts.map((row) => <tr key={row.index}><td>{row.name}</td><td>{yen.format(row.draftAmount)}</td><td>{yen.format(row.storedAmount)}</td></tr>)}</Table>;
+  return <div className="notice warn">
+    <strong>美容室手当の旧未保存入力があります。</strong><p>日次の美容室手当は現在変更できません。未保存の可否を確認して日次原本の金額へ戻すと、再送できます。ほかの入力は保持します。</p>
+    {amounts}<button type="button" className="button secondary mini top-gap" disabled={disabled} onClick={() => { if (!disabled) setOpen(true); }}>旧未保存の美容室手当を確認</button>
+    {open && <Modal title="美容室手当の旧未保存入力を確認" disabled={disabled} onClose={() => setOpen(false)}>
+      <p>未保存の可否を控えてください。日次を送信した後、店舗作業の「美容室手当」で登録・変更してください。</p>
+      {amounts}<p>この下書きの美容室手当だけを、保存済み日次原本の金額へ戻します。体入美容室の経費・日払い・立替・売上などは変更しません。</p>
+      <div className="actions"><button type="button" className="button" disabled={disabled} onClick={() => { if (disabled) return; onRestore(); setOpen(false); }}>原本の美容室手当へ戻す</button><button type="button" className="button secondary" disabled={disabled} onClick={() => setOpen(false)}>入力を保持して戻る</button></div>
+    </Modal>}
+  </div>;
+}
+
 function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChange }: Props & { initial: DailyClosing | null; onFinished: () => void; onDirtyChange: (dirty: boolean) => void }) {
   // 再編集対象とその入力を同じキーで復元し、別営業日の下書きを混在させない。
   const draftKey = `store.workflow.${initial?.id || "new"}`;
@@ -554,7 +589,8 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     ? cashFundingIssues({ ...cash, funding: { ...cash.funding, confirmed: true } })
     : pos ? ["補充・返済の計算前提を確認できません。"] : [];
   const transportConflicts = dailyTransportDraftConflicts(initial, castRows);
-  const canConfirmCash = Boolean(transportConflicts.length === 0 && cash?.funding && cash.expectedClosingCash >= 0 && cashInputIssues.length === 0
+  const beautyConflicts = dailyBeautyDraftConflicts(initial, castRows);
+  const canConfirmCash = Boolean(transportConflicts.length === 0 && beautyConflicts.length === 0 && cash?.funding && cash.expectedClosingCash >= 0 && cashInputIssues.length === 0
     && contextConfirmed && (!cashChanged || cashRevisionReason.trim()) && !workflowLock && !duplicateMessage);
   const canSubmitCash = canConfirmCash && cashConfirmed;
   const visibleStage = stage === "preview" && !canSubmitCash ? "cash" : stage;
@@ -598,6 +634,11 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     <DailyTransportDraftRecovery conflicts={transportConflicts} disabled={busy || Boolean(workflowLock)} onRestore={() => {
       if (busy || workflowLock) return;
       setCastRows((rows) => restoreDailyTransportDraftRows(initial, rows));
+      setConfirmedCashKey(""); setStage("details"); setError("");
+    }} />
+    <DailyBeautyDraftRecovery conflicts={beautyConflicts} disabled={busy || Boolean(workflowLock)} onRestore={() => {
+      if (busy || workflowLock) return;
+      setCastRows((rows) => restoreDailyBeautyDraftRows(initial, rows));
       setConfirmedCashKey(""); setStage("details"); setError("");
     }} />
     {workflowLock && <div className="notice warn"><strong>この営業日は編集できません。</strong><br />{workflowLock}</div>}
@@ -660,7 +701,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     {stage === "details" && pos && !workflowLock && <div className="stack section-pad">
       {unmatchedCastDrafts.length > 0 && <div className="notice error"><strong>引継ぎ保留のキャスト入力があります</strong><p>POSキャストID・名前・区分の一致を確認できなかったため、別人への誤転記を防いで元の入力を保留しています。正しいJSONまたは照合内容を確認してください。</p><Table headers={["キャスト", "本指名売上", "場内延長売上", "美容室", "日払い", "立替", "送迎"]}>{unmatchedCastDrafts.map((row) => <tr key={`${row.posCastId}-${row.name}-${row.kind}`}><td>{row.name}<br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td><td>{yen.format(row.honShimeiSales)}</td><td>{yen.format(row.jonaiExtensionSales)}</td><td>{yen.format(row.beautyAllowance)}</td><td>{yen.format(row.dailyPayment)}</td><td>{yen.format(row.advancePayment)}</td><td>{yen.format(row.transportFee)}</td></tr>)}</Table><button className="button danger mini" onClick={() => { if (window.confirm("引継ぎ保留のキャスト入力を破棄しますか？破棄した値は現在の再編集画面へ戻せません。")) { setUnmatchedCastDrafts([]); setError(""); } }}>保留入力を確認済みとして破棄</button></div>}
       {invalidTrialBeautyExpenses.length > 0 && <div className="notice error">体入キャストとの紐付けを確認できない美容室手当経費があります。経費一覧から対象行を削除し、現在の体入キャストを選び直してください。</div>}
-      <h3>キャスト出勤・売上・手当控除</h3><Table headers={["キャスト", "勤務", "本指名", "場内", "同伴", "本指名売上", "場内延長売上", "ボトル/ドリンク", "美容室", "日払い", "立替", "送迎"]}>{castRows.map((row) => <tr key={row.posCastId}><td><strong>{row.name}</strong><br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td><td>{row.startTime}–{row.endTime}<br />{row.hours}時間</td><td>{row.honShimeiCount}本</td><td>{row.banaiShimeiCount}本</td><td>{row.dohanCount}本</td><td><MoneyInput value={row.honShimeiSales} step={10} onChange={(value) => updateCast(row.posCastId, { honShimeiSales: value })} /></td><td><MoneyInput value={row.jonaiExtensionSales} step={10} onChange={(value) => updateCast(row.posCastId, { jonaiExtensionSales: value })} /></td><td><CastProductSummary row={row} pos={pos} /></td><td><label className="check-row"><input type="checkbox" checked={row.beautyAllowance === 500} disabled={row.kind === "trial"} onChange={(e) => updateCast(row.posCastId, { beautyAllowance: e.target.checked ? 500 : 0 })} />500円</label></td><td><MoneyInput value={row.dailyPayment} onChange={(value) => updateCast(row.posCastId, { dailyPayment: value })} /></td><td><MoneyInput value={row.advancePayment} onChange={(value) => updateCast(row.posCastId, { advancePayment: value })} /></td><td>{yen.format(row.transportFee)}<br /><small>送迎画面で登録・編集</small></td></tr>)}</Table>
+      <h3>キャスト出勤・売上・手当控除</h3><Table headers={["キャスト", "勤務", "本指名", "場内", "同伴", "本指名売上", "場内延長売上", "ボトル/ドリンク", "美容室", "日払い", "立替", "送迎"]}>{castRows.map((row) => <tr key={row.posCastId}><td><strong>{row.name}</strong><br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td><td>{row.startTime}–{row.endTime}<br />{row.hours}時間</td><td>{row.honShimeiCount}本</td><td>{row.banaiShimeiCount}本</td><td>{row.dohanCount}本</td><td><MoneyInput value={row.honShimeiSales} step={10} onChange={(value) => updateCast(row.posCastId, { honShimeiSales: value })} /></td><td><MoneyInput value={row.jonaiExtensionSales} step={10} onChange={(value) => updateCast(row.posCastId, { jonaiExtensionSales: value })} /></td><td><CastProductSummary row={row} pos={pos} /></td><td>{row.beautyAllowance > 0 && <>{yen.format(row.beautyAllowance)}<br /><small>旧日次入力を保持</small><br /></>}<small>{row.kind === "trial" ? "当日経費で登録" : "美容室手当画面で登録・編集"}</small></td><td><MoneyInput value={row.dailyPayment} onChange={(value) => updateCast(row.posCastId, { dailyPayment: value })} /></td><td><MoneyInput value={row.advancePayment} onChange={(value) => updateCast(row.posCastId, { advancePayment: value })} /></td><td>{yen.format(row.transportFee)}<br /><small>送迎画面で登録・編集</small></td></tr>)}</Table>
       <h3>スタッフ勤務・日払い</h3><p className="muted compact-text">登録時時給は店舗入力時の保存値です。在籍スタッフの未確定月（2026年9月以降）は月度時給で給与計算します。</p><div className="grid form-row"><Field label="スタッフ"><select className="input" value={staffId} onChange={(e) => setStaffId(e.target.value)}><option value="">選択</option>{staffCandidates.map((row) => <option key={row.id} value={row.id}>{row.name}（{row.status === "trial" ? "体入" : "在籍"}）</option>)}</select></Field><Field label="出勤"><input className="input" type="time" value={staffStart} onChange={(e) => setStaffStart(e.target.value)} /></Field><Field label="退勤"><input className="input" type="time" value={staffEnd} onChange={(e) => setStaffEnd(e.target.value)} /></Field><button className="button compact" onClick={addStaff}>追加</button></div><Table headers={["スタッフ", "区分", "出勤", "退勤", "勤務", "登録時時給", "日払い", "操作"]}>{staffWork.map((row) => <tr key={row.staffId}><td>{row.name}</td><td>{row.kind === "trial" ? "体入" : "在籍"}</td><td>{row.startTime}</td><td>{row.endTime}</td><td>{row.hours}時間</td><td>{yen.format(row.hourlyRate)}</td><td><MoneyInput value={row.dailyPayment} disabled={row.kind === "trial"} onChange={(value) => setStaffWork((rows) => rows.map((item) => item.staffId === row.staffId ? { ...item, dailyPayment: value } : item))} />{row.kind === "trial" && <small>{initial?.staffWork.some((recorded) => recorded.staffId === row.staffId) ? "保存済みの日払い額を保持（時給給与との差額は月次精算）" : "基本給与全額を即日払い"}</small>}</td><td><button className="button danger mini" onClick={() => setStaffWork((rows) => rows.filter((item) => item.staffId !== row.staffId))}>削除</button></td></tr>)}</Table>
       <h3>送迎ドライバー・日払い</h3><div className="check-grid">{data.drivers.filter((row) => activeOnBusinessDate(row.hiredAt, row.departedAt)).map((row) => { const selected = driverWork.some((item) => item.driverId === row.id); return <label className="select-card" key={row.id}><input type="checkbox" checked={selected} onChange={(e) => setDriverWork(e.target.checked ? [...driverWork.filter((item) => item.driverId !== row.id), { driverId: row.id, name: row.name, dailyRate: row.dailyRate, dailyPayment: 0 }] : driverWork.filter((item) => item.driverId !== row.id))} /><span>{row.name}<small>日給 {yen.format(row.dailyRate)}</small></span></label>; })}</div><Table headers={["ドライバー", "日給", "日払い", "操作"]}>{driverWork.map((row) => <tr key={row.driverId}><td>{row.name}</td><td>{yen.format(row.dailyRate)}</td><td><MoneyInput value={row.dailyPayment} onChange={(value) => setDriverWork((rows) => rows.map((item) => item.driverId === row.driverId ? { ...item, dailyPayment: value } : item))} /></td><td><button className="button danger mini" onClick={() => setDriverWork((rows) => rows.filter((item) => item.driverId !== row.driverId))}>削除</button></td></tr>)}</Table>
       <h3>当日経費</h3><div className="grid form-row expense-row"><Field label="勘定科目"><select className="input" value={expenseCategory} onChange={(e) => { setExpenseCategory(e.target.value as ExpenseCategory); setExpensePayee(""); setExpensePersonId(""); }}>{Object.entries(expenseLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>{expenseCategory === "beautyTrial" ? <Field label="対象の体入キャスト"><select className="input" value={expensePersonId} onChange={(e) => setExpensePersonId(e.target.value)}><option value="">選択</option>{castRows.filter((row) => row.kind === "trial").map((row) => <option key={row.posCastId} value={row.posCastId}>{row.name}</option>)}</select></Field> : <Field label="支払先"><input className="input" value={expensePayee} onChange={(e) => setExpensePayee(e.target.value)} /></Field>}<Field label="金額"><MoneyInput value={expenseAmount} onChange={setExpenseAmount} /></Field><button className="button compact" onClick={addExpense}>追加</button></div><Table headers={["勘定科目", "支払先", "金額", "操作"]}>{expenses.map((row) => <tr key={row.id}><td>{expenseLabels[row.category]}</td><td>{row.payee}</td><td>{yen.format(row.amount)}</td><td><button className="button danger mini" onClick={() => setExpenses((rows) => rows.filter((item) => item.id !== row.id))}>削除</button></td></tr>)}</Table><div className="right-total">経費総計 <strong>{yen.format(expenseTotal)}</strong></div>

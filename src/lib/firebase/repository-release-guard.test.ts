@@ -62,6 +62,7 @@ const operations: Record<string, () => Promise<unknown>> = {
   saveMonthlyAdjustments: () => repository.saveMonthlyAdjustments(adjustments, user),
   saveCastAccountingInputs: () => repository.saveCastAccountingInputs(month, [], 0, user),
   saveTransportSettings: () => repository.saveTransportSettings({ revision: 0, castRegistrations: {}, remoteAmounts: [] }, month, user),
+  saveBeautyAllowanceDay: () => repository.saveBeautyAllowanceDay(month, "cast-1", date, true, 0, user),
   saveCastTransportDay: () => repository.saveCastTransportDay(month, "cast-1", date, 500, 0, user),
   saveDriverTransportDay: () => repository.saveDriverTransportDay(month, "driver-1", date, { first: 500 }, 0, user),
   finalizeAccountingMonth: () => repository.finalizeAccountingMonth(month, snapshot, 0, user),

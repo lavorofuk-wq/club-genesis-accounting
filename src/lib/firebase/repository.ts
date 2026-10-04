@@ -65,6 +65,7 @@ import { castAccountingAttendanceSources, castAccountingInputTotals, normalizeCa
 import { buildCastSalesRankingRoster } from "@/domain/cast-sales-ranking";
 import type { TransportSettings, TransportMonth } from "@/domain/transport";
 import { normalizeTransportSettings, normalizeTransportMonth, transportCastDays, transportAttendance, transportUnresolvedLegacyInputs } from "@/domain/transport";
+import { beautyAttendance, beautyCastDays, normalizeBeautyMonth } from "@/domain/beauty-allowance";
 import { assertCashLedgerChange, cashDayIssues, cashFundingIssues, cashLedgerIssues, sameCashReconciliation } from "@/domain/cash-funding";
 
 export type WorkspaceData = AccountingWorkspaceData;
@@ -625,6 +626,8 @@ function validateDailyClosingForSubmission(value: DailyClosing, before: DailyClo
   const previousClosing = before ? normalizeDailyClosing(before) : null;
   const preservedTransport = mergeReconciledDailyCastInputs(previousClosing?.casts || [],
     value.casts.map((row) => ({ ...row, transportFee: 0 })), previousClosing?.posSnapshot).rows;
+  const preservedBeauty = mergeReconciledDailyCastInputs(previousClosing?.casts || [],
+    value.casts.map((row) => ({ ...row, beautyAllowance: 0 })), previousClosing?.posSnapshot).rows;
   value.casts.forEach((row, rowIndex) => {
     require(!("accountingCorrection" in row), `${row.name}に現在は使用できない編集情報が含まれています。店舗の送信済みデータから再編集してください。`);
     require((row.kind === "regular" || row.kind === "trial") && Boolean(row.masterId) && Boolean(row.posCastId) && Boolean(row.name), "キャストデータの識別情報が正しくありません。");
@@ -642,6 +645,7 @@ function validateDailyClosingForSubmission(value: DailyClosing, before: DailyClo
     // 初回送信では保存済み旧下書きの入力額を保持する。再送はサーバー原本と照合する。
     require(!before || row.transportFee === priorTransport, `${row.name}の送迎代は店舗作業の「送迎」から登録してください。旧日次の送迎代は変更できません。`);
     require(row.beautyAllowance === 0 || (row.kind === "regular" && row.beautyAllowance === 500), `${row.name}の美容室手当が正しくありません。`);
+    require(!before || row.beautyAllowance === (preservedBeauty[rowIndex]?.beautyAllowance || 0), `${row.name}の美容室手当は店舗作業の「美容室手当」から登録してください。旧日次の美容室手当は変更できません。`);
     require(Array.isArray(row.bottles), `${row.name}のボトル明細が不完全です。`);
     require(unique(row.bottles.map((bottle) => bottle.sourceKey || "")), `${row.name}のボトル明細に同じPOS商品が重複しています。JSONを再取込してください。`);
     row.bottles.forEach((bottle) => {
@@ -1054,7 +1058,7 @@ export async function userRole(user: User): Promise<Role> {
 
 export async function loadWorkspaceData(role?: Role): Promise<AccountingWorkspaceData> {
   const accountingAccess = role === "accounting" || role === "op";
-  const [casts, staff, drivers, introducers, liquor, closings, cashFloat, adjustments, entryEvents, introducerDeletionCommits, introducerMonthEvents, monthStates, monthSnapshots, transportSettings, transportMonths] = await Promise.all([
+  const [casts, staff, drivers, introducers, liquor, closings, cashFloat, adjustments, entryEvents, introducerDeletionCommits, introducerMonthEvents, monthStates, monthSnapshots, transportSettings, transportMonths, beautyMonths] = await Promise.all([
     get(rootRef("casts")), get(rootRef("staff")), get(rootRef("drivers")), get(rootRef("introducers")),
     get(rootRef("liquorCosts")), get(rootRef("history")), get(rootRef("config/cashFloat")),
     accountingAccess ? get(rootRef("accountingAdjustments")) : Promise.resolve(null),
@@ -1064,6 +1068,7 @@ export async function loadWorkspaceData(role?: Role): Promise<AccountingWorkspac
     get(rootRef("accountingMonthStates")),
     accountingAccess ? get(rootRef("accountingMonthSnapshots")) : Promise.resolve(null),
     get(rootRef("config/transportSettings")), get(rootRef("transportMonths")),
+    get(rootRef("beautyMonths")),
   ]);
   const allCastRows = asArray<CastRecord & { deletedAt?: string }>(casts.val());
   const allStaffRows = asArray<StaffRecord & { deletedAt?: string }>(staff.val());
@@ -1089,6 +1094,8 @@ export async function loadWorkspaceData(role?: Role): Promise<AccountingWorkspac
   const closingRows = asArray<DailyClosing>(closings.val()).map(normalizeDailyClosing).sort((a, b) => b.businessDate.localeCompare(a.businessDate));
   const transportMonthRows = Object.fromEntries(Object.entries((transportMonths.val() || {}) as Record<string, unknown>)
     .map(([month, value]) => [month, normalizeTransportMonth(value)]));
+  const beautyMonthRows = Object.fromEntries(Object.entries((beautyMonths.val() || {}) as Record<string, unknown>)
+    .map(([month, value]) => [month, normalizeBeautyMonth(value)]));
   const transportLegacyInputs: Record<string, CastAccountingInput[]> = {};
   const transportLegacyRemote: Record<string, Record<string, number>> = {};
   // 店舗には旧送迎のみ読み取りを許可し、源泉や経費などの経理入力を取得しない。
@@ -1105,6 +1112,7 @@ export async function loadWorkspaceData(role?: Role): Promise<AccountingWorkspac
   }
   return {
     transportSettings: normalizeTransportSettings(transportSettings.val()), transportMonths: transportMonthRows,
+    beautyMonths: beautyMonthRows,
     transportLegacyInputs, transportLegacyRemote,
     casts: allCastRows.filter((row) => !row.deletedAt).sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ja")),
     staff: allStaffRows.filter((row) => !row.deletedAt).sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ja")),
@@ -2450,8 +2458,73 @@ export async function saveDriverTransportDay(month: string, driverId: string, bu
   await saveTransportDayUpdate(month, "drivers", driverId, businessDate, day, expectedRevision, data.transportMonths?.[month], data.transportSettings, user);
 }
 
+/** 可・否を日別に保存する。否も残し、旧日次の手当が復活することを防ぐ。 */
+export async function saveBeautyAllowanceDay(month: string, castId: string, businessDate: string, eligible: boolean, expectedRevision: number, user: User) {
+  await requireUser(user, ["shop", "op"]);
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error("対象月を正しく選択してください。");
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) throw new Error("美容室手当の版番号が正しくありません。");
+  if (!/^[A-Za-z0-9_-]+$/.test(castId)) throw new Error("美容室手当の対象キャストが正しくありません。");
+  if (!validDate(businessDate) || !businessDate.startsWith(month + "-")) throw new Error("対象月の正しい日付を選択してください。");
+  if (typeof eligible !== "boolean") throw new Error("美容室手当の可否を選択してください。");
+  await assertMonthOpen(month);
+  const [casts, history, monthSnapshot] = await Promise.all([
+    get(rootRef("casts")), get(rootRef("history")), get(rootRef("beautyMonths/" + month)),
+  ]);
+  const previousMonth = normalizeBeautyMonth(monthSnapshot.val());
+  if (previousMonth.revision !== expectedRevision) throw new Error("別の端末で美容室手当が更新されています。最新データを読み込んでください。");
+  const data: DomainWorkspaceData = { ...emptyData, casts: asArray<CastRecord>(casts.val()),
+    closings: asArray<DailyClosing>(history.val()).map(normalizeDailyClosing), beautyMonths: { [month]: previousMonth } };
+  const previous = previousMonth.casts[castId]?.[businessDate];
+  const sources = beautyAttendance(data, month, castId).filter((day) => day.businessDate === businessDate);
+  if (sources.length > 1 && (eligible || !previous)) throw new Error("同日の本人の在籍出勤が重複しています。日次の出勤を確認してください。");
+  const source = sources.length === 1 ? sources[0] : undefined;
+  const legacyDay = beautyCastDays(data, month, castId).find((day) => day.businessDate === businessDate);
+  if (eligible) {
+    const cast = data.casts.find((row) => row.id === castId && !row.deletedAt);
+    const departedRepair = cast?.status === "departed" && previous?.eligible === true;
+    if (!cast || (cast.status !== "active" && !departedRepair)) throw new Error("在籍キャストのみ美容室手当を記録できます。退店者は保存済み記録の出勤根拠だけ修復できます。");
+    if (!source) throw new Error("店舗から送信済みの本人の在籍区分の出勤日を選択してください。体入日は美容室手当の対象外です。");
+  } else if (!source && !previous && !legacyDay?.hasRecord) {
+    throw new Error("店舗から送信済みの本人の在籍区分の出勤日を選択してください。体入日は美容室手当の対象外です。");
+  }
+  const legacySources = data.closings.filter((closing) => closing.businessDate === businessDate)
+    .flatMap((closing) => closing.casts.flatMap((row, index) => row.masterId === castId && row.kind === "regular" && row.beautyAllowance === 500
+      ? [{ closingId: closing.id, index, posCastId: row.posCastId }] : []));
+  if (!previous && !source && legacySources.length !== 1) throw new Error("旧美容室手当の本人の出勤を一意に確認できません。日次の出勤を確認してください。");
+  const sourceRow = source && data.closings.find((closing) => closing.id === source.closingId)?.casts[source.index];
+  const anchor = !eligible && previous ? previous : source ? {
+    attendanceClosingId: source.closingId, attendanceIndex: source.index, attendancePosCastId: sourceRow?.posCastId || "",
+  } : { attendanceClosingId: legacySources[0]?.closingId || "", attendanceIndex: legacySources[0]?.index ?? 0, attendancePosCastId: legacySources[0]?.posCastId || "" };
+  if (!anchor.attendancePosCastId) throw new Error("美容室手当の本人のPOS出勤識別子を確認できません。日次の出勤を確認してください。");
+  if (eligible && previous && (previous.attendanceClosingId !== anchor.attendanceClosingId || previous.attendancePosCastId !== anchor.attendancePosCastId)) {
+    const oldClosing = data.closings.find((closing) => closing.id === previous.attendanceClosingId && closing.businessDate === businessDate);
+    const unresolvedRemap = oldClosing?.casts.some((row) => {
+      if (row.kind !== "regular" || row.posCastId !== previous.attendancePosCastId || row.masterId === castId || row.beautyAllowance <= 0) return false;
+      const replacement = previousMonth.casts[row.masterId]?.[businessDate];
+      return !replacement || replacement.attendanceClosingId !== previous.attendanceClosingId || replacement.attendancePosCastId !== previous.attendancePosCastId;
+    });
+    if (unresolvedRemap) throw new Error("元のPOS出勤に旧手当が残っています。日次のキャスト照合を確認し、照合先キャストの美容室手当が元のPOS出勤を参照しているか確認してください。");
+  }
+  const day = { eligible, attendanceClosingId: anchor.attendanceClosingId, attendanceIndex: anchor.attendanceIndex, attendancePosCastId: anchor.attendancePosCastId };
+  try {
+    await update(rootRef(), {
+      ["beautyMonths/" + month + "/casts/" + castId + "/" + businessDate]: day,
+      ["beautyMonths/" + month + "/revision"]: expectedRevision + 1,
+      ["beautyMonths/" + month + "/updatedAt"]: nextEventTimestamp(now(), previousMonth.updatedAt),
+      ["beautyMonths/" + month + "/updatedBy"]: user.uid,
+    });
+  } catch (error) {
+    const latest = normalizeBeautyMonth((await get(rootRef("beautyMonths/" + month))).val());
+    if (latest.revision !== expectedRevision) throw new Error("美容室手当が更新されています。最新データを読み込み、保存結果を確認してください。");
+    if (/permission[_-]denied/i.test(error instanceof Error ? error.message : String(error))) {
+      throw new Error("美容室手当を保存できません。日次の出勤・キャスト照合と月次確定状態を確認し、最新データを読み込んでください。入力は保持しています。");
+    }
+    throw error;
+  }
+}
+
 async function currentMonthlySources(month: string) {
-  const [casts, staff, introducers, closings, adjustment, entryEvents, introducerDeletionCommits, introducerMonthEvents, transportMonth] = await Promise.all([
+  const [casts, staff, introducers, closings, adjustment, entryEvents, introducerDeletionCommits, introducerMonthEvents, transportMonth, beautyMonth] = await Promise.all([
     get(rootRef("casts")),
     get(rootRef("staff")),
     get(rootRef("introducers")),
@@ -2460,9 +2533,10 @@ async function currentMonthlySources(month: string) {
     get(rootRef(`introducerEntryEvents/${month}`)),
     get(rootRef("introducerDeletionCommits")),
     get(rootRef(`introducerMonthEvents/${month}`)),
-    get(rootRef(`transportMonths/${month}`)),
+    get(rootRef(`transportMonths/${month}`)), get(rootRef(`beautyMonths/${month}`)),
   ]);
   const data: DomainWorkspaceData = {
+    beautyMonths: { [month]: normalizeBeautyMonth(beautyMonth.val()) },
     transportMonths: { [month]: normalizeTransportMonth(transportMonth.val()) },
     casts: asArray<CastRecord>(casts.val()),
     staff: asArray<StaffRecord>(staff.val()),
