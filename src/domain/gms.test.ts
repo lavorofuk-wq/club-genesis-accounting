@@ -125,7 +125,7 @@ describe("GMS報酬・日次計算", () => {
     expect(staffCandidatesForBusinessDate([legacyActive], [], "2026-09-01")).toEqual([]);
   });
 
-  it("報酬と商品バックは10円未満、勤務は15分未満を切り捨てる", () => {
+  it("売上と商品バックは10円未満、勤務は15分未満を切り捨てる", () => {
     expect(floorTen(1234)).toBe(1230);
     expect(floorTen(9.999)).toBe(0);
     expect(floorHundred(1234)).toBe(1200);
@@ -192,13 +192,13 @@ describe("GMS報酬・日次計算", () => {
     it.each([
       [1_209_990, 0, 1_189_990, 0],
       [1_210_000, 0.6, 1_190_000, 714_000],
-      [2_509_990, 0.6, 2_489_990, 1_493_990],
+      [2_509_990, 0.6, 2_489_990, 1_493_994],
       [2_510_000, 0.65, 2_490_000, 1_618_500],
-      [4_009_990, 0.65, 3_989_990, 2_593_490],
+      [4_009_990, 0.65, 3_989_990, 2_593_493],
       [4_010_000, 0.7, 3_990_000, 2_793_000],
-      [6_009_990, 0.7, 5_989_990, 4_192_990],
+      [6_009_990, 0.7, 5_989_990, 4_192_993],
       [6_010_000, 0.75, 5_990_000, 4_492_500],
-      [8_009_990, 0.75, 7_989_990, 5_992_490],
+      [8_009_990, 0.75, 7_989_990, 5_992_492],
       [8_010_000, 0.8, 7_990_000, 6_392_000],
     ])("原価控除前売上 %i 円で率 %s を決め、原価50％控除後に掛ける", (sales, rewardRate, salesRewardBase, salesReward) => {
       const closing = closingWithSales(sales, 0, 40_000);
@@ -222,10 +222,53 @@ describe("GMS報酬・日次計算", () => {
       expect(calculateCastRewards(closings, [], "2026-09")[0]).toMatchObject({
         honShimeiSales: 718_000, jonaiExtensionSales: 643_290, liquorCost: 306_050,
         hourlyPay: 465_000, hourlyAndBack: 620_860, rewardRate: 0.6,
-        salesRewardBase: 1_208_260, salesReward: 724_950,
-        adoptedSystem: "salesReward", adoptedReward: 724_950,
+        salesRewardBase: 1_208_265, salesReward: 724_959,
+        adoptedSystem: "salesReward", adoptedReward: 724_959,
       });
       expect(closings).toEqual(before);
+    });
+
+    it("原価50％控除後の小数を保持し、報酬率を掛けた最終金額だけ1円未満を切り捨てる", () => {
+      const closing = closingWithSales(1_210_010, 0, 40_001);
+      expect(calculateCastRewards([closing], [], "2026-09")[0]).toMatchObject({
+        honShimeiSales: 1_210_010, liquorCost: 40_001, rewardRate: 0.6,
+        salesRewardBase: 1_190_009.5, salesReward: 714_005,
+        adoptedSystem: "salesReward", adoptedReward: 714_005,
+      });
+    });
+
+    it.each([
+      [714_004, "salesReward", 714_005],
+      [714_005, "hourlyAndBack", 714_005],
+      [714_006, "hourlyAndBack", 714_006],
+    ] as const)("1円単位に確定した売上報酬と時給＋バック %i 円を比較する", (hourlyAndBack, adoptedSystem, adoptedReward) => {
+      const closing = closingWithSales(1_210_010, 0, 40_001);
+      closing.casts[0].hours = 1;
+      closing.casts[0].hourlyRate = hourlyAndBack - 1_000;
+      expect(calculateCastRewards([closing], [], "2026-09")[0]).toMatchObject({
+        salesReward: 714_005, hourlyAndBack, adoptedSystem, adoptedReward,
+      });
+    });
+
+    it("均等配賦の小数原価を丸めず、整数結果の浮動小数誤差でも1円過少にしない", () => {
+      const closing = closingWithSales(1_210_000, 0, 40_000 / 3);
+      const reward = calculateCastRewards([closing], [], "2026-09")[0];
+      expect(reward.liquorCost).toBe(40_000 / 3);
+      expect(reward.salesRewardBase).toBe(1_210_000 - (40_000 / 3) * 0.5);
+      // 数学上722,000円だがIEEE 754では721999.9999999999になる。
+      expect(reward.salesRewardBase * reward.rewardRate).toBeLessThan(722_000);
+      expect(reward.salesReward).toBe(722_000);
+    });
+
+    it("売上報酬は日別に切り捨てず、月間売上と原価の合計から一度だけ計算する", () => {
+      const first = closingWithSales(605_000, 0, 1);
+      const last = closingWithSales(605_000, 0, 1);
+      last.id = "rate-month-final";
+      last.businessDate = "2026-09-03";
+      expect(calculateCastRewards([first, last], [], "2026-09")[0]).toMatchObject({
+        honShimeiSales: 1_210_000, liquorCost: 2, rewardRate: 0.6,
+        salesRewardBase: 1_209_999, salesReward: 725_999,
+      });
     });
 
     it("追加売上も控除前の率判定に含め、追加手当は採用方式の比較後にだけ加える", () => {
@@ -1019,7 +1062,7 @@ describe("GMS報酬・日次計算", () => {
     expect(requiresBottleCost(transaction, bottle, { p1: "dispatch", p2: "cast-2" })).toBe(true);
   });
 
-  it("POS原本のない旧日次も時給は1円、売上・バック・売上報酬は10円単位へ切り捨てる", () => {
+  it("POS原本のない旧日次も時給・売上報酬は1円、売上・バックは10円単位へ切り捨てる", () => {
     const source = pos();
     const base = buildDailyCasts(source, {
       p1: { masterId: "c1", name: "花子", kind: "regular", hourlyRate: 1_234 },
@@ -1060,9 +1103,9 @@ describe("GMS報酬・日次計算", () => {
       drinkBack: 330,
       hourlyAndBack: 6_496,
       salesRewardBase: 1_210_030,
-      salesReward: 726_010,
+      salesReward: 726_018,
       adoptedSystem: "salesReward",
-      adoptedReward: 726_010,
+      adoptedReward: 726_018,
     });
     expect(report.days[0]).toMatchObject({
       honShimeiSales: 1_210_010,

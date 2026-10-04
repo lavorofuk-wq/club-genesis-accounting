@@ -2,7 +2,7 @@ import type { CastReward, CastSalesDay, CastSalesReport, DailyClosing, DailyHour
 import { floorYen } from "./gms";
 import { additionalCastAmounts } from "./cast-input-export";
 import type { MonthlyAccountingResults, MonthlyAccountingSnapshot, StaffHourlySource } from "./month-accounting";
-import { supportsMonthlyStaffRatesSnapshot } from "./month-accounting";
+import { supportsMonthlyStaffRatesSnapshot, supportsSalesRewardYenSnapshot } from "./month-accounting";
 import { STAFF_MONTHLY_RATES_START_MONTH, staffMonthlyRateForMonth } from "./staff-rates";
 
 export type BalancePayrollAllocationInput = {
@@ -69,9 +69,10 @@ function backAmounts(day: Pick<CastSalesDay, "backs" | "backTotal">, label: stri
   return values;
 }
 
-/** 月額は丸め直さず、途中日のみ10円単位へ配分し、最終出勤日へ残差を置く。 */
-function weightedTenYen(total: number, weights: number[], label: string): number[] {
+/** 月額は丸め直さず、途中日を指定単位へ切り捨て、最終出勤日へ残差を置く。 */
+function weightedAmount(total: number, weights: number[], label: string, unit: 1 | 10): number[] {
   amount(total, label);
+  if (unit === 1) requireValue(Number.isSafeInteger(total), `${label}の月額が1円単位の金額ではありません。`);
   requireValue(weights.length > 0, `${label}の最終出勤日を確認できません。`);
   const weightTotal = weights.reduce((sum, value) => sum + amount(value, `${label}の配分基準`), 0);
   requireValue(weightTotal > 0 || total === 0, `${label}の配分基準が0のため日別に配分できません。`);
@@ -79,8 +80,9 @@ function weightedTenYen(total: number, weights: number[], label: string): number
   return weights.map((weight, index) => {
     if (index === weights.length - 1) return remaining;
     const proportional = weightTotal > 0 ? total * (weight / weightTotal) : 0;
-    // 四則演算の浮動小数誤差だけを補正し、ちょうど10円の配分が0円にならないようにする。
-    const value = Math.floor((proportional + Number.EPSILON * Math.max(1, proportional) * 8) / 10) * 10;
+    // 新売上報酬は1円切捨て。旧確定分は従来の10円配分・誤差補正をそのまま維持する。
+    const value = unit === 1 ? floorYen(proportional)
+      : Math.floor((proportional + Number.EPSILON * Math.max(1, proportional) * 8) / 10) * 10;
     remaining -= value;
     return value;
   });
@@ -175,7 +177,7 @@ function castDays(report: CastSalesReport, reward: CastReward, approved: Map<str
   return result;
 }
 
-function allocateCast(reward: CastReward, report: CastSalesReport, approved: Map<string, DailyClosing>, output: Map<string, BalancePayrollDay>, legacyHourly: boolean) {
+function allocateCast(reward: CastReward, report: CastSalesReport, approved: Map<string, DailyClosing>, output: Map<string, BalancePayrollDay>, legacyHourly: boolean, salesRewardUnit: 1 | 10) {
   const days = castDays(report, reward, approved);
   const dailyHourly = legacyHourly ? undefined : dailyHourlyAmounts(reward.hourlyByDay, days, reward.hourlyPay, `${reward.name}の時給報酬`);
   const beauties = new Map<string, number>();
@@ -219,7 +221,7 @@ function allocateCast(reward: CastReward, report: CastSalesReport, approved: Map
   }
   if (!legacyHourly) {
     base = reward.adoptedSystem === "hourlyAndBack" ? dailyHourly!
-      : weightedTenYen(reward.salesReward, days.map((day) => day.sales), `${reward.name}の売上報酬`);
+      : weightedAmount(reward.salesReward, days.map((day) => day.sales), `${reward.name}の売上報酬`, salesRewardUnit);
   } else if (reward.trialOnly) {
     requireValue(trialBase.size === days.length && days.every((day) => trialBase.has(day.businessDate)),
       `${reward.name}の体入日別時給を保存IDから復元できません。`);
@@ -234,8 +236,8 @@ function allocateCast(reward: CastReward, report: CastSalesReport, approved: Map
     base[base.length - 1] += reward.hourlyPay - base.reduce((sum, value) => sum + value, 0);
   } else {
     base = reward.adoptedSystem === "hourlyAndBack"
-      ? weightedTenYen(reward.hourlyPay, days.map((day) => day.hours), `${reward.name}の時給報酬`)
-      : weightedTenYen(reward.salesReward, days.map((day) => day.sales), `${reward.name}の売上報酬`);
+      ? weightedAmount(reward.hourlyPay, days.map((day) => day.hours), `${reward.name}の時給報酬`, 10)
+      : weightedAmount(reward.salesReward, days.map((day) => day.sales), `${reward.name}の売上報酬`, salesRewardUnit);
   }
   days.forEach((day, index) => {
     const value = base[index] + (reward.adoptedSystem === "hourlyAndBack" ? day.backs : 0) + (beauties.get(day.businessDate) || 0) + day.allowance;
@@ -267,6 +269,7 @@ function staffSourceId(work: DailyStaffWork, payrollIds: ReadonlySet<string>, ma
 export function allocateBalancePayroll({ results, closings, month, staff = [], archivedStaff = [], snapshot }: BalancePayrollAllocationInput): { byDate: BalancePayrollDay[] } {
   requireValue(/^\d{4}-(0[1-9]|1[0-2])$/.test(month), "給与配分の対象月が不正です。");
   const legacyHourly = snapshot?.schemaVersion === 1 || snapshot?.schemaVersion === 2;
+  const salesRewardUnit = !snapshot || (snapshot.schemaVersion === 3 && supportsSalesRewardYenSnapshot(snapshot.calculationVersion)) ? 1 : 10;
   const monthlyStaffRates = !snapshot || (!legacyHourly && supportsMonthlyStaffRatesSnapshot(snapshot.calculationVersion));
   if (snapshot && !legacyHourly) {
     const version = /^(\d+)\.(\d+)\.(\d+)$/.exec(snapshot.calculationVersion);
@@ -289,7 +292,7 @@ export function allocateBalancePayroll({ results, closings, month, staff = [], a
   const rewards = indexed(results.castRewards, "キャスト報酬");
   const reports = indexed(results.castSalesReports, "キャスト売上明細");
   requireValue(rewards.size === reports.size && [...reports.keys()].every((id) => rewards.has(id)), "キャスト報酬と売上明細の人物IDが一致しません。");
-  rewards.forEach((reward) => allocateCast(reward, reports.get(reward.id)!, approved, output, legacyHourly));
+  rewards.forEach((reward) => allocateCast(reward, reports.get(reward.id)!, approved, output, legacyHourly, salesRewardUnit));
 
   const staffPayroll = indexed(results.staffPayroll, "スタッフ給与");
   const payrollIds = new Set(staffPayroll.keys());

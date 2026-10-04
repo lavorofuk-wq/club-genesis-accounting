@@ -78,10 +78,73 @@ describe("収支表の日別給与配分", () => {
     ]);
     const reward = input.results.castRewards[0];
     expect(reward.adoptedSystem).toBe("salesReward");
-    const expectedFirst = Math.floor(reward.salesReward * 600_010 / 1_210_020 / 10) * 10;
+    const expectedFirst = Math.floor(reward.salesReward * 600_010 / 1_210_020);
     const output = allocateBalancePayroll(input).byDate;
     expect(output.map((day) => day.castHourly)).toEqual([0, 0, 0]);
     expect(output.map((day) => day.castSalesReward)).toEqual([expectedFirst, reward.salesReward - expectedFirst + 500, 0]);
+  });
+
+  it.each([undefined, "2.50.1", "2.51.0", "3.0.0"])("新版 %s は日別売上報酬を1円配分し、売上0円でも本人の最終出勤日へ端数差だけを置く", (calculationVersion) => {
+    const input = fixture([
+      closing(4, { casts: [cast({ jonaiExtensionSales: 1_510_000 })] }),
+      closing(6),
+      closing(5, { casts: [cast({ beautyAllowance: 500 })] }),
+      closing(1, { casts: [cast({ honShimeiSales: 1_000_010 })] }),
+    ]);
+    if (calculationVersion) input.snapshot = { schemaVersion: 3, calculationVersion };
+    const before = structuredClone(input);
+    const reward = input.results.castRewards[0];
+    expect(reward.salesReward).toBe(1_631_506);
+    const output = allocateBalancePayroll(input).byDate;
+    expect(output.map((day) => day.castSalesReward)).toEqual([650_006, 981_499, 501, 0]);
+    expect(output.every((day) => Number.isSafeInteger(day.castSalesReward))).toBe(true);
+    expect(output.reduce((sum, day) => sum + day.castSalesReward, 0)).toBe(reward.grossPay);
+    expect(input).toEqual(before);
+  });
+
+  it.each([
+    [1, "2.12.0"], [2, "2.19.0"], [3, "2.20.0"], [3, "2.49.9"], [3, "2.50.0"],
+    [1, "2.50.1"], [2, "2.50.1"],
+  ] as const)("旧形式schema%s・計算版%sの確定済み売上報酬は月額も10円配分も変更しない", (schemaVersion, calculationVersion) => {
+    const input = fixture([
+      closing(1, { casts: [cast({ honShimeiSales: 1_000_010 })] }),
+      closing(4, { casts: [cast({ jonaiExtensionSales: 1_510_000 })] }),
+      closing(5, { casts: [cast({ beautyAllowance: 500 })] }),
+    ]);
+    input.snapshot = { schemaVersion, calculationVersion };
+    const reward = input.results.castRewards[0];
+    // 当時の10円切捨てで確定した額。現在の報酬式から計算し直さない。
+    Object.assign(reward, { salesReward: 1_631_500, adoptedReward: 1_631_500, grossPay: 1_632_000, netPay: 1_632_000 });
+    input.results.balance.cast = reward.grossPay;
+    const before = structuredClone(input);
+    const output = allocateBalancePayroll(input).byDate;
+    expect(output.map((day) => day.castSalesReward)).toEqual([650_000, 981_490, 510]);
+    expect(output.reduce((sum, day) => sum + day.castSalesReward, 0)).toBe(reward.grossPay);
+    expect(input).toEqual(before);
+  });
+
+  it("新版でも日別売上が0円の日へ比例配分せず、ちょうど1円の配分を誤差で切り落とさない", () => {
+    const input = fixture([
+      closing(1, { casts: [cast()] }),
+      closing(2, { casts: [cast({ honShimeiSales: 600_010 })] }),
+      closing(3, { casts: [cast({ honShimeiSales: 610_010 })] }),
+    ]);
+    expect(allocateBalancePayroll(input).byDate.map((day) => day.castSalesReward)).toEqual([0, 360_006, 366_006]);
+  });
+
+  it("新売上報酬の配分基準が全日0円なら正額を残差として押し込まず停止する", () => {
+    const input = fixture([closing(1, { casts: [cast({ hours: 0 })] }), closing(2, { casts: [cast({ hours: 0 })] })]);
+    const reward = input.results.castRewards[0];
+    Object.assign(reward, { salesReward: 1, adoptedSystem: "salesReward", adoptedReward: 1, grossPay: 1, netPay: 1 });
+    expect(() => allocateBalancePayroll(input)).toThrow("配分基準が0");
+    Object.assign(reward, { salesReward: 0, adoptedReward: 0, grossPay: 0, netPay: 0 });
+    expect(allocateBalancePayroll(input).byDate.map((day) => day.castSalesReward)).toEqual([0, 0]);
+  });
+
+  it("新売上報酬の月額に小数が残る不正値を日別の端数調整で隠さない", () => {
+    const input = fixture([closing(1, { casts: [cast({ honShimeiSales: 1_210_000 })] })]);
+    Object.assign(input.results.castRewards[0], { salesReward: 726_000.5, adoptedReward: 726_000.5, grossPay: 726_000.5, netPay: 726_000.5 });
+    expect(() => allocateBalancePayroll(input)).toThrow("月額が1円単位");
   });
 
   it("同月体入→在籍は保存済みの統合報酬で配分し、体入の美容室経費を二重加算しない", () => {

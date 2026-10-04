@@ -39,7 +39,7 @@ import { applyTransport, normalizeTransportMonth } from "./transport";
 import { applyBeautyAllowances, normalizeBeautyMonth } from "./beauty-allowance";
 import { normalizeCastSalesRankingRoster, type CastSalesRankingRoster } from "./cast-sales-ranking";
 
-export const MONTHLY_CALCULATION_VERSION = "2.50.0";
+export const MONTHLY_CALCULATION_VERSION = "2.50.1";
 export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 3 as const;
 
 export type IntroducerEntryEvent = {
@@ -170,7 +170,7 @@ export type AccountingMonthState = {
 export type MonthlyAccountingSnapshot = MonthlyAccountingResults & {
   /** 売上順位表用の確定時名簿。旧確定には補完しない。 */
   castSalesRankingRoster?: CastSalesRankingRoster;
-  /** schema 1は旧形式、2は10円報酬、3は日別時給1円・売上/バック/売上報酬10円。 */
+  /** schema 1は旧形式、2は10円報酬、3は日別時給1円・売上/バック10円。売上報酬は計算版2.50.1以降1円、旧版10円。 */
   schemaVersion: 1 | 2 | 3;
   calculationVersion: string;
   month: string;
@@ -217,6 +217,14 @@ const supportsDailyHourlyYenSnapshot = (value: string) => {
   const [major, minor] = match.slice(1).map(Number);
   return major > 2 || (major === 2 && minor >= 20);
 };
+/** 売上報酬の途中丸め廃止・最終1円切捨てを導入した計算版。旧確定は従来の単位を保持する。 */
+export const supportsSalesRewardYenSnapshot = (value: string) => {
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(value);
+  if (!match) return false;
+  const [major, minor, patch] = match.slice(1).map(Number);
+  return major > 2 || (major === 2 && (minor > 50 || (minor === 50 && patch >= 1)));
+};
+const snapshotSalesRewardBase = (value: unknown) => snapshotNonNegative(value) && value <= Number.MAX_SAFE_INTEGER;
 const requiresCashFundingSnapshot = (value: string) => {
   const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(value);
   if (!match) return false;
@@ -548,6 +556,7 @@ export function normalizeMonthlyAccountingSnapshot(
 
   const requireTenYen = row.schemaVersion >= 2;
   const requireDailyHourlyYen = row.schemaVersion === 3;
+  const requireSalesRewardYen = row.schemaVersion === 3 && supportsSalesRewardYenSnapshot(row.calculationVersion);
   const castSalesReports = normalizeSnapshotCastSales(row.castSalesReports, pathMonth, requireTenYen,
     requiresCastDailyPaymentsSnapshot(row.calculationVersion), requiresTransportSnapshot(row.calculationVersion));
   const storedCastRewards = validSnapshotRows(row.castRewards, ["id", "name", "adoptedSystem"], [
@@ -599,8 +608,11 @@ export function normalizeMonthlyAccountingSnapshot(
       && Number(item.rewardRate) <= 1
       && (!requireTenYen || [
         "honShimeiSales", "jonaiExtensionSales", "honShimeiBack", "banaiShimeiBack",
-        "dohanBack", "bottleBack", "drinkBack", "salesRewardBase", "salesReward",
+        "dohanBack", "bottleBack", "drinkBack",
       ].every((key) => snapshotTenYen(item[key])))
+      && (!requireTenYen || (requireSalesRewardYen
+        ? snapshotSalesRewardBase(item.salesRewardBase) && snapshotInteger(item.salesReward)
+        : snapshotTenYen(item.salesRewardBase) && snapshotTenYen(item.salesReward)))
       && (!requireTenYen || ["hourlyPay", "hourlyAndBack", "adoptedReward"]
         .every((key) => requireDailyHourlyYen ? snapshotInteger(item[key]) : snapshotTenYen(item[key])))
       && item.hourlyAndBack === Number(item.hourlyPay) + Number(item.honShimeiBack) + Number(item.banaiShimeiBack)
@@ -1350,8 +1362,9 @@ function introducerDeletionCommitConsistencyIssues(
 
 function castAccountingAmountIssues(rewards: CastReward[]): string[] {
   return rewards.filter((reward) => additionalCastKeys.some((key) => reward[key] !== undefined)
-    && [reward.hourlyAndBack, reward.salesRewardBase, reward.salesReward, reward.adoptedReward,
-      reward.grossPay, reward.transportFee, reward.netPay].some((amount) => !Number.isSafeInteger(amount)))
+    && (!snapshotSalesRewardBase(reward.salesRewardBase)
+      || [reward.hourlyAndBack, reward.salesReward, reward.adoptedReward,
+        reward.grossPay, reward.transportFee, reward.netPay].some((amount) => !Number.isSafeInteger(amount))))
     .map((reward) => `${reward.name}のキャストデータ入力を反映した計算額が処理可能な範囲を超えています。入力金額を確認してください。`);
 }
 

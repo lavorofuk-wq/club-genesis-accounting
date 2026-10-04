@@ -1,4 +1,5 @@
 import { withoutTransportRules } from "./transport-rules-baseline-helper.mjs";
+import { withoutOneYenSalesRewardRules } from "./sales-reward-rules-baseline-helper.mjs";
 import assert from "node:assert/strict";
 import { withoutAccountingExpenseRules } from "./expense-rules-baseline-helper.mjs";
 import { withoutCastSalesRankingRosterRules } from "./ranking-roster-rules-baseline-helper.mjs";
@@ -331,8 +332,30 @@ test("Rulesの新保護式は有効な構文で、入れ子の同名ワイルド
 });
 }
 
+nodeTest("売上報酬の指紋ヘルパーは承認された2式だけを戻し、未知の変更を隠さない", () => {
+  const original = structuredClone(rules);
+  const restored = withoutOneYenSalesRewardRules(rules);
+  assert.deepEqual(rules, original, "入力のルールを変更しない");
+  const restoredRewards = restored.$workspace.accountingMonthSnapshots.$month.$revision.castRewards.$index;
+  const originalRewards = original.$workspace.accountingMonthSnapshots.$month.$revision.castRewards.$index;
+  for (const key of ["salesRewardBase", "salesReward"]) {
+    assert.equal(restoredRewards[key][".validate"], "newData.isNumber() && newData.val() >= 0 && newData.val() % 10 === 0");
+    originalRewards[key] = restoredRewards[key];
+    for (const transform of [
+      (node) => { node[".validate"] = node[".validate"].replace("$workspace === 'accounting-dev'", "$workspace === 'accounting'"); },
+      (node) => { node[".validate"] = node[".validate"].replace(": newData.val() % 10 === 0)", ": newData.val() % 1 === 0)"); },
+      (node) => { node[".write"] = true; },
+    ]) {
+      const changed = structuredClone(rules);
+      transform(changed.$workspace.accountingMonthSnapshots.$month.$revision.castRewards.$index[key]);
+      assert.throws(() => withoutOneYenSalesRewardRules(changed), assert.AssertionError);
+    }
+  }
+  assert.deepEqual(restored, original, "対象2式以外はすべて保持する");
+});
+
 nodeTest("本番公開の変更は承認された18個の環境条件だけで、他の保護式を変更しない", () => {
-  const restored = withoutAccountingExpenseRules(withoutCastSalesRankingRosterRules(withoutTransportRules(rules))), targets = [];
+  const restored = withoutAccountingExpenseRules(withoutCastSalesRankingRosterRules(withoutTransportRules(withoutOneYenSalesRewardRules(rules)))), targets = [];
   const base = ["$workspace", "accountingMonthSnapshots", "$month", "$revision"];
   targets.push(["$workspace", "accountingAdjustments", "$month", "castInputs", ".validate"]);
   for (const section of [["castSalesReports", "$index", "days", "$dayIndex"], ["castSalesReports", "$index", "totals"]]) {
