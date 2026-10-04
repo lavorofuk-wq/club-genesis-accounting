@@ -38,8 +38,9 @@ import { resolveCastAccountingInputs, normalizeCastAccountingInputs, castAccount
 import { applyTransport, normalizeTransportMonth } from "./transport";
 import { applyBeautyAllowances, normalizeBeautyMonth } from "./beauty-allowance";
 import { normalizeCastSalesRankingRoster, type CastSalesRankingRoster } from "./cast-sales-ranking";
+import { calculateCastWithholding } from "./cast-withholding";
 
-export const MONTHLY_CALCULATION_VERSION = "2.50.1";
+export const MONTHLY_CALCULATION_VERSION = "2.51.0";
 export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 3 as const;
 
 export type IntroducerEntryEvent = {
@@ -225,6 +226,20 @@ export const supportsSalesRewardYenSnapshot = (value: string) => {
   return major > 2 || (major === 2 && (minor > 50 || (minor === 50 && patch >= 1)));
 };
 const snapshotSalesRewardBase = (value: unknown) => snapshotNonNegative(value) && value <= Number.MAX_SAFE_INTEGER;
+/** 新計算版だけ自動源泉税の一致を検証する。旧確定の手入力税額は再計算しない。 */
+export const supportsAutomaticCastWithholdingSnapshot = (value: string) => {
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(value);
+  if (!match) return false;
+  const [major, minor] = match.slice(1).map(Number);
+  return major > 2 || (major === 2 && minor >= 51);
+};
+function validSnapshotAutomaticCastWithholding(item: Record<string, unknown>, month: string): boolean {
+  if (item.trialOnly === true) return true;
+  try {
+    return snapshotInteger(item.withholding) && snapshotNonNegative(item.grossPay)
+      && item.withholding === calculateCastWithholding(item.grossPay, month);
+  } catch { return false; }
+}
 const requiresCashFundingSnapshot = (value: string) => {
   const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(value);
   if (!match) return false;
@@ -557,6 +572,7 @@ export function normalizeMonthlyAccountingSnapshot(
   const requireTenYen = row.schemaVersion >= 2;
   const requireDailyHourlyYen = row.schemaVersion === 3;
   const requireSalesRewardYen = row.schemaVersion === 3 && supportsSalesRewardYenSnapshot(row.calculationVersion);
+  const requireAutomaticWithholding = row.schemaVersion === 3 && supportsAutomaticCastWithholdingSnapshot(row.calculationVersion);
   const castSalesReports = normalizeSnapshotCastSales(row.castSalesReports, pathMonth, requireTenYen,
     requiresCastDailyPaymentsSnapshot(row.calculationVersion), requiresTransportSnapshot(row.calculationVersion));
   const storedCastRewards = validSnapshotRows(row.castRewards, ["id", "name", "adoptedSystem"], [
@@ -604,7 +620,8 @@ export function normalizeMonthlyAccountingSnapshot(
       if (!rates.length || rates.some((rate) => !snapshotNonNegative(rate)) || new Set(rates).size !== rates.length) return false;
       item.appliedHourlyRates = rates;
     }
-    return (item.adoptedSystem === "hourlyAndBack" || item.adoptedSystem === "salesReward")
+    return (!requireAutomaticWithholding || validSnapshotAutomaticCastWithholding(item, pathMonth))
+      && (item.adoptedSystem === "hourlyAndBack" || item.adoptedSystem === "salesReward")
       && Number(item.rewardRate) <= 1
       && (!requireTenYen || [
         "honShimeiSales", "jonaiExtensionSales", "honShimeiBack", "banaiShimeiBack",
@@ -1569,20 +1586,28 @@ export function canFinalizeMonthlyAccounting(
   const unresolvedDaily = data.closings.filter((row) => row.businessDate.startsWith(month)
     && (row.status === "submitted" || row.status === "returned" || row.status === "withdrawn"));
   const approved = data.closings.filter((row) => row.businessDate.startsWith(month) && row.status === "approved");
-  const castRewards = calculateCastRewards(
-    calculationData.closings,
-    calculationData.casts,
-    month,
-    adjustments,
-    resolvedMonthEvents,
-    resolvedDeletionCommits,
-  );
+  let castRewards: CastReward[];
+  const castCalculationIssues: string[] = [];
+  try {
+    castRewards = calculateCastRewards(
+      calculationData.closings,
+      calculationData.casts,
+      month,
+      adjustments,
+      resolvedMonthEvents,
+      resolvedDeletionCommits,
+    );
+  } catch (error) {
+    castRewards = [];
+    castCalculationIssues.push(error instanceof Error ? error.message : "キャスト報酬・源泉所得税を計算できません。");
+  }
   const businessDateCounts = new Map<string, number>();
   approved.forEach((row) => businessDateCounts.set(row.businessDate, (businessDateCounts.get(row.businessDate) || 0) + 1));
   const duplicateBusinessDates = [...businessDateCounts.entries()]
     .filter(([, count]) => count > 1)
     .map(([businessDate]) => `${businessDate}の承認済み日次データが複数あります。重複データを差し戻してから確定してください。`);
   const integrityIssues = [
+    ...castCalculationIssues,
     ...beauty.issues,
     ...transport.issues,
     ...resolveAccountingExpenses(adjustments, month, calculationData.closings).issues,

@@ -2,6 +2,7 @@ import { removeNewExpensesForLegacy } from "./legacy-expense-fixture.test-helper
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { calculateCashFunding, cashFundingContext } from "./cash-funding";
 import { legacyBottleSourceKey } from "./gms";
+import { calculateCastWithholding } from "./cast-withholding";
 import type {
   CastRecord,
   CastReward,
@@ -23,6 +24,7 @@ import {
   MONTHLY_CALCULATION_VERSION,
   MONTHLY_SNAPSHOT_SCHEMA_VERSION,
   supportsSalesRewardYenSnapshot,
+  supportsAutomaticCastWithholdingSnapshot,
   monthlySourceFingerprint,
   monthlyAccountingWarnings,
   normalizeIntroducerDeletionCommit,
@@ -262,6 +264,70 @@ describe("月次会計ドメイン", () => {
   }
 
   it.each([
+    ["2.50.1", false], ["2.50.99", false], ["2.51.0", true], ["2.51.1", true],
+    ["2.100.0", true], ["3.0.0", true], ["2.051.0", false], ["2.51.00", false], ["2.51.0-dev", false],
+  ])("計算版%sの自動源泉保存検証は%s", (version, expected) => {
+    expect(supportsAutomaticCastWithholdingSnapshot(version)).toBe(expected);
+  });
+
+  it("新規確定の自動税額を保持し、旧入力を計算に使わず原本と手入力履歴を変更しない", () => {
+    const { source, input } = salesRateSnapshot(1_210_000);
+    input.withholdingByCast["cast-1"] = 9123;
+    const before = structuredClone({ source, input });
+    const results = calculateMonthlyAccounting(source, month, input);
+    expect(results.castRewards[0]).toMatchObject({ grossPay: 720500, withholding: 58248, netPay: 662252 });
+    const saved = buildMonthlySnapshot(month, 1, "a".repeat(64), input, results, source.closings,
+      "accounting-user", "2026-10-01T00:00:00Z");
+    expect(saved.calculationVersion).toBe("2.51.0");
+    expect(normalizeMonthlyAccountingSnapshot(saved, month, 1)?.castRewards).toEqual(results.castRewards);
+    expect(canFinalizeMonthlyAccounting(source, month, input, true).allowed).toBe(true);
+    expect({ source, input }).toEqual(before);
+  });
+
+  it.each([58247, 58249, 58248.5, 0])("新計算の源泉税%sは差引支給との足算だけ合っていても読込拒否する", (withholding) => {
+    const { snapshot } = salesRateSnapshot(1_210_000);
+    const reward = snapshot.castRewards[0];
+    reward.withholding = withholding;
+    reward.netPay = reward.grossPay - reward.dailyPayment - reward.advancePayment - reward.transportFee - withholding;
+    expect(normalizeMonthlyAccountingSnapshot(snapshot, month, 1)).toBeUndefined();
+  });
+
+  it.each(["2.50.1", "2.50.0", "2.49.1"])("旧確定%sの手入力税額は保持し、解除後の再計算だけ自動税へ変える", (version) => {
+    const { source, input, snapshot } = salesRateSnapshot(1_210_000);
+    snapshot.calculationVersion = version;
+    const reward = snapshot.castRewards[0];
+    reward.withholding = 9123.5;
+    reward.netPay = reward.grossPay - 9123.5;
+    input.withholdingByCast[reward.id] = 9123.5;
+    const before = structuredClone(snapshot);
+    const saved = normalizeMonthlyAccountingSnapshot(snapshot, month, 1);
+    expect(saved?.castRewards[0]).toEqual(before.castRewards[0]);
+    const reopened = calculateMonthlyAccounting(source, month, input);
+    expect(reopened.castRewards[0]).toMatchObject({ withholding: 58248, netPay: 662252 });
+    expect(snapshot).toEqual(before);
+  });
+
+  it("計算不能の総支給額を0税として確定せず、原因を返す", () => {
+    const { source, input } = hourlyYenSnapshot();
+    source.casts[0].hourlyRates[month] = Number.MAX_SAFE_INTEGER;
+    const validation = canFinalizeMonthlyAccounting(source, month, input, true);
+    expect(validation.allowed).toBe(false);
+    expect(validation.integrityIssues.join("\n")).toContain("源泉");
+  });
+
+  it("新版の確定でも体入のみの手入力源泉を丸めず保存・読込する", () => {
+    const { source, input } = hourlyYenSnapshot();
+    source.casts[0].status = "trial";
+    source.closings[0].casts[0].kind = "trial";
+    input.withholdingByCast["cast-1"] = 1234.5;
+    const results = calculateMonthlyAccounting(source, month, input);
+    expect(results.castRewards[0]).toMatchObject({ trialOnly: true, withholding: 1234.5 });
+    const snapshot = buildMonthlySnapshot(month, 1, "a".repeat(64), input, results, source.closings,
+      "accounting-user", "2026-10-01T00:00:00Z");
+    expect(normalizeMonthlyAccountingSnapshot(snapshot, month, 1)?.castRewards).toEqual(results.castRewards);
+  });
+
+  it.each([
     [1_210_000, .6, 720_000],
     [2_510_000, .65, 1_625_000],
     [4_010_000, .7, 2_800_000],
@@ -272,7 +338,8 @@ describe("月次会計ドメイン", () => {
     expect(canFinalizeMonthlyAccounting(source, month, input, true).allowed).toBe(true);
     expect(results.castRewards[0]).toMatchObject({ hourlyAndBack: 17_000, liquorCost: 20_000,
       rewardRate: rate, salesRewardBase: sales - 10_000, salesReward: pay,
-      adoptedSystem: "salesReward", adoptedReward: pay, beautyAllowance: 500, grossPay: pay + 500, netPay: pay + 500 });
+      adoptedSystem: "salesReward", adoptedReward: pay, beautyAllowance: 500, grossPay: pay + 500,
+      withholding: calculateCastWithholding(pay + 500, month), netPay: pay + 500 - calculateCastWithholding(pay + 500, month) });
     expect(results.introducerPayments[0]).toMatchObject({ grossBase: pay + 500,
       grossFee: (pay + 500) / 10, total: (pay + 500) / 10 });
     expect(results.balance.cast).toBe(pay + 500);
@@ -301,6 +368,7 @@ describe("月次会計ドメイン", () => {
       reward.adoptedSystem = oldSalesPay > reward.hourlyAndBack ? "salesReward" : "hourlyAndBack";
       reward.adoptedReward = oldAdopted;
       reward.grossPay = oldAdopted + reward.beautyAllowance;
+      reward.withholding = 0;
       reward.netPay = reward.grossPay;
       const payment = snapshot.introducerPayments[0];
       payment.grossBase = reward.grossPay;
@@ -344,7 +412,7 @@ describe("月次会計ドメイン", () => {
 
   it("同月体入から在籍への集約でも日別支払を移動・再計算しない", () => {
     const trial = cast({ id: "trial-1", status: "trial", convertedToCastId: "cast-1" });
-    const member = cast({ convertedFromTrialId: "trial-1", hiredAt: "2026-09-03" });
+    const member = cast({ convertedFromTrialId: "trial-1", hiredAt: "2026-09-03", hourlyRates: { [month]: 50_000 } });
     const source = workspace({ casts: [trial, member], closings: [
       approvedClosing({ casts: [dailyCast({ masterId: trial.id, kind: "trial", dailyPayment: 9001, advancePayment: 123 })] }),
       approvedClosing({ id: "regular-day", businessDate: "2026-09-03",
@@ -356,6 +424,10 @@ describe("月次会計ドメイン", () => {
       totals: { dailyPayment: 11004, advancePayment: 579 } });
     expect(results.castSalesReports[0].days.map((day) => day.dailyPayment)).toEqual([9001, 2003]);
     expect(results.castRewards[0]).toMatchObject({ trialOnly: false, dailyPayment: 11004, advancePayment: 579 });
+    expect(results.castRewards[0].withholding).toBeGreaterThan(0);
+    const snapshot = buildMonthlySnapshot(month, 1, "a".repeat(64), adjustments(), results, source.closings,
+      "accounting-user", "2026-10-01T00:00:00Z");
+    expect(normalizeMonthlyAccountingSnapshot(snapshot, month, 1)?.castRewards).toEqual(results.castRewards);
   });
 
   it("現行確定には0円も明示保存し、後の原本変更から日別・月額を独立させる", () => {

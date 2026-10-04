@@ -154,7 +154,8 @@ describe("キャストデータ入力から全帳票への統合", () => {
     expect(reward.additionalAllowance).toBe(100001);
     expect(reward.transportFee).toBe(2500);
     expect(reward.grossPay).toBe(sales === 90000 ? 134001 : 855801);
-    expect(reward.netPay).toBe(sales === 90000 ? 126168 : 847968);
+    expect(reward.withholding).toBe(sales === 90000 ? 0 : 72062);
+    expect(reward.netPay).toBe(sales === 90000 ? 126501 : 776239);
     const report = buildBalanceExportReport(input);
     expect(report.additionalSales).toBe(sales);
     expect(report.castTransport).toBe(2500);
@@ -177,12 +178,12 @@ describe("キャストデータ入力から全帳票への統合", () => {
     expect(sheet.getCell("I38").value).toBe(101001);
     expect(sheet.getCell("I39").value).toEqual({ formula: "SUM(I36:I38)", result: 134001 });
     expect(sheet.getCell("I40").value).toBe(7500);
-    expect(sheet.getCell("I41").value).toBe(333);
-    expect(sheet.getCell("I42").value).toEqual({ formula: "I39-I40-I41", result: 126168 });
+    expect(sheet.getCell("I41").value).toBe(sales === 90000 ? 0 : 72062);
+    expect(sheet.getCell("I42").value).toEqual({ formula: "I39-I40-I41", result: sales === 90000 ? 126501 : 54439 });
     expect(sheet.getCell("U36").value).toBe(reward.salesReward);
     expect(sheet.getCell("U37").value).toBe(101001);
     expect(sheet.getCell("U39").value).toBe(7500);
-    expect(sheet.getCell("U40").value).toBe(333);
+    expect(sheet.getCell("U40").value).toBe(sales === 90000 ? 0 : 72062);
     expect(sheet.getCell("U44").value).toBe(reward.netPay);
     expect(input.results.sales).toEqual(input.baseline.sales);
     expect(input.results).toEqual(originalResults);
@@ -229,7 +230,7 @@ describe("キャストデータ入力から全帳票への統合", () => {
       if (name === "cast-sales") {
         expectCastInputDailyColumns(restored.worksheets[0]);
         expect(restored.worksheets[0].getCell("I40").value).toBe(7500);
-        expect(restored.worksheets[0].getCell("U44").value).toBe(847968);
+        expect(restored.worksheets[0].getCell("U44").value).toBe(776239);
       }
       buffers.set(name, new Uint8Array(buffer));
     }
@@ -244,7 +245,7 @@ describe("キャストデータ入力から全帳票への統合", () => {
       const restored = new ExcelJS.Workbook();
       await restored.xlsx.load(bytes as unknown as ExcelJS.Buffer);
       const address = receiptCellAddress("salesReward", document, document === "receipt" ? "G7" : "F26");
-      expect(restored.worksheets[0].getCell(address).value).toBe(847968);
+      expect(restored.worksheets[0].getCell(address).value).toBe(776239);
       if (document === "statement") {
         const sheet = restored.worksheets[0];
         expect(sheet.getCell(receiptCellAddress("salesReward", "statement", "B15")).value).toBe("美容室手当");

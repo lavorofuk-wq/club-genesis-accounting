@@ -134,7 +134,8 @@ describe("追加売上・手当・送迎の月次反映", () => {
     expect(reward).toMatchObject({ honShimeiSales: 1200000, jonaiExtensionSales: 0, additionalSales: 10000,
       additionalAllowance: 1001, additionalTransportFee: 1000, honShimeiBack: 1000, banaiShimeiBack: 1000,
       dohanBack: 3000, hourlyPay: 22750, hourlyAndBack: 27750, salesRewardBase: 1210000,
-      rewardRate: .6, salesReward: 726000, adoptedSystem: "salesReward", grossPay: 727501, transportFee: 1500, netPay: 726001 });
+      rewardRate: .6, salesReward: 726000, adoptedSystem: "salesReward", grossPay: 727501,
+      transportFee: 1500, withholding: 58962, netPay: 667039 });
     const results = calculateMonthlyAccounting(data, month, settings);
     expect(results.sales).toEqual({ cash: 0, card: 0, total: 0 });
     expect(results.introducerPayments[0]).toMatchObject({ salesBase: 1200000, salesFee: 120000, total: 120000 });

@@ -52,7 +52,8 @@ describe("キャスト報酬の在籍・体入別表示", () => {
     const rows = [reward("r", "同名", false), reward("t1", "同名", true),
       { ...reward("t2", "同名", true), withholding: 456, netPay: 7_997 }];
     const [regular, trial] = groups(render(rows));
-    expect(regular.match(/<input /g)).toHaveLength(1);
+    expect(regular).not.toContain("<input ");
+    expect(regular).toContain("￥123");
     expect(trial.match(/<input /g)).toHaveLength(2);
     expect(trial.match(/<strong>同名<\/strong>/g)).toHaveLength(2);
     expect(trial).toContain('value="123"');
@@ -61,15 +62,19 @@ describe("キャスト報酬の在籍・体入別表示", () => {
     expect(trial).toContain("￥7,997");
   });
 
-  it.each([false, true])("両区分とも金額・入力禁止状態をそのまま引き継ぐ（disabled=%s）", (disabled) => {
-    for (const group of groups(render([reward("r", "在籍", false), reward("t", "体入", true)], disabled))) {
+  it.each([false, true])("在籍は源泉額の表示のみ、体入だけ従来の源泉入力と禁止状態を引き継ぐ（disabled=%s）", (disabled) => {
+    const [regular, trial] = groups(render([reward("r", "在籍", false), reward("t", "体入", true)], disabled));
+    for (const group of [regular, trial]) {
       expect(group).toContain("￥9,753");
       expect(group).toContain("￥10,253");
       expect(group).toContain("￥8,330");
       expect(group).toContain("1日 / 3.25時間");
-      expect(group).toContain('value="123"');
-      expect(/<input[^>]*disabled/.test(group)).toBe(disabled);
     }
+    expect(regular).toContain("<td>￥123</td>");
+    expect(regular).not.toContain("<input ");
+    expect(regular).not.toContain("自動計算");
+    expect(trial).toContain('value="123"');
+    expect(/<input[^>]*disabled/.test(trial)).toBe(disabled);
   });
 });
 
@@ -137,15 +142,19 @@ describe("キャスト報酬の給率表示", () => {
       honShimeiSales: 10_000, jonaiExtensionSales: 5_000,
     }));
     const before = structuredClone(rows);
-    for (const group of groups(render(rows, true))) {
+    const [regular, trial] = groups(render(rows, true));
+    for (const group of [regular, trial]) {
       expect(group.match(/class="cast-pay-ratio cast-pay-ratio--([^"]+)"[^>]*>([^<]*)</)?.slice(1)).toEqual(["blue", "65.0%"]);
       expect(group).toContain("￥9,753");
       expect(group).toContain("￥10,253");
       expect(group).toContain("￥8,330");
-      expect(group).toContain('value="123"');
-      expect(group.match(/<input /g)).toHaveLength(1);
-      expect(group).toMatch(/<input[^>]*disabled/);
     }
+    expect(regular).toContain("<td>￥123</td>");
+    expect(regular).not.toContain("<input ");
+    expect(regular).not.toContain("自動計算");
+    expect(trial).toContain('value="123"');
+    expect(trial.match(/<input /g)).toHaveLength(1);
+    expect(trial).toMatch(/<input[^>]*disabled/);
     expect(rows).toEqual(before);
     for (const row of rows) expect(row).not.toHaveProperty("additionalSales");
   });
@@ -167,7 +176,7 @@ describe("キャスト報酬の給率表示", () => {
   });
 
   it("在籍・体入とも採用と美容室の間へ給率列を追加し、全16列の対応を保つ", () => {
-    for (const group of groups(render([reward("r", "在籍", false), reward("t", "体入", true)]))) {
+    for (const [index, group] of groups(render([reward("r", "在籍", false), reward("t", "体入", true)])).entries()) {
       const headers = [...group.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((match) => match[1]);
       const cells = [...group.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/g)].map((match) => match[1]);
       expect(headers).toEqual(["キャスト", "勤務", "基本報酬", "指名・同伴内訳", "ボトル", "ドリンク", "酒代原価", "売上報酬", "採用", "給率", "美容室", "追加手当", "総支給", "日払・立替・送迎内訳", "源泉所得税", "差引支給"]);
@@ -175,7 +184,8 @@ describe("キャスト報酬の給率表示", () => {
       expect(cells[8]).toContain("￥9,753");
       expect(cells[9]).toContain("cast-pay-ratio");
       expect(cells[10]).toBe("￥500");
-      expect(cells[14]).toContain('value="123"');
+      if (index === 0) expect(cells[14]).toBe("￥123");
+      else expect(cells[14]).toContain('value="123"');
       expect(cells[15]).toContain("￥8,330");
     }
   });

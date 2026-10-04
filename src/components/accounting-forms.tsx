@@ -235,7 +235,13 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
   const pendingLegacy = allLegacyBottles.filter((row) => !adjustments.legacyBottleClassifications?.[row.sourceKey]);
   const legacyDirty = classificationSignature(adjustments) !== classificationSignature(storedAdjustments);
   const calculationsBlocked = !closed && (pendingLegacy.length > 0 || legacyDirty);
-  const liveResults = useMemo(() => calculateMonthlyAccounting(data, month, calculationAdjustments, data.introducerEntryEvents), [calculationAdjustments, data, month]);
+  const calculation = useMemo(() => {
+    // 確定済み月は現在のマスタ・日次を再計算せず、保存済みの税額と支給額を使う。
+    if (closed) return { results: undefined, error: "" };
+    try { return { results: calculateMonthlyAccounting(data, month, calculationAdjustments, data.introducerEntryEvents), error: "" }; }
+    catch (error) { return { results: undefined, error: error instanceof Error ? error.message : "計算元データを確認してください。" }; }
+  }, [calculationAdjustments, closed, data, month]);
+  const liveResults = calculation.results;
   const results = closed ? currentSnapshot : calculationsBlocked ? undefined : liveResults;
   const exportClosings = useMemo(() => beautyClosingsForExport(data, month, currentSnapshot), [data, month, currentSnapshot]);
   const payrollExportInput = useMemo(() => results ? {
@@ -248,13 +254,15 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
     catch (error) { return { value: undefined, error: error instanceof Error ? error.message : "順位表の在籍者名簿を確認してください。" }; }
   }, [results, closed, currentSnapshot, data.casts, data.archivedCasts, month]);
   const approved = data.closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(month));
-  const finalizeCheck = canFinalizeMonthlyAccounting(data, month, calculationAdjustments, true);
+  const finalizeCheck = closed || !liveResults
+    ? { allowed: false, unclassified: [], unresolvedDaily: [], integrityIssues: [] }
+    : canFinalizeMonthlyAccounting(data, month, calculationAdjustments, true);
   const monthlyCashProblems = closed ? [] : cashLedgerIssues(data.closings, month);
   const setMap = (key: "withholdingByCast" | "staffSalesAllowance" | "staffBottleAllowance" , id: string, value: number) => setAdjustments((row) => ({ ...row, [key]: { ...row[key], [id]: value } }));
   const saveDisabled = busy || closed || state?.status === "closing" || adjustmentsStale || Boolean(expenseInputError) || Boolean(fixedExpenseError) || Boolean(consumptionTaxRateError) || !adjustmentsDirty;
   const save = () => saveDisabled ? Promise.resolve(false) : run(() => saveMonthlyAdjustments(calculationAdjustments, user), `${month}の経理入力を保存しました。`);
   const finalize = () => {
-    if (adjustmentsDirty || adjustmentsStale || calculationsBlocked || consumptionTaxRateError || fixedExpenseError || rankingRoster.error || !finalizeCheck.allowed) return;
+    if (closed || !liveResults || adjustmentsDirty || adjustmentsStale || calculationsBlocked || consumptionTaxRateError || fixedExpenseError || rankingRoster.error || !finalizeCheck.allowed) return;
     if (!window.confirm(`${month}を月次確定しますか？\n確定後は日次承認・差戻し・経理入力を変更できません。`)) return;
     void run(async () => {
       const fingerprint = await monthlySourceFingerprint(data, month, calculationAdjustments, data.introducerEntryEvents);
@@ -279,6 +287,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
   return <div className="grid">
     <Card><div className="month-toolbar"><Field label="対象月"><input className="input" type="month" value={month} onChange={(event) => changeMonth(event.target.value)} /></Field><span>承認済み営業日 <strong>{results?.approvedDays ?? approved.length}日</strong></span>{state?.status === "closed" ? <StatusPill tone="good">月次確定済み 第{state.currentSnapshotRevision}版</StatusPill> : state?.status === "closing" ? <StatusPill tone="warn">月次確定処理中</StatusPill> : <StatusPill>未確定</StatusPill>}{!closed && state?.status !== "closing" && (section !== "castSales" || adjustmentsDirty) && <button className="button" disabled={saveDisabled} onClick={() => void save()}>経理入力を保存</button>}{!closed && state?.status !== "closing" && <button className="button secondary" disabled={busy || adjustmentsDirty || adjustmentsStale || calculationsBlocked || Boolean(consumptionTaxRateError) || Boolean(fixedExpenseError) || Boolean(rankingRoster.error) || !finalizeCheck.allowed} onClick={finalize}>月次確定</button>}{state?.status === "closing" && <button className="button danger" disabled={busy} onClick={cancelClosing}>確定処理を中止</button>}{closed && <button className="button danger" disabled={busy} onClick={reopen}>確定解除</button>}</div></Card>
     {fixedExpenseError && <div className="notice error" role="alert">{fixedExpenseError}</div>}
+    {calculation.error && <div className="notice error" role="alert">月次計算を完了できません。{calculation.error} 月次確定・帳票出力は停止しています。</div>}
     {rankingRoster.error && <div className="notice error" role="alert">売上順位表：{rankingRoster.error} 名簿を保存できないため月次確定も停止しています。</div>}
     {consumptionTaxRateError && <div className="notice error" role="alert">預かり消費税：{consumptionTaxRateError}</div>}
     {expenseInputError && <div className="notice error" role="alert">経費入力：{expenseInputError}</div>}
@@ -562,7 +571,7 @@ function CastRewardTable({ rows, disabled, onWithholding, empty }: CastRewardsPr
     <td>{yen.format(row.additionalAllowance || 0)}</td>
     <td><strong>{yen.format(row.grossPay)}</strong></td>
     <td className="wrap-cell"><div className="back-breakdown"><span><small>日払い</small><strong>{yen.format(row.dailyPayment)}</strong></span><span><small>立替</small><strong>{yen.format(row.advancePayment)}</strong></span><span><small>送迎</small><strong>{yen.format(row.transportFee)}</strong></span></div></td>
-    <td><MoneyInput value={row.withholding} disabled={disabled} onChange={(value) => onWithholding(row.id, value)} /></td>
+    <td>{row.trialOnly ? <MoneyInput value={row.withholding} disabled={disabled} onChange={(value) => onWithholding(row.id, value)} /> : yen.format(row.withholding)}</td>
     <td><strong>{yen.format(row.netPay)}</strong></td>
   </tr>)}</Table>;
 }
