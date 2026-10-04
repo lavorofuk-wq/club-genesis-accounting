@@ -2650,3 +2650,85 @@ describe("入店顧問料の0円訂正履歴", () => {
       .introducerPayments[0].entryAdvisory).toBe(30000);
   });
 });
+
+describe("日別送迎を反映した月次確定", () => {
+  function transportWorkspace() {
+    const source = workspace({ casts: [cast()], closings: [approvedClosing({ casts: [dailyCast({ transportFee: 500 })],
+      drivers: [{ driverId: "driver-1", name: "太郎", dailyRate: 10000, dailyPayment: 0 }] })] });
+    const inputs = adjustments({ driverRemoteAllowance: { "driver-1": 3000 }, castInputs: [{ id: "legacy-transport", castId: "cast-1", castName: "花子", kind: "transport", label: "旧送迎", amount: 1000 }] });
+    source.adjustments = [inputs];
+    source.transportMonths = { [month]: { revision: 1,
+      casts: { "cast-1": { "2026-09-02": { amount: 2000, legacyInputIds: ["legacy-transport"], attendanceClosingId: "closing-1", attendanceIndex: 0 } } },
+      drivers: { "driver-1": { "2026-09-02": { entries: { first: 500, second: 1500 }, attendanceClosingId: "closing-1", attendanceIndex: 0 } } } } };
+    return { source, inputs };
+  }
+
+  it("新送迎・遠方手当を給与・帳票・損益に同じ値で一度だけ反映する", () => {
+    const { source, inputs } = transportWorkspace();
+    const result = calculateMonthlyAccounting(source, month, inputs);
+    expect(result.castRewards[0].transportFee).toBe(2000);
+    expect(result.castSalesReports[0].days[0].transportFee).toBe(2000);
+    expect(result.castSalesReports[0].totals.transportFee).toBe(2000);
+    expect(result.driverPayroll[0]).toMatchObject({ remote: 5000, gross: 15000 });
+    expect(result.balance.driver).toBe(15000);
+    expect(result.warnings).toEqual([]);
+    expect(inputs.driverRemoteAllowance["driver-1"]).toBe(3000);
+    expect(source.closings[0].casts[0].transportFee).toBe(500);
+  });
+
+  it("送迎額を確定値として保存し、部分欠損・日別合計不一致・給与不一致を拒否する", () => {
+    const { source, inputs } = transportWorkspace();
+    const results = calculateMonthlyAccounting(source, month, inputs);
+    const snapshot = buildMonthlySnapshot(month, 1, "a".repeat(64), inputs, results, source.closings, "op", "2026-10-01T00:00:00Z");
+    expect(normalizeMonthlyAccountingSnapshot(snapshot, month, 1)?.castSalesReports[0].totals.transportFee).toBe(2000);
+    for (const field of ["missing", "total", "reward"]) {
+      const changed = structuredClone(snapshot);
+      if (field === "missing") delete changed.castSalesReports[0].days[0].transportFee;
+      if (field === "total") changed.castSalesReports[0].totals.transportFee = 1500;
+      if (field === "reward") {
+        changed.castRewards[0].transportFee += 500;
+        changed.castRewards[0].netPay -= 500;
+      }
+      expect(normalizeMonthlyAccountingSnapshot(changed, month, 1)).toBeUndefined();
+    }
+    source.transportMonths![month].casts["cast-1"]["2026-09-02"].amount = 500;
+    expect(snapshot.castSalesReports[0].totals.transportFee).toBe(2000);
+  });
+
+  it("旧確定に未保存の日別送迎内訳を補完しない", () => {
+    const source = workspace({ casts: [cast()], closings: [approvedClosing({ casts: [dailyCast({ transportFee: 500 })] })] });
+    const inputs = adjustments();
+    const snapshot = buildMonthlySnapshot(month, 1, "a".repeat(64), inputs, calculateMonthlyAccounting(source, month, inputs), source.closings, "op", "2026-10-01T00:00:00Z");
+    snapshot.calculationVersion = "2.48.1";
+    for (const report of snapshot.castSalesReports) {
+      delete report.totals.transportFee;
+      for (const day of report.days) delete day.transportFee;
+    }
+    const restored = normalizeMonthlyAccountingSnapshot(snapshot, month, 1)!;
+    expect(restored.castSalesReports[0].totals.transportFee).toBeUndefined();
+    expect(restored.castRewards[0].transportFee).toBe(500);
+  });
+
+  it("送迎未作成月はUIの未定義値と確定APIの空月で同じハッシュになる", async () => {
+    const { source, inputs } = transportWorkspace();
+    delete source.transportMonths;
+    const uiFingerprint = await monthlySourceFingerprint(source, month, inputs);
+    source.transportMonths = { [month]: { revision: 0, casts: {}, drivers: {} } };
+    expect(await monthlySourceFingerprint(source, month, inputs)).toBe(uiFingerprint);
+  });
+
+  it("送迎編集を確定前の競合検知へ含める", async () => {
+    const { source, inputs } = transportWorkspace();
+    const before = await monthlySourceFingerprint(source, month, inputs);
+    source.transportMonths![month].casts["cast-1"]["2026-09-02"].amount = 500;
+    expect(await monthlySourceFingerprint(source, month, inputs)).not.toBe(before);
+  });
+
+  it("送信後の出勤差戻しがある送迎記録を警告する", () => {
+    const { source, inputs } = transportWorkspace();
+    source.closings[0].status = "returned";
+    const result = calculateMonthlyAccounting(source, month, inputs);
+    expect(result.castRewards).toEqual([]);
+    expect(result.warnings.some((warning) => warning.includes("送迎記録") && warning.includes("差戻し"))).toBe(true);
+  });
+});

@@ -1,3 +1,4 @@
+import { withoutTransportRules } from "./transport-rules-baseline-helper.mjs";
 import assert from "node:assert/strict";
 import { withoutAccountingExpenseRules } from "./expense-rules-baseline-helper.mjs";
 import { withoutCastSalesRankingRosterRules } from "./ranking-roster-rules-baseline-helper.mjs";
@@ -107,7 +108,7 @@ test("今月採用でも空の勤務行・区分不明の勤務から本人出�
 test("日付省略は手当・送迎だけ許可し、本人出勤根拠は省略できない", () => {
   for (const kind of ["allowance", "transport"]) {
     const f = fixture(); Object.assign(row(f), { kind, amount: kind === "transport" ? 500 : 1 }); delete row(f).businessDate;
-    assert.equal(allowed(f), true); delete row(f).attendanceClosingId; assert.equal(allowed(f), false);
+    assert.equal(allowed(f), kind !== "transport" || workspaceUnderTest === "accounting"); delete row(f).attendanceClosingId; assert.equal(allowed(f), false);
   }
   const f = fixture(); delete row(f).businessDate; assert.equal(allowed(f), false);
 });
@@ -117,7 +118,7 @@ test("金額単位・安全整数・型・名目・キーID・未知項目を検
     { label: "a".repeat(101) }, { id: "other" }, { castId: "bad/path" }, { unknown: true }];
   for (const change of invalid) { const f = fixture(); Object.assign(row(f), change); assert.equal(allowed(f), false, JSON.stringify(change)); }
   for (const [kind, amount] of [["sales", 0], ["allowance", 1], ["transport", 500]]) {
-    const f = fixture(); Object.assign(row(f), { kind, amount }); assert.equal(allowed(f), true);
+    const f = fixture(); Object.assign(row(f), { kind, amount }); assert.equal(allowed(f), kind !== "transport" || workspaceUnderTest === "accounting");
   }
 });
 test("退店・差戻し後の保存行は不変なら保持でき、変更は拒否、削除は可能", () => {
@@ -206,6 +207,7 @@ test("2.39以降の確定明細は日次と月合計に日払い・立替を両�
   for (const version of ["2.39.0", "2.39.1", "2.40.0", "2.100.0", "3.0.0", "10.0.0"]) {
     const f = snapshotFixture(); f.snapshot.calculationVersion = version;
     for (const [node, path, row] of paymentTargets(f)) {
+      row.transportFee = row.additionalTransportFee || 0;
       assert.equal(evaluate(node[".validate"], {}, f.tree, f.prefix + path), false, version + " " + path);
       row.dailyPayment = 0;
       assert.equal(evaluate(node[".validate"], {}, f.tree, f.prefix + path), false, "立替欠損を拒否");
@@ -299,7 +301,7 @@ test("Rulesの新保護式は有効な構文で、入れ子の同名ワイルド
 }
 
 nodeTest("本番公開の変更は承認された18個の環境条件だけで、他の保護式を変更しない", () => {
-  const restored = withoutAccountingExpenseRules(withoutCastSalesRankingRosterRules(rules)), targets = [];
+  const restored = withoutAccountingExpenseRules(withoutCastSalesRankingRosterRules(withoutTransportRules(rules))), targets = [];
   const base = ["$workspace", "accountingMonthSnapshots", "$month", "$revision"];
   targets.push(["$workspace", "accountingAdjustments", "$month", "castInputs", ".validate"]);
   for (const section of [["castSalesReports", "$index", "days", "$dayIndex"], ["castSalesReports", "$index", "totals"]]) {

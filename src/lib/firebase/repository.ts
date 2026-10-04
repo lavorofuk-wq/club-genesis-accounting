@@ -1,6 +1,6 @@
 "use client";
 
-import { get, onValue, serverTimestamp, set, update, ref } from "firebase/database";
+import { get, onValue, serverTimestamp, set, update, ref, query, orderByChild, equalTo } from "firebase/database";
 import type { User } from "firebase/auth";
 import { database, rootRef } from "./client";
 import { readOneShotValue } from "./one-shot-value";
@@ -18,6 +18,7 @@ import {
   isStaffHireDateAfterTrial,
   japanMonthFromTimestamp,
   normalizeDailyClosing,
+  mergeReconciledDailyCastInputs,
   normalizeMonthlyAdjustments,
   parsePosClosingV3,
   posSubmissionClaimKey,
@@ -62,6 +63,8 @@ import { staffMonthlyRates } from "@/domain/staff-rates";
 import { validateAccountingExpenseInputs, validateConsumptionTaxRate } from "@/domain/accounting-expenses";
 import { castAccountingAttendanceSources, castAccountingInputTotals, normalizeCastAccountingInputs } from "@/domain/cast-accounting-inputs";
 import { buildCastSalesRankingRoster } from "@/domain/cast-sales-ranking";
+import type { TransportSettings, TransportMonth } from "@/domain/transport";
+import { normalizeTransportSettings, normalizeTransportMonth, transportCastDays, transportAttendance, transportUnresolvedLegacyInputs } from "@/domain/transport";
 import { assertCashLedgerChange, cashDayIssues, cashFundingIssues, cashLedgerIssues, sameCashReconciliation } from "@/domain/cash-funding";
 
 export type WorkspaceData = AccountingWorkspaceData;
@@ -619,7 +622,10 @@ function validateDailyClosingForSubmission(value: DailyClosing, before: DailyClo
   require(value.posSnapshot.castWork
     .filter((work) => work.castType === "regular")
     .every((work) => castPosIds.has(work.castId)), "POS原本の在籍キャスト勤務が店舗データから欠落しています。JSONを再取込してください。");
-  value.casts.forEach((row) => {
+  const previousClosing = before ? normalizeDailyClosing(before) : null;
+  const preservedTransport = mergeReconciledDailyCastInputs(previousClosing?.casts || [],
+    value.casts.map((row) => ({ ...row, transportFee: 0 })), previousClosing?.posSnapshot).rows;
+  value.casts.forEach((row, rowIndex) => {
     require(!("accountingCorrection" in row), `${row.name}に現在は使用できない編集情報が含まれています。店舗の送信済みデータから再編集してください。`);
     require((row.kind === "regular" || row.kind === "trial") && Boolean(row.masterId) && Boolean(row.posCastId) && Boolean(row.name), "キャストデータの識別情報が正しくありません。");
     const sourceWork = workByPosId.get(row.posCastId);
@@ -632,6 +638,9 @@ function validateDailyClosingForSubmission(value: DailyClosing, before: DailyClo
     require(row.dohanBack % 10 === 0, `${row.name}の同伴バックは10円単位で処理してください。`);
     if (row.kind === "trial") require(Number.isSafeInteger(row.dailyPayment), `${row.name}の体入即日支払いは1円単位で入力してください。`);
     require(row.transportFee % 500 === 0, `${row.name}の送迎代は500円単位で入力してください。`);
+    const priorTransport = preservedTransport[rowIndex]?.transportFee || 0;
+    // 初回送信では保存済み旧下書きの入力額を保持する。再送はサーバー原本と照合する。
+    require(!before || row.transportFee === priorTransport, `${row.name}の送迎代は店舗作業の「送迎」から登録してください。旧日次の送迎代は変更できません。`);
     require(row.beautyAllowance === 0 || (row.kind === "regular" && row.beautyAllowance === 500), `${row.name}の美容室手当が正しくありません。`);
     require(Array.isArray(row.bottles), `${row.name}のボトル明細が不完全です。`);
     require(unique(row.bottles.map((bottle) => bottle.sourceKey || "")), `${row.name}のボトル明細に同じPOS商品が重複しています。JSONを再取込してください。`);
@@ -1045,7 +1054,7 @@ export async function userRole(user: User): Promise<Role> {
 
 export async function loadWorkspaceData(role?: Role): Promise<AccountingWorkspaceData> {
   const accountingAccess = role === "accounting" || role === "op";
-  const [casts, staff, drivers, introducers, liquor, closings, cashFloat, adjustments, entryEvents, introducerDeletionCommits, introducerMonthEvents, monthStates, monthSnapshots] = await Promise.all([
+  const [casts, staff, drivers, introducers, liquor, closings, cashFloat, adjustments, entryEvents, introducerDeletionCommits, introducerMonthEvents, monthStates, monthSnapshots, transportSettings, transportMonths] = await Promise.all([
     get(rootRef("casts")), get(rootRef("staff")), get(rootRef("drivers")), get(rootRef("introducers")),
     get(rootRef("liquorCosts")), get(rootRef("history")), get(rootRef("config/cashFloat")),
     accountingAccess ? get(rootRef("accountingAdjustments")) : Promise.resolve(null),
@@ -1054,6 +1063,7 @@ export async function loadWorkspaceData(role?: Role): Promise<AccountingWorkspac
     accountingAccess ? get(rootRef("introducerMonthEvents")) : Promise.resolve(null),
     get(rootRef("accountingMonthStates")),
     accountingAccess ? get(rootRef("accountingMonthSnapshots")) : Promise.resolve(null),
+    get(rootRef("config/transportSettings")), get(rootRef("transportMonths")),
   ]);
   const allCastRows = asArray<CastRecord & { deletedAt?: string }>(casts.val());
   const allStaffRows = asArray<StaffRecord & { deletedAt?: string }>(staff.val());
@@ -1077,7 +1087,25 @@ export async function loadWorkspaceData(role?: Role): Promise<AccountingWorkspac
       return normalized ? [normalized] : [];
     }));
   const closingRows = asArray<DailyClosing>(closings.val()).map(normalizeDailyClosing).sort((a, b) => b.businessDate.localeCompare(a.businessDate));
+  const transportMonthRows = Object.fromEntries(Object.entries((transportMonths.val() || {}) as Record<string, unknown>)
+    .map(([month, value]) => [month, normalizeTransportMonth(value)]));
+  const transportLegacyInputs: Record<string, CastAccountingInput[]> = {};
+  const transportLegacyRemote: Record<string, Record<string, number>> = {};
+  // 店舗には旧送迎のみ読み取りを許可し、源泉や経費などの経理入力を取得しない。
+  if (!accountingAccess) {
+    const months = [...new Set([...closingRows.map((row) => row.businessDate.slice(0, 7)), ...Object.keys(transportMonthRows), ...monthStateRows.map((row) => row.month)])];
+    await Promise.all(months.map(async (month) => {
+      const [inputs, remote] = await Promise.all([
+        get(query(rootRef(`accountingAdjustments/${month}/castInputs`), orderByChild("kind"), equalTo("transport"))),
+        get(rootRef(`accountingAdjustments/${month}/driverRemoteAllowance`)),
+      ]);
+      transportLegacyInputs[month] = normalizeCastAccountingInputs(inputs.val());
+      transportLegacyRemote[month] = remote.val() || {};
+    }));
+  }
   return {
+    transportSettings: normalizeTransportSettings(transportSettings.val()), transportMonths: transportMonthRows,
+    transportLegacyInputs, transportLegacyRemote,
     casts: allCastRows.filter((row) => !row.deletedAt).sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ja")),
     staff: allStaffRows.filter((row) => !row.deletedAt).sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ja")),
     drivers: asArray<DriverRecord>(drivers.val()).sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "ja")),
@@ -2250,6 +2278,9 @@ export async function saveMonthlyAdjustments(value: MonthlyAdjustments, user: Us
     if (castInputSignature(value.castInputs) !== castInputSignature(existing?.castInputs)) {
       throw new Error("キャストの追加入力は専用画面から保存してください。月次入力とあわせて最新データを読み込んでください。");
     }
+    if (JSON.stringify(canonicalComparisonValue(value.driverRemoteAllowance || {})) !== JSON.stringify(canonicalComparisonValue(existing?.driverRemoteAllowance || {}))) {
+      throw new Error("遠方手当は店舗作業の「送迎」から登録してください。以前の月額は保持されます。");
+    }
     const { month: _month, ...stored } = value;
     return clean({ ...stored, consumptionTaxRate, expenseInputs: expenseInputs.length ? Object.fromEntries(expenseInputs.map((row) => [row.id, row])) : undefined,
       castInputs: existing?.castInputs, revision: currentRevision + 1,
@@ -2287,7 +2318,11 @@ export async function saveCastAccountingInputs(month: string, inputs: CastAccoun
     const existing = current as Omit<MonthlyAdjustments, "month"> | null;
     const revision = Number(existing?.revision || 0);
     if (revision !== expectedRevision) throw new Error("別の端末で月次入力が更新されています。入力内容を控え、最新データを読み込んでから反映し直してください。");
-    const previous = new Map(normalizeCastAccountingInputs(existing?.castInputs).map((row) => [row.id, row]));
+    const previousInputs = normalizeCastAccountingInputs(existing?.castInputs);
+    if (castInputSignature(requested.filter((row) => row.kind === "transport")) !== castInputSignature(previousInputs.filter((row) => row.kind === "transport"))) {
+      throw new Error("送迎代は店舗作業の「送迎」から登録・変更・削除してください。");
+    }
+    const previous = new Map(previousInputs.map((row) => [row.id, row]));
     const prepared = requested.map((row) => {
       const before = previous.get(row.id);
       if (before && JSON.stringify(castInputUserFields(before)) === JSON.stringify(castInputUserFields(row))) return before;
@@ -2307,8 +2342,114 @@ export async function saveCastAccountingInputs(month: string, inputs: CastAccoun
   if (!result.committed) throw new Error("キャストの追加入力を保存できませんでした。最新データを確認してください。");
 }
 
+const transportIdentifier = (value: string) => /^[A-Za-z0-9_-]+$/.test(value);
+const transportAmount = (value: number) => [500, 1000, 1500, 2000].includes(value);
+function assertTransportRequest(month: string, expectedRevision: number, id?: string, businessDate?: string) {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error("対象月を正しく選択してください。");
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) throw new Error("送迎情報の版番号が正しくありません。");
+  if (id !== undefined && !transportIdentifier(id)) throw new Error("送迎の対象者が正しくありません。");
+  if (businessDate !== undefined && (!validDate(businessDate) || !businessDate.startsWith(month + "-"))) throw new Error("対象月の正しい日付を選択してください。");
+}
+async function currentTransportSources(month: string): Promise<DomainWorkspaceData> {
+  const [casts, drivers, history, inputs, settings, transportMonth] = await Promise.all([
+    get(rootRef("casts")), get(rootRef("drivers")), get(rootRef("history")),
+    get(query(rootRef(`accountingAdjustments/${month}/castInputs`), orderByChild("kind"), equalTo("transport"))),
+    get(rootRef("config/transportSettings")), get(rootRef(`transportMonths/${month}`)),
+  ]);
+  return { ...emptyData, casts: asArray<CastRecord>(casts.val()), drivers: asArray<DriverRecord>(drivers.val()),
+    closings: asArray<DailyClosing>(history.val()).map(normalizeDailyClosing),
+    transportSettings: normalizeTransportSettings(settings.val()),
+    transportMonths: { [month]: normalizeTransportMonth(transportMonth.val()) },
+    transportLegacyInputs: { [month]: normalizeCastAccountingInputs(inputs.val()) } };
+}
+/** 設定だけを更新し、過去の記録・金額には触れない。 */
+export async function saveTransportSettings(value: TransportSettings, month: string, user: User) {
+  await requireUser(user, ["shop", "op"]);
+  assertTransportRequest(month, value.revision);
+  const requested = normalizeTransportSettings(value);
+  await assertMonthOpen(month);
+  const data = await currentTransportSources(month);
+  const timestamp = now();
+  const result = await runReadyTransaction(rootRef("config/transportSettings"), (raw) => {
+    const current = normalizeTransportSettings(raw);
+    if (current.revision !== requested.revision) throw new Error("別の端末で送迎設定が更新されています。最新データを読み込んでください。");
+    for (const id of Object.keys(current.castRegistrations)) {
+      if (!requested.castRegistrations[id] && (transportCastDays(data, month, id).some((day) => day.hasRecord && day.amount > 0) || transportUnresolvedLegacyInputs(data, month, id).length > 0)) {
+        throw new Error("当月に送迎記録があるため削除できません");
+      }
+    }
+    for (const id of Object.keys(requested.castRegistrations)) {
+      if (!current.castRegistrations[id] && !data.casts.some((cast) => cast.id === id && cast.status === "active" && !cast.deletedAt)) {
+        throw new Error("在籍キャストのみ送迎登録できます。最新データを読み込んでください。");
+      }
+    }
+    return clean({ ...requested, revision: current.revision + 1, updatedAt: nextEventTimestamp(timestamp, current.updatedAt), updatedBy: user.uid });
+  }, { applyLocally: false });
+  if (!result.committed) throw new Error("送迎設定を保存できませんでした。");
+}
+async function saveTransportDayUpdate(month: string, kind: "casts" | "drivers", personId: string, businessDate: string,
+  day: unknown, expectedRevision: number, previous: TransportMonth | undefined, settings: TransportSettings | undefined, user: User) {
+  if ((previous?.revision || 0) !== expectedRevision) throw new Error("別の端末で送迎記録が更新されています。最新データを読み込んでください。");
+  // 親validateのrevision検証と、日別writeのnewData.existsによる削除禁止を同時に適用する。
+  try {
+    await update(rootRef(), clean({
+      [`transportMonths/${month}/${kind}/${personId}/${businessDate}`]: day,
+      [`transportMonths/${month}/revision`]: expectedRevision + 1,
+      [`transportMonths/${month}/updatedAt`]: nextEventTimestamp(now(), previous?.updatedAt),
+      [`transportMonths/${month}/updatedBy`]: user.uid,
+      "config/transportSettings/revision": (settings?.revision || 0) + 1,
+      "config/transportSettings/updatedAt": nextEventTimestamp(now(), settings?.updatedAt),
+      "config/transportSettings/updatedBy": user.uid,
+    }));
+  } catch (error) {
+    const latest = normalizeTransportMonth((await get(rootRef(`transportMonths/${month}`))).val());
+    if (latest.revision !== expectedRevision) throw new Error("送迎記録が更新されています。最新データを読み込み、保存結果を確認してください。");
+    throw error;
+  }
+}
+export async function saveCastTransportDay(month: string, castId: string, businessDate: string, amount: number, expectedRevision: number, user: User) {
+  await requireUser(user, ["shop", "op"]);
+  assertTransportRequest(month, expectedRevision, castId, businessDate);
+  if (amount !== 0 && !transportAmount(amount)) throw new Error("送迎代は500円・1000円・1500円・2000円から選択してください。");
+  await assertMonthOpen(month);
+  const data = await currentTransportSources(month);
+  const previous = data.transportMonths?.[month]?.casts[castId]?.[businessDate];
+  const legacyDay = transportCastDays(data, month, castId).find((day) => day.businessDate === businessDate);
+  const source = transportAttendance(data, month, castId, "cast").find((day) => day.businessDate === businessDate);
+  const hasExisting = Boolean(previous || legacyDay?.hasRecord);
+  const registration = data.transportSettings?.castRegistrations[castId];
+  if (amount > 0) {
+    if (!data.casts.some((cast) => cast.id === castId && cast.status === "active" && !cast.deletedAt)) throw new Error("在籍キャストのみ送迎を記録できます。");
+    if (!source) throw new Error("店舗から送信済みの本人の出勤日を選択してください。");
+    if (!registration && !hasExisting) throw new Error("先にキャスト送迎登録を行ってください。");
+    if (registration && previous?.amount !== amount && !registration.amounts.includes(amount)) throw new Error("登録済みの送迎金額を選択してください。最新データを読み込んでください。");
+  } else if (!hasExisting) throw new Error("削除対象の送迎記録がありません。");
+  const fallbackClosing = data.closings.find((closing) => closing.businessDate === businessDate && closing.casts.some((cast) => cast.masterId === castId));
+  const legacyInput = data.transportLegacyInputs?.[month]?.find((input) => legacyDay?.legacyInputIds.includes(input.id));
+  const attendanceClosingId = source?.closingId || previous?.attendanceClosingId || legacyInput?.attendanceClosingId || fallbackClosing?.id || "legacy_removed";
+  const attendanceIndex = source?.index ?? previous?.attendanceIndex ?? legacyInput?.attendanceIndex ?? Math.max(0, fallbackClosing?.casts.findIndex((cast) => cast.masterId === castId) ?? 0);
+  const day = { amount, legacyInputIds: [...new Set([...(previous?.legacyInputIds || []), ...(legacyDay?.legacyInputIds || [])])], attendanceClosingId, attendanceIndex };
+  await saveTransportDayUpdate(month, "casts", castId, businessDate, day, expectedRevision, data.transportMonths?.[month], data.transportSettings, user);
+}
+export async function saveDriverTransportDay(month: string, driverId: string, businessDate: string, entries: Record<string, number>, expectedRevision: number, user: User) {
+  await requireUser(user, ["shop", "op"]);
+  assertTransportRequest(month, expectedRevision, driverId, businessDate);
+  if (!entries || Array.isArray(entries) || Object.entries(entries).some(([id, amount]) => !transportIdentifier(id) || !transportAmount(amount))) throw new Error("遠方手当の金額を正しく選択してください。");
+  await assertMonthOpen(month);
+  const data = await currentTransportSources(month);
+  const previous = data.transportMonths?.[month]?.drivers[driverId]?.[businessDate];
+  const source = transportAttendance(data, month, driverId, "driver").find((day) => day.businessDate === businessDate);
+  if (Object.keys(entries).length) {
+    if (!data.drivers.some((driver) => driver.id === driverId)) throw new Error("登録されているドライバーを選択してください。");
+    if (!source) throw new Error("店舗から送信済みの本人の出勤日を選択してください。");
+    if (Object.entries(entries).some(([id, amount]) => previous?.entries[id] !== amount && !data.transportSettings?.remoteAmounts.includes(amount))) throw new Error("登録済みの遠方手当金額を選択してください。最新データを読み込んでください。");
+  } else if (!previous) throw new Error("削除対象の遠方手当がありません。");
+  const day = { entries, attendanceClosingId: source?.closingId || previous!.attendanceClosingId, attendanceIndex: source?.index ?? previous!.attendanceIndex };
+  await saveTransportDayUpdate(month, "drivers", driverId, businessDate, day, expectedRevision, data.transportMonths?.[month], data.transportSettings, user);
+}
+
 async function currentMonthlySources(month: string) {
-  const [casts, staff, introducers, closings, adjustment, entryEvents, introducerDeletionCommits, introducerMonthEvents] = await Promise.all([
+  const [casts, staff, introducers, closings, adjustment, entryEvents, introducerDeletionCommits, introducerMonthEvents, transportMonth] = await Promise.all([
     get(rootRef("casts")),
     get(rootRef("staff")),
     get(rootRef("introducers")),
@@ -2317,8 +2458,10 @@ async function currentMonthlySources(month: string) {
     get(rootRef(`introducerEntryEvents/${month}`)),
     get(rootRef("introducerDeletionCommits")),
     get(rootRef(`introducerMonthEvents/${month}`)),
+    get(rootRef(`transportMonths/${month}`)),
   ]);
   const data: DomainWorkspaceData = {
+    transportMonths: { [month]: normalizeTransportMonth(transportMonth.val()) },
     casts: asArray<CastRecord>(casts.val()),
     staff: asArray<StaffRecord>(staff.val()),
     drivers: [],

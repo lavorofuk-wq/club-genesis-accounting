@@ -27,6 +27,7 @@ import {
 import { loadWorkspaceData, userRole } from "@/lib/firebase/repository";
 import { CommonForms } from "./common-forms";
 import { StoreWork } from "./store-work";
+import { TransportWork } from "./transport-work";
 import { AccountingForms } from "./accounting-forms";
 import { Card, StatusPill, currentMonth, yen } from "./ui";
 import { APP_VERSION } from "@/lib/app-release";
@@ -36,6 +37,7 @@ import { UpdateDraftProvider } from "./update-drafts";
 type View =
   | "home"
   | "store"
+  | "transport"
   | "approval"
   | "castInputs"
   | "castSales"
@@ -135,6 +137,13 @@ const viewInfo: Record<
     description: "POS JSONの取込から現金照合、経理送信までを行います。",
     roles: ["shop", "op"],
   },
+  transport: {
+    group: "店舗作業",
+    label: "送迎",
+    title: "送迎",
+    description: "キャストの送迎代とドライバーの遠方手当を出勤日ごとに記録します。",
+    roles: ["shop", "op"],
+  },
   approval: {
     group: "経理作業",
     label: "受信・承認",
@@ -146,7 +155,7 @@ const viewInfo: Record<
     group: "経理作業",
     label: "キャストデータ入力",
     title: "キャストデータ入力",
-    description: "在籍キャストの売上・手当・追加送迎を名目別に登録します。",
+    description: "在籍キャストの売上・手当を名目別に登録します。",
     roles: ["accounting", "op"],
   },
   castSales: {
@@ -600,6 +609,9 @@ export function AccountingApp() {
               )}
               {view === "store" && (
                 <StoreWork key={`store:${pageRevision}`} data={data} user={user} busy={mutationDisabled} run={run} onDirtyChange={setPageDirty} />
+              )}
+              {view === "transport" && (
+                <TransportWork key={`transport:${pageRevision}`} data={data} user={user} busy={mutationDisabled} run={run} onDirtyChange={setPageDirty} />
               )}
               {commonSection && (
                 <CommonForms

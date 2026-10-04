@@ -17,7 +17,7 @@ const labels = { sales: "売上", allowance: "手当", transport: "送迎" } as 
 const hints = {
   sales: "10円未満を切り捨て、キャストの売上報酬計算に加算します。本指名・場内延長売上、POSの店舗売上は変更しません。",
   allowance: "1円単位で入力します。時給＋バックと売上報酬を比較した後に加算します。",
-  transport: "500円単位で入力します。店舗入力の送迎代に追加して控除します。",
+  transport: "送迎代は店舗作業の「送迎」から登録してください。",
 } as const;
 
 export function castInputSourceKey(data: AccountingWorkspaceData, month: string) {
@@ -51,6 +51,7 @@ function CastAccountingInputForm({ data, user, busy, run, onDirtyChange }: Props
   const inputs: CastAccountingInput[] = state?.status === "closed" ? snapshot?.castSalesReports.flatMap((row) => row.totals.accountingInputs || []) || [] : stored?.castInputs || [];
   const locked = state?.status === "closed" || state?.status === "closing";
   const disabled = busy || saving || locked;
+  const transportDraft = editing?.input.kind === "transport";
   const context = useMemo(() => castInputSourceKey(data, month), [data, month]);
   const stale = Boolean(editing && (editing.context !== context || editing.revision !== revision));
   const casts = useMemo(() => [...data.archivedCasts, ...data.casts], [data.archivedCasts, data.casts]);
@@ -61,9 +62,9 @@ function CastAccountingInputForm({ data, user, busy, run, onDirtyChange }: Props
   const days = useMemo(() => inputCastId ? castAccountingAttendanceDays(data.closings, casts, month, inputCastId) : [], [casts, data.closings, month, inputCastId]);
   const resolved = useMemo(() => state?.status === "closed"
     ? { inputs: snapshot?.castSalesReports.flatMap((row) => row.totals.accountingInputs || []) || [], issues: snapshot ? [] : ["確定時の入力明細を読み込めません。現在の日次データから再計算はしていません。"] }
-    : resolveCastAccountingInputs(stored || { month, castInputs: [] }, data.closings, casts, month), [casts, data.closings, month, snapshot, state?.status, stored]);
+    : resolveCastAccountingInputs({ month, castInputs: (stored?.castInputs || []).filter((row) => row.kind !== "transport") }, data.closings, casts, month), [casts, data.closings, month, snapshot, state?.status, stored]);
   const groups = new Map<string, CastAccountingInput[]>();
-  inputs.forEach((input) => groups.set(input.castId, [...(groups.get(input.castId) || []), input]));
+  inputs.filter((input) => input.kind !== "transport").forEach((input) => groups.set(input.castId, [...(groups.get(input.castId) || []), input]));
   useEffect(() => { onDirtyChange?.(Boolean(editing)); return () => onDirtyChange?.(false); }, [editing, onDirtyChange]);
 
   const changeMonth = (value: string) => {
@@ -80,7 +81,7 @@ function CastAccountingInputForm({ data, user, busy, run, onDirtyChange }: Props
     setEditing(null); setError(""); setSelected(castId); setDetailsCastId(castId); setPickerOpen(false);
   };
   const open = (kind: CastAccountingInput["kind"], original?: CastAccountingInput) => {
-    if (disabled) return;
+    if (disabled || kind === "transport") return;
     const cast = active.find((row) => row.id === (original?.castId || selected));
     if (!cast) { setError("追加・変更できるのは現在の在籍キャストのみです。"); return; }
     if (!castAccountingAttendanceDays(data.closings, casts, month, cast.id).length) { setError("対象月に本人の承認済み出勤データがありません。"); return; }
@@ -93,6 +94,7 @@ function CastAccountingInputForm({ data, user, busy, run, onDirtyChange }: Props
   const patch = (change: Partial<CastAccountingInput>) => setEditing((value) => value ? { ...value, input: { ...value.input, ...change } } : value);
   const candidate = useMemo(() => {
     if (!editing) return { input: undefined, amount: undefined, date: "", error: "" };
+    if (editing.input.kind === "transport") return { input: undefined, amount: undefined, date: "", error: "送迎の入力先が変わりました。入力内容を控えて、店舗作業の「送迎」から登録してください。" };
     try {
       if (!editing.amountText.trim()) throw new Error("金額を入力してください。");
       const amount = castAccountingInputAmount(editing.input.kind, Number(editing.amountText));
@@ -115,7 +117,7 @@ function CastAccountingInputForm({ data, user, busy, run, onDirtyChange }: Props
     } finally { savingRef.current = false; setSaving(false); }
   };
   const remove = async (input: CastAccountingInput) => {
-    if (disabled || editing || savingRef.current) return;
+    if (disabled || editing || savingRef.current || input.kind === "transport") return;
     if (!window.confirm(month + " " + input.castName + "の" + labels[input.kind] + "「" + input.label + "」" + yen.format(input.amount) + "を削除しますか？\n店舗の日次原本・支払実績は変更しません。")) return;
     savingRef.current = true; setSaving(true);
     try { await run(() => saveCastAccountingInputs(month, inputs.filter((row) => row.id !== input.id), revision, user), "入力項目を削除しました。"); }
@@ -133,7 +135,7 @@ function CastAccountingInputForm({ data, user, busy, run, onDirtyChange }: Props
   };
 
   return <div className="grid cast-accounting-inputs">
-    <Card title="キャストデータ入力" description="店舗の日次原本を変更せず、月次の売上・手当・追加送迎を名目別に登録します。現金の支払実績を訂正する場合は差戻しから行ってください。">
+    <Card title="キャストデータ入力" description="店舗の日次原本を変更せず、月次の売上・手当を名目別に登録します。送迎代は店舗作業の「送迎」で登録します。現金の支払実績を訂正する場合は差戻しから行ってください。">
       <div className="month-toolbar"><Field label="対象月"><input className="input" type="month" value={month} disabled={busy || saving} onChange={(event) => changeMonth(event.target.value)} /></Field><StatusPill tone={locked ? "warn" : "neutral"}>{state?.status === "closed" ? "月次確定済み" : state?.status === "closing" ? "月次確定処理中" : "未確定"}</StatusPill></div>
       {locked && <p className="notice warn">この月は追加・変更・削除できません。保存済みの明細は閲覧できます。</p>}
     </Card>
@@ -146,17 +148,17 @@ function CastAccountingInputForm({ data, user, busy, run, onDirtyChange }: Props
       </div>
     </Card>
     {pickerOpen && <CastInputPicker month={month} rows={pickerRows} selected={selected} disabled={locked} busy={busy || saving} onSelect={chooseCast} onClose={() => setPickerOpen(false)} />}
-    <Card title={selectedCast ? selectedCast.name + "の入力" : "売上・手当・送迎の入力"}>
-        {selectedCast && <div className="actions">{(["sales", "allowance", "transport"] as const).map((kind) => <button type="button" key={kind} className="button secondary" disabled={disabled || !days.length} onClick={() => open(kind)}>{labels[kind]}入力</button>)}</div>}
+    <Card title={selectedCast ? selectedCast.name + "の入力" : "売上・手当の入力"}>
+        {selectedCast && <div className="actions">{(["sales", "allowance"] as const).map((kind) => <button type="button" key={kind} className="button secondary" disabled={disabled || !days.length} onClick={() => open(kind)}>{labels[kind]}入力</button>)}</div>}
         {editing && <div className="stack top-gap">
           <h3>{editing.input.castName}・{labels[editing.input.kind]}入力</h3>
           <p className="muted compact-text">{hints[editing.input.kind]}</p>
           {!active.some((cast) => cast.id === editing.input.castId) && <p className="notice warn">このキャストは在籍外になったため変更できません。入力内容は保持しています。</p>}
           {stale && <div className="notice warn" role="alert">参照データが更新されています。入力内容は保持しています。最新データを確認してから保存してください。<button className="button secondary mini top-gap" disabled={disabled} onClick={recheck}>入力を保持して最新データと再確認</button></div>}
-          <fieldset disabled={disabled} className="cast-input-fields">
+          <fieldset disabled={disabled || transportDraft} className="cast-input-fields">
             <div className="grid form-row">
               <Field label="名目"><input className="input" value={editing.input.label} maxLength={100} onChange={(event) => patch({ label: event.target.value })} /></Field>
-              <Field label="金額"><input className="input money-input" type="number" min="0" step={editing.input.kind === "transport" ? 500 : 1} value={editing.amountText} onChange={(event) => setEditing((value) => value ? { ...value, amountText: event.target.value } : value)} /></Field>
+              <Field label="金額"><input className="input money-input" type="number" min="0" step={1} value={editing.amountText} onChange={(event) => setEditing((value) => value ? { ...value, amountText: event.target.value } : value)} /></Field>
               <Field label={editing.input.kind === "sales" ? "営業日（必須）" : "営業日（任意）"} hint={editing.input.kind === "sales" ? "本人の承認済み出勤日から選択" : "未指定の場合は本人の最終承認済み出勤日に計上"}>
                 <select className="input" value={editing.input.businessDate || ""} onChange={(event) => patch({ businessDate: event.target.value || undefined })}>
                   <option value="">{editing.input.kind === "sales" ? "営業日を選択" : "最終出勤日に計上"}</option>
@@ -173,7 +175,7 @@ function CastAccountingInputForm({ data, user, busy, run, onDirtyChange }: Props
     </Card>
     <Card title="入力済みキャスト一覧" description={month + "に登録した名目別の入力です。退店後も保存済み明細は残ります。"}>
       {!groups.size ? <p className="muted">この月の入力はありません。</p> : <div className="table-wrap cast-input-summary"><table>
-        <thead><tr><th scope="col">キャスト</th><th scope="col">売上</th><th scope="col">手当</th><th scope="col">追加送迎</th><th scope="col">件数</th><th scope="col">詳細</th></tr></thead>
+        <thead><tr><th scope="col">キャスト</th><th scope="col">売上</th><th scope="col">手当</th><th scope="col">件数</th><th scope="col">詳細</th></tr></thead>
         <tbody>{[...groups].map(([castId, rows]) => {
           const name = rows[0].castName;
           const isActive = active.some((cast) => cast.id === castId);
@@ -183,10 +185,10 @@ function CastAccountingInputForm({ data, user, busy, run, onDirtyChange }: Props
           return <Fragment key={castId}>
             <tr className={expanded ? "is-selected" : undefined}>
               <th scope="row">{name}{!isActive && "（在籍外）"}</th>
-              <td className="money-cell">{yen.format(total("sales"))}</td><td className="money-cell">{yen.format(total("allowance"))}</td><td className="money-cell">{yen.format(total("transport"))}</td><td>{rows.length}件</td>
+              <td className="money-cell">{yen.format(total("sales"))}</td><td className="money-cell">{yen.format(total("allowance"))}</td><td>{rows.length}件</td>
               <td><button type="button" className="button secondary mini" aria-expanded={expanded} aria-controls={regionId} aria-label={name + "の明細" + (expanded ? "を閉じる" : "を表示")} onClick={() => setDetailsCastId(expanded ? null : castId)}>{expanded ? "閉じる" : "詳細"}</button></td>
             </tr>
-            {expanded && <tr className="cast-input-detail-row"><td colSpan={6}><section id={regionId} aria-label={name + "の入力明細"} className="cast-input-detail">
+            {expanded && <tr className="cast-input-detail-row"><td colSpan={5}><section id={regionId} aria-label={name + "の入力明細"} className="cast-input-detail">
               <h3>{name}の入力明細</h3>
               <Table headers={["区分", "名目", "金額", "指定日・計上日", "操作"]}>{rows.map((row) => {
                 const day = resolved.inputs.find((item) => item.id === row.id)?.businessDate;

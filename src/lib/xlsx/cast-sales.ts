@@ -60,6 +60,12 @@ function validateReport(report: CastSalesReport, reward: CastReward) {
     if (monthly !== additionalCastAmounts(reward)[key]
       || monthly !== report.days.reduce((sum, day) => sum + additionalCastAmounts(day)[key], 0)) fail();
   }
+  const transportRows = [...report.days, report.totals];
+  if (transportRows.some((row) => row.transportFee !== undefined)) {
+    if (transportRows.some((row) => !Number.isSafeInteger(row.transportFee) || row.transportFee! < 0)
+      || report.totals.transportFee !== reward.transportFee
+      || report.days.reduce((sum, day) => sum + day.transportFee!, 0) !== reward.transportFee) fail();
+  }
   const paymentRows = [...report.days, report.totals];
   const paymentKeys = ["dailyPayment", "advancePayment"] as const;
   // 旧確定分の未保存内訳は0円と区別する。部分欠損や月額との不一致は出力しない。
@@ -174,7 +180,8 @@ function addPayroll(sheet: ExcelJS.Worksheet, reward: CastReward, report: CastSa
   sheet.getRow(44).font = { ...font, bold: true };
   sheet.getRow(44).alignment = { vertical: "middle" };
   const notes = ["金額は円。日払い・その他＝日払い＋立替＋送迎代。給与欄はキャスト報酬の月次計算結果。"];
-  notes.push("X送迎・AA手当はキャストデータ入力の追加分のみ（店舗送迎・美容室手当は含みません）。Z減給は空欄です。");
+  notes.push("X送迎代は送迎控除の合計。AA手当は追加手当のみ（美容室手当は含みません）。Z減給は空欄です。");
+  if (report.totals.transportFee === undefined) notes.push("X送迎代：日別内訳未保存のため日別欄は空欄。合計欄は確定時に保存された送迎控除額です。");
   if (report.totals.dailyPayment === undefined) notes.push("W日払い・Y立替：日別内訳未保存のため日別欄は空欄。合計欄は確定時に保存された月合計です。");
   if (report.totals.beautyAllowance !== reward.beautyAllowance) notes.push("日別の美容室欄には、即日支払済みの体入手当を含みます。");
   if (report.totals.backTotal !== totalBack) notes.push("日別バック合計と給与欄の総バックが異なるため、それぞれの月次計算結果を記載しています。");
@@ -251,7 +258,7 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
       B: "日", C: "出勤", D: "退勤", E: "勤務時間", F: "本指", G: "バック", H: "本指売上",
       I: "場内", J: "バック", K: "場延売上", L: "同伴", M: "バック",
       N: "本指酒代", O: "場内酒代", R: "ボトル名", S: "酒代計", T: "日売上", U: "ドリンク10%", V: "美容室",
-      W: "日払い", X: "送迎", Y: "立替", Z: "減給", AA: "手当",
+      W: "日払い", X: "送迎代", Y: "立替", Z: "減給", AA: "手当",
     };
     Object.entries(headings).forEach(([column, value]) => { sheet.getCell(`${column}2`).value = value; });
     sheet.getRow(2).alignment = { horizontal: "center", vertical: "middle", wrapText: true };
@@ -271,7 +278,7 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
         L: day.dohanCount, M: back(day, "dohan"), N: day.honShimeiLiquorCost, O: day.jonaiExtensionLiquorCost,
         R: day.bottles.map((bottle) => `${bottle.name} ×${bottle.quantity}`).join("\n"),
         S: day.totalLiquorCost, T: day.totalSales, U: back(day, "drink"), V: day.beautyAllowance,
-        W: day.dailyPayment ?? null, X: additionalCastAmounts(day).transport,
+        W: day.dailyPayment ?? null, X: day.transportFee ?? null,
         Y: day.advancePayment ?? null, AA: additionalCastAmounts(day).allowance,
       };
       Object.entries(values).forEach(([column, value]) => { row.getCell(column).value = value; });
@@ -291,7 +298,7 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
     }
 
     sheet.getCell("B34").value = "合計";
-    const sumColumns = ["E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "S", "T", "U", "V", "X", "AA"];
+    const sumColumns = ["E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "S", "T", "U", "V", "AA"];
     for (const column of sumColumns) {
       const total = report.days.reduce((sum, day) => {
         const date = Number(day.businessDate.slice(8));
@@ -299,7 +306,7 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
       }, 0);
       sumCell(sheet, column, total);
     }
-    for (const [column, key] of [["W", "dailyPayment"], ["Y", "advancePayment"]] as const) {
+    for (const [column, key] of [["W", "dailyPayment"], ["X", "transportFee"], ["Y", "advancePayment"]] as const) {
       if (report.totals[key] === undefined) {
         sheet.getCell(`${column}34`).value = reward[key];
         sheet.getCell(`${column}34`).note = "日別内訳未保存。確定時に保存された月合計です。";
@@ -329,7 +336,7 @@ function addAccountingInputs(sheet: ExcelJS.Worksheet, report: CastSalesReport) 
     if (totals.sales || totals.allowance || totals.transport) throw new Error(`${report.name}の追加売上・手当・送迎の明細がありません。`);
     return;
   }
-  const labels = { sales: "追加売上", allowance: "追加手当", transport: "追加送迎控除" };
+  const labels = { sales: "追加売上", allowance: "追加手当", transport: "送迎代" };
   const seen = new Set<string>();
   const sums = { sales: 0, allowance: 0, transport: 0 };
   entries.forEach((entry) => {

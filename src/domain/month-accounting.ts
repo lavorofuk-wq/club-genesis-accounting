@@ -35,9 +35,10 @@ import { cashLedgerIssues, summarizeCashFunding, type CashFundingSummary } from 
 import { STAFF_MONTHLY_RATES_START_MONTH, staffMonthlyRateForMonth } from "./staff-rates";
 import { sha256Hex } from "../lib/crypto-compat";
 import { resolveCastAccountingInputs, normalizeCastAccountingInputs, castAccountingInputTotals } from "./cast-accounting-inputs";
+import { applyTransport, normalizeTransportMonth } from "./transport";
 import { normalizeCastSalesRankingRoster, type CastSalesRankingRoster } from "./cast-sales-ranking";
 
-export const MONTHLY_CALCULATION_VERSION = "2.48.1";
+export const MONTHLY_CALCULATION_VERSION = "2.49.0";
 export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 3 as const;
 
 export type IntroducerEntryEvent = {
@@ -233,6 +234,11 @@ export const supportsMonthlyStaffRatesSnapshot = (value: string) => {
   const [major, minor] = match.slice(1).map(Number);
   return major > 2 || (major === 2 && minor >= 25);
 };
+const requiresTransportSnapshot = (value: string) => {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(value);
+  return Boolean(match && (Number(match[1]) > 2 || Number(match[1]) === 2 && Number(match[2]) >= 49));
+};
+
 const requiresCastDailyPaymentsSnapshot = (value: string) => {
   const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(value);
   if (!match) return false;
@@ -346,7 +352,7 @@ function validSnapshotCastDailyPayments(report: CastSalesReport, required: boole
       report.days.reduce((sum, day) => sum + day[key]!, 0)));
 }
 
-function normalizeSnapshotCastSales(value: unknown, month: string, requireTenYen: boolean, requireDailyPayments: boolean): CastSalesReport[] | undefined {
+function normalizeSnapshotCastSales(value: unknown, month: string, requireTenYen: boolean, requireDailyPayments: boolean, requireTransport: boolean): CastSalesReport[] | undefined {
   const tenYenKeys = ["honShimeiSales", "jonaiExtensionSales", "totalSales", "backTotal"];
   const reports = snapshotList<unknown>(value);
   const normalized: CastSalesReport[] = [];
@@ -396,6 +402,11 @@ function normalizeSnapshotCastSales(value: unknown, month: string, requireTenYen
         ...(accountingInputs === undefined ? {} : { accountingInputs }) },
     };
     if (!validSnapshotCastDailyPayments(report, requireDailyPayments)) return undefined;
+    const transportRows = [...report.days, report.totals];
+    if (requireTransport || transportRows.some((day) => day.transportFee !== undefined)) {
+      if (!transportRows.every((day) => snapshotPaymentAmount(day.transportFee))
+        || !sameSnapshotPaymentAmount(report.totals.transportFee, report.days.reduce((sum, day) => sum + day.transportFee!, 0))) return undefined;
+    }
     normalized.push(report);
   }
   return normalized;
@@ -537,7 +548,7 @@ export function normalizeMonthlyAccountingSnapshot(
   const requireTenYen = row.schemaVersion >= 2;
   const requireDailyHourlyYen = row.schemaVersion === 3;
   const castSalesReports = normalizeSnapshotCastSales(row.castSalesReports, pathMonth, requireTenYen,
-    requiresCastDailyPaymentsSnapshot(row.calculationVersion));
+    requiresCastDailyPaymentsSnapshot(row.calculationVersion), requiresTransportSnapshot(row.calculationVersion));
   const storedCastRewards = validSnapshotRows(row.castRewards, ["id", "name", "adoptedSystem"], [
     "hours", "hourlyPay", "honShimeiSales", "jonaiExtensionSales", "liquorCost", "honShimeiLiquorCost",
     "honShimeiBack", "banaiShimeiBack", "dohanBack", "bottleBack", "drinkBack", "hourlyAndBack",
@@ -574,6 +585,7 @@ export function normalizeMonthlyAccountingSnapshot(
     const report = castSalesReports?.find((report) => report.id === item.id);
     if (report && castDailyPaymentKeys.some((key) => report.totals[key] !== undefined
       && !sameSnapshotPaymentAmount(report.totals[key], Number(item[key])))) return false;
+    if (report?.totals.transportFee !== undefined && !sameSnapshotPaymentAmount(report.totals.transportFee, Number(item.transportFee))) return false;
     if (!validSnapshotCastAdditions(item) || additionalCastKeys.some((key) => Number(item[key] || 0) !== Number(report?.totals[key] || 0))
       || Number(item.additionalTransportFee || 0) > Number(item.transportFee)) return false;
     if (item.appliedHourlyRates !== undefined) {
@@ -1370,7 +1382,10 @@ export function calculateMonthlyAccounting(
   monthEvents: IntroducerMonthEvent[] = data.introducerMonthEvents ?? [],
   deletionCommits: IntroducerDeletionCommit[] = data.introducerDeletionCommits ?? [],
 ): MonthlyAccountingResults {
-  const calculationData = withArchivedMasters(data);
+  const originalData = withArchivedMasters(data);
+  const transport = applyTransport(originalData, month, adjustments);
+  const calculationData = { ...originalData, closings: transport.closings };
+  adjustments = transport.adjustments;
   const approved = calculationData.closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(month));
   const castSalesReports = calculateCastSalesReports(calculationData.closings, calculationData.casts, month, adjustments);
   const castRewards = calculateCastRewards(calculationData.closings, calculationData.casts, month, adjustments, monthEvents, deletionCommits);
@@ -1446,6 +1461,7 @@ export function calculateMonthlyAccounting(
     balance: { ...balanceWithoutProfit, totalCosts, profit: sales.total - totalCosts },
     cashFunding,
     warnings: [...new Set([
+      ...transport.issues,
       ...accountingExpenseIssues,
       ...resolveCastAccountingInputs(adjustments, calculationData.closings, calculationData.casts, month).issues,
       ...castAccountingAmountIssues(castRewards),
@@ -1482,6 +1498,8 @@ export async function monthlySourceFingerprint(
     // 計算方式だけが変わった場合も、旧画面のfingerprintと一致させない。
     snapshotSchemaVersion: MONTHLY_SNAPSHOT_SCHEMA_VERSION,
     calculationVersion: MONTHLY_CALCULATION_VERSION,
+    // UIの未作成月(undefined)と確定APIの空月を同じ入力として扱う。
+    transport: normalizeTransportMonth(data.transportMonths?.[month]),
     // updatedAtだけでなく計算へ入力される実値を含め、同一ミリ秒の更新や直接書込みも検出する。
     closings: calculationData.closings.filter((row) => row.businessDate.startsWith(month))
       .sort((left, right) => left.id.localeCompare(right.id)),

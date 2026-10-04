@@ -237,9 +237,17 @@ export function buildBalanceExportReport(input: BalanceExportInput): BalanceExpo
   same(castDailyAndAdvance, sum(approved, (closing) => sum(closing.casts,
     (cast) => amount(cast.dailyPayment, "キャスト日払い") + amount(cast.advancePayment, "キャスト立替"))),
   "キャスト日払い・立替合計");
+  // 送迎画面で編集した金額は確定時の日別総額から照合する。旧日次原額を再加算しない。
+  if (results.castSalesReports.every((report) => report.totals.transportFee !== undefined)) {
+    same(castTransport, sum(results.castSalesReports, (report) => amount(report.totals.transportFee, "送迎代")), "送迎代合計");
+    for (const report of results.castSalesReports) {
+      same(amount(report.totals.transportFee, "送迎代"), sum(report.days, (day) => amount(day.transportFee, "日別送迎代")), "日別送迎代合計");
+    }
+  } else {
   same(castTransport, sum(approved, (closing) => sum(closing.casts, (cast) => amount(cast.transportFee, "キャスト送迎控除")))
     + sum(results.castRewards, (reward) => amount(reward.additionalTransportFee ?? 0, "キャスト追加送迎控除")),
     "キャスト送迎控除合計");
+  }
   // 日払い・派遣支払は各1回だけ引く。カード実入金で控除済みの手数料は現金残高から二重に引かない。
   const expandedCash = results.sales.cash - castNet - castWithholding - results.balance.introducer
     - employeeNet - castDailyAndAdvance - employeeDaily - results.expenses.dispatchCast
