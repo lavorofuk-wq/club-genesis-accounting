@@ -325,9 +325,10 @@ test("schema 3だけ時給・時給バック合計・採用報酬の1円を許�
   }
 });
 
-test("devのschema 3・Ver2.50.1以降だけ売上報酬の1円と途中計算の小数を許容する", () => {
+for (const workspaceUnderTest of ["accounting-dev", "accounting"]) {
+test(`${workspaceUnderTest}のschema 3・Ver2.50.1以降だけ売上報酬の1円と途中計算の小数を許容する`, () => {
   const reward = databaseRules.accountingMonthSnapshots.$month.$revision.castRewards.$index;
-  const evaluate = (key, amount, schemaVersion = 3, calculationVersion = "2.50.1", workspace = "accounting-dev") =>
+  const evaluate = (key, amount, schemaVersion = 3, calculationVersion = "2.50.1", workspace = workspaceUnderTest) =>
     new Function("newData", "$workspace", `return (${reward[key][".validate"]});`)(
       valueNode(amount, schemaVersion, calculationVersion), workspace,
     );
@@ -340,15 +341,15 @@ test("devのschema 3・Ver2.50.1以降だけ売上報酬の1円と途中計算�
     // Pass the version explicitly through valueNode so undefined tests a missing field.
     for (const key of ["salesRewardBase", "salesReward"]) {
       const permitted = new Function("newData", "$workspace", `return (${reward[key][".validate"]});`);
-      assert.equal(permitted(valueNode(1503, 3, calculationVersion), "accounting-dev"), false, `${key}: ${calculationVersion}`);
-      assert.equal(permitted(valueNode(1500, 3, calculationVersion), "accounting-dev"), true, `${key}: ${calculationVersion}`);
+      assert.equal(permitted(valueNode(1503, 3, calculationVersion), workspaceUnderTest), false, `${key}: ${calculationVersion}`);
+      assert.equal(permitted(valueNode(1500, 3, calculationVersion), workspaceUnderTest), true, `${key}: ${calculationVersion}`);
     }
   }
   for (const schemaVersion of [undefined, 2]) {
     for (const key of ["salesRewardBase", "salesReward"]) {
       const permitted = new Function("newData", "$workspace", `return (${reward[key][".validate"]});`);
-      assert.equal(permitted(valueNode(1503, schemaVersion, "2.50.1"), "accounting-dev"), false);
-      assert.equal(permitted(valueNode(1500, schemaVersion, "2.50.1"), "accounting-dev"), true);
+      assert.equal(permitted(valueNode(1503, schemaVersion, "2.50.1"), workspaceUnderTest), false);
+      assert.equal(permitted(valueNode(1500, schemaVersion, "2.50.1"), workspaceUnderTest), true);
     }
   }
   for (const key of ["salesRewardBase", "salesReward"]) {
@@ -363,6 +364,7 @@ test("devのschema 3・Ver2.50.1以降だけ売上報酬の1円と途中計算�
   assert.equal(evaluate("salesReward", 724_959.9), false);
   assert.equal(evaluate("salesReward", 0.5), false);
 });
+}
 
 test("売上報酬のversionゲートは2.50.1の境界と将来のsemverを正しく判定する", () => {
   const reward = databaseRules.accountingMonthSnapshots.$month.$revision.castRewards.$index;
@@ -383,16 +385,19 @@ test("売上報酬のversionゲートは2.50.1の境界と将来のsemverを正�
   }
 });
 
-test("本番の売上報酬ルールはschema・versionによらず従来の10円制約と同値を維持する", () => {
+test("本番・devの旧schema/旧版と他環境では従来の10円制約と同値を維持する", () => {
   const reward = databaseRules.accountingMonthSnapshots.$month.$revision.castRewards.$index;
   const legacyRule = new Function("newData", "return newData.isNumber() && newData.val() >= 0 && newData.val() % 10 === 0;");
   const amounts = [-10, -1, 0, 0.5, 1500, 1503, 1503.5, 724950, 724959, 1_208_264.5,
     Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1, 9_007_199_254_741_000, NaN, Infinity, null, "1500"];
   for (const key of ["salesRewardBase", "salesReward"]) {
     const permitted = new Function("newData", "$workspace", `return (${reward[key][".validate"]});`);
-    for (const workspace of ["accounting", "another-workspace"]) {
+    for (const workspace of ["accounting-dev", "accounting", "another-workspace"]) {
       for (const schemaVersion of [undefined, 2, 3]) {
         for (const calculationVersion of [undefined, "2.13.1", "2.50.0", "2.50.1", "2.51.0", "3.0.0", "10.0.0", "invalid"]) {
+          const newCalculation = ["accounting-dev", "accounting"].includes(workspace) && schemaVersion === 3
+            && ["2.50.1", "2.51.0", "3.0.0", "10.0.0"].includes(calculationVersion);
+          if (newCalculation) continue;
           for (const amount of amounts) {
             const node = valueNode(amount, schemaVersion, calculationVersion);
             assert.equal(permitted(node, workspace), legacyRule(node), `${workspace}/${key}/${schemaVersion}/${calculationVersion}/${amount}`);
