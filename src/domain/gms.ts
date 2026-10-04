@@ -2266,8 +2266,10 @@ export function calculateCastRewards(
     // 各商品バックは商品全体で10円単位へ切捨て後、個人額も10円単位へ切捨て済み。
     // 月次では保存済みの各商品分を単純合計する。
     const hourlyAndBack = hourlyPay + honShimeiBack + banaiShimeiBack + totalDohanBack + totalBottleBack + totalDrinkBack;
-    const salesRewardBase = trialOnly ? 0 : floorTen(Math.max(0, honShimeiSales + jonaiExtensionSales + additions.additionalSales - liquorCost * 0.5));
-    const rewardRate = trialOnly ? 0 : rewardRateForSales(salesRewardBase);
+    // 対象・報酬率は原価控除前の売上で判定し、報酬額の算定時だけ原価の50%を控除する。
+    const salesBeforeCost = honShimeiSales + jonaiExtensionSales + additions.additionalSales;
+    const rewardRate = trialOnly ? 0 : rewardRateForSales(salesBeforeCost);
+    const salesRewardBase = trialOnly ? 0 : floorTen(Math.max(0, salesBeforeCost - liquorCost * 0.5));
     const salesReward = floorTen(salesRewardBase * rewardRate);
     const adoptedSystem = salesReward > hourlyAndBack ? "salesReward" as const : "hourlyAndBack" as const;
     const adoptedReward = Math.max(hourlyAndBack, salesReward);

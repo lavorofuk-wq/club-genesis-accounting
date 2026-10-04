@@ -37,7 +37,7 @@ import { sha256Hex } from "../lib/crypto-compat";
 import { resolveCastAccountingInputs, normalizeCastAccountingInputs, castAccountingInputTotals } from "./cast-accounting-inputs";
 import { normalizeCastSalesRankingRoster, type CastSalesRankingRoster } from "./cast-sales-ranking";
 
-export const MONTHLY_CALCULATION_VERSION = "2.46.3";
+export const MONTHLY_CALCULATION_VERSION = "2.48.1";
 export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 3 as const;
 
 export type IntroducerEntryEvent = {
