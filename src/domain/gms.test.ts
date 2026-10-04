@@ -175,6 +175,103 @@ describe("GMS報酬・日次計算", () => {
     expect(rewardRateForSales(8010000)).toBe(0.8);
   });
 
+  describe("売上報酬の率判定と原価控除の分離", () => {
+    function closingWithSales(honShimeiSales: number, jonaiExtensionSales: number, costPrice: number, salePrice = costPrice) {
+      const snapshot = pos();
+      snapshot.transactions[0].items = snapshot.transactions[0].items.filter((item) => item.itemId === "hon" || item.itemId === "bottle");
+      const bottle = snapshot.transactions[0].items.find((item) => item.itemId === "bottle")!;
+      Object.assign(bottle, { price: salePrice, backTargetCastIds: ["p1"], backTargetCastNames: ["花子"], backAllocation: "single" });
+      Object.assign(snapshot.castSales[0], { honShimeiSales, jonaiExtensionSales, totalAttributedSales: honShimeiSales + jonaiExtensionSales });
+      const rows = buildDailyCasts(snapshot, {
+        p1: { masterId: "c1", name: "花子", kind: "regular", hourlyRate: 3000 },
+        p2: { masterId: "c2", name: "春子", kind: "regular", hourlyRate: 3000 },
+      }, [{ id: "l1", kind: "champagneWine", name: "テストシャンパン", salePrice, costPrice, createdAt: "", updatedAt: "" }], {});
+      return { id: "rate-before-cost", businessDate: snapshot.businessDate, status: "approved", casts: [rows[0]], posSnapshot: snapshot } as DailyClosing;
+    }
+
+    it.each([
+      [1_209_990, 0, 1_189_990, 0],
+      [1_210_000, 0.6, 1_190_000, 714_000],
+      [2_509_990, 0.6, 2_489_990, 1_493_990],
+      [2_510_000, 0.65, 2_490_000, 1_618_500],
+      [4_009_990, 0.65, 3_989_990, 2_593_490],
+      [4_010_000, 0.7, 3_990_000, 2_793_000],
+      [6_009_990, 0.7, 5_989_990, 4_192_990],
+      [6_010_000, 0.75, 5_990_000, 4_492_500],
+      [8_009_990, 0.75, 7_989_990, 5_992_490],
+      [8_010_000, 0.8, 7_990_000, 6_392_000],
+    ])("原価控除前売上 %i 円で率 %s を決め、原価50％控除後に掛ける", (sales, rewardRate, salesRewardBase, salesReward) => {
+      const closing = closingWithSales(sales, 0, 40_000);
+      expect(calculateCastRewards([closing], [], "2026-09")[0]).toMatchObject({
+        liquorCost: 40_000, rewardRate, salesRewardBase, salesReward,
+      });
+    });
+
+    it("本指名と場内延長の合計は対象額を超え、原価控除後だけ対象額未満になる月も売上報酬を比較する", () => {
+      const first = closingWithSales(718_000, 643_290, 306_050, 925_490);
+      const closings = Array.from({ length: 20 }, (_, index) => {
+        const closing = index === 0 ? first : closingWithSales(0, 0, 0);
+        closing.id = `rate-month-${index}`;
+        closing.businessDate = `2026-09-${String(index + 1).padStart(2, "0")}`;
+        closing.casts[0].hours = 7.75;
+        closing.casts[0].endTime = "03:45";
+        if (index > 0) closing.casts[0].honShimeiCount = 0;
+        return closing;
+      });
+      const before = structuredClone(closings);
+      expect(calculateCastRewards(closings, [], "2026-09")[0]).toMatchObject({
+        honShimeiSales: 718_000, jonaiExtensionSales: 643_290, liquorCost: 306_050,
+        hourlyPay: 465_000, hourlyAndBack: 620_860, rewardRate: 0.6,
+        salesRewardBase: 1_208_260, salesReward: 724_950,
+        adoptedSystem: "salesReward", adoptedReward: 724_950,
+      });
+      expect(closings).toEqual(before);
+    });
+
+    it("追加売上も控除前の率判定に含め、追加手当は採用方式の比較後にだけ加える", () => {
+      const closing = closingWithSales(1_000_000, 200_000, 40_000);
+      const member: CastRecord = { id: "c1", name: "花子", legalName: "", status: "active", hiredAt: "2026-09-01",
+        hourlyRates: { "2026-09": 3000 }, note: "", createdAt: "", updatedAt: "" };
+      const adjustments = normalizeMonthlyAdjustments({ month: "2026-09",
+        withholdingByCast: {}, staffSalesAllowance: {}, staffBottleAllowance: {},
+        driverRemoteAllowance: {}, fixedExpenses: [], cardFee: 0, castInputs: [
+        { id: "sales", castId: member.id, castName: member.name, kind: "sales", label: "追加売上", amount: 10_000, businessDate: closing.businessDate },
+        { id: "allowance", castId: member.id, castName: member.name, kind: "allowance", label: "追加手当", amount: 100_001, businessDate: closing.businessDate },
+      ] });
+      expect(calculateCastRewards([closing], [member], "2026-09", adjustments)[0]).toMatchObject({
+        additionalSales: 10_000, additionalAllowance: 100_001, rewardRate: 0.6,
+        salesRewardBase: 1_190_000, salesReward: 714_000, hourlyAndBack: 13_000,
+        adoptedSystem: "salesReward", grossPay: 814_001,
+      });
+    });
+
+    it("体入のみの月は控除前売上が対象額以上でも時給のみを維持する", () => {
+      const closing = closingWithSales(1_210_000, 0, 40_000);
+      closing.casts[0].kind = "trial";
+      expect(calculateCastRewards([closing], [], "2026-09")[0]).toMatchObject({
+        hourlyPay: 12_000, hourlyAndBack: 12_000, rewardRate: 0,
+        salesRewardBase: 0, salesReward: 0, adoptedSystem: "hourlyAndBack", adoptedReward: 12_000,
+      });
+    });
+
+    it.each([714_000, 714_001])("売上報酬が対象でも時給＋バック %i 円が同額以上なら時給＋バックを採用する", (hourlyAndBack) => {
+      const closing = closingWithSales(1_210_000, 0, 40_000);
+      closing.casts[0].hours = 1;
+      closing.casts[0].hourlyRate = hourlyAndBack - 1_000;
+      expect(calculateCastRewards([closing], [], "2026-09")[0]).toMatchObject({
+        rewardRate: 0.6, salesReward: 714_000, hourlyAndBack,
+        adoptedSystem: "hourlyAndBack", adoptedReward: hourlyAndBack,
+      });
+    });
+
+    it("原価50％控除後がマイナスでも率判定を変えず、報酬算定額を0円に制限する", () => {
+      const closing = closingWithSales(1_210_000, 0, 2_500_000);
+      expect(calculateCastRewards([closing], [], "2026-09")[0]).toMatchObject({
+        rewardRate: 0.6, salesRewardBase: 0, salesReward: 0, adoptedSystem: "hourlyAndBack",
+      });
+    });
+  });
+
   it("複数キャストのボトル売上と原価を均等分配する", () => {
     const rows = buildDailyCasts(pos(), {
       p1: { masterId: "c1", name: "花子", kind: "regular", hourlyRate: 3000 },

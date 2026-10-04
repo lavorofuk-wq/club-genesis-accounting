@@ -1,6 +1,7 @@
 import { removeNewExpensesForLegacy } from "./legacy-expense-fixture.test-helper";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { calculateCashFunding, cashFundingContext } from "./cash-funding";
+import { legacyBottleSourceKey } from "./gms";
 import type {
   CastRecord,
   CastReward,
@@ -235,6 +236,92 @@ describe("月次会計ドメイン", () => {
     const snapshot = buildMonthlySnapshot(month, 1, "a".repeat(64), input, results, source.closings, "accounting-user", "2026-09-30T23:59:59.000Z");
     return { source, input, results, snapshot };
   }
+
+  function salesRateSnapshot(sales: number) {
+    const referral = introducer({ feeType: "gross10", entryAdvisoryEnabled: false });
+    const row = dailyCast({
+      honShimeiSales: sales - 10_000,
+      jonaiExtensionSales: 10_000,
+      beautyAllowance: 500,
+      bottles: [{ itemId: "rate-test-bottle", name: "テスト商品", kind: "champagneWine", quantity: 1,
+        salesAmount: 40_000, costAmount: 20_000, specialCost: false }],
+      liquorCost: 20_000,
+      introducer: { id: referral.id, name: referral.name, feeType: referral.feeType,
+        attendanceAdvisoryEnabled: false, entryAdvisoryEnabled: false,
+        attendanceAdvisoryFee: 0, entryAdvisoryFee: 0 },
+    });
+    const closing = approvedClosing({ casts: [row], sales: { cashSales: 0, cardSales: sales, totalSales: sales } });
+    closing.cash.cardSales = sales;
+    closing.cash.totalSales = sales;
+    const source = workspace({ casts: [cast({ introducerId: referral.id })], introducers: [referral], closings: [closing] });
+    const input = adjustments({ legacyBottleClassifications: { [legacyBottleSourceKey(closing, row, 0)]: "honShimei" } });
+    const results = calculateMonthlyAccounting(source, month, input);
+    const snapshot = buildMonthlySnapshot(month, 1, "a".repeat(64), input, results, source.closings, "accounting-user", "2026-09-30T23:59:59.000Z");
+    return { source, input, results, snapshot };
+  }
+
+  it.each([
+    [1_210_000, .6, 720_000],
+    [2_510_000, .65, 1_625_000],
+    [4_010_000, .7, 2_800_000],
+    [6_010_000, .75, 4_500_000],
+    [8_010_000, .8, 6_400_000],
+  ])("控除前売上%sの報酬率%sを紹介者・収支へ連動し、新規確定額%sを読取保持する", (sales, rate, pay) => {
+    const { source, input, results, snapshot } = salesRateSnapshot(sales);
+    expect(canFinalizeMonthlyAccounting(source, month, input, true).allowed).toBe(true);
+    expect(results.castRewards[0]).toMatchObject({ hourlyAndBack: 17_000, liquorCost: 20_000,
+      rewardRate: rate, salesRewardBase: sales - 10_000, salesReward: pay,
+      adoptedSystem: "salesReward", adoptedReward: pay, beautyAllowance: 500, grossPay: pay + 500, netPay: pay + 500 });
+    expect(results.introducerPayments[0]).toMatchObject({ grossBase: pay + 500,
+      grossFee: (pay + 500) / 10, total: (pay + 500) / 10 });
+    expect(results.balance.cast).toBe(pay + 500);
+    expect(results.balance.introducer).toBe((pay + 500) / 10);
+    expect(results.balance.profit).toBe(sales - (pay + 500) - (pay + 500) / 10 - results.expenses.total);
+    expect(snapshot.calculationVersion).toBe(MONTHLY_CALCULATION_VERSION);
+    const before = structuredClone(snapshot);
+    const restored = normalizeMonthlyAccountingSnapshot(JSON.parse(JSON.stringify(snapshot)), month, 1)!;
+    expect(restored).toBeDefined();
+    expect(restored.castRewards).toEqual(results.castRewards);
+    expect(restored.introducerPayments).toEqual(results.introducerPayments);
+    expect(restored.balance).toEqual(results.balance);
+    expect(snapshot).toEqual(before);
+  });
+
+  it.each(["2.46.3", "2.48.0"])("旧計算版%sの控除後率による確定額は同じ入力の再計算結果へ置き換えない", (version) => {
+    for (const [sales, oldRate, oldSalesPay, oldAdopted] of [
+      [1_210_000, 0, 0, 17_000],
+      [2_510_000, .6, 1_500_000, 1_500_000],
+    ]) {
+      const { source, input, snapshot } = salesRateSnapshot(sales);
+      snapshot.calculationVersion = version;
+      const reward = snapshot.castRewards[0];
+      reward.rewardRate = oldRate;
+      reward.salesReward = oldSalesPay;
+      reward.adoptedSystem = oldSalesPay > reward.hourlyAndBack ? "salesReward" : "hourlyAndBack";
+      reward.adoptedReward = oldAdopted;
+      reward.grossPay = oldAdopted + reward.beautyAllowance;
+      reward.netPay = reward.grossPay;
+      const payment = snapshot.introducerPayments[0];
+      payment.grossBase = reward.grossPay;
+      payment.grossFee = Math.floor(reward.grossPay / 10);
+      payment.total = payment.grossFee;
+      snapshot.balance.cast = reward.grossPay;
+      snapshot.balance.introducer = payment.total;
+      snapshot.balance.totalCosts = snapshot.balance.cast + snapshot.balance.introducer + snapshot.balance.staff
+        + snapshot.balance.driver + snapshot.balance.expenses;
+      snapshot.balance.profit = snapshot.sales.total - snapshot.balance.totalCosts;
+      const before = structuredClone(snapshot);
+      const current = calculateMonthlyAccounting(source, month, input);
+      expect(current.castRewards[0].adoptedReward).toBeGreaterThan(oldAdopted);
+      const restored = normalizeMonthlyAccountingSnapshot(JSON.parse(JSON.stringify(snapshot)), month, 1)!;
+      expect(restored).toBeDefined();
+      expect(restored.castRewards).toEqual(before.castRewards);
+      expect(restored.introducerPayments).toEqual(before.introducerPayments);
+      expect(restored.balance).toEqual(before.balance);
+      expect(restored.calculationVersion).toBe(version);
+      expect(snapshot).toEqual(before);
+    }
+  });
 
   it("日別日払い・立替は承認済み原額を丸めず転記し、月額控除と一致させる", () => {
     const { source, input } = hourlyYenSnapshot();
