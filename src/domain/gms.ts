@@ -1090,7 +1090,7 @@ export const floorTen = (value: number) => {
   return Math.floor(stableUnits) * 10;
 };
 
-/** 時給専用の1円未満切捨て。売上・バック等の10円処理には使用しない。 */
+/** 時給・売上報酬の1円未満切捨て。売上・バック等の10円処理には使用しない。 */
 export const floorYen = (value: number) => {
   const amount = Math.max(0, value);
   const nearest = Math.round(amount);
@@ -2282,8 +2282,9 @@ export function calculateCastRewards(
     // 対象・報酬率は原価控除前の売上で判定し、報酬額の算定時だけ原価の50%を控除する。
     const salesBeforeCost = honShimeiSales + jonaiExtensionSales + additions.additionalSales;
     const rewardRate = trialOnly ? 0 : rewardRateForSales(salesBeforeCost);
-    const salesRewardBase = trialOnly ? 0 : floorTen(Math.max(0, salesBeforeCost - liquorCost * 0.5));
-    const salesReward = floorTen(salesRewardBase * rewardRate);
+    // 原価配賦の小数も途中で丸めず保持し、月間売上報酬の最終結果だけ1円未満を切り捨てる。
+    const salesRewardBase = trialOnly ? 0 : Math.max(0, salesBeforeCost - liquorCost * 0.5);
+    const salesReward = floorYen(salesRewardBase * rewardRate);
     const adoptedSystem = salesReward > hourlyAndBack ? "salesReward" as const : "hourlyAndBack" as const;
     const adoptedReward = Math.max(hourlyAndBack, salesReward);
     const beautyAllowance = sum("beautyAllowance");

@@ -22,6 +22,7 @@ import {
   canFinalizeMonthlyAccounting,
   MONTHLY_CALCULATION_VERSION,
   MONTHLY_SNAPSHOT_SCHEMA_VERSION,
+  supportsSalesRewardYenSnapshot,
   monthlySourceFingerprint,
   monthlyAccountingWarnings,
   normalizeIntroducerDeletionCommit,
@@ -683,7 +684,68 @@ describe("月次会計ドメイン", () => {
     expect(normalizeMonthlyAccountingSnapshot(snapshot, month, 1)).toBeUndefined();
   });
 
-  it.each(["honShimeiSales", "jonaiExtensionSales", "honShimeiBack", "banaiShimeiBack", "dohanBack", "bottleBack", "drinkBack", "salesRewardBase", "salesReward"] as const)(
+
+  it.each([
+    ["2.50.0", false], ["2.50.1", true], ["2.50.10", true], ["2.51.0", true],
+    ["3.0.0", true], ["2.49.99", false], ["1.99.99", false],
+    ["2.050.1", false], ["2.50.01", false], ["2.50.1-dev", false], ["", false],
+  ])("売上報酬1円計算版の境界 %s → %s", (version, expected) => {
+    expect(supportsSalesRewardYenSnapshot(String(version))).toBe(expected);
+  });
+
+  it.each([20_001, 20_001.5])("配賦原価%sの基礎端数を保持し、追加売上がある月も1円報酬を確定できる", (cost) => {
+    const { source, input } = salesRateSnapshot(1_210_010);
+    const row = source.closings[0].casts[0];
+    row.honShimeiSales -= 10;
+    row.liquorCost = cost;
+    row.bottles[0].costAmount = cost;
+    input.castInputs = [{ id: "extra-sales", castId: row.masterId, castName: row.name,
+      kind: "sales", label: "追加売上", amount: 10, businessDate: source.closings[0].businessDate }];
+    const before = structuredClone(source);
+    const result = calculateMonthlyAccounting(source, month, input);
+    expect(result.castRewards[0]).toMatchObject({
+      rewardRate: .6, salesRewardBase: 1_210_010 - cost * .5,
+      salesReward: 720_005, adoptedReward: 720_005, adoptedSystem: "salesReward",
+    });
+    expect(canFinalizeMonthlyAccounting(source, month, input, true).allowed).toBe(true);
+    const snapshot = buildMonthlySnapshot(month, 1, "a".repeat(64), input, result, source.closings,
+      "accounting-user", "2026-09-30T23:59:59.000Z");
+    const saved = JSON.parse(JSON.stringify(snapshot));
+    const restored = normalizeMonthlyAccountingSnapshot(saved, month, 1)!;
+    expect(restored).toBeDefined();
+    expect(restored.castRewards).toEqual(result.castRewards);
+    expect(restored.introducerPayments).toEqual(result.introducerPayments);
+    expect(restored.balance).toEqual(result.balance);
+    expect(saved).toEqual(snapshot);
+    expect(source).toEqual(before);
+  });
+
+  it.each(["2.48.1", "2.50.0"])("旧確定版%sの売上報酬・基礎は10円単位のまま保持する", (version) => {
+    const { snapshot } = salesRateSnapshot(1_210_000);
+    snapshot.calculationVersion = version;
+    const before = structuredClone(snapshot);
+    expect(normalizeMonthlyAccountingSnapshot(snapshot, month, 1)?.castRewards).toEqual(before.castRewards);
+    expect(snapshot).toEqual(before);
+    for (const key of ["salesRewardBase", "salesReward"] as const) {
+      const invalid = structuredClone(snapshot);
+      invalid.castRewards[0][key] += 1;
+      expect(normalizeMonthlyAccountingSnapshot(invalid, month, 1)).toBeUndefined();
+    }
+  });
+
+  it.each([-1, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])("新版の売上報酬基礎の不正値%sは保存形式として拒否する", (value) => {
+    const { snapshot } = salesRateSnapshot(1_210_000);
+    snapshot.castRewards[0].salesRewardBase = value;
+    expect(normalizeMonthlyAccountingSnapshot(snapshot, month, 1)).toBeUndefined();
+  });
+
+  it.each([-1, .5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])("新版の売上報酬の不正値%sは保存形式として拒否する", (value) => {
+    const { snapshot } = salesRateSnapshot(1_210_000);
+    snapshot.castRewards[0].salesReward = value;
+    expect(normalizeMonthlyAccountingSnapshot(snapshot, month, 1)).toBeUndefined();
+  });
+
+  it.each(["honShimeiSales", "jonaiExtensionSales", "honShimeiBack", "banaiShimeiBack", "dohanBack", "bottleBack", "drinkBack"] as const)(
     "schema 3でも%sの10円未満は受け付けない", (key) => {
       const { snapshot } = hourlyYenSnapshot();
       snapshot.castRewards[0][key] += 1;
@@ -2837,7 +2899,7 @@ describe("在籍美容室手当の月次統合", () => {
     const data = beautyData();
     const result = calculateMonthlyAccounting(data, month, adjustments());
     const snapshot = buildMonthlySnapshot(month, 1, "a".repeat(64), adjustments(), result, data.closings, "accounting-user", "2026-10-01T00:00:00.000Z");
-    expect(snapshot.calculationVersion).toBe("2.50.0");
+    expect(snapshot.calculationVersion).toBe(MONTHLY_CALCULATION_VERSION);
     const normalized = normalizeMonthlyAccountingSnapshot(snapshot, month, 1);
     expect(normalized?.castRewards[0].beautyAllowance).toBe(500);
     data.beautyMonths![month].casts["cast-1"][month + "-02"].eligible = false;

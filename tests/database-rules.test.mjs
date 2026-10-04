@@ -279,14 +279,14 @@ test("月次snapshotはschema 2/3を併存し、売上・バックは10円単位
   assert.match(day.backs.$backIndex[".validate"], /amount'\)\.val\(\) % 10 === 0/);
   for (const key of [
     "honShimeiSales", "jonaiExtensionSales", "honShimeiBack", "banaiShimeiBack",
-    "dohanBack", "bottleBack", "drinkBack", "salesRewardBase", "salesReward",
+    "dohanBack", "bottleBack", "drinkBack",
   ]) assert.match(reward[key][".validate"], /val\(\) % 10 === 0/);
 
   // POSの実売上は現金・カードを含め1円単位の実額を保持する。
   assert.doesNotMatch(snapshot.sales[".validate"], /% 10/);
 });
 
-function valueNode(value, schemaVersion) {
+function valueNode(value, schemaVersion, calculationVersion) {
   return {
     val: () => typeof value === "string" ? {
       matches: (pattern) => pattern.test(value),
@@ -296,8 +296,11 @@ function valueNode(value, schemaVersion) {
     isString: () => typeof value === "string",
     hasChildren: (keys = []) => value !== null && typeof value === "object"
       && Object.keys(value).length > 0 && keys.every((key) => value[key] !== undefined && value[key] !== null),
-    child: (key) => valueNode(value?.[key], schemaVersion),
-    parent: () => ({ parent: () => ({ parent: () => ({ child: (key) => valueNode(key === "schemaVersion" ? schemaVersion : undefined, schemaVersion) }) }) }),
+    child: (key) => valueNode(value?.[key], schemaVersion, calculationVersion),
+    parent: () => ({ parent: () => ({ parent: () => ({ child: (key) => valueNode(
+      key === "schemaVersion" ? schemaVersion : key === "calculationVersion" ? calculationVersion : undefined,
+      schemaVersion, calculationVersion,
+    ) }) }) }),
   };
 }
 
@@ -315,10 +318,93 @@ test("schema 3だけ時給・時給バック合計・採用報酬の1円を許�
     assert.equal(permitted(valueNode(1503, 2)), false);
     assert.equal(permitted(valueNode(1500, 2)), true);
   }
-  for (const key of ["honShimeiSales", "jonaiExtensionSales", "honShimeiBack", "banaiShimeiBack", "dohanBack", "bottleBack", "drinkBack", "salesRewardBase", "salesReward"]) {
+  for (const key of ["honShimeiSales", "jonaiExtensionSales", "honShimeiBack", "banaiShimeiBack", "dohanBack", "bottleBack", "drinkBack"]) {
     const permitted = new Function("newData", `return (${reward[key][".validate"]});`);
     assert.equal(permitted(valueNode(1503, 3)), false);
     assert.equal(permitted(valueNode(1500, 3)), true);
+  }
+});
+
+for (const workspaceUnderTest of ["accounting-dev", "accounting"]) {
+test(`${workspaceUnderTest}のschema 3・Ver2.50.1以降だけ売上報酬の1円と途中計算の小数を許容する`, () => {
+  const reward = databaseRules.accountingMonthSnapshots.$month.$revision.castRewards.$index;
+  const evaluate = (key, amount, schemaVersion = 3, calculationVersion = "2.50.1", workspace = workspaceUnderTest) =>
+    new Function("newData", "$workspace", `return (${reward[key][".validate"]});`)(
+      valueNode(amount, schemaVersion, calculationVersion), workspace,
+    );
+
+  for (const calculationVersion of ["2.50.1", "2.50.9", "2.50.10", "2.51.0", "2.59.0", "2.60.0", "2.100.0", "3.0.0", "10.0.0"]) {
+    assert.equal(evaluate("salesRewardBase", 1_208_264.5, 3, calculationVersion), true, calculationVersion);
+    assert.equal(evaluate("salesReward", 724_959, 3, calculationVersion), true, calculationVersion);
+  }
+  for (const calculationVersion of [undefined, null, 2.501, "", "1.99.999", "2.49.999", "2.50.0", "2.50.01", "2.050.1", "02.50.1", "2.51.00", "3.00.0", "2.50.1-beta", "2.50.1+metadata"]) {
+    // Pass the version explicitly through valueNode so undefined tests a missing field.
+    for (const key of ["salesRewardBase", "salesReward"]) {
+      const permitted = new Function("newData", "$workspace", `return (${reward[key][".validate"]});`);
+      assert.equal(permitted(valueNode(1503, 3, calculationVersion), workspaceUnderTest), false, `${key}: ${calculationVersion}`);
+      assert.equal(permitted(valueNode(1500, 3, calculationVersion), workspaceUnderTest), true, `${key}: ${calculationVersion}`);
+    }
+  }
+  for (const schemaVersion of [undefined, 2]) {
+    for (const key of ["salesRewardBase", "salesReward"]) {
+      const permitted = new Function("newData", "$workspace", `return (${reward[key][".validate"]});`);
+      assert.equal(permitted(valueNode(1503, schemaVersion, "2.50.1"), workspaceUnderTest), false);
+      assert.equal(permitted(valueNode(1500, schemaVersion, "2.50.1"), workspaceUnderTest), true);
+    }
+  }
+  for (const key of ["salesRewardBase", "salesReward"]) {
+    for (const amount of [-1, NaN, Infinity, -Infinity, null, "724959", Number.MAX_SAFE_INTEGER + 1]) {
+      assert.equal(evaluate(key, amount), false, `${key}: ${amount}`);
+    }
+    assert.equal(evaluate(key, 0), true);
+    assert.equal(evaluate(key, Number.MAX_SAFE_INTEGER), true);
+  }
+  assert.equal(evaluate("salesRewardBase", 0.5), true);
+  assert.equal(evaluate("salesRewardBase", 1_208_264.5), true);
+  assert.equal(evaluate("salesReward", 724_959.9), false);
+  assert.equal(evaluate("salesReward", 0.5), false);
+});
+}
+
+test("売上報酬のversionゲートは2.50.1の境界と将来のsemverを正しく判定する", () => {
+  const reward = databaseRules.accountingMonthSnapshots.$month.$revision.castRewards.$index;
+  const patterns = ["salesRewardBase", "salesReward"].map((key) => {
+    const matches = [...reward[key][".validate"].matchAll(/\.matches\(\/(.+?)\/\)/g)];
+    assert.equal(matches.length, 1);
+    return new RegExp(matches[0][1]);
+  });
+  assert.equal(patterns[0].source, patterns[1].source);
+  for (let major = 0; major < 15; major += 1) {
+    for (let minor = 0; minor < 150; minor += 1) {
+      for (let patch = 0; patch < 15; patch += 1) {
+        const version = `${major}.${minor}.${patch}`;
+        const expected = major > 2 || (major === 2 && (minor > 50 || (minor === 50 && patch >= 1)));
+        assert.equal(patterns[0].test(version), expected, version);
+      }
+    }
+  }
+});
+
+test("本番・devの旧schema/旧版と他環境では従来の10円制約と同値を維持する", () => {
+  const reward = databaseRules.accountingMonthSnapshots.$month.$revision.castRewards.$index;
+  const legacyRule = new Function("newData", "return newData.isNumber() && newData.val() >= 0 && newData.val() % 10 === 0;");
+  const amounts = [-10, -1, 0, 0.5, 1500, 1503, 1503.5, 724950, 724959, 1_208_264.5,
+    Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1, 9_007_199_254_741_000, NaN, Infinity, null, "1500"];
+  for (const key of ["salesRewardBase", "salesReward"]) {
+    const permitted = new Function("newData", "$workspace", `return (${reward[key][".validate"]});`);
+    for (const workspace of ["accounting-dev", "accounting", "another-workspace"]) {
+      for (const schemaVersion of [undefined, 2, 3]) {
+        for (const calculationVersion of [undefined, "2.13.1", "2.50.0", "2.50.1", "2.51.0", "3.0.0", "10.0.0", "invalid"]) {
+          const newCalculation = ["accounting-dev", "accounting"].includes(workspace) && schemaVersion === 3
+            && ["2.50.1", "2.51.0", "3.0.0", "10.0.0"].includes(calculationVersion);
+          if (newCalculation) continue;
+          for (const amount of amounts) {
+            const node = valueNode(amount, schemaVersion, calculationVersion);
+            assert.equal(permitted(node, workspace), legacyRule(node), `${workspace}/${key}/${schemaVersion}/${calculationVersion}/${amount}`);
+          }
+        }
+      }
+    }
   }
 });
 
