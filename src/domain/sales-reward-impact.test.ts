@@ -82,14 +82,15 @@ describe("売上報酬1円単位の他計算への影響", () => {
       honShimeiSales: 600_000, jonaiExtensionSales: 610_010, rewardRate: .6,
       salesRewardBase: 1_190_009.5, salesReward: 714_005, adoptedReward: 714_005,
       additionalAllowance: 5, grossPay: 714_010, dailyPayment: 10_000, advancePayment: 2000,
-      transportFee: 500, withholding: 1234, netPay: 700_276,
+      transportFee: 500, withholding: 57_585, netPay: 643_925,
     });
     const payment = result.introducerPayments[0];
     expect(payment).toMatchObject({ grossBase: 714_010, grossFee: 71_401, total: fee });
     const oldPay = floorTen(floorTen(reward.salesRewardBase) * reward.rewardRate);
     expect(oldPay).toBe(714_000);
+    const oldWithholding = 57_584;
     const oldReward = { ...reward, salesReward: oldPay, adoptedReward: oldPay,
-      grossPay: oldPay + 5, netPay: oldPay + 5 - 13_734 };
+      grossPay: oldPay + 5, withholding: oldWithholding, netPay: oldPay + 5 - 12_500 - oldWithholding };
     const oldPayment = calculateIntroducerPayments([oldReward], data, month)[0];
     expect(payment.salesBase).toBe(oldPayment.salesBase);
     expect(payment.salesFee).toBe(oldPayment.salesFee);

@@ -5,6 +5,7 @@ import { cashFundingIssues } from "./cash-funding";
 import type { CashFunding } from "./cash-funding";
 import { sha256Hex } from "../lib/crypto-compat";
 import { resolveCastAccountingInputs, castAccountingInputTotals, normalizeCastAccountingInputs } from "./cast-accounting-inputs";
+import { calculateCastWithholding } from "./cast-withholding";
 
 export type Role = "shop" | "accounting" | "op";
 export type PersonStatus = "active" | "trial" | "departed";
@@ -2292,7 +2293,10 @@ export function calculateCastRewards(
     const dailyPayment = sum("dailyPayment");
     const advancePayment = sum("advancePayment");
     const transportFee = sum("transportFee") + additions.additionalTransportFee;
-    const withholding = asNumber(adjustments?.withholdingByCast?.[id]);
+    // 体入のみの月は従来の手入力を維持。同月入店を含む在籍分は統合後の総支給額で1回計算する。
+    const withholding = trialOnly
+      ? asNumber(adjustments?.withholdingByCast?.[id])
+      : calculateCastWithholding(grossPay, month);
     // 月途中で条件が変わった場合は営業日・在籍区分ではなく、体入日も含めて
     // 「最後に店舗保存された日次」に実際に入っている条件を正とする。
     const latestIntroducerEntry = [...entries].sort((left, right) => {

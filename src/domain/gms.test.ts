@@ -1186,6 +1186,76 @@ describe("GMS報酬・日次計算", () => {
     ])).toEqual([{ businessDate: "2026-09-02", hours: 0.5, amount: 751 }]);
   });
 
+  describe("在籍源泉の自動計算と体入手入力の分離", () => {
+    const month = "2026-09";
+    function withholdingRow(masterId = "withholding-member", kind: "regular" | "trial" = "regular"): DailyClosing["casts"][number] {
+      return { masterId, posCastId: `pos-${masterId}`, name: "源泉確認", kind,
+        startTime: "20:00", endTime: "00:00", hours: 4, hourlyRate: 125_000,
+        honShimeiCount: 0, banaiShimeiCount: 0, dohanCount: 0, dohanBack: 0,
+        honShimeiSales: 0, jonaiExtensionSales: 0, drinkSales: 0, drinkAllocations: [],
+        bottles: [], liquorCost: 0, beautyAllowance: 500, dailyPayment: 20_000,
+        advancePayment: 1000, transportFee: 500 };
+    }
+    function withholdingClosing(row: DailyClosing["casts"][number], day = "20"): DailyClosing {
+      return { id: `withholding-${day}`, businessDate: `${month}-${day}`, status: "approved", casts: [row] } as DailyClosing;
+    }
+    function withholdingSettings(id: string) {
+      return normalizeMonthlyAdjustments({ month, withholdingByCast: { [id]: 99_999 },
+        staffSalesAllowance: {}, staffBottleAllowance: {}, driverRemoteAllowance: {}, fixedExpenses: [], cardFee: 0,
+        castInputs: [{ id: "withholding-allowance", castId: id, castName: "源泉確認", kind: "allowance",
+          label: "追加手当", amount: 23_000, businessDate: `${month}-20` }] });
+    }
+
+    it.each(["active", "departed"] as const)("%sの途中入退店でも全月控除し、美容室・追加手当を含む総支給から計算する", (status) => {
+      const row = withholdingRow();
+      const member: CastRecord = { id: row.masterId, name: row.name, legalName: "", status,
+        hiredAt: `${month}-15`, ...(status === "departed" ? { departedAt: `${month}-25` } : {}),
+        hourlyRates: { [month]: 125_000 }, note: "", createdAt: "", updatedAt: "" };
+      const closings = [withholdingClosing(row)];
+      const settings = withholdingSettings(member.id);
+      const before = structuredClone({ closings, settings, member });
+      expect(calculateCastRewards(closings, [member], month, settings)[0]).toMatchObject({
+        id: member.id, days: 1, hourlyPay: 500_000, adoptedReward: 500_000,
+        beautyAllowance: 500, additionalAllowance: 23_000, grossPay: 523_500,
+        withholding: 38_134, dailyPayment: 20_000, advancePayment: 1000, transportFee: 500, netPay: 463_866,
+      });
+      expect({ closings, settings, member }).toEqual(before);
+    });
+
+    it.each([1234.5, 0])("体入のみは手入力%s円と支払済み金額を維持する", (manualTax) => {
+      const row = { ...withholdingRow("withholding-trial", "trial"), beautyAllowance: 0 };
+      const closings = [withholdingClosing(row)];
+      const settings = normalizeMonthlyAdjustments({ month, withholdingByCast: { [row.masterId]: manualTax },
+        staffSalesAllowance: {}, staffBottleAllowance: {}, driverRemoteAllowance: {}, fixedExpenses: [], cardFee: 0 });
+      const before = structuredClone({ closings, settings });
+      expect(calculateCastRewards(closings, [], month, settings)[0]).toMatchObject({
+        trialOnly: true, grossPay: 500_000, withholding: manualTax,
+        dailyPayment: 20_000, advancePayment: 1000, transportFee: 500, netPay: 478_500 - manualTax,
+      });
+      expect({ closings, settings }).toEqual(before);
+    });
+
+    it("同月入店者は体入と在籍の総支給を統合して1回だけ全月控除し、過去の手入力を加算しない", () => {
+      const trialRow = { ...withholdingRow("withholding-trial", "trial"), hourlyRate: 50_000,
+        beautyAllowance: 0, dailyPayment: 200_000, advancePayment: 0, transportFee: 0 };
+      const regularRow = { ...withholdingRow(), hourlyRate: 75_000 };
+      const active: CastRecord = { id: regularRow.masterId, name: regularRow.name, legalName: "", status: "active",
+        hiredAt: `${month}-15`, convertedFromTrialId: trialRow.masterId, hourlyRates: { [month]: 75_000 },
+        note: "", createdAt: "", updatedAt: "" };
+      const trial: CastRecord = { ...active, id: trialRow.masterId, status: "trial", hiredAt: undefined,
+        trialDate: `${month}-02`, trialHourlyRate: 50_000, hourlyRates: {}, convertedFromTrialId: undefined, convertedToCastId: active.id };
+      const closings = [withholdingClosing(trialRow, "02"), withholdingClosing(regularRow)];
+      const settings = withholdingSettings(active.id);
+      settings.withholdingByCast[trial.id] = 1234;
+      const before = structuredClone({ closings, settings });
+      const rewards = calculateCastRewards(closings, [trial, active], month, settings);
+      expect(rewards).toHaveLength(1);
+      expect(rewards[0]).toMatchObject({ id: active.id, trialOnly: false, days: 2,
+        hourlyPay: 500_000, grossPay: 523_500, withholding: 38_134, dailyPayment: 220_000, netPay: 263_866 });
+      expect({ closings, settings }).toEqual(before);
+    });
+  });
+
   it("時給＋バックと売上報酬を比較する", () => {
     const snapshot = pos();
     const rows = buildDailyCasts(snapshot, { p1: { masterId: "c1", name: "花子", kind: "regular", hourlyRate: 3000 }, p2: { masterId: "c2", name: "春子", kind: "regular", hourlyRate: 3000 } }, [{ id: "l1", kind: "champagneWine", name: "テストシャンパン", salePrice: 30000, costPrice: 10000, createdAt: "", updatedAt: "" }], {});

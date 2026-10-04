@@ -307,10 +307,11 @@ describe("主要ページのSSRスモーク", () => {
         casts: [regularCast],
       });
     }
+    source.adjustments[0].withholdingByCast = { [member.id]: 9876, "converted-trial": 4321 };
     const calculated = calculateMonthlyAccounting(source, month, source.adjustments[0]);
     expect(calculated.castRewards).toHaveLength(1);
     expect(calculated.castRewards[0]).toMatchObject({
-      id: member.id, trialOnly: false, days: hasRegularAttendance ? 2 : 1,
+      id: member.id, trialOnly: false, days: hasRegularAttendance ? 2 : 1, withholding: 0,
     });
 
     const markup = renderToStaticMarkup(createElement(AccountingForms, {
@@ -321,6 +322,7 @@ describe("主要ページのSSRスモーク", () => {
     expect(regularCard).toBeDefined();
     expect(trialCard).toBeDefined();
     expect(regularCard).toContain(`<strong>${member.name}</strong>`);
+    expect(regularCard).not.toContain("<input ");
     expect(markup.match(new RegExp(`<strong>${member.name}</strong>`, "g"))).toHaveLength(1);
     expect(trialCard).toContain("当月の体入キャスト報酬データはありません。");
     expect(trialCard).not.toContain(member.name);
@@ -348,7 +350,12 @@ describe("主要ページのSSRスモーク", () => {
     const result = calculateMonthlyAccounting(source, month, source.adjustments[0]);
     expect(result.castRewards.find((row) => row.id === "cast-1")?.trialOnly).toBe(false);
     expect(result.castRewards.find((row) => row.id === "snapshot-trial")?.trialOnly).toBe(true);
+    const regularReward = result.castRewards.find((row) => row.id === "cast-1")!;
+    // 自動計算導入前に手入力101円で確定した履歴を再現する。
+    regularReward.withholding = 101;
+    regularReward.netPay = regularReward.grossPay - regularReward.dailyPayment - regularReward.advancePayment - regularReward.transportFee - 101;
     const snapshot = buildMonthlySnapshot(month, 3, "a".repeat(64), source.adjustments[0], result, source.closings, user.uid, new Date().toISOString());
+    snapshot.calculationVersion = "2.50.1";
     const restored = normalizeMonthlyAccountingSnapshot(JSON.parse(JSON.stringify(snapshot)), month, 3);
     expect(restored).toBeDefined();
     const closed: AccountingWorkspaceData = {
@@ -365,7 +372,9 @@ describe("主要ページのSSRスモーク", () => {
     expect(regularCard).not.toContain("確定時の体入名");
     expect(trialCard).toContain("<strong>確定時の体入名</strong>");
     expect(trialCard).not.toContain("確定時の在籍名");
-    expect(regularCard).toMatch(/<input[^>]*class="input money-input"[^>]*disabled=""[^>]*value="101"/);
+    expect(regularCard).toContain("<td>￥101</td>");
+    expect(regularCard).not.toContain("<input ");
+    expect(regularCard).not.toContain("自動計算");
     expect(trialCard).toMatch(/<input[^>]*class="input money-input"[^>]*disabled=""[^>]*value="202"/);
     expectReceiptExportButtons(markup, false);
 
@@ -378,7 +387,45 @@ describe("主要ページのSSRスモーク", () => {
     changed.closings[0].casts[1].kind = "regular";
     changed.closings[0].casts[0].hours = 99;
     expect(render(changed)).toBe(markup);
+    // 現在の勤務データでは源泉計算できなくても、確定済み金額の表示を巻き込まない。
+    changed.closings[0].casts[1].hourlyRate = Number.MAX_VALUE;
+    expect(render(changed)).toBe(markup);
     expect(render({ ...changed, casts: [], closings: [] })).toBe(markup);
+  });
+
+  it("未確定の在籍源泉は月次計算値を読取表示し、保存済み手入力を復活させない", () => {
+    const source = balanceWorkspace();
+    source.casts[0].hourlyRates = { [month]: 50_000 };
+    source.adjustments[0].withholdingByCast = { "cast-1": 9876 };
+    const before = structuredClone(source);
+    const result = calculateMonthlyAccounting(source, month, source.adjustments[0]);
+    const reward = result.castRewards[0];
+    const [year, monthNumber] = month.split("-").map(Number);
+    const calendarDays = new Date(Date.UTC(year, monthNumber, 0)).getUTCDate();
+    const expected = Math.floor((reward.grossPay - calendarDays * 5000) * 1021 / 10000);
+    expect(reward.withholding).toBe(expected);
+    expect(reward.withholding).not.toBe(9876);
+    const markup = renderToStaticMarkup(createElement(AccountingForms, {
+      section: "castRewards", data: source, user, busy: false, run,
+    }));
+    const regularCard = markup.match(/<h2>在籍キャスト報酬（1名）<\/h2>[\s\S]*?<\/section>/)?.[0];
+    expect(regularCard).toContain(`<td>￥${expected.toLocaleString("ja-JP")}</td>`);
+    expect(regularCard).not.toContain("<input ");
+    expect(source).toEqual(before);
+  });
+
+  it("未確定の源泉計算が不正金額で停止してもページを落とさず警告し、確定と帳票出力を止める", () => {
+    const source = balanceWorkspace();
+    source.casts[0].hourlyRates = { [month]: Number.MAX_VALUE };
+    const before = structuredClone(source);
+    const markup = renderToStaticMarkup(createElement(AccountingForms, {
+      section: "castRewards", data: source, user, busy: false, run,
+    }));
+    expect(markup).toContain('role="alert">月次計算を完了できません。');
+    expect(markup).toContain("月次確定・帳票出力は停止しています。");
+    expect(markup).toMatch(/<button[^>]*disabled=""[^>]*>月次確定<\/button>/);
+    expectReceiptExportButtons(markup, true);
+    expect(source).toEqual(before);
   });
 
   it.each([false, true])("同月入店スタッフは体入分も在籍へまとめ、確定後の現マスタ・日次変更で区分や金額を変えない（在籍勤務=%s）", (hasRegularWork) => {

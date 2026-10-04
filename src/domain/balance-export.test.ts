@@ -277,7 +277,7 @@ describe("収支帳票の月次突合", () => {
     expect(report.castDailyAndAdvance).toBe(5000);
     expect(report.employeeDaily).toBe(6000);
     expect(report.castTransport).toBe(1000);
-    expect(report.castWithholding).toBe(333);
+    expect(report.castWithholding).toBe(0);
     expect(data).toEqual(before);
   });
   it("店舗登録の酒代・紹介料と日付指定経費は当日を維持し、未指定入力だけ月次行へ加える", () => {
