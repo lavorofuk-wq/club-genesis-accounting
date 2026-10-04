@@ -166,4 +166,25 @@ describe.each(["accounting-dev", "accounting"])("送迎保存境界（%s）", (e
     await expect(saveCastTransportDay(month, "cast_1", "2026-09-02", 500, 1, user)).resolves.toBeUndefined();
   });
 
+  it("退店後に配列順が変わっても保存済み送迎の同額で出勤根拠を修復する", async () => {
+    await saveCastTransportDay(month, "cast_1", "2026-09-02", 500, 0, user);
+    seed([closing("2026-09-02", { casts: [dailyCast({ masterId: "other", posCastId: "other" }), dailyCast()] })], [cast({ status: "departed" })]);
+    await saveCastTransportDay(month, "cast_1", "2026-09-02", 500, 1, user);
+    expect(records().casts.cast_1["2026-09-02"]).toMatchObject({ amount: 500, attendanceIndex: 1 });
+  });
+  it("退店者の新規・旧額からの初回上書き・金額変更・削除済み復活を拒否する", async () => {
+    seed([closing("2026-09-02", { casts: [dailyCast({ transportFee: 500 })] })], [cast({ status: "departed" })]);
+    await expect(saveCastTransportDay(month, "cast_1", "2026-09-02", 500, 0, user)).rejects.toThrow("在籍");
+    seed(); await saveCastTransportDay(month, "cast_1", "2026-09-02", 500, 0, user);
+    seed([closing()], [cast({ status: "departed" })]);
+    await expect(saveCastTransportDay(month, "cast_1", "2026-09-02", 1000, 1, user)).rejects.toThrow("在籍");
+    await saveCastTransportDay(month, "cast_1", "2026-09-02", 0, 1, user);
+    await expect(saveCastTransportDay(month, "cast_1", "2026-09-02", 500, 2, user)).rejects.toThrow("在籍");
+  });
+  it.each(["deleted", "missing", "returned"])("%sは退店後の同額修復でも拒否する", async (mode) => {
+    await saveCastTransportDay(month, "cast_1", "2026-09-02", 500, 0, user);
+    seed([closing("2026-09-02", { status: mode === "returned" ? "returned" : "approved" })], mode === "missing" ? [] : [cast({ status: "departed", ...(mode === "deleted" ? { deletedAt: "2026-09-03T00:00:00.000Z" } : {}) })]);
+    await expect(saveCastTransportDay(month, "cast_1", "2026-09-02", 500, 1, user)).rejects.toThrow();
+  });
+
 });

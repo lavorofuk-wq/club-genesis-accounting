@@ -116,7 +116,7 @@ export function TransportWork({ data, user, busy, run, onDirtyChange }: Props) {
   const stale = Boolean(panel && "context" in panel && (panel.type !== "calendar" || panel.date) && panel.context !== context);
   const dirty = transportPanelDirty(panel);
   const castMasters = [...data.casts, ...data.archivedCasts.filter((row) => !data.casts.some((cast) => cast.id === row.id))];
-  const activeCasts = data.casts.filter((row) => row.status === "active");
+  const activeCasts = data.casts.filter((row) => row.status === "active" && !row.deletedAt);
   const castRows = castMasters.map((cast) => ({ cast, registration: settings.castRegistrations[cast.id], days: transportCastDays(data, month, cast.id), unresolved: transportUnresolvedLegacyInputs(data, month, cast.id) }))
     .filter((row) => row.registration || row.days.some((day) => day.hasRecord) || row.unresolved.length > 0).sort((a, b) => a.cast.name.localeCompare(b.cast.name, "ja"));
   const legacyRemote = { ...(data.adjustments.find((row) => row.month === month)?.driverRemoteAllowance || {}), ...(data.transportLegacyRemote?.[month] || {}) };
@@ -132,12 +132,17 @@ export function TransportWork({ data, user, busy, run, onDirtyChange }: Props) {
     ? Object.fromEntries(castDays.filter((day) => day.hasRecord).map((day) => [day.businessDate, { amount: day.amount }]))
     : Object.fromEntries(Object.entries(driverDays).filter(([, row]) => Object.keys(row.entries).length).map(([date, row]) => [date, { amount: Object.values(row.entries).reduce((sum, amount) => sum + amount, 0), count: Object.keys(row.entries).length }]));
   const candidateAmounts: number[] = panel?.type === "calendar" && panel.kind === "cast" ? settings.castRegistrations[panel.id]?.amounts || [...TRANSPORT_AMOUNTS] : settings.remoteAmounts;
-  const calendarCanEdit = panel?.type === "calendar" && (panel.kind === "driver" || castForPanel?.status === "active");
+  const calendarCanEdit = panel?.type === "calendar" && (panel.kind === "driver" ? data.drivers.some((driver) => driver.id === panel.id) : activeCasts.some((cast) => cast.id === panel.id));
   const selectedAttended = panel?.type === "calendar" && attendance.includes(panel.date);
   const currentAttendance = panel?.type === "calendar" ? attendanceRows.find((row) => row.businessDate === panel.date) : undefined;
   const savedDay = panel?.type === "calendar" ? (panel.kind === "cast" ? storedMonth.casts[panel.id]?.[panel.date] : storedMonth.drivers[panel.id]?.[panel.date]) : undefined;
   const needsAttendanceRefresh = Boolean(currentAttendance && savedDay && (savedDay.attendanceClosingId !== currentAttendance.closingId || savedDay.attendanceIndex !== currentAttendance.index));
-  const editingDisabled = disabled || stale || !calendarCanEdit;
+  const canRefreshDepartedAttendance = Boolean(panel?.type === "calendar" && panel.kind === "cast" && !dirty && needsAttendanceRefresh
+    && data.casts.some((cast) => cast.id === panel.id && cast.status === "departed" && !cast.deletedAt)
+    && savedDay && "amount" in savedDay && savedDay.amount > 0 && panel.amount === savedDay.amount);
+  const needsRegistration = panel?.type === "calendar" && panel.kind === "cast" && Boolean(panel.date) && !settings.castRegistrations[panel.id] && !savedDay && !panel.hadRecord;
+  const editingDisabled = disabled || stale || !calendarCanEdit || needsRegistration;
+  const deletionDisabled = disabled || stale || panel?.type !== "calendar" || !panel.hadRecord;
   useUpdateDraftBusy("store.transport.saving", saving);
   useEffect(() => { onDirtyChange?.(dirty); return () => onDirtyChange?.(false); }, [dirty, onDirtyChange]);
 
@@ -187,13 +192,18 @@ export function TransportWork({ data, user, busy, run, onDirtyChange }: Props) {
     setConfirmation({ type: "deleteRegistration", id: panel.id });
   };
   const saveDay = (remove = false) => {
-    if (panel?.type !== "calendar" || !panel.date || editingDisabled) return;
+    if (panel?.type !== "calendar" || !panel.date || (remove ? deletionDisabled : editingDisabled)) return;
     if (!remove && (!selectedAttended || (panel.kind === "cast" && (panel.amount === null || !(candidateAmounts.includes(panel.amount) || (needsAttendanceRefresh && panel.amount === panel.originalAmount)))))) return;
     const next: CalendarPanel = { ...panel, date: "", amount: null, originalAmount: null, entries: {}, originalEntries: {}, hadRecord: false };
     void perform(() => panel.kind === "cast"
       ? saveCastTransportDay(month, panel.id, panel.date, remove ? 0 : panel.amount!, panel.revision, user)
       : saveDriverTransportDay(month, panel.id, panel.date, remove ? {} : panel.entries, panel.revision, user),
     personName + "の" + (panel.kind === "cast" ? "送迎" : "遠方手当") + "記録を" + (remove ? "削除" : "保存") + "しました。", next);
+  };
+  const refreshDepartedAttendance = () => {
+    if (panel?.type !== "calendar" || panel.kind !== "cast" || !panel.date || !canRefreshDepartedAttendance || disabled || stale || !savedDay || !("amount" in savedDay)) return;
+    const next: CalendarPanel = { ...panel, date: "", amount: null, originalAmount: null, entries: {}, originalEntries: {}, hadRecord: false };
+    void perform(() => saveCastTransportDay(month, panel.id, panel.date, savedDay.amount, panel.revision, user), personName + "の送迎金額を保持して出勤情報を更新しました。", next);
   };
   const confirmAction = () => {
     if (!confirmation || waiting) return;
@@ -238,18 +248,19 @@ export function TransportWork({ data, user, busy, run, onDirtyChange }: Props) {
       })}</div>{!drivers.length && <p className="muted">ドライバーが登録されていません。共通フォームの「ドライバー」から登録してください。</p>}
     </Card>
     {(panel || confirmation) && <TransportModal title={title} busy={waiting} onClose={() => confirmation ? setConfirmation(null) : move(null)}>
-      {confirmation ? <div className="stack"><p className={confirmation.type === "blocked" ? "notice error" : "notice"} role={confirmation.type === "blocked" ? "alert" : undefined}>{confirmation.type === "blocked" ? "当月に送迎記録があるため削除できません" : confirmation.type === "discard" ? "保存していない入力を破棄して移動しますか？" : confirmation.type === "deleteRegistration" ? "キャストの送迎登録を削除しますか？保存済みの過去の送迎記録は残ります。" : "この日の送迎記録を削除しますか？"}</p><div className="actions"><button type="button" className={"button" + (confirmation.type === "blocked" ? "" : " danger")} disabled={waiting} onClick={confirmAction}>{confirmation.type === "blocked" ? "閉じる" : confirmation.type === "discard" ? "破棄して移動" : "削除する"}</button>{confirmation.type !== "blocked" && <button type="button" className="button secondary" disabled={waiting} onClick={() => setConfirmation(null)}>戻る</button>}</div></div>
+      {confirmation ? <div className="stack"><p className={confirmation.type === "blocked" ? "notice error" : "notice"} role={confirmation.type === "blocked" ? "alert" : undefined}>{confirmation.type === "blocked" ? "当月に送迎記録があるため削除できません" : confirmation.type === "discard" ? "保存していない入力を破棄して移動しますか？" : confirmation.type === "deleteRegistration" ? "キャストの送迎登録を削除しますか？保存済みの過去の送迎記録は残ります。" : "この日の送迎記録を削除しますか？"}</p>{(confirmation.type === "deleteDay" || confirmation.type === "deleteRegistration") && (locked || stale) && <p className="notice warn" role="alert">{locked ? "月次確定処理中・確定済みのため削除できません。" : "元データが更新されています。戻って最新の記録を確認してください。"}</p>}<div className="actions"><button type="button" className={"button" + (confirmation.type === "blocked" ? "" : " danger")} disabled={waiting || ((confirmation.type === "deleteDay" || confirmation.type === "deleteRegistration") && (locked || stale))} onClick={confirmAction}>{confirmation.type === "blocked" ? "閉じる" : confirmation.type === "discard" ? "破棄して移動" : "削除する"}</button>{confirmation.type !== "blocked" && <button type="button" className="button secondary" disabled={waiting} onClick={() => setConfirmation(null)}>戻る</button>}</div></div>
       : <>
         {error && <p className="notice error" role="alert">{error}</p>}
         {stale && <p className="notice warn" role="alert">元データが更新されました。入力を保持しています。内容を控え、この画面を閉じて最新の記録から開き直してください。</p>}
         {locked && <p className="notice warn">月次確定処理中・確定済みのため、記録の変更はできません。</p>}
-        {panel?.type === "castMenu" && <div className="transport-menu-actions"><button type="button" className="transport-person" disabled={disabled || castForPanel?.status !== "active"} onClick={() => openSettings(settings.castRegistrations[panel.id] ? "castInfo" : "register", panel.id)}><strong>{settings.castRegistrations[panel.id] ? "送迎情報編集" : "送迎情報を登録"}</strong><span>候補金額の変更・送迎登録の削除</span></button><button type="button" className="transport-person" disabled={waiting} onClick={() => openCalendar("cast", panel.id)}><strong>送迎記録</strong><span>カレンダーから登録・変更・削除</span></button></div>}
+        {panel?.type === "castMenu" && <div className="transport-menu-actions"><button type="button" className="transport-person" disabled={disabled || (!settings.castRegistrations[panel.id] && !activeCasts.some((cast) => cast.id === panel.id))} onClick={() => openSettings(settings.castRegistrations[panel.id] ? "castInfo" : "register", panel.id)}><strong>{settings.castRegistrations[panel.id] ? "送迎情報編集" : "送迎情報を登録"}</strong><span>候補金額の変更・送迎登録の削除</span></button><button type="button" className="transport-person" disabled={waiting} onClick={() => openCalendar("cast", panel.id)}><strong>送迎記録</strong><span>カレンダーから登録・変更・削除</span></button></div>}
         {panel && (panel.type === "register" || panel.type === "castInfo" || panel.type === "remoteSettings") && <div className="stack">
           {panel.type === "register" && <><Field label="キャストを検索"><input className="input" type="search" value={query} disabled={disabled || stale} placeholder="キャスト名" onChange={(event) => setQuery(event.target.value)} /></Field><div className="transport-cast-picker" role="group" aria-label="送迎を利用する在籍キャスト">{activeCasts.filter((cast) => cast.name.normalize("NFKC").includes(query.normalize("NFKC"))).map((cast) => <button type="button" className={"button secondary" + (panel.id === cast.id ? " is-selected" : "")} aria-pressed={panel.id === cast.id} disabled={disabled || stale || (Boolean(settings.castRegistrations[cast.id]) && panel.id !== cast.id)} key={cast.id} onClick={() => setPanel({ ...panel, id: cast.id })}>{cast.name}{settings.castRegistrations[cast.id] && "（登録済み）"}</button>)}</div>{!activeCasts.length && <p className="muted">登録できる在籍キャストがいません。</p>}</>}
           <p className="muted compact-text">{panel.type === "remoteSettings" ? "全ドライバー共通で使う金額を選択してください。" : "利用する送迎金額を選択してください。"}複数選択できます。翌月以降も引き継がれます。</p>
-          <TransportAmountChoices selected={panel.amounts} multiple disabled={disabled || stale} onSelect={toggleAmount} />
+          <TransportAmountChoices selected={panel.amounts} multiple disabled={disabled || stale || (panel.type === "castInfo" && !activeCasts.some((cast) => cast.id === panel.id))} onSelect={toggleAmount} />
+          {panel.type === "castInfo" && !activeCasts.some((cast) => cast.id === panel.id) && <p className="notice">在籍外のため金額は変更できません。対象月に送迎記録がない場合は登録を削除できます。</p>}
           <p className="muted compact-text">候補金額を変更しても、記録済みの金額は変更されません。</p>
-          <div className="actions"><button type="button" className="button" disabled={disabled || stale || !panel.amounts.length || (panel.type !== "remoteSettings" && !panel.id) || (panel.type !== "register" && !dirty)} onClick={saveSettings}>設定を保存</button><button type="button" className="button secondary" disabled={waiting} onClick={() => move(panel.type === "castInfo" ? { type: "castMenu", id: panel.id } : null)}>戻る</button>{panel.type === "castInfo" && <button type="button" className="button danger" disabled={disabled || stale} onClick={deleteRegistration}>送迎登録を削除</button>}</div>
+          <div className="actions"><button type="button" className="button" disabled={disabled || stale || !panel.amounts.length || (panel.type !== "remoteSettings" && !activeCasts.some((cast) => cast.id === panel.id)) || (panel.type !== "register" && !dirty)} onClick={saveSettings}>設定を保存</button><button type="button" className="button secondary" disabled={waiting} onClick={() => move(panel.type === "castInfo" ? { type: "castMenu", id: panel.id } : null)}>戻る</button>{panel.type === "castInfo" && <button type="button" className="button danger" disabled={disabled || stale} onClick={deleteRegistration}>送迎登録を削除</button>}</div>
         </div>}
         {panel?.type === "calendar" && <div className="stack">
           {monthNavigation}
@@ -263,9 +274,11 @@ export function TransportWork({ data, user, busy, run, onDirtyChange }: Props) {
             {!selectedAttended && <p className="notice warn">この日の出勤を現在確認できません。この日の全記録の削除はできます。金額を登録・変更するには出勤データを送信してください。</p>}
             {panel.kind === "cast" ? <>
               {panel.hadRecord && <p>現在の送迎代 <strong>{yen.format(panel.originalAmount || 0)}</strong></p>}
-              {castForPanel?.status !== "active" && <p className="notice warn">在籍外のキャストは記録の閲覧のみ可能です。</p>}
+              {!calendarCanEdit && <p className="notice warn">在籍外のため新規記録・金額変更はできません。保存済みの記録は削除できます。</p>}
+              {needsRegistration && calendarCanEdit && <div className="notice">この日に新しく記録するには、先に送迎情報を登録してください。<button type="button" className="button secondary mini" disabled={disabled || stale} onClick={() => openSettings("register", panel.id)}>送迎情報を登録</button></div>}
               <TransportAmountChoices amounts={candidateAmounts} selected={panel.amount === null ? [] : [panel.amount]} disabled={editingDisabled || !selectedAttended} onSelect={(amount) => setPanel({ ...panel, amount })} />
             </> : <>
+              {!calendarCanEdit && <p className="notice warn">ドライバーの登録が削除されているため金額は変更できません。保存済みの記録は日単位で削除できます。</p>}
               {Object.entries(panel.entries).map(([id, amount], index) => <div className="transport-remote-entry" key={id}><span>{index + 1}件目</span><select className="input" aria-label={index + 1 + "件目の遠方手当"} value={amount} disabled={editingDisabled || !selectedAttended} onChange={(event) => setPanel({ ...panel, entries: { ...panel.entries, [id]: Number(event.target.value) } })}>{[...new Set([...candidateAmounts, amount])].sort((a, b) => a - b).map((value) => <option key={value} value={value}>{yen.format(value)}</option>)}</select><button type="button" className="button danger mini" disabled={editingDisabled} aria-label={index + 1 + "件目の遠方手当を削除"} onClick={() => { if (editingDisabled) return; const entries = { ...panel.entries }; delete entries[id]; setPanel({ ...panel, entries }); }}>削除</button></div>)}
               {!Object.keys(panel.entries).length && <p className="muted">この日の遠方手当はありません。</p>}
               <p className="muted compact-text">金額を押して1件追加します。同じ金額を複数回追加できます。</p>
@@ -273,7 +286,8 @@ export function TransportWork({ data, user, busy, run, onDirtyChange }: Props) {
               {!candidateAmounts.length && <p className="notice">上部の「遠方手当」から候補金額を登録してください。</p>}
               <p className="transport-day-total">この日の合計 <strong>{yen.format(Object.values(panel.entries).reduce((sum, amount) => sum + amount, 0))}</strong></p>
             </>}
-            <div className="actions top-gap"><button type="button" className="button" disabled={editingDisabled || (!dirty && !needsAttendanceRefresh) || !selectedAttended || (panel.kind === "cast" && (panel.amount === null || !(candidateAmounts.includes(panel.amount) || (needsAttendanceRefresh && panel.amount === panel.originalAmount))))} onClick={() => saveDay()}>記録を保存</button>{panel.hadRecord && <button type="button" className="button danger" disabled={editingDisabled} onClick={() => setConfirmation({ type: "deleteDay" })}>この日の記録を削除</button>}</div>
+            {canRefreshDepartedAttendance && <div className="actions top-gap"><button type="button" className="button" disabled={disabled || stale} onClick={refreshDepartedAttendance}>同じ金額で出勤情報を更新</button></div>}
+            <div className="actions top-gap"><button type="button" className="button" disabled={editingDisabled || (!dirty && !needsAttendanceRefresh) || !selectedAttended || (panel.kind === "cast" && (panel.amount === null || !(candidateAmounts.includes(panel.amount) || (needsAttendanceRefresh && panel.amount === panel.originalAmount))))} onClick={() => saveDay()}>記録を保存</button>{panel.hadRecord && <button type="button" className="button danger" disabled={deletionDisabled} onClick={() => setConfirmation({ type: "deleteDay" })}>この日の記録を削除</button>}</div>
           </section>}
           <div className="actions"><button type="button" className="button secondary" disabled={waiting} onClick={() => move(panel.kind === "cast" ? { type: "castMenu", id: panel.id } : null)}>戻る</button></div>
         </div>}

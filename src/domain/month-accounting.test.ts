@@ -2724,6 +2724,27 @@ describe("日別送迎を反映した月次確定", () => {
     expect(await monthlySourceFingerprint(source, month, inputs)).not.toBe(before);
   });
 
+  it.each(["cast", "driver"])("承認済みでも%s送迎の本人出勤根拠が変わったら月次確定を禁止する", (kind) => {
+    const { source, inputs } = transportWorkspace();
+    if (kind === "cast") source.transportMonths![month].casts["cast-1"]["2026-09-02"].attendanceIndex = 1;
+    else source.transportMonths![month].drivers["driver-1"]["2026-09-02"].attendanceClosingId = "missing";
+    const check = canFinalizeMonthlyAccounting(source, month, inputs, true);
+    expect(check.allowed).toBe(false);
+    expect(check.integrityIssues.some((issue) => issue.includes("出勤変更"))).toBe(true);
+  });
+
+  it("削除済み旧追加の無効な出勤日を確定阻害要因として残さない", () => {
+    const { source, inputs } = transportWorkspace();
+    inputs.castInputs![0].businessDate = "2026-09-03";
+    source.transportMonths![month].casts["cast-1"] = {
+      "2026-09-03": { amount: 0, legacyInputIds: ["legacy-transport"], attendanceClosingId: "removed-closing", attendanceIndex: 0 },
+    };
+    const check = canFinalizeMonthlyAccounting(source, month, inputs, true);
+    expect(check.integrityIssues).toEqual([]);
+    expect(check.allowed).toBe(true);
+    expect(calculateMonthlyAccounting(source, month, inputs).castRewards[0].transportFee).toBe(500);
+  });
+
   it("送信後の出勤差戻しがある送迎記録を警告する", () => {
     const { source, inputs } = transportWorkspace();
     source.closings[0].status = "returned";

@@ -211,3 +211,134 @@ describe("再送後の出勤根拠の更新", () => {
     await vi.waitFor(() => expect(kind === "cast" ? saveCastTransportDay : saveDriverTransportDay).toHaveBeenCalledOnce());
   });
 });
+
+
+describe("退店後の記録整理と未登録日の案内", () => {
+  it("退店キャストは金額を変更できず、保存済みの送迎記録だけ削除できる", async () => {
+    const data = fixture(); data.casts[0].status = "departed";
+    hooks.days.cast = [{ businessDate: date, amount: 1500, legacyInputIds: [], hasRecord: true }];
+    openCalendar(data);
+    expect(component(render(data), TransportAmountChoices).props.disabled).toBe(true);
+    expect(button(render(data), "記録を保存").props.disabled).toBe(true);
+    const remove = button(render(data), "この日の記録を削除");
+    expect(remove.props.disabled).toBe(false); remove.props.onClick();
+    button(render(data), "削除する").props.onClick();
+    await vi.waitFor(() => expect(saveCastTransportDay).toHaveBeenCalledExactlyOnceWith(month, "cast", date, 0, 8, user));
+  });
+  it("対象月に記録がない退店キャストの既存登録を削除できる", async () => {
+    const data = fixture(); data.casts[0].status = "departed";
+    hooks.drafts.set("store.transport.panel", { type: "castMenu", id: "cast" });
+    const edit = find(render(data), (row) => row.type === "button" && text(row.props.children).startsWith("送迎情報編集"));
+    expect(edit.props.disabled).toBe(false); edit.props.onClick();
+    expect(component(render(data), TransportAmountChoices).props.disabled).toBe(true);
+    expect(button(render(data), "設定を保存").props.disabled).toBe(true);
+    button(render(data), "送迎登録を削除").props.onClick();
+    button(render(data), "削除する").props.onClick();
+    await vi.waitFor(() => expect(saveTransportSettings).toHaveBeenCalledExactlyOnceWith({
+      revision: 4, castRegistrations: {}, remoteAmounts: [500, 1500],
+    }, month, user));
+  });
+  it("退店キャストでも対象月の記録がある間は登録を削除できない", () => {
+    const data = fixture(); data.casts[0].status = "departed";
+    hooks.days.cast = [{ businessDate: date, amount: 500, legacyInputIds: [], hasRecord: true }];
+    hooks.drafts.set("store.transport.panel", { type: "castInfo", id: "cast", amounts: [500, 1000], original: [500, 1000], revision: 4, context: transportSourceKey(data, month) });
+    button(render(data), "送迎登録を削除").props.onClick();
+    expect(text(render(data))).toContain("当月に送迎記録があるため削除できません");
+    expect(saveTransportSettings).not.toHaveBeenCalled();
+  });
+  it("旧記録だけの未登録者は新規日に登録を案内し、拒否される記録保存へ進ませない", () => {
+    const data = fixture(); hooks.days.legacy = [{ businessDate: "2026-10-01", amount: 500, legacyInputIds: ["old"], hasRecord: true }];
+    openCalendar(data, "cast", "legacy");
+    expect(component(render(data), TransportAmountChoices).props.disabled).toBe(true);
+    expect(button(render(data), "記録を保存").props.disabled).toBe(true);
+    expect(text(render(data))).toContain("先に送迎情報を登録してください");
+    button(render(data), "記録を保存").props.onClick(); expect(saveCastTransportDay).not.toHaveBeenCalled();
+    button(render(data), "送迎情報を登録").props.onClick();
+    expect(panel()?.type).toBe("register"); expect(panel()?.id).toBe("legacy");
+  });
+  it("同じ保存ボタンを連続で呼んでも一回だけ保存する", async () => {
+    const data = fixture(); openCalendar(data); chooseAmount(data, 1000);
+    let resolve!: () => void;
+    const pending = new Promise<void>((done) => { resolve = done; });
+    vi.mocked(saveCastTransportDay).mockReturnValue(pending);
+    const save = button(render(data), "記録を保存");
+    save.props.onClick(); save.props.onClick();
+    expect(saveCastTransportDay).toHaveBeenCalledTimes(1);
+    resolve(); await vi.waitFor(() => expect(panel()?.date).toBe(""));
+  });
+});
+
+
+describe("削除済みドライバー・確認中の状態変更", () => {
+  it("削除済みドライバーは金額を変更できず、残った日別記録だけ削除できる", async () => {
+    const data = fixture(); data.drivers = [];
+    data.transportMonths![month].drivers.driver = { [date]: { entries: { one: 500 }, attendanceClosingId: "closing", attendanceIndex: 0 } };
+    openCalendar(data, "driver");
+    expect(component(render(data), TransportAmountChoices).props.disabled).toBe(true);
+    expect(button(render(data), "記録を保存").props.disabled).toBe(true);
+    expect(text(render(data))).toContain("ドライバーの登録が削除されている");
+    button(render(data), "この日の記録を削除").props.onClick();
+    button(render(data), "削除する").props.onClick();
+    await vi.waitFor(() => expect(saveDriverTransportDay).toHaveBeenCalledExactlyOnceWith(month, "driver", date, {}, 8, user));
+  });
+  it("登録が残る退店ドライバーは過去の出勤日の遠方手当を変更できる", async () => {
+    const data = fixture(); data.drivers[0].status = "departed";
+    data.transportMonths![month].drivers.driver = { [date]: { entries: { one: 500 }, attendanceClosingId: "closing", attendanceIndex: 0 } };
+    openCalendar(data, "driver");
+    chooseAmount(data, 1500); button(render(data), "記録を保存").props.onClick();
+    await vi.waitFor(() => expect(saveDriverTransportDay).toHaveBeenCalledWith(month, "driver", date, { one: 500, new_1: 1500 }, 8, user));
+  });
+  it.each(["closed", "stale"] as const)("削除確認中の%s変更を説明し、削除ボタンとイベントを止める", (condition) => {
+    const data = fixture(); hooks.days.cast = [{ businessDate: date, amount: 500, legacyInputIds: [], hasRecord: true }];
+    openCalendar(data); button(render(data), "この日の記録を削除").props.onClick();
+    if (condition === "closed") data.monthStates = [{ month, status: "closed", revision: 1 }] as never;
+    else data.transportMonths![month].revision = 9;
+    const node = render(data), remove = button(node, "削除する");
+    expect(remove.props.disabled).toBe(true); remove.props.onClick();
+    expect(text(node)).toContain(condition === "closed" ? "月次確定処理中・確定済みのため削除できません" : "元データが更新されています");
+    expect(saveCastTransportDay).not.toHaveBeenCalled();
+  });
+});
+
+describe("退店キャストの出勤根拠だけの修復", () => {
+  function departedSourceDrift() {
+    const data = fixture(); data.casts[0].status = "departed";
+    data.transportSettings!.castRegistrations.cast.amounts = [1000];
+    data.transportMonths![month].casts.cast = { [date]: { amount: 500, legacyInputIds: [], attendanceClosingId: "closing", attendanceIndex: 2 } };
+    hooks.days.cast = [{ businessDate: date, amount: 500, legacyInputIds: [], hasRecord: true }];
+    return data;
+  }
+  it("候補外の既存額を変更せず、退店後も再送でずれた本人出勤の根拠を更新できる", async () => {
+    const data = departedSourceDrift(); openCalendar(data);
+    const node = render(data);
+    expect(component(node, TransportAmountChoices).props.disabled).toBe(true);
+    expect(button(node, "記録を保存").props.disabled).toBe(true);
+    const repair = button(node, "同じ金額で出勤情報を更新");
+    expect(repair.props.disabled).toBe(false); repair.props.onClick();
+    await vi.waitFor(() => expect(saveCastTransportDay).toHaveBeenCalledExactlyOnceWith(month, "cast", date, 500, 8, user));
+    expect(data.transportMonths![month].casts.cast[date].amount).toBe(500);
+  });
+  it.each(["deleted", "missing", "legacy", "zero", "noAttendance", "sameSource", "changedDraft"] as const)("%s は根拠修復で新規・変更を許可しない", (condition) => {
+    const data = departedSourceDrift();
+    if (condition === "deleted") data.casts[0].deletedAt = "2026-10-03T00:00:00.000Z";
+    if (condition === "missing") { data.archivedCasts = [data.casts[0]]; data.casts = data.casts.slice(1); }
+    if (condition === "legacy") delete data.transportMonths![month].casts.cast;
+    if (condition === "zero") { data.transportMonths![month].casts.cast[date].amount = 0; hooks.days.cast[0].amount = 0; }
+    if (condition === "noAttendance") hooks.attendance.cast = [];
+    if (condition === "sameSource") data.transportMonths![month].casts.cast[date].attendanceIndex = 0;
+    openCalendar(data);
+    if (condition === "changedDraft") hooks.drafts.set("store.transport.panel", { ...panel(), amount: 1000 });
+    const node = render(data);
+    expect(text(node)).not.toContain("同じ金額で出勤情報を更新");
+    expect(button(node, "記録を保存").props.disabled).toBe(true);
+    button(node, "記録を保存").props.onClick(); expect(saveCastTransportDay).not.toHaveBeenCalled();
+  });
+  it.each(["busy", "closed", "closing", "stale"] as const)("根拠修復も%s時は保存できない", (condition) => {
+    const data = departedSourceDrift(); openCalendar(data);
+    if (condition === "closed" || condition === "closing") data.monthStates = [{ month, status: condition, revision: 1 }] as never;
+    if (condition === "stale") data.transportMonths![month].revision++;
+    const node = render(data, condition === "busy");
+    const repair = button(node, "同じ金額で出勤情報を更新");
+    expect(repair.props.disabled).toBe(true); repair.props.onClick(); expect(saveCastTransportDay).not.toHaveBeenCalled();
+  });
+});

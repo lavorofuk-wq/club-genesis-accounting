@@ -38,7 +38,7 @@ import { resolveCastAccountingInputs, normalizeCastAccountingInputs, castAccount
 import { applyTransport, normalizeTransportMonth } from "./transport";
 import { normalizeCastSalesRankingRoster, type CastSalesRankingRoster } from "./cast-sales-ranking";
 
-export const MONTHLY_CALCULATION_VERSION = "2.49.0";
+export const MONTHLY_CALCULATION_VERSION = "2.49.1";
 export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 3 as const;
 
 export type IntroducerEntryEvent = {
@@ -1540,7 +1540,10 @@ export function canFinalizeMonthlyAccounting(
   monthEvents?: IntroducerMonthEvent[],
   deletionCommits?: IntroducerDeletionCommit[],
 ) {
-  const calculationData = withArchivedMasters(data);
+  const originalData = withArchivedMasters(data);
+  const transport = applyTransport(originalData, month, adjustments);
+  const calculationData = { ...originalData, closings: transport.closings };
+  adjustments = transport.adjustments;
   const resolvedEntryEvents = entryEvents ?? data.introducerEntryEvents ?? [];
   const resolvedMonthEvents = monthEvents ?? data.introducerMonthEvents ?? [];
   const resolvedDeletionCommits = deletionCommits ?? data.introducerDeletionCommits ?? [];
@@ -1562,6 +1565,7 @@ export function canFinalizeMonthlyAccounting(
     .filter(([, count]) => count > 1)
     .map(([businessDate]) => `${businessDate}の承認済み日次データが複数あります。重複データを差し戻してから確定してください。`);
   const integrityIssues = [
+    ...transport.issues,
     ...resolveAccountingExpenses(adjustments, month, calculationData.closings).issues,
     ...resolveCastAccountingInputs(adjustments, calculationData.closings, calculationData.casts, month).issues,
     ...castAccountingAmountIssues(castRewards),

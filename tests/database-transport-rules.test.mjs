@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import test from "node:test";
+import nodeTest from "node:test";
 import ts from "typescript";
 const rules = JSON.parse(await readFile(new URL("../database.rules.json", import.meta.url), "utf8")).rules;
 const transport = rules.$workspace.transportMonths;
@@ -17,7 +17,9 @@ class Snapshot {
   isString() { return typeof this.raw() === "string"; }
   hasChildren(keys = []) { const value = this.raw(); return value && typeof value === "object" && Object.keys(value).length > 0 && keys.every((key) => this.child(key).exists()); }
 }
-const identity = { $workspace: "accounting-dev", $month: month, $personId: "cast_1", $castId: "cast_1", $date: businessDate, $field: "", $entryId: "first", $legacyIndex: "0", $amountIndex: "0" };
+for (const workspaceUnderTest of ["accounting-dev", "accounting"]) {
+const test = (name, run) => nodeTest(workspaceUnderTest + ": " + name, run);
+const identity = { $workspace: workspaceUnderTest, $month: month, $personId: "cast_1", $castId: "cast_1", $date: businessDate, $field: "", $entryId: "first", $legacyIndex: "0", $amountIndex: "0" };
 function evaluate(rule, old, next, path, context = {}) {
   const variables = { ...identity, ...context };
   return Boolean(new Function("root", "data", "newData", "auth", "now", "query", ...Object.keys(variables),
@@ -26,7 +28,7 @@ function evaluate(rule, old, next, path, context = {}) {
     context.auth === null ? null : { uid: "user" }, now, context.query || {}, ...Object.values(variables)));
 }
 function fixture(kind = "casts") {
-  const old = { users: { user: { role: "shop" } }, "accounting-dev": {
+  const old = { users: { user: { role: "shop" } }, [workspaceUnderTest]: {
     config: { transportSettings: { revision: 1, castRegistrations: { cast_1: { amounts: [500, 1000] } }, remoteAmounts: [500, 1000] } },
     casts: { cast_1: { name: "テスト", status: "active" } }, drivers: { driver_1: { name: "運転手" } },
     history: { daily_20260902: { status: "submitted", businessDate, casts: [{ masterId: "cast_1", kind: "regular" }], drivers: [{ driverId: "driver_1" }] } },
@@ -34,11 +36,11 @@ function fixture(kind = "casts") {
   } };
   const next = structuredClone(old), id = kind === "casts" ? "cast_1" : "driver_1";
   const day = { attendanceClosingId: "daily_20260902", attendanceIndex: 0, ...(kind === "casts" ? { amount: 1000, legacyInputIds: ["legacy_1"] } : { entries: { first: 500, second: 1000 } }) };
-  next["accounting-dev"].transportMonths = { [month]: { revision: 1, updatedAt: "2026-09-03T00:00:00.000Z", updatedBy: "user", [kind]: { [id]: { [businessDate]: day } } } };
+  next[workspaceUnderTest].transportMonths = { [month]: { revision: 1, updatedAt: "2026-09-03T00:00:00.000Z", updatedBy: "user", [kind]: { [id]: { [businessDate]: day } } } };
   return { old, next, kind, id, day };
 }
 function allowed(f) {
-  const monthPath = "accounting-dev/transportMonths/" + month, dayPath = monthPath + "/" + f.kind + "/" + f.id + "/" + businessDate;
+  const monthPath = workspaceUnderTest + "/transportMonths/" + month, dayPath = monthPath + "/" + f.kind + "/" + f.id + "/" + businessDate;
   const context = { $personId: f.id }, dayRules = transport.$month[f.kind].$personId.$date;
   if (!evaluate(dayRules[".write"], f.old, f.next, dayPath, context) || !evaluate(transport.$month[".validate"], f.old, f.next, monthPath, context)
     || !evaluate(dayRules[".validate"], f.old, f.next, dayPath, context)) return false;
@@ -50,54 +52,54 @@ function allowed(f) {
   }
   return true;
 }
-test("送迎書込は開発環境の店舗・OPのみで、経理と本番への書込を拒否する", () => {
+test("送迎書込は店舗・OPだけに許可し、経理と対象外workspaceへの書込を拒否する", () => {
   for (const role of ["shop", "op"]) { const f = fixture(); f.old.users.user.role = role; assert.equal(allowed(f), true); }
   const f = fixture(); f.old.users.user.role = "accounting"; assert.equal(allowed(f), false);
   const node = transport.$month.casts.$personId.$date;
-  assert.equal(evaluate(node[".write"], fixture().old, fixture().next, "accounting-dev/transportMonths/" + month + "/casts/cast_1/" + businessDate, { $workspace: "accounting" }), false);
+  assert.equal(evaluate(node[".write"], fixture().old, fixture().next, workspaceUnderTest + "/transportMonths/" + month + "/casts/cast_1/" + businessDate, { $workspace: "other" }), false);
 });
 test("CAS・確定月・確定処理ロックをサーバーで検査する", () => {
-  for (const patch of [{ revision: 2 }, { updatedBy: "other" }]) { const f = fixture(); Object.assign(f.next["accounting-dev"].transportMonths[month], patch); assert.equal(allowed(f), false); }
-  for (const status of ["closed", "closing"]) { const f = fixture(); f.old["accounting-dev"].accountingMonthStates = { [month]: { status } }; assert.equal(allowed(f), false); }
-  const f = fixture(); f.old["accounting-dev"].accountingFinalizeLock = { expiresAt: now + 10000 }; assert.equal(allowed(f), false);
+  for (const patch of [{ revision: 2 }, { updatedBy: "other" }]) { const f = fixture(); Object.assign(f.next[workspaceUnderTest].transportMonths[month], patch); assert.equal(allowed(f), false); }
+  for (const status of ["closed", "closing"]) { const f = fixture(); f.old[workspaceUnderTest].accountingMonthStates = { [month]: { status } }; assert.equal(allowed(f), false); }
+  const f = fixture(); f.old[workspaceUnderTest].accountingFinalizeLock = { expiresAt: now + 10000 }; assert.equal(allowed(f), false);
 });
 test("新規送迎は本人の送信済み出勤と500円刻み4候補だけを受け付ける", () => {
   for (const patch of [{ amount: 501 }, { amount: 2500 }, { attendanceIndex: 1 }, { attendanceClosingId: "missing" }]) { const f = fixture(); Object.assign(f.day, patch); assert.equal(allowed(f), false); }
-  for (const status of ["returned", "withdrawn"]) { const f = fixture(); f.old["accounting-dev"].history.daily_20260902.status = status; assert.equal(allowed(f), false); }
-  const f = fixture(); f.old["accounting-dev"].casts.cast_1.status = "trial"; assert.equal(allowed(f), false);
+  for (const status of ["returned", "withdrawn"]) { const f = fixture(); f.old[workspaceUnderTest].history.daily_20260902.status = status; assert.equal(allowed(f), false); }
+  const f = fixture(); f.old[workspaceUnderTest].casts.cast_1.status = "trial"; assert.equal(allowed(f), false);
 });
 test("他人の旧追加入力を送迎日別記録で抑制できない", () => {
-  const f = fixture(); f.old["accounting-dev"].accountingAdjustments[month].castInputs.legacy_1.castId = "other"; assert.equal(allowed(f), false);
+  const f = fixture(); f.old[workspaceUnderTest].accountingAdjustments[month].castInputs.legacy_1.castId = "other"; assert.equal(allowed(f), false);
 });
 test("送迎と遠方手当は論理削除できるが、日別記録の物理削除と月の一括書込を拒否する", () => {
   assert.equal(transport.$month[".write"], undefined);
   for (const kind of ["casts", "drivers"]) {
-    const f = fixture(kind); const path = "accounting-dev/transportMonths/" + month + "/" + kind + "/" + f.id + "/" + businessDate;
-    const before = structuredClone(f.next); delete f.next["accounting-dev"].transportMonths[month][kind][f.id][businessDate];
+    const f = fixture(kind); const path = workspaceUnderTest + "/transportMonths/" + month + "/" + kind + "/" + f.id + "/" + businessDate;
+    const before = structuredClone(f.next); delete f.next[workspaceUnderTest].transportMonths[month][kind][f.id][businessDate];
     assert.equal(evaluate(transport.$month[kind].$personId.$date[".write"], before, f.next, path, { $personId: f.id }), false);
     assert.equal(transport.$month[kind][".write"], undefined); assert.equal(transport.$month[kind].$personId[".write"], undefined);
-    f.next = structuredClone(before); f.old = before; f.next["accounting-dev"].transportMonths[month].revision = 2;
-    f.next["accounting-dev"].transportMonths[month].updatedAt = "2026-09-03T01:00:00.000Z";
-    f.day = f.next["accounting-dev"].transportMonths[month][kind][f.id][businessDate];
+    f.next = structuredClone(before); f.old = before; f.next[workspaceUnderTest].transportMonths[month].revision = 2;
+    f.next[workspaceUnderTest].transportMonths[month].updatedAt = "2026-09-03T01:00:00.000Z";
+    f.day = f.next[workspaceUnderTest].transportMonths[month][kind][f.id][businessDate];
     if (kind === "casts") f.day.amount = 0; else delete f.day.entries;
-    f.old["accounting-dev"].history.daily_20260902.status = "returned";
+    f.old[workspaceUnderTest].history.daily_20260902.status = "returned";
     assert.equal(allowed(f), true);
   }
 });
 test("遠方手当は同日に複数回保持し、本人出勤以外や不正金額を拒否する", () => {
   const f = fixture("drivers"); assert.equal(allowed(f), true);
   f.day.entries.second = 501; assert.equal(allowed(f), false);
-  f.day.entries.second = 1000; f.old["accounting-dev"].history.daily_20260902.drivers[0].driverId = "other"; assert.equal(allowed(f), false);
+  f.day.entries.second = 1000; f.old[workspaceUnderTest].history.daily_20260902.drivers[0].driverId = "other"; assert.equal(allowed(f), false);
 });
 test("店舗は旧送迎クエリと旧遠方手当だけ読み取れ、経理入力全体を読めない", () => {
   const f = fixture(), monthly = rules.$workspace.accountingAdjustments.$month;
-  assert.equal(evaluate(rules.$workspace.accountingAdjustments[".read"], f.old, f.next, "accounting-dev/accountingAdjustments"), false);
-  const path = "accounting-dev/accountingAdjustments/" + month + "/castInputs";
+  assert.equal(evaluate(rules.$workspace.accountingAdjustments[".read"], f.old, f.next, workspaceUnderTest + "/accountingAdjustments"), false);
+  const path = workspaceUnderTest + "/accountingAdjustments/" + month + "/castInputs";
   assert.equal(evaluate(monthly.castInputs[".read"], f.old, f.next, path, { query: { orderByChild: "kind", equalTo: "transport" } }), true);
   assert.equal(evaluate(monthly.castInputs[".read"], f.old, f.next, path), false);
   assert.equal(evaluate(monthly.castInputs[".read"], f.old, f.next, path, { query: { orderByChild: "kind", equalTo: "sales" } }), false);
   assert.deepEqual(monthly.castInputs[".indexOn"], ["kind"]);
-  assert.equal(evaluate(monthly.driverRemoteAllowance[".read"], f.old, f.next, "accounting-dev/accountingAdjustments/" + month + "/driverRemoteAllowance"), true);
+  assert.equal(evaluate(monthly.driverRemoteAllowance[".read"], f.old, f.next, workspaceUnderTest + "/accountingAdjustments/" + month + "/driverRemoteAllowance"), true);
 });
 test("ルールに非対応メソッドや重複したワイルドカードを作らない", () => {
   function inspect(node, ancestors = []) {
@@ -115,13 +117,36 @@ test("ルールに非対応メソッドや重複したワイルドカードを�
   inspect(transport, ["$workspace"]); inspect(settings, ["$workspace"]);
 });
 
-test("新規送迎2ノードの閲覧許可もdevに限定し本番の既定denyを維持する", () => {
+test("送迎データは認証済みの3権限だけ参照でき、対象外workspaceを拒否する", () => {
   const f = fixture();
   for (const role of ["shop", "accounting", "op", "unknown"]) {
     f.old.users.user.role = role;
     for (const [node, path] of [[settings, "config/transportSettings"], [transport, "transportMonths"]]) {
-      assert.equal(evaluate(node[".read"], f.old, f.next, "accounting/" + path, { $workspace: "accounting" }), false);
-      assert.equal(evaluate(node[".read"], f.old, f.next, "accounting-dev/" + path), role !== "unknown");
+      assert.equal(evaluate(node[".read"], f.old, f.next, "other/" + path, { $workspace: "other" }), false);
+      assert.equal(evaluate(node[".read"], f.old, f.next, workspaceUnderTest + "/" + path), role !== "unknown");
+      assert.equal(evaluate(node[".read"], f.old, f.next, workspaceUnderTest + "/" + path, { auth: null }), false);
     }
   }
 });
+
+test("退店後の同額記録だけ現在の本人出勤へ根拠を修復できる", () => {
+  const f = fixture(); f.old = structuredClone(f.next); f.next = structuredClone(f.old);
+  f.old[workspaceUnderTest].casts.cast_1.status = "departed";
+  f.old[workspaceUnderTest].history.daily_20260902.casts.unshift({ masterId: "other", kind: "regular" });
+  Object.assign(f.next[workspaceUnderTest].transportMonths[month], { revision: 2, updatedAt: "2026-09-03T01:00:00.000Z" });
+  f.day = f.next[workspaceUnderTest].transportMonths[month].casts.cast_1[businessDate]; f.day.attendanceIndex = 1;
+  assert.equal(allowed(f), true);
+  f.day.amount = 1500; assert.equal(allowed(f), false); f.day.amount = 1000;
+  f.old[workspaceUnderTest].casts.cast_1.deletedAt = "2026-09-03T00:00:00Z"; assert.equal(allowed(f), false);
+  delete f.old[workspaceUnderTest].casts.cast_1.deletedAt;
+  f.old[workspaceUnderTest].history.daily_20260902.status = "returned"; assert.equal(allowed(f), false);
+  f.old[workspaceUnderTest].history.daily_20260902.status = "approved";
+  delete f.old[workspaceUnderTest].casts.cast_1; assert.equal(allowed(f), false);
+});
+test("退店者の新規送迎と旧額からの初回上書きを許可しない", () => {
+  const f = fixture(); f.old[workspaceUnderTest].casts.cast_1.status = "departed";
+  f.old[workspaceUnderTest].history.daily_20260902.casts[0].transportFee = 1000;
+  assert.equal(allowed(f), false);
+});
+
+}

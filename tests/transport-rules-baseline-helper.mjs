@@ -11,13 +11,13 @@ export function withoutTransportRules(value) {
   delete inputs[".read"]; delete inputs[".indexOn"];
   assert.ok(workspace.accountingAdjustments.$month.driverRemoteAllowance[".read"]);
   delete workspace.accountingAdjustments.$month.driverRemoteAllowance[".read"];
-  const marker = ") && ($workspace !== 'accounting-dev' || (newData.child('kind').val() !== 'transport'";
+  const marker = ") && (($workspace !== 'accounting-dev' && $workspace !== 'accounting') || (newData.child('kind').val() !== 'transport'";
   const expression = inputs.$inputId[".validate"], end = expression.lastIndexOf(marker);
   assert.ok(expression.startsWith("(") && end > 0);
   inputs.$inputId[".validate"] = expression.slice(1, end);
   const snapshot = workspace.accountingMonthSnapshots.$month.$revision;
   for (const row of [snapshot.castSalesReports.$index.days.$dayIndex, snapshot.castSalesReports.$index.totals]) {
-    const rule = row[".validate"], boundary = rule.lastIndexOf(" && ($workspace !== 'accounting-dev' || !(");
+    const rule = row[".validate"], boundary = rule.lastIndexOf(" && (($workspace !== 'accounting-dev' && $workspace !== 'accounting') || !(");
     assert.ok(boundary > 0 && rule.slice(boundary).includes("transportFee"));
     row[".validate"] = rule.slice(0, boundary);
   }

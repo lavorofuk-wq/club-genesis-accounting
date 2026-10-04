@@ -14,7 +14,7 @@ import { calculateConfirmedCashFunding, cashFundingDraftContext, cashFundingIssu
 import type { CashFundingContext, CashFundingInputs } from "@/domain/cash-funding";
 import { duplicateClosingForNewWorkflow, existingClosingSubmissionMessage } from "@/domain/daily-edit-source";
 import { deleteUnapprovedClosing, submitClosing, withdrawClosing } from "@/lib/firebase/repository";
-import { Card, Field, MoneyInput, StatusPill, Table, yen } from "./ui";
+import { Card, Field, MoneyInput, Modal, StatusPill, Table, yen } from "./ui";
 import { useRecoverableState, useUpdateDraftBusy } from "./update-drafts";
 import { PrintPreview } from "./print-preview";
 
@@ -173,6 +173,41 @@ export function StoreWork(props: Props) {
       </Table>
     </Card></div>
     {preview && <PrintPreview title={`GMS 営業日次データ ${preview.businessDate}`} onClose={() => setPreview(null)}><DailyPreview closing={preview} /></PrintPreview>}
+  </div>;
+}
+
+
+export type DailyTransportDraftConflict = { index: number; name: string; draftAmount: number; storedAmount: number };
+
+/** 再送時のサーバー照合と同じ人物対応で、廃止した日次送迎の未保存差分だけを抽出する。 */
+export function dailyTransportDraftConflicts(initial: DailyClosing | null, rows: DailyCast[]): DailyTransportDraftConflict[] {
+  if (!initial) return [];
+  const preserved = mergeReconciledDailyCastInputs(initial.casts || [], rows.map((row) => ({ ...row, transportFee: 0 })), initial.posSnapshot).rows;
+  return rows.flatMap((row, index) => {
+    const storedAmount = preserved[index]?.transportFee || 0;
+    return row.transportFee === storedAmount ? [] : [{ index, name: row.name, draftAmount: row.transportFee, storedAmount }];
+  });
+}
+
+export function restoreDailyTransportDraftRows(initial: DailyClosing | null, rows: DailyCast[]): DailyCast[] {
+  const conflicts = new Map(dailyTransportDraftConflicts(initial, rows).map((row) => [row.index, row.storedAmount]));
+  return rows.map((row, index) => conflicts.has(index) ? { ...row, transportFee: conflicts.get(index)! } : row);
+}
+
+export function DailyTransportDraftRecovery({ conflicts, disabled, onRestore }: {
+  conflicts: DailyTransportDraftConflict[]; disabled: boolean; onRestore: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  if (!conflicts.length) return null;
+  const amounts = <Table headers={["キャスト", "復元した未保存入力", "保存済みの日次原本"]}>{conflicts.map((row) => <tr key={row.index}><td>{row.name}</td><td>{yen.format(row.draftAmount)}</td><td>{yen.format(row.storedAmount)}</td></tr>)}</Table>;
+  return <div className="notice warn">
+    <strong>送迎の旧未保存入力があります。</strong><p>日次の送迎代は現在変更できません。未保存額を確認して日次原本の金額へ戻すと、再送できます。ほかの入力はそのまま保持します。</p>
+    {amounts}<button type="button" className="button secondary mini top-gap" disabled={disabled} onClick={() => { if (!disabled) setOpen(true); }}>旧未保存の送迎入力を確認</button>
+    {open && <Modal title="送迎の旧未保存入力を確認" disabled={disabled} onClose={() => setOpen(false)}>
+      <p>未保存の送迎額を控えてください。日次を送信した後、店舗作業の「送迎」で登録・変更してください。</p>
+      {amounts}<p>この下書きの送迎額だけを、保存済み日次原本の金額へ戻します。日払い・立替・売上・経費などは変更しません。</p>
+      <div className="actions"><button type="button" className="button" disabled={disabled} onClick={() => { if (disabled) return; onRestore(); setOpen(false); }}>原本の送迎額へ戻す</button><button type="button" className="button secondary" disabled={disabled} onClick={() => setOpen(false)}>入力を保持して戻る</button></div>
+    </Modal>}
   </div>;
 }
 
@@ -518,7 +553,8 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
   const cashInputIssues = fundingError ? [fundingError] : cash?.funding
     ? cashFundingIssues({ ...cash, funding: { ...cash.funding, confirmed: true } })
     : pos ? ["補充・返済の計算前提を確認できません。"] : [];
-  const canConfirmCash = Boolean(cash?.funding && cash.expectedClosingCash >= 0 && cashInputIssues.length === 0
+  const transportConflicts = dailyTransportDraftConflicts(initial, castRows);
+  const canConfirmCash = Boolean(transportConflicts.length === 0 && cash?.funding && cash.expectedClosingCash >= 0 && cashInputIssues.length === 0
     && contextConfirmed && (!cashChanged || cashRevisionReason.trim()) && !workflowLock && !duplicateMessage);
   const canSubmitCash = canConfirmCash && cashConfirmed;
   const visibleStage = stage === "preview" && !canSubmitCash ? "cash" : stage;
@@ -559,6 +595,11 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
   return <Card title={initial ? `${initial.businessDate} 再編集` : "当日営業データ作成"} description="POS JSONの照合から現金の補充・返済実績・確認まで順番に入力します。" action={initial ? <button className="button secondary" disabled={busy} onClick={() => { if (window.confirm("保存していない再編集内容を破棄して終了しますか？")) onFinished(); }}>再編集を終了</button> : null}>
     <div className="stepper">{(["json", "details", "cash", "preview"] as Stage[]).map((value, index) => <span key={value} className={visibleStage === value ? "active" : ""}><b>{index + 1}</b>{["JSON取込", "店舗データ", "現金照合", "送信確認"][index]}</span>)}</div>
     {error && <div className="notice error">{error}</div>}
+    <DailyTransportDraftRecovery conflicts={transportConflicts} disabled={busy || Boolean(workflowLock)} onRestore={() => {
+      if (busy || workflowLock) return;
+      setCastRows((rows) => restoreDailyTransportDraftRows(initial, rows));
+      setConfirmedCashKey(""); setStage("details"); setError("");
+    }} />
     {workflowLock && <div className="notice warn"><strong>この営業日は編集できません。</strong><br />{workflowLock}</div>}
     {duplicateMessage && <div className="notice warn" role="alert"><strong>この営業日の送信済みデータがあります。</strong><p>{duplicateMessage}</p><p>現在の入力は保持していますが、この新規作成画面からは送信できません。</p><a className="text-button" href="#store-sent-data">送信済みデータを確認</a></div>}
     {stage === "json" && <div className="stack section-pad">

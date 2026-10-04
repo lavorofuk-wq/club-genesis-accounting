@@ -156,3 +156,82 @@ describe("ドライバー遠方手当", () => {
     expect(applied.issues.join()).toContain("遠方手当は日次の承認待ち");
   });
 });
+
+
+describe("既存給与を保持する送迎境界条件", () => {
+  it.each(["active", "departed"] as const)("新記録がない%sキャストは旧集計への全入力・給与を変更しない", (status) => {
+    const settings = adjustments([
+      legacy("dated", month + "-02"), legacy("floating"),
+      { ...legacy("sale", month + "-02"), kind: "sales", label: "追加売上", amount: 100010 },
+      { ...legacy("allowance"), kind: "allowance", label: "手当", amount: 321 },
+    ]);
+    const first = closing("02", { casts: [dailyCast({ hours: 4.25, endTime: "00:15", hourlyRate: 3123,
+      honShimeiSales: 1110010, jonaiExtensionSales: 20000, honShimeiCount: 2, banaiShimeiCount: 3,
+      dohanBack: 3500, beautyAllowance: 500, dailyPayment: 5432, advancePayment: 123, transportFee: 1500 })] });
+    const second = closing("05", { casts: [dailyCast({ transportFee: 2000, dailyPayment: 2500 })] });
+    const pending = closing("06", { status: "submitted", casts: [dailyCast({ transportFee: 500 })] });
+    const returned = closing("07", { status: "returned", casts: [dailyCast({ transportFee: 500 })] });
+    const data = workspace([returned, second, pending, first], settings);
+    data.casts = [{ ...cast, status }];
+    settings.withholdingByCast = { [cast.id]: 1234 };
+    const original = structuredClone(data);
+    const beforeRewards = calculateCastRewards(data.closings, data.casts, month, settings);
+    const beforeSales = calculateCastSalesReports(data.closings, data.casts, month, settings);
+    const beforeDrivers = calculateDriverPayroll(data.closings.filter((row) => row.status === "approved"), settings.driverRemoteAllowance);
+    for (const records of [undefined, { [month]: { revision: 0, casts: {}, drivers: {} } }]) {
+      data.transportMonths = records;
+      const applied = applyTransport(data, month, settings);
+      expect(applied.issues).toEqual([]);
+      expect(applied.closings).toEqual(original.closings);
+      expect(applied.adjustments).toEqual(settings);
+      expect(calculateCastRewards(applied.closings, data.casts, month, applied.adjustments)).toEqual(beforeRewards);
+      expect(calculateCastSalesReports(applied.closings, data.casts, month, applied.adjustments)).toEqual(beforeSales);
+      expect(calculateDriverPayroll(applied.closings.filter((row) => row.status === "approved"), applied.adjustments.driverRemoteAllowance)).toEqual(beforeDrivers);
+    }
+    expect(beforeRewards[0].transportFee).toBe(5500);
+    expect(beforeSales[0].days.map((day) => day.transportFee)).toEqual([2500, 3000]);
+    expect(settings).toEqual(original.adjustments[0]);
+    expect(data.closings).toEqual(original.closings);
+  });
+
+  it("送迎保存後に退店しても承認済みの記録と控除額を保持する", () => {
+    const data = withRecord(workspace(), record(1500));
+    data.casts = [{ ...cast, status: "departed", departedAt: month + "-03" }];
+    expect(reward(data).applied.issues).toEqual([]);
+    expect(reward(data).rewards[0].transportFee).toBe(1500);
+  });
+
+  it("同月在籍化した体入日の旧送迎・新送迎は在籍IDへ一度だけ集約する", () => {
+    const data = withRecord(workspace([closing("02", { casts: [dailyCast({ masterId: "trial-1", kind: "trial", transportFee: 1000 })] }), closing("03")]), record(1500));
+    data.casts = [{ ...cast, hiredAt: month + "-03", convertedFromTrialId: "trial-1" }];
+    expect(transportAttendance(data, month, cast.id, "cast").map((row) => row.businessDate)).toEqual([month + "-02", month + "-03"]);
+    expect(reward(data).applied.issues).toEqual([]);
+    expect(reward(data).rewards).toHaveLength(1);
+    expect(reward(data).rewards[0].transportFee).toBe(2000);
+    expect(transportCastDays(data, month, cast.id).map((row) => row.amount)).toEqual([1500, 500]);
+  });
+
+  it("再送で出勤位置が変わった記録は同額で根拠を更新すれば復旧する", () => {
+    const data = withRecord(workspace([closing("02", { casts: [dailyCast({ masterId: "other", posCastId: "other", transportFee: 0 }), dailyCast()] })]), record(1500));
+    expect(reward(data).applied.issues.join()).toContain("出勤変更");
+    data.transportMonths![month].casts[cast.id][month + "-02"].attendanceIndex = 1;
+    const restored = reward(data);
+    expect(restored.applied.issues).toEqual([]);
+    expect(restored.rewards.find((row) => row.id === cast.id)!.transportFee).toBe(1500);
+  });
+
+  it("複数日の遠方手当は削除した日の新規分だけ減り、旧月額と別日分を保持する", () => {
+    const data = workspace([closing("02"), closing("03")]);
+    data.transportMonths = { [month]: { revision: 1, casts: {}, drivers: { "driver-1": {
+      [month + "-02"]: { entries: { first: 500, second: 1500 }, attendanceClosingId: "closing-02", attendanceIndex: 0 },
+      [month + "-03"]: { entries: { third: 2000 }, attendanceClosingId: "closing-03", attendanceIndex: 0 },
+    } } } };
+    const before = applyTransport(data, month, data.adjustments[0]);
+    expect(before.adjustments.driverRemoteAllowance["driver-1"]).toBe(11500);
+    data.transportMonths[month].drivers["driver-1"][month + "-02"].entries = {};
+    const after = applyTransport(data, month, data.adjustments[0]);
+    expect(after.issues).toEqual([]);
+    expect(after.adjustments.driverRemoteAllowance["driver-1"]).toBe(9500);
+    expect(data.adjustments[0].driverRemoteAllowance["driver-1"]).toBe(7500);
+  });
+});

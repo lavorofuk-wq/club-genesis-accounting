@@ -2419,7 +2419,9 @@ export async function saveCastTransportDay(month: string, castId: string, busine
   const hasExisting = Boolean(previous || legacyDay?.hasRecord);
   const registration = data.transportSettings?.castRegistrations[castId];
   if (amount > 0) {
-    if (!data.casts.some((cast) => cast.id === castId && cast.status === "active" && !cast.deletedAt)) throw new Error("在籍キャストのみ送迎を記録できます。");
+    const cast = data.casts.find((row) => row.id === castId && !row.deletedAt);
+    const departedRepair = cast?.status === "departed" && previous?.amount === amount;
+    if (!cast || (cast.status !== "active" && !departedRepair)) throw new Error("在籍キャストのみ送迎を記録できます。退店者は保存済み記録の同額で出勤根拠だけ修復できます。");
     if (!source) throw new Error("店舗から送信済みの本人の出勤日を選択してください。");
     if (!registration && !hasExisting) throw new Error("先にキャスト送迎登録を行ってください。");
     if (registration && previous?.amount !== amount && !registration.amounts.includes(amount)) throw new Error("登録済みの送迎金額を選択してください。最新データを読み込んでください。");

@@ -108,7 +108,7 @@ test("今月採用でも空の勤務行・区分不明の勤務から本人出�
 test("日付省略は手当・送迎だけ許可し、本人出勤根拠は省略できない", () => {
   for (const kind of ["allowance", "transport"]) {
     const f = fixture(); Object.assign(row(f), { kind, amount: kind === "transport" ? 500 : 1 }); delete row(f).businessDate;
-    assert.equal(allowed(f), kind !== "transport" || workspaceUnderTest === "accounting"); delete row(f).attendanceClosingId; assert.equal(allowed(f), false);
+    assert.equal(allowed(f), kind !== "transport"); delete row(f).attendanceClosingId; assert.equal(allowed(f), false);
   }
   const f = fixture(); delete row(f).businessDate; assert.equal(allowed(f), false);
 });
@@ -118,9 +118,21 @@ test("金額単位・安全整数・型・名目・キーID・未知項目を検
     { label: "a".repeat(101) }, { id: "other" }, { castId: "bad/path" }, { unknown: true }];
   for (const change of invalid) { const f = fixture(); Object.assign(row(f), change); assert.equal(allowed(f), false, JSON.stringify(change)); }
   for (const [kind, amount] of [["sales", 0], ["allowance", 1], ["transport", 500]]) {
-    const f = fixture(); Object.assign(row(f), { kind, amount }); assert.equal(allowed(f), kind !== "transport" || workspaceUnderTest === "accounting");
+    const f = fixture(); Object.assign(row(f), { kind, amount }); assert.equal(allowed(f), kind !== "transport");
   }
 });
+test("旧送迎の原額は保持でき、新しい追加送迎と旧額変更は拒否する", () => {
+  const f = fixture();
+  const legacy = input({ kind: "transport", amount: 500 });
+  f.old[f.workspace].accountingAdjustments[month].castInputs = { input_1: structuredClone(legacy) };
+  f.next[f.workspace].accountingAdjustments[month].castInputs = { input_1: structuredClone(legacy) };
+  assert.equal(allowed(f), true);
+  row(f).amount = 1000;
+  assert.equal(allowed(f), false);
+  delete f.old[f.workspace].accountingAdjustments[month].castInputs;
+  assert.equal(allowed(f), false);
+});
+
 test("退店・差戻し後の保存行は不変なら保持でき、変更は拒否、削除は可能", () => {
   const f = fixture();
   f.old[f.workspace].accountingAdjustments[month].castInputs = { input_1: input() };
@@ -215,6 +227,25 @@ test("2.39以降の確定明細は日次と月合計に日払い・立替を両�
       assert.equal(evaluate(node[".validate"], {}, f.tree, f.prefix + path), true, "0円も記録する");
       delete row.dailyPayment;
       assert.equal(evaluate(node[".validate"], {}, f.tree, f.prefix + path), false, "日払い欠損を拒否");
+    }
+  }
+});
+
+test("2.49は統一送迎額を要求し、2.39以前を含む旧snapshotは欠損を許容する", () => {
+  for (const version of ["2.39.0", "2.48.1", "2.49.0", "2.49.1"]) {
+    const f = snapshotFixture(); f.snapshot.calculationVersion = version;
+    for (const [node, path, row] of paymentTargets(f)) {
+      row.dailyPayment = 0; row.advancePayment = 0;
+      delete row.transportFee;
+      assert.equal(evaluate(node[".validate"], {}, f.tree, f.prefix + path), !version.startsWith("2.49"));
+      row.transportFee = row.additionalTransportFee || 0;
+      assert.equal(evaluate(node[".validate"], {}, f.tree, f.prefix + path), true);
+      if (version.startsWith("2.49")) {
+        for (const amount of [-500, 500.5, "1000"]) {
+          row.transportFee = amount;
+          assert.equal(evaluate(node[".validate"], {}, f.tree, f.prefix + path), false);
+        }
+      }
     }
   }
 });
