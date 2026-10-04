@@ -66,10 +66,10 @@ describe.each([false, true])("キャストデータ入力の表示・入力保�
     expect(html).not.toContain("退店ゆり");
     expect(html).toContain("入力済みキャスト一覧");
   });
-  it("キャスト選択後に売上・手当・送迎の入力を分けて表示する", () => {
+  it("キャスト選択後は売上・手当を表示し送迎入力は新画面へ移す", () => {
     drafts.set("accounting.castInputs.selected", "cast1");
     const html = render();
-    for (const label of ["売上入力", "手当入力", "送迎入力"]) expect(html).toContain(label);
+    for (const label of ["売上入力", "手当入力"]) expect(html).toContain(label);
     expect(html).not.toContain('type="time"');
   });
   it("売上は10円未満切捨の反映額と本人の承認済み日付を表示する", () => {
@@ -81,7 +81,7 @@ describe.each([false, true])("キャストデータ入力の表示・入力保�
     expect(html).not.toContain('value="2026-09-05"');
     expect(html).not.toMatch(/<button[^>]*disabled[^>]*>この入力を保存/);
   });
-  it.each([["allowance", "100.5", "1円未満"], ["transport", "1200", "500円単位"]] as const)("不正な%sの単位を勝手に丸めず保存不可にする", (kind, amount, error) => {
+  it.each([["allowance", "100.5", "1円未満"], ["transport", "1200", "送迎の入力先が変わりました"]] as const)("不正な%sの単位を勝手に丸めず保存不可にする", (kind, amount, error) => {
     const data = fixture(); recover(data, { ...input, kind, businessDate: undefined }, amount);
     const html = render(data);
     expect(html).toContain(error);
@@ -179,6 +179,6 @@ describe.each([false, true])("キャストデータ入力の表示・入力保�
     expect(html).not.toContain("開発環境で確認中");
     expect(html).toContain('type="month"');
     expect(html).toContain("在籍花子");
-    for (const label of ["キャストを変更", "売上入力", "手当入力", "送迎入力"]) expect(html).toContain(label);
+    for (const label of ["キャストを変更", "売上入力", "手当入力"]) expect(html).toContain(label);
   });
 });

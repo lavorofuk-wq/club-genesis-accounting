@@ -167,7 +167,8 @@ describe("キャスト売上XLSX", () => {
       }
     }
     expect(sheet.getCell("W4").value).toBe(1000);
-    expect(sheet.getCell("X4").value).toBe(500);
+    expect(sheet.getCell("X4").value).toBeNull();
+    expect(sheet.getCell("X34").value).toBe(1000);
     expect(sheet.getCell("Y4").value).toBe(2000);
     expect(sheet.getCell("Z4").value).toBeNull();
     expect(sheet.getCell("AA4").value).toBe(123);
@@ -362,7 +363,7 @@ describe("キャスト売上XLSX", () => {
     const restored = new ExcelJS.Workbook();
     await restored.xlsx.load(await book.xlsx.writeBuffer());
     const sheet = restored.worksheets[0];
-    for (const [column, label] of [["W", "日払い"], ["X", "送迎"], ["Y", "立替"], ["Z", "減給"], ["AA", "手当"]]) {
+    for (const [column, label] of [["W", "日払い"], ["X", "送迎代"], ["Y", "立替"], ["Z", "減給"], ["AA", "手当"]]) {
       expect(sheet.getCell(`${column}2`).value).toBe(label);
       expect(sheet.getColumn(column).width).toBe(sheet.getColumn("V").width);
       for (const row of [2, 4, 34]) {
@@ -372,17 +373,18 @@ describe("キャスト売上XLSX", () => {
     }
     expect(sheet.getCell("W4").value).toBe(1000);
     expect(sheet.getCell("Y4").value).toBe(2000);
-    // 店舗送迎500円と美容室500円を追加入力欄へ混ぜない。
-    expect(sheet.getCell("X4").value).toBe(0);
+    // 旧確定で総送迎代の日別額が未保存なら、月額を保持して日別を空欄にする。
+    expect(sheet.getCell("X4").value).toBeNull();
+    expect(sheet.getCell("X34").value).toBe(reward.transportFee);
     expect(sheet.getCell("AA4").value).toBe(0);
-    for (const [column, result] of [["W", 1000], ["X", 0], ["Y", 2000], ["AA", 0]] as const) {
+    for (const [column, result] of [["W", 1000], ["Y", 2000], ["AA", 0]] as const) {
       // ExcelJS.valueのコピーは0のresultを省略するため、保存モデルのresultを検証する。
       expect(sheet.getCell(`${column}34`).formula).toBe(`SUM(${column}3:${column}33)`);
       expect(sheet.getCell(`${column}34`).result).toBe(result);
     }
     for (let row = 3; row <= 34; row++) expect(sheet.getCell(`Z${row}`).value).toBeNull();
-    expect(sheet.getCell("B45").value).toContain("追加分のみ");
-    expect(sheet.getCell("B45").value).not.toContain("日別内訳未保存");
+    expect(sheet.getCell("B45").value).toContain("送迎控除の合計");
+    expect(sheet.getCell("B45").value).toContain("X送迎代：日別内訳未保存");
     expect(sheet.pageSetup.printArea).toBe("B1:AA45");
   });
 

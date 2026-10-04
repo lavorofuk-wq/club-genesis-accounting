@@ -1,3 +1,4 @@
+import type { TransportSettings, TransportMonth } from "./transport";
 import { normalizeAccountingExpenseInputs, validateConsumptionTaxRate } from "./accounting-expenses";
 import { cashFundingIssues } from "./cash-funding";
 import type { CashFunding } from "./cash-funding";
@@ -895,6 +896,11 @@ export type WorkspaceData = {
   liquor: LiquorRecord[];
   closings: DailyClosing[];
   adjustments: MonthlyAdjustments[];
+  transportSettings?: TransportSettings;
+  transportMonths?: Record<string, TransportMonth>;
+  /** 店舗向けの旧送迎入力だけを公開する投影。経理側の正本はadjustments。 */
+  transportLegacyInputs?: Record<string, CastAccountingInput[]>;
+  transportLegacyRemote?: Record<string, Record<string, number>>;
   cashFloat: number;
 };
 
@@ -962,6 +968,8 @@ export type CastSalesDay = {
   /** Ver2.39以降の確定結果。未保存の旧確定日別額は0円で補完しない。 */
   dailyPayment?: number;
   advancePayment?: number;
+  /** Ver2.49以降の日別送迎代合計。旧確定には補完しない。 */
+  transportFee?: number;
   honShimeiSales: number;
   jonaiExtensionSales: number;
   additionalSales?: number;
@@ -2148,6 +2156,7 @@ export function calculateCastSalesReports(
         hours: asNumber(row.hours),
         dailyPayment: asNumber(row.dailyPayment),
         advancePayment: asNumber(row.advancePayment),
+        transportFee: asNumber(row.transportFee) + additions.additionalTransportFee,
         honShimeiSales: floorTen(asNumber(row.honShimeiSales)),
         jonaiExtensionSales: floorTen(asNumber(row.jonaiExtensionSales)),
         totalSales: floorTen(asNumber(row.honShimeiSales)) + floorTen(asNumber(row.jonaiExtensionSales)) + additions.additionalSales,
@@ -2187,6 +2196,7 @@ export function calculateCastSalesReports(
         hours: total("hours"),
         dailyPayment: total("dailyPayment"),
         advancePayment: total("advancePayment"),
+        transportFee: total("transportFee"),
         honShimeiSales: total("honShimeiSales"),
         jonaiExtensionSales: total("jonaiExtensionSales"),
         totalSales: total("totalSales"),

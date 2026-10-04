@@ -122,14 +122,14 @@ function featureInput(salesAmount = 90000, feeType: IntroducerFeeType = "gross10
 }
 
 function expectCastInputDailyColumns(sheet: ExcelJS.Worksheet) {
-  // 店舗の送迎・美容室を重複計上せず、経理入力分だけを X / AA に載せる。
-  for (const [row, values] of [[4, [1000, 0, 1500, null, 0]], [6, [1000, 1500, 1500, null, 100001]]] as const) {
+  // Xは旧日次と追加を合算した送迎代、AAは追加手当。
+  for (const [row, values] of [[4, [1000, 500, 1500, null, 0]], [6, [1000, 2000, 1500, null, 100001]]] as const) {
     ["W", "X", "Y", "Z", "AA"].forEach((column, index) => {
       expect(sheet.getCell(column + row).value, column + row).toBe(values[index]);
     });
     expect(sheet.getCell("V" + row).value).toBe(500);
   }
-  for (const [column, total] of [["W", 2000], ["X", 1500], ["Y", 3000], ["AA", 100001]] as const) {
+  for (const [column, total] of [["W", 2000], ["X", 2500], ["Y", 3000], ["AA", 100001]] as const) {
     expect(sheet.getCell(column + "34").value).toEqual({ formula: "SUM(" + column + "3:" + column + "33)", result: total });
   }
   expect(sheet.getCell("Z34").value).toBeNull();
@@ -302,5 +302,30 @@ describe("キャストデータ入力から全帳票への統合", () => {
       await writeFile(process.env.GMS_STATEMENT_QA_DIR + `/statement-${kind}.xlsx`, bytes);
       await writeFile(process.env.GMS_STATEMENT_QA_DIR + `/receipt-${kind}.xlsx`, await fillReceiptTemplate(template, receipt, "receipt"));
     }
+  });
+});
+
+
+describe("統一送迎の帳票整合", () => {
+  it.each([1000, 0])("旧日次と追加送迎を同日の%i円へ変更し、控除・売上表・収支表へ一度だけ反映する", (editedAmount) => {
+    const input = featureInput(90000);
+    const original = structuredClone(input.data);
+    const castId = input.results.castRewards[0].id;
+    const businessDate = "2026-09-04";
+    const closing = input.data.closings.find((row) => row.businessDate === businessDate)!;
+    input.data.transportMonths = { [input.month]: { revision: 1, casts: { [castId]: { [businessDate]: { amount: editedAmount, legacyInputIds: ["transport"], attendanceClosingId: closing.id, attendanceIndex: 0 } } }, drivers: {} } };
+    const results = calculateMonthlyAccounting(input.data, input.month, input.adjustments);
+    expect(results.warnings).toEqual([]);
+    expect(results.castRewards[0].transportFee).toBe(500 + editedAmount);
+    expect(results.castRewards[0].grossPay).toBe(input.results.castRewards[0].grossPay);
+    expect(results.castRewards[0].netPay).toBe(input.results.castRewards[0].netPay + 2000 - editedAmount);
+    expect(input.data.closings).toEqual(original.closings);
+    expect(input.adjustments.castInputs?.find((row) => row.id === "transport")?.amount).toBe(1500);
+    const balance = buildBalanceExportReport({ ...input, results });
+    expect(balance.castTransport).toBe(500 + editedAmount);
+    const sheet = createCastSalesWorkbook(results, input.month, "未確定").worksheets[0];
+    expect(sheet.getCell("X4").value).toBe(500);
+    expect(sheet.getCell("X6").value).toBe(editedAmount);
+    expect(sheet.getCell("X34").value).toEqual({ formula: "SUM(X3:X33)", result: 500 + editedAmount });
   });
 });

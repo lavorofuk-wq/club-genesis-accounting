@@ -156,7 +156,7 @@ function expectIntroducerExportButton(markup: string, disabled: boolean) {
 }
 
 describe("主要ページのSSRスモーク", () => {
-  it("キャスト売上と報酬に別名目の売上・手当・追加送迎を表示する", () => {
+  it("キャスト売上と報酬に旧名目を保持し送迎代を日次と追加の合計で表示する", () => {
     const source = balanceWorkspace();
     source.adjustments[0].castInputs = [
       { id: "input_sales", castId: "cast-1", castName: "花子", kind: "sales", label: "売上追加の名目", amount: 12340, businessDate },
@@ -166,7 +166,8 @@ describe("主要ページのSSRスモーク", () => {
     for (const section of ["castSales", "castRewards"] as const) {
       const markup = renderToStaticMarkup(createElement(AccountingForms, { section, data: source, user, busy: false, run }));
       for (const label of ["売上追加の名目", "手当追加の名目", "送迎追加の名目"]) expect(markup).toContain(label);
-      for (const amount of ["￥12,340", "￥1,234", "￥1,500"]) expect(markup).toContain(amount);
+      for (const amount of ["￥12,340", "￥1,234", "￥2,000"]) expect(markup).toContain(amount);
+      if (section === "castSales") expect(markup).not.toContain("￥1,500");
     }
     const markup = renderToStaticMarkup(createElement(AccountingForms, { section: "castSales", data: source, user, busy: false, run }));
     expect(markup).toContain("￥52,340");

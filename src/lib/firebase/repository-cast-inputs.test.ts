@@ -85,12 +85,14 @@ describe.each(["accounting-dev", "accounting"])("キャストデータ入力の�
     await expect(saveCastAccountingInputs(month, [input()], 0, user)).rejects.toThrow("確定");
     expect(memory.transaction).not.toHaveBeenCalled();
   });
-  it("未指定の手当・送迎は最終本人出勤を根拠にするが日付を固定保存しない", async () => {
+  it("未指定の手当は最終本人出勤を根拠とし、旧送迎は保持するが新規送迎を受け付けない", async () => {
     seed([closing(), closing("2026-09-07"), closing("2026-09-09", { status: "returned" })]);
-    await saveCastAccountingInputs(month, [input({ kind: "allowance", amount: 101, businessDate: undefined }),
-      input({ id: "input_2", kind: "transport", amount: 1500, businessDate: undefined })], 0, user);
-    expect(Object.values(saved().castInputs).every((row) => row.businessDate === undefined
-      && row.attendanceClosingId === "daily_20260907")).toBe(true);
+    const old = input({ id: "input_2", kind: "transport", amount: 1500, businessDate: undefined, attendanceClosingId: "daily_20260907", attendanceIndex: 0 });
+    memory.values.set(scoped(path), { ...defaults(), castInputs: { input_2: old } });
+    await saveCastAccountingInputs(month, [input({ kind: "allowance", amount: 101, businessDate: undefined }), old], 0, user);
+    expect(Object.values(saved().castInputs).every((row) => row.businessDate === undefined && row.attendanceClosingId === "daily_20260907")).toBe(true);
+    await expect(saveCastAccountingInputs(month, [old, input({ kind: "transport", amount: 500 })], 1, user)).rejects.toThrow("送迎");
+    await expect(saveCastAccountingInputs(month, [], 1, user)).rejects.toThrow("送迎");
   });
   it("0時間の記録も既存の出勤判定どおり扱う", async () => {
     seed([closing("2026-09-02", { casts: [dailyCast({ hours: 0, endTime: "20:00" })] })]);

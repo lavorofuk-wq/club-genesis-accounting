@@ -81,9 +81,11 @@ describe("店舗フォームの更新時入力退避", () => {
     expect(markup).toContain("2026-09-02 再編集");
     expect(markup).toContain("20:00");
     expect(markup).toContain("6時間");
-    for (const value of ["123450", "45670", "1234", "2345", "1500"]) {
+    for (const value of ["123450", "45670", "1234", "2345"]) {
       expect(markup).toContain('value="' + value + '"');
     }
+    expect(markup).toContain("￥1,500");
+    expect(markup).toContain("送迎画面で登録・編集");
     expect(drafts.keys).toContain("store.workflow.daily_20260902.castRows");
     expect(markup).not.toContain("経理で修正した勤務");
   });
@@ -112,10 +114,12 @@ describe("店舗フォームの更新時入力退避", () => {
     });
     const markup = render();
     expect(markup).not.toContain('type="file"');
+    expect(markup).toContain("￥1,500");
+    expect(markup).toContain("送迎画面で登録・編集");
     for (const text of [cast.name, "復元スタッフ", "復元ドライバー", "復元支払先", "追加前の支払先"]) {
       expect(markup).toContain(text);
     }
-    for (const value of ["123450", "45670", "1234", "2345", "1500", "3456", "4567", "6789", "1111", "2222", "3333", "4444", "21:15", "03:30"]) {
+    for (const value of ["123450", "45670", "1234", "2345", "3456", "4567", "6789", "1111", "2222", "3333", "4444", "21:15", "03:30"]) {
       expect(markup).toContain(`value="${value}"`);
     }
   });

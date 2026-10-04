@@ -11,6 +11,7 @@ const memory = vi.hoisted(() => ({
 
 vi.mock("firebase/database", () => ({
   get: memory.get,
+  query: (reference: unknown) => reference, orderByChild: vi.fn(), equalTo: vi.fn(),
   ref: (_database: unknown, path: string) => ({ path }),
   serverTimestamp: () => Date.now(),
   onValue: (_reference: unknown, callback: (snapshot: { val: () => number }) => void) => {
@@ -304,6 +305,28 @@ describe("体入キャスト日払いの1円送信", () => {
       startTime: row.startTime, endTime: row.endTime, hours: row.hours, isTrial: true, breakMinutes: 0 }];
     return value;
   }
+
+  it.each(["same", "master", "pos"])("旧送迎は正規再取込の%s識別子変更でも保持して再送できる", async (mode) => {
+    const before = castFixture(1503); before.status = "returned"; before.casts[0].transportFee = 500;
+    memory.values.set(path, structuredClone(before)); memory.values.set("history", { [before.id]: before });
+    const value = castFixture(1503); value.casts[0].transportFee = 500;
+    if (mode === "master") value.casts[0].masterId = "corrected-cast";
+    if (mode === "pos") { value.casts[0].posCastId = "corrected-pos"; value.posSnapshot.castWork[0].castId = "corrected-pos"; }
+    await submitClosing(value, user, before.updatedAt);
+    expect(memory.values.get(path)).toMatchObject({ casts: [{ transportFee: 500 }] });
+  });
+  it("未送信の旧下書きに入力済みの送迎代を初回送信で消さず保持する", async () => {
+    const value = castFixture(1503); value.casts[0].transportFee = 500;
+    await submitClosing(value, user);
+    expect(memory.values.get(path)).toMatchObject({ casts: [{ transportFee: 500 }] });
+  });
+  it("送信済み原本の送迎代を日次再送から変更できない", async () => {
+    const before = castFixture(1503); before.status = "returned"; before.casts[0].transportFee = 500;
+    memory.values.set(path, structuredClone(before)); memory.values.set("history", { [before.id]: before });
+    const value = castFixture(1503); value.casts[0].transportFee = 1000;
+    await expect(submitClosing(value, user, before.updatedAt)).rejects.toThrow("店舗作業の「送迎」");
+    expect(memory.values.get(path)).toMatchObject({ casts: [{ transportFee: 500 }] });
+  });
 
   it("体入キャストの1503円日払いを10円へ丸めず保存する", async () => {
     const value = castFixture(1503);
