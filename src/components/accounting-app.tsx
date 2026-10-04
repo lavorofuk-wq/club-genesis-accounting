@@ -28,6 +28,7 @@ import { loadWorkspaceData, userRole } from "@/lib/firebase/repository";
 import { CommonForms } from "./common-forms";
 import { StoreWork } from "./store-work";
 import { TransportWork } from "./transport-work";
+import { BeautyAllowanceWork } from "./beauty-allowance-work";
 import { AccountingForms } from "./accounting-forms";
 import { Card, StatusPill, currentMonth, yen } from "./ui";
 import { APP_VERSION } from "@/lib/app-release";
@@ -38,6 +39,7 @@ type View =
   | "home"
   | "store"
   | "transport"
+  | "beautyAllowance"
   | "approval"
   | "castInputs"
   | "castSales"
@@ -142,6 +144,13 @@ const viewInfo: Record<
     label: "送迎",
     title: "送迎",
     description: "キャストの送迎代とドライバーの遠方手当を出勤日ごとに記録します。",
+    roles: ["shop", "op"],
+  },
+  beautyAllowance: {
+    group: "店舗作業",
+    label: "美容室手当",
+    title: "美容室手当",
+    description: "在籍キャストの出勤日ごとに美容室手当の可否を登録します。",
     roles: ["shop", "op"],
   },
   approval: {
@@ -612,6 +621,9 @@ export function AccountingApp() {
               )}
               {view === "transport" && (
                 <TransportWork key={`transport:${pageRevision}`} data={data} user={user} busy={mutationDisabled} run={run} onDirtyChange={setPageDirty} />
+              )}
+              {view === "beautyAllowance" && (
+                <BeautyAllowanceWork key={`beautyAllowance:${pageRevision}`} data={data} user={user} busy={mutationDisabled} run={run} onDirtyChange={setPageDirty} />
               )}
               {commonSection && (
                 <CommonForms

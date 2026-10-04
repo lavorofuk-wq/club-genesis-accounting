@@ -1,4 +1,5 @@
 import type { TransportSettings, TransportMonth } from "./transport";
+import type { BeautyMonth } from "./beauty-allowance";
 import { normalizeAccountingExpenseInputs, validateConsumptionTaxRate } from "./accounting-expenses";
 import { cashFundingIssues } from "./cash-funding";
 import type { CashFunding } from "./cash-funding";
@@ -898,6 +899,8 @@ export type WorkspaceData = {
   adjustments: MonthlyAdjustments[];
   transportSettings?: TransportSettings;
   transportMonths?: Record<string, TransportMonth>;
+  /** 在籍出勤日の美容室手当。旧日次を保持し、日別指定がある場合に優先する。 */
+  beautyMonths?: Record<string, BeautyMonth>;
   /** 店舗向けの旧送迎入力だけを公開する投影。経理側の正本はadjustments。 */
   transportLegacyInputs?: Record<string, CastAccountingInput[]>;
   transportLegacyRemote?: Record<string, Record<string, number>>;

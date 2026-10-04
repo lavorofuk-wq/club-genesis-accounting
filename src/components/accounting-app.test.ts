@@ -37,6 +37,7 @@ vi.mock("@/lib/firebase/client", () => ({
 vi.mock("@/lib/firebase/repository", () => ({ loadWorkspaceData: vi.fn(), userRole: vi.fn() }));
 vi.mock("./common-forms", () => ({ CommonForms: () => null }));
 vi.mock("./store-work", () => ({ StoreWork: () => null }));
+vi.mock("./beauty-allowance-work", () => ({ BeautyAllowanceWork: () => null }));
 vi.mock("./accounting-forms", () => ({ AccountingForms: () => null }));
 vi.mock("./client-update", () => ({
   ClientUpdateNotice: () => null, LoginUpdateNotice: () => null,
@@ -45,6 +46,7 @@ vi.mock("./client-update", () => ({
 vi.mock("./update-drafts", () => ({ UpdateDraftProvider: () => null }));
 import { AccountingApp } from "./accounting-app";
 import { AccountingForms } from "./accounting-forms";
+import { BeautyAllowanceWork } from "./beauty-allowance-work";
 import { UpdateDraftProvider } from "./update-drafts";
 
 type Element = ReactElement<Record<string, any>>; // テストで JSX のイベントを呼び出す。
@@ -122,5 +124,28 @@ describe.each([true, false])("キャストデータ入力の権限・環境分�
     expect(accounting(render()).props.busy).toBe(status !== "current");
     seed("op", "castInputs", false, true);
     expect(accounting(render()).props.busy).toBe(true);
+  });
+});
+
+describe("美容室手当の店舗作業導線", () => {
+  it.each(["shop", "op"] as const)("%sは送迎の次にある美容室手当を開ける", (role) => {
+    seed(role);
+    const tree = render();
+    const nav = find(tree, (item) => item.type === "nav");
+    const labels = elements(nav).filter((item) => item.type === "button").map((item) => item.props.children);
+    expect(labels.indexOf("美容室手当")).toBe(labels.indexOf("送迎") + 1);
+    button(tree, "美容室手当").props.onClick();
+    expect(elements(render()).some((item) => item.type === BeautyAllowanceWork)).toBe(true);
+  });
+  it("経理権限では新画面の直接表示と退避復元を止める", () => {
+    seed("accounting");
+    expect(elements(render()).some((item) => item.type === "button" && item.props.children === "美容室手当")).toBe(false);
+    expect(() => provider(render()).props.onRestoreView("beautyAllowance")).toThrow("権限");
+    seed("accounting", "beautyAllowance");
+    expect(elements(render()).some((item) => item.type === BeautyAllowanceWork)).toBe(false);
+  });
+  it("更新待ちの美容室画面に保存停止を伝える", () => {
+    seed("shop", "beautyAllowance"); hooks.releaseStatus = "update-available";
+    expect(find(render(), (item) => item.type === BeautyAllowanceWork).props.busy).toBe(true);
   });
 });

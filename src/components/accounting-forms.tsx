@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { User } from "firebase/auth";
 import { secureRandomUUID } from "@/lib/crypto-compat";
 import type { CashReconciliation, CastAccountingInput, ResolvedCastAccountingInput, CastReward, CastSalesBackBreakdown, CastSalesBottleSummary, CastSalesReport, DailyClosing, LegacyBottleClassification, MonthlyAdjustments } from "@/domain/gms";
+import { beautyClosingsForExport } from "@/domain/beauty-export";
 import { findUnclassifiedLegacyBottles, normalizeMonthlyAdjustments } from "@/domain/gms";
 import { validateExpenseExport, type ExpenseExportInput } from "@/domain/expense-export";
 import { buildBalanceExportReport, type BalanceExportInput } from "@/domain/balance-export";
@@ -236,9 +237,10 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
   const calculationsBlocked = !closed && (pendingLegacy.length > 0 || legacyDirty);
   const liveResults = useMemo(() => calculateMonthlyAccounting(data, month, calculationAdjustments, data.introducerEntryEvents), [calculationAdjustments, data, month]);
   const results = closed ? currentSnapshot : calculationsBlocked ? undefined : liveResults;
+  const exportClosings = useMemo(() => beautyClosingsForExport(data, month, currentSnapshot), [data, month, currentSnapshot]);
   const payrollExportInput = useMemo(() => results ? {
-    results, closings: data.closings, month, snapshot: currentSnapshot, staff: data.staff, archivedStaff: data.archivedStaff,
-  } : undefined, [results, data.closings, month, currentSnapshot, data.staff, data.archivedStaff]);
+    results, closings: exportClosings, month, snapshot: currentSnapshot, staff: data.staff, archivedStaff: data.archivedStaff,
+  } : undefined, [results, exportClosings, month, currentSnapshot, data.staff, data.archivedStaff]);
   const rankingRoster = useMemo(() => {
     if (!results) return { value: undefined, error: "" };
     if (closed) return { value: currentSnapshot?.castSalesRankingRoster, error: "" };
@@ -342,7 +344,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
         : results.warnings.length || (!closed && finalizeCheck.integrityIssues.length) ? "データの警告を解消してから出力してください。" : ""}
     />}
     {section === "expenses" && <ExpenseExport
-      input={results ? { results, closings: data.closings, adjustments: calculationAdjustments, month, snapshot: currentSnapshot } : undefined}
+      input={results ? { results, closings: exportClosings, adjustments: calculationAdjustments, month, snapshot: currentSnapshot } : undefined}
       month={month}
       sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
       disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"
@@ -353,7 +355,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
         : results.warnings.length || (!closed && finalizeCheck.integrityIssues.length) ? "データの警告を解消してから出力してください。" : ""}
     />}
     {section === "balance" && <BalanceExport
-      input={results ? { results, closings: data.closings, adjustments: calculationAdjustments, month, snapshot: currentSnapshot, staff: data.staff, archivedStaff: data.archivedStaff } : undefined}
+      input={results ? { results, closings: exportClosings, adjustments: calculationAdjustments, month, snapshot: currentSnapshot, staff: data.staff, archivedStaff: data.archivedStaff } : undefined}
       month={month}
       sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
       disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"

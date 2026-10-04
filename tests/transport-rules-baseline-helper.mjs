@@ -4,6 +4,11 @@ import assert from "node:assert/strict";
 export function withoutTransportRules(value) {
   const copy = structuredClone(value), workspace = copy.$workspace;
   assert.ok(workspace.transportMonths && workspace.config.transportSettings);
+  // Ver2.50: 追加パスと、同じ日次行の美容室手当を保持する検証だけを除く。
+  assert.ok(workspace.beautyMonths);
+  delete workspace.beautyMonths;
+  assert.equal(workspace.history.$id.casts.$index[".validate"], "$workspace !== 'accounting-dev' || ((newData.child('beautyAllowance').val() === 0 || (newData.child('kind').val() === 'regular' && newData.child('beautyAllowance').val() === 500)) && (!data.parent().parent().exists() || data.child('kind').val() !== newData.child('kind').val() || (data.child('masterId').val() !== newData.child('masterId').val() && data.child('posCastId').val() !== newData.child('posCastId').val()) || newData.child('beautyAllowance').val() === (data.child('beautyAllowance').exists() ? data.child('beautyAllowance').val() : 0)))");
+  delete workspace.history.$id.casts.$index[".validate"];
   delete workspace.transportMonths;
   delete workspace.config.transportSettings;
   const inputs = workspace.accountingAdjustments.$month.castInputs;

@@ -306,6 +306,32 @@ describe("体入キャスト日払いの1円送信", () => {
     return value;
   }
 
+
+  function beautyFixture(amount: number): DailyClosing {
+    const value = castFixture(0);
+    value.casts[0].kind = "regular"; value.casts[0].beautyAllowance = amount;
+    value.posSnapshot.castWork[0].castType = "regular"; value.posSnapshot.castWork[0].isTrial = false;
+    return value;
+  }
+  it.each(["same", "master", "pos"] as const)("旧在籍美容室手当は正規再取込の%s変更でも原本額を保持する", async (mode) => {
+    const before = beautyFixture(500); before.status = "returned";
+    memory.values.set(path, structuredClone(before)); memory.values.set("history", { [before.id]: before });
+    const value = beautyFixture(500);
+    if (mode === "master") value.casts[0].masterId = "corrected-cast";
+    if (mode === "pos") { value.casts[0].posCastId = "corrected-pos"; value.posSnapshot.castWork[0].castId = "corrected-pos"; }
+    await submitClosing(value, user, before.updatedAt);
+    expect(memory.values.get(path)).toMatchObject({ casts: [{ beautyAllowance: 500 }] });
+  });
+  it("未送信の旧下書きの美容室手当は初回送信で維持する", async () => {
+    await submitClosing(beautyFixture(500), user);
+    expect(memory.values.get(path)).toMatchObject({ casts: [{ beautyAllowance: 500 }] });
+  });
+  it.each([[500, 0], [0, 500]])("旧日次の美容室額%s→%s変更は再送から行えない", async (oldAmount, newAmount) => {
+    const before = beautyFixture(oldAmount); before.status = "returned";
+    memory.values.set(path, structuredClone(before)); memory.values.set("history", { [before.id]: before });
+    await expect(submitClosing(beautyFixture(newAmount), user, before.updatedAt)).rejects.toThrow("店舗作業の「美容室手当」");
+    expect(memory.values.get(path)).toMatchObject({ casts: [{ beautyAllowance: oldAmount }] });
+  });
   it.each(["same", "master", "pos"])("旧送迎は正規再取込の%s識別子変更でも保持して再送できる", async (mode) => {
     const before = castFixture(1503); before.status = "returned"; before.casts[0].transportFee = 500;
     memory.values.set(path, structuredClone(before)); memory.values.set("history", { [before.id]: before });

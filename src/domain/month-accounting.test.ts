@@ -2753,3 +2753,96 @@ describe("日別送迎を反映した月次確定", () => {
     expect(result.warnings.some((warning) => warning.includes("送迎記録") && warning.includes("差戻し"))).toBe(true);
   });
 });
+
+describe("在籍美容室手当の月次統合", () => {
+  function beautyData(eligible = true) {
+    const closing = approvedClosing({ casts: [dailyCast()] });
+    return workspace({ casts: [cast()], closings: [closing], beautyMonths: {
+      [month]: { revision: 1, casts: { "cast-1": { [closing.businessDate]: { eligible, attendanceClosingId: closing.id, attendanceIndex: 0, attendancePosCastId: "pos-cast-1" } } } },
+    } });
+  }
+
+  it("新画面の500円を売上明細・報酬・損益へ一度だけ反映し、日次原本と経費を変更しない", () => {
+    const data = beautyData();
+    const before = structuredClone(data);
+    const result = calculateMonthlyAccounting(data, month, adjustments());
+    expect(result.castSalesReports[0].days[0].beautyAllowance).toBe(500);
+    expect(result.castSalesReports[0].totals.beautyAllowance).toBe(500);
+    expect(result.castRewards[0]).toMatchObject({ beautyAllowance: 500, grossPay: 12500, netPay: 12500 });
+    expect(result.balance.cast).toBe(12500);
+    expect(result.expenses.dailyExpenseTotal).toBe(0);
+    expect(canFinalizeMonthlyAccounting(data, month, adjustments(), true).allowed).toBe(true);
+    expect(data).toEqual(before);
+    data.closings[0].casts[0].beautyAllowance = 500;
+    expect(calculateMonthlyAccounting(data, month, adjustments()).castRewards[0].beautyAllowance).toBe(500);
+  });
+
+  it("旧500円を新しいなしで取消し、旧日次原本の500円を保持する", () => {
+    const data = beautyData(false);
+    data.closings[0].casts[0].beautyAllowance = 500;
+    const result = calculateMonthlyAccounting(data, month, adjustments());
+    expect(result.castRewards[0]).toMatchObject({ beautyAllowance: 0, grossPay: 12000 });
+    expect(result.castSalesReports[0].totals.beautyAllowance).toBe(0);
+    expect(data.closings[0].casts[0].beautyAllowance).toBe(500);
+  });
+
+  it("体入日経費を保持し、同月在籍化後の在籍出勤分だけ報酬へ加算する", () => {
+    const trial = cast({ id: "trial-cast", status: "trial", hiredAt: undefined, convertedToCastId: "cast-1", trialDate: month + "-02", trialHourlyRate: 1500 });
+    const member = cast({ hiredAt: month + "-03", convertedFromTrialId: trial.id });
+    const trialClosing = approvedClosing({ casts: [dailyCast({ masterId: trial.id, kind: "trial", hourlyRate: 1500 })],
+      expenses: [{ id: "trial-beauty", category: "beautyTrial", payee: trial.name, personId: trial.id, amount: 2000 }],
+    });
+    const regularClosing = approvedClosing({ id: "closing-2", businessDate: month + "-03", casts: [dailyCast()] });
+    const data = workspace({ casts: [trial, member], closings: [trialClosing, regularClosing], beautyMonths: {
+      [month]: { revision: 1, casts: { [member.id]: { [regularClosing.businessDate]: { eligible: true, attendanceClosingId: regularClosing.id, attendanceIndex: 0, attendancePosCastId: "pos-cast-1" } } } },
+    } });
+    const result = calculateMonthlyAccounting(data, month, adjustments());
+    expect(result.castRewards).toHaveLength(1);
+    expect(result.castRewards[0]).toMatchObject({ id: member.id, beautyAllowance: 500, grossPay: 18500 });
+    expect(result.castSalesReports[0].days.map((day) => day.beautyAllowance)).toEqual([2000, 500]);
+    expect(result.expenses.byCategory.beautyTrial).toBe(2000);
+    expect(trialClosing.casts[0].beautyAllowance).toBe(0);
+    expect(trialClosing.expenses[0].amount).toBe(2000);
+  });
+
+  it("承認待ちや出勤根拠の不一致は警告し、月次確定を停止する", () => {
+    const data = beautyData();
+    data.closings[0].status = "submitted";
+    expect(calculateMonthlyAccounting(data, month, adjustments()).warnings.join()).toContain("美容室手当は日次の承認待ち");
+    expect(canFinalizeMonthlyAccounting(data, month, adjustments(), false).allowed).toBe(false);
+    data.closings[0].status = "approved";
+    data.beautyMonths![month].casts["cast-1"][month + "-02"].attendanceIndex = 3;
+    const check = canFinalizeMonthlyAccounting(data, month, adjustments(), true);
+    expect(check.allowed).toBe(false);
+    expect(check.integrityIssues.join()).toContain("美容室手当に対応する送信済みの在籍出勤がありません");
+    expect(calculateMonthlyAccounting(data, month, adjustments()).castRewards[0].beautyAllowance).toBe(0);
+  });
+
+  it("美容室手当の実値と出勤根拠を変更検知へ含め、未作成月と空月は同じとして扱う", async () => {
+    const data = beautyData();
+    data.beautyMonths = undefined;
+    const empty = await monthlySourceFingerprint(data, month, adjustments());
+    data.beautyMonths = { [month]: { revision: 0, casts: {} } };
+    expect(await monthlySourceFingerprint(data, month, adjustments())).toBe(empty);
+    const saved = beautyData();
+    const eligible = await monthlySourceFingerprint(saved, month, adjustments());
+    saved.beautyMonths![month].casts["cast-1"][month + "-02"].eligible = false;
+    expect(await monthlySourceFingerprint(saved, month, adjustments())).not.toBe(eligible);
+    saved.beautyMonths![month].casts["cast-1"][month + "-02"].eligible = true;
+    saved.beautyMonths![month].casts["cast-1"][month + "-02"].attendanceIndex = 1;
+    expect(await monthlySourceFingerprint(saved, month, adjustments())).not.toBe(eligible);
+  });
+
+  it("美容室手当込み確定結果を保存し、後日の入力変更で保存済み結果を再計算しない", () => {
+    const data = beautyData();
+    const result = calculateMonthlyAccounting(data, month, adjustments());
+    const snapshot = buildMonthlySnapshot(month, 1, "a".repeat(64), adjustments(), result, data.closings, "accounting-user", "2026-10-01T00:00:00.000Z");
+    expect(snapshot.calculationVersion).toBe("2.50.0");
+    const normalized = normalizeMonthlyAccountingSnapshot(snapshot, month, 1);
+    expect(normalized?.castRewards[0].beautyAllowance).toBe(500);
+    data.beautyMonths![month].casts["cast-1"][month + "-02"].eligible = false;
+    expect(calculateMonthlyAccounting(data, month, adjustments()).castRewards[0].beautyAllowance).toBe(0);
+    expect(normalized?.castRewards[0].beautyAllowance).toBe(500);
+    expect(normalized?.castSalesReports[0].days[0].beautyAllowance).toBe(500);
+  });
+});
