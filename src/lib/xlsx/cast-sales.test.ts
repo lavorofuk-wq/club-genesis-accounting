@@ -37,6 +37,57 @@ const reward: CastReward = {
 };
 const input = () => structuredClone({ castSalesReports: [report], castRewards: [reward] });
 
+
+function convertedCastWorkbookFixture(beautyAmount = 0) {
+  const month = "2026-09";
+  const member: CastRecord = {
+    id: "active", name: "花子", legalName: "", status: "active", hiredAt: month + "-03",
+    convertedFromTrialId: "trial", hourlyRates: { [month]: 3500, "2026-10": 9000 },
+    note: "", createdAt: "", updatedAt: "",
+  };
+  const trial: CastRecord = { ...member, id: "trial", status: "trial", convertedFromTrialId: undefined, convertedToCastId: member.id };
+  const daily = (overrides: Partial<DailyCast>): DailyCast => ({
+    masterId: member.id, posCastId: "pos", name: member.name, kind: "regular",
+    startTime: "20:00", endTime: "23:15", hours: 3.25, hourlyRate: 3000,
+    honShimeiCount: 0, banaiShimeiCount: 0, dohanCount: 0, dohanBack: 0,
+    honShimeiSales: 0, jonaiExtensionSales: 0, drinkSales: 0, drinkAllocations: [], bottles: [], liquorCost: 0,
+    beautyAllowance: 0, dailyPayment: 0, advancePayment: 0, transportFee: 0, ...overrides,
+  });
+  const closings = [
+    { id: "trial-day", businessDate: month + "-02", status: "approved",
+      casts: [daily({ masterId: trial.id, posCastId: "trial-pos", kind: "trial", hourlyRate: 2000, hours: 2.25, endTime: "22:15", dailyPayment: 4500 })],
+      expenses: beautyAmount ? [{ id: "trial-beauty", category: "beautyTrial", payee: trial.name, personId: trial.id, amount: beautyAmount }] : [] },
+    { id: "active-day", businessDate: month + "-03", status: "approved", casts: [daily({ beautyAllowance: beautyAmount })], expenses: [] },
+    { id: "pending-day", businessDate: month + "-04", status: "submitted", casts: [daily({ hourlyRate: 8000, beautyAllowance: 500 })], expenses: [] },
+  ] as DailyClosing[];
+  const casts = [trial, member];
+  return { month, casts, closings };
+}
+
+function calculatedCastExport(closings: DailyClosing[], casts: CastRecord[], month: string) {
+  return { castRewards: calculateCastRewards(closings, casts, month), castSalesReports: calculateCastSalesReports(closings, casts, month) };
+}
+
+async function restoredWorkbook(book: ExcelJS.Workbook) {
+  const restored = new ExcelJS.Workbook();
+  await restored.xlsx.load(await book.xlsx.writeBuffer());
+  return restored;
+}
+
+/** 美容室の日別V列と合計以外は、給与欄を含め保存結果・書式・結合を全セル比較する。 */
+function expectOnlyBeautyColumnChanged(actual: ExcelJS.Worksheet, expected: ExcelJS.Worksheet) {
+  for (let row = 1; row <= 44; row++) {
+    for (let column = 2; column <= 27; column++) {
+      if (column === 22 && row >= 3 && row <= 34) continue;
+      const cell = actual.getCell(row, column), baseline = expected.getCell(row, column);
+      expect(cell.value, cell.address).toEqual(baseline.value);
+      expect(cell.style, cell.address).toEqual(baseline.style);
+      expect(cell.note, cell.address).toEqual(baseline.note);
+      expect(cell.master.address, cell.address).toBe(baseline.master.address);
+    }
+  }
+}
+
 describe("キャスト売上XLSX", () => {
   it.each([false, true])("勤務時間の右へ対象月の適用時給を数値で保存する（体入のみ=%s）", async (trialOnly) => {
     const data = input();
@@ -178,29 +229,10 @@ describe("キャスト売上XLSX", () => {
   });
 
   it("体入から同月入店した実計算の体入時給と月度時給を出力し、未承認単価を混ぜない", async () => {
-    const month = "2026-09";
-    const member: CastRecord = {
-      id: "active", name: "花子", legalName: "", status: "active", hiredAt: "2026-09-03",
-      convertedFromTrialId: "trial", hourlyRates: { [month]: 3500, "2026-10": 9000 },
-      note: "", createdAt: "", updatedAt: "",
-    };
-    const trial: CastRecord = { ...member, id: "trial", status: "trial", convertedFromTrialId: undefined, convertedToCastId: member.id };
-    const daily = (overrides: Partial<DailyCast>): DailyCast => ({
-      masterId: member.id, posCastId: "pos", name: member.name, kind: "regular",
-      startTime: "20:00", endTime: "23:15", hours: 3.25, hourlyRate: 3000,
-      honShimeiCount: 0, banaiShimeiCount: 0, dohanCount: 0, dohanBack: 0,
-      honShimeiSales: 0, jonaiExtensionSales: 0, drinkSales: 0, drinkAllocations: [], bottles: [], liquorCost: 0,
-      beautyAllowance: 0, dailyPayment: 0, advancePayment: 0, transportFee: 0, ...overrides,
-    });
-    const closings = [
-      { id: "trial-day", businessDate: "2026-09-02", status: "approved", casts: [daily({ masterId: trial.id, kind: "trial", hourlyRate: 2000, hours: 2.25, endTime: "22:15", dailyPayment: 4500 })] },
-      { id: "active-day", businessDate: "2026-09-03", status: "approved", casts: [daily({})] },
-      { id: "pending-day", businessDate: "2026-09-04", status: "submitted", casts: [daily({ hourlyRate: 8000 })] },
-    ] as DailyClosing[];
-    const casts = [trial, member];
-    const data = { castRewards: calculateCastRewards(closings, casts, month), castSalesReports: calculateCastSalesReports(closings, casts, month) };
+    const { month, casts, closings } = convertedCastWorkbookFixture();
+    const data = calculatedCastExport(closings, casts, month);
     expect(data.castRewards).toHaveLength(1);
-    expect(data.castRewards[0]).toMatchObject({ id: member.id, appliedHourlyRates: [2000, 3500], trialOnly: false, hourlyPay: 15875, dailyPayment: 4500, netPay: 11375 });
+    expect(data.castRewards[0]).toMatchObject({ id: "active", appliedHourlyRates: [2000, 3500], trialOnly: false, hourlyPay: 15875, dailyPayment: 4500, netPay: 11375 });
     const before = structuredClone(data);
     const book = createCastSalesWorkbook(data, month, "承認済みデータ（未確定）");
     const restored = new ExcelJS.Workbook();
@@ -459,5 +491,115 @@ describe("キャスト売上XLSX", () => {
     const wrongDay = input();
     wrongDay.castSalesReports[0].days[0].businessDate = "2026-09-31";
     expect(() => createCastSalesWorkbook(wrongDay, "2026-09", "未確定")).toThrow("出勤日");
+  });
+});
+
+
+describe("未確定キャスト売上XLSXの美容室欄", () => {
+  it("同月入店した体入日のV欄を空欄・V34を在籍分500円にし、給与・画面集計・経費を保持する", async () => {
+    const { month, casts, closings } = convertedCastWorkbookFixture(500);
+    const data = calculatedCastExport(closings, casts, month);
+    expect(data.castSalesReports).toHaveLength(1);
+    expect(data.castSalesReports[0].days.map((day) => day.beautyAllowance)).toEqual([500, 500]);
+    expect(data.castSalesReports[0].totals.beautyAllowance).toBe(1000);
+    expect(data.castRewards[0]).toMatchObject({ id: "active", trialOnly: false, beautyAllowance: 500, hourlyPay: 15875, grossPay: 16375, netPay: 11875 });
+    const before = structuredClone({ data, casts, closings });
+    const sourceLabel = "承認済みデータ（未確定）";
+    const baseline = createCastSalesWorkbook(data, month, sourceLabel);
+    const book = createCastSalesWorkbook(data, month, sourceLabel, { beautyContext: { closings, casts } });
+    const [baselineRestored, restored] = await Promise.all([restoredWorkbook(baseline), restoredWorkbook(book)]);
+    for (const [sheet, baseSheet] of [[book.worksheets[0], baseline.worksheets[0]], [restored.worksheets[0], baselineRestored.worksheets[0]]]) {
+      expect(sheet.getCell("V4").value).toBeNull();
+      expect(sheet.getCell("V5").value).toBe(500);
+      expect(sheet.getCell("V6").value).toBeNull();
+      expect(sheet.getCell("V34").formula).toBe("SUM(V3:V33)");
+      expect(sheet.getCell("V34").result).toBe(500);
+      expect(sheet.getCell("I38").value).toBe(500);
+      expect(sheet.getCell("U37").value).toBe(500);
+      expect(sheet.getCell("U44").value).toBe(11875);
+      expect(sheet.getCell("B45").value).not.toContain("即日支払済みの体入手当を含みます");
+      for (const address of ["V4", "V5", "V34"]) expect(sheet.getCell(address).style).toEqual(baseSheet.getCell(address).style);
+      expectOnlyBeautyColumnChanged(sheet, baseSheet);
+    }
+    expect({ data, casts, closings }).toEqual(before);
+    expect(closings[0].expenses).toEqual([{ id: "trial-beauty", category: "beautyTrial", payee: "花子", personId: "trial", amount: 500 }]);
+    expect(data.castSalesReports[0].totals.beautyAllowance).toBe(1000);
+  });
+
+  it("オプションを渡さない確定月は体入500円・在籍500円・合計1000円と従来注記を保持する", async () => {
+    const { month, casts, closings } = convertedCastWorkbookFixture(500);
+    const data = calculatedCastExport(closings, casts, month), before = structuredClone({ data, casts, closings });
+    const book = createCastSalesWorkbook(data, month, "月次確定済み 第2版");
+    const restored = await restoredWorkbook(book);
+    for (const sheet of [book.worksheets[0], restored.worksheets[0]]) {
+      expect(sheet.getCell("V4").value).toBe(500);
+      expect(sheet.getCell("V5").value).toBe(500);
+      expect(sheet.getCell("V34").formula).toBe("SUM(V3:V33)");
+      expect(sheet.getCell("V34").result).toBe(1000);
+      expect(sheet.getCell("B45").value).toContain("即日支払済みの体入手当を含みます");
+      expect(sheet.getCell("U44").value).toBe(11875);
+    }
+    expect({ data, casts, closings }).toEqual(before);
+  });
+
+  it("体入だけの未確定月はV欄を空欄・合計0円にし、即日払いと体入経費を残す", async () => {
+    const fixture = convertedCastWorkbookFixture(500), { month } = fixture;
+    const casts = [fixture.casts[0]], closings = [fixture.closings[0]];
+    delete casts[0].convertedToCastId;
+    const data = calculatedCastExport(closings, casts, month), before = structuredClone({ data, casts, closings });
+    expect(data.castRewards[0]).toMatchObject({ trialOnly: true, beautyAllowance: 0, dailyPayment: 4500, netPay: 0 });
+    const baseline = await restoredWorkbook(createCastSalesWorkbook(data, month, "未確定"));
+    const book = createCastSalesWorkbook(data, month, "未確定", { beautyContext: { closings, casts } });
+    const restored = await restoredWorkbook(book);
+    for (const sheet of [book.worksheets[0], restored.worksheets[0]]) {
+      expect(sheet.getCell("V4").value).toBeNull();
+      expect(sheet.getCell("V34").formula).toBe("SUM(V3:V33)");
+      expect(sheet.getCell("V34").result).toBe(0);
+      expect(sheet.getCell("W4").value).toBe(4500);
+      expect(sheet.getCell("U44").value).toBe(0);
+    }
+    expectOnlyBeautyColumnChanged(restored.worksheets[0], baseline.worksheets[0]);
+    expect({ data, casts, closings }).toEqual(before);
+    expect(closings[0].expenses[0].amount).toBe(500);
+  });
+
+  it.each([0, 500])("在籍のみの未確定月は美容室%s円を空欄へ変えず、給与欄も保持する", async (beautyAmount) => {
+    const fixture = convertedCastWorkbookFixture(beautyAmount), { month } = fixture;
+    const casts = [fixture.casts[1]], closings = [fixture.closings[1]];
+    const data = calculatedCastExport(closings, casts, month), before = structuredClone({ data, casts, closings });
+    const baseline = await restoredWorkbook(createCastSalesWorkbook(data, month, "未確定"));
+    const book = createCastSalesWorkbook(data, month, "未確定", { beautyContext: { closings, casts } });
+    const restored = await restoredWorkbook(book);
+    for (const sheet of [book.worksheets[0], restored.worksheets[0]]) {
+      expect(sheet.getCell("V5").value).toBe(beautyAmount);
+      expect(sheet.getCell("V34").formula).toBe("SUM(V3:V33)");
+      expect(sheet.getCell("V34").result).toBe(beautyAmount);
+      expect(sheet.getCell("I38").value).toBe(beautyAmount);
+    }
+    expectOnlyBeautyColumnChanged(restored.worksheets[0], baseline.worksheets[0]);
+    expect({ data, casts, closings }).toEqual(before);
+  });
+
+  it("同名の別人体入キャストを在籍キャストと混同せず、それぞれのV欄と合計を出す", async () => {
+    const { month, casts, closings } = convertedCastWorkbookFixture(500);
+    delete casts[0].convertedToCastId;
+    delete casts[1].convertedFromTrialId;
+    const data = calculatedCastExport(closings, casts, month), before = structuredClone({ data, casts, closings });
+    expect(data.castSalesReports).toHaveLength(2);
+    const baseline = await restoredWorkbook(createCastSalesWorkbook(data, month, "未確定"));
+    const book = createCastSalesWorkbook(data, month, "未確定", { beautyContext: { closings, casts } });
+    const restored = await restoredWorkbook(book);
+    for (const output of [book, restored]) {
+      expect(output.worksheets).toHaveLength(2);
+      expect(new Set(output.worksheets.map((sheet) => sheet.name)).size).toBe(2);
+      data.castSalesReports.forEach((report, index) => {
+        const sheet = output.worksheets[index], isTrial = report.id === "trial";
+        expect(sheet.getCell(isTrial ? "V4" : "V5").value).toBe(isTrial ? null : 500);
+        expect(sheet.getCell("V34").formula).toBe("SUM(V3:V33)");
+        expect(sheet.getCell("V34").result).toBe(isTrial ? 0 : 500);
+      });
+    }
+    restored.worksheets.forEach((sheet, index) => expectOnlyBeautyColumnChanged(sheet, baseline.worksheets[index]));
+    expect({ data, casts, closings }).toEqual(before);
   });
 });

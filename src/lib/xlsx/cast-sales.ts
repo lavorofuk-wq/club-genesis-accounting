@@ -1,9 +1,10 @@
 "use client";
 
 import ExcelJS from "exceljs/dist/exceljs.min.js";
-import type { CastReward, CastSalesDay, CastSalesReport } from "@/domain/gms";
+import type { CastRecord, CastReward, CastSalesDay, CastSalesReport, DailyClosing } from "@/domain/gms";
 import type { MonthlyAccountingResults } from "@/domain/month-accounting";
 import { additionalCastAmounts } from "@/domain/cast-input-export";
+import { castSalesBeautyValuesForExport } from "@/domain/cast-sales-beauty-export";
 
 const amountFormat = '#,##0;[Red]-#,##0;0';
 const font = { name: "Yu Gothic", size: 10 };
@@ -122,7 +123,7 @@ function appliedHourlyRateValue(reward: CastReward): string | number {
     .map((rate) => `${rate.toLocaleString("ja-JP", { maximumFractionDigits: 15 })}円`).join(" / ");
 }
 
-function addPayroll(sheet: ExcelJS.Worksheet, reward: CastReward, report: CastSalesReport) {
+function addPayroll(sheet: ExcelJS.Worksheet, reward: CastReward, report: CastSalesReport, trialBeautyExcluded = false) {
   const hourlyAdopted = reward.adoptedSystem === "hourlyAndBack";
   mergeValue(sheet, "D35:K35", `時給＋バック${hourlyAdopted ? "（採用）" : "（比較用）"}`);
   mergeValue(sheet, "R35:V35", `売上報酬${!reward.rewardRate ? "（対象外）" : hourlyAdopted ? "（比較用）" : "（採用）"}`);
@@ -183,7 +184,7 @@ function addPayroll(sheet: ExcelJS.Worksheet, reward: CastReward, report: CastSa
   notes.push("X送迎代は送迎控除の合計。AA手当は追加手当のみ（美容室手当は含みません）。Z減給は空欄です。");
   if (report.totals.transportFee === undefined) notes.push("X送迎代：日別内訳未保存のため日別欄は空欄。合計欄は確定時に保存された送迎控除額です。");
   if (report.totals.dailyPayment === undefined) notes.push("W日払い・Y立替：日別内訳未保存のため日別欄は空欄。合計欄は確定時に保存された月合計です。");
-  if (report.totals.beautyAllowance !== reward.beautyAllowance) notes.push("日別の美容室欄には、即日支払済みの体入手当を含みます。");
+  if (!trialBeautyExcluded && report.totals.beautyAllowance !== reward.beautyAllowance) notes.push("日別の美容室欄には、即日支払済みの体入手当を含みます。");
   if (report.totals.backTotal !== totalBack) notes.push("日別バック合計と給与欄の総バックが異なるため、それぞれの月次計算結果を記載しています。");
   mergeValue(sheet, "B45:AA45", notes.join("\n"));
   sheet.getCell("B45").font = { ...font, size: 9 };
@@ -191,10 +192,12 @@ function addPayroll(sheet: ExcelJS.Worksheet, reward: CastReward, report: CastSa
   sheet.getRow(45).height = 15 * notes.length;
 }
 
-/** 集計済み画面データ／確定スナップショットのみを受け取り、原本・現在マスタから再計算しない。 */
-export function createCastSalesWorkbook(results: ExportResults, month: string, sourceLabel: string) {
+/** 給与は集計済み結果のまま出力し、未確定月で指定された場合だけ美容室列を当日の在籍区分で表示する。 */
+export function createCastSalesWorkbook(results: ExportResults, month: string, sourceLabel: string, options?: { beautyContext?: { closings: DailyClosing[]; casts: CastRecord[] } }) {
   if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error("対象月を選択してください。");
   if (!results.castSalesReports.length) throw new Error("対象月の承認済みキャスト売上がありません。");
+  const beautyValues = options?.beautyContext
+    ? castSalesBeautyValuesForExport(results, options.beautyContext.closings, options.beautyContext.casts, month) : undefined;
   const book = new ExcelJS.Workbook();
   book.creator = "GENESIS Management System Ver2.39.0";
   book.created = new Date();
@@ -271,13 +274,15 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
       row.getCell("B").value = dayNumber;
       const day = byDate.get(`${month}-${String(dayNumber).padStart(2, "0")}`);
       if (!day) continue;
+      const beautyValue = beautyValues ? beautyValues.get(report.id)?.get(day.businessDate) : day.beautyAllowance;
+      if (beautyValue === undefined) throw new Error(`${report.name}の美容室手当の出勤日を確認できません。`);
       const values: Record<string, ExcelJS.CellValue> = {
         C: timeValue(day.startTime), D: timeValue(day.endTime), E: day.hours / 24,
         F: day.honShimeiCount, G: back(day, "honShimei"), H: day.honShimeiSales,
         I: day.banaiShimeiCount, J: back(day, "banaiShimei"), K: day.jonaiExtensionSales,
         L: day.dohanCount, M: back(day, "dohan"), N: day.honShimeiLiquorCost, O: day.jonaiExtensionLiquorCost,
         R: day.bottles.map((bottle) => `${bottle.name} ×${bottle.quantity}`).join("\n"),
-        S: day.totalLiquorCost, T: day.totalSales, U: back(day, "drink"), V: day.beautyAllowance,
+        S: day.totalLiquorCost, T: day.totalSales, U: back(day, "drink"), V: beautyValue,
         W: day.dailyPayment ?? null, X: day.transportFee ?? null,
         Y: day.advancePayment ?? null, AA: additionalCastAmounts(day).allowance,
       };
@@ -322,7 +327,7 @@ export function createCastSalesWorkbook(results: ExportResults, month: string, s
       sumCell(sheet, "P", report.days.reduce((sum, day) => sum + day.bottleBackByKind!.keepBottle, 0));
       sumCell(sheet, "Q", report.days.reduce((sum, day) => sum + day.bottleBackByKind!.champagneWine, 0));
     }
-    addPayroll(sheet, reward, report);
+    addPayroll(sheet, reward, report, Boolean(beautyValues));
     addAccountingInputs(sheet, report);
   }
   return book;

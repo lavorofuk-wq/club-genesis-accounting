@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { User } from "firebase/auth";
 import { secureRandomUUID } from "@/lib/crypto-compat";
-import type { CashReconciliation, CastAccountingInput, ResolvedCastAccountingInput, CastReward, CastSalesBackBreakdown, CastSalesBottleSummary, CastSalesReport, DailyClosing, LegacyBottleClassification, MonthlyAdjustments } from "@/domain/gms";
+import type { CashReconciliation, CastRecord, CastAccountingInput, ResolvedCastAccountingInput, CastReward, CastSalesBackBreakdown, CastSalesBottleSummary, CastSalesReport, DailyClosing, LegacyBottleClassification, MonthlyAdjustments } from "@/domain/gms";
 import { beautyClosingsForExport } from "@/domain/beauty-export";
 import { findUnclassifiedLegacyBottles, normalizeMonthlyAdjustments } from "@/domain/gms";
 import { validateExpenseExport, type ExpenseExportInput } from "@/domain/expense-export";
@@ -244,6 +244,9 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
   const liveResults = calculation.results;
   const results = closed ? currentSnapshot : calculationsBlocked ? undefined : liveResults;
   const exportClosings = useMemo(() => beautyClosingsForExport(data, month, currentSnapshot), [data, month, currentSnapshot]);
+  const castSalesBeautyContext = useMemo(() => closed ? undefined : {
+    closings: exportClosings, casts: [...new Map([...data.archivedCasts, ...data.casts].map((cast) => [cast.id, cast])).values()],
+  }, [closed, exportClosings, data.archivedCasts, data.casts]);
   const payrollExportInput = useMemo(() => results ? {
     results, closings: exportClosings, month, snapshot: currentSnapshot, staff: data.staff, archivedStaff: data.archivedStaff,
   } : undefined, [results, exportClosings, month, currentSnapshot, data.staff, data.archivedStaff]);
@@ -301,7 +304,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
     {!closed && calculationsBlocked && <div className="notice error"><strong>旧データのボトル区分が未確定または未保存のため、自動計算を停止しています。</strong><br />すべての商品を「本指名・場内延長・対象外」から手動指定し、保存してください。</div>}
     {results?.warnings.length ? <div className="notice error"><strong>正しく算出できない項目があります。</strong><ul>{results.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul></div> : null}
     {section === "castSales" && <CastSalesExport
-      results={results} month={month}
+      results={results} month={month} beautyContext={castSalesBeautyContext}
       sourceLabel={closed ? `月次確定済み 第${state.currentSnapshotRevision}版` : "承認済みデータ（未確定）"}
       disabledReason={busy ? "処理中です。" : state?.status === "closing" ? "月次確定処理中です。"
         : adjustmentsStale ? "別の操作で月次入力が更新されています。最新データを確認してください。"
@@ -384,7 +387,8 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
   </div>;
 }
 
-export function CastSalesExport({ results, month, sourceLabel, disabledReason }: {
+export function CastSalesExport({ results, month, sourceLabel, disabledReason, beautyContext }: {
+  beautyContext?: { closings: DailyClosing[]; casts: CastRecord[] };
   results?: Pick<MonthlyAccountingResults, "castSalesReports" | "castRewards">;
   month: string;
   sourceLabel: string;
@@ -402,7 +406,7 @@ export function CastSalesExport({ results, month, sourceLabel, disabledReason }:
     try {
       const { createCastSalesWorkbook } = await import("@/lib/xlsx/cast-sales");
       const { downloadWorkbook } = await import("@/lib/xlsx/workbooks");
-      const book = createCastSalesWorkbook(results, month, sourceLabel);
+      const book = createCastSalesWorkbook(results, month, sourceLabel, beautyContext ? { beautyContext } : undefined);
       await downloadWorkbook(book, `GENESISキャスト売上_${month}.xlsx`);
       setNotice({ month, error: false, text: `${month}のキャスト売上XLSXを出力しました。` });
     } catch (error) {

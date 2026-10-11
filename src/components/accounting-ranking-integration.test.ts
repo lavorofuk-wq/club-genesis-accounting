@@ -206,3 +206,27 @@ describe("キャスト売上順位表の月次画面統合", () => {
     expect(ranking(render(data, "castSales", condition === "busy"))!.props.disabledReason).not.toBe("");
   });
 });
+
+
+describe("キャスト売上Excelの体入美容室表示の適用範囲", () => {
+  it("未確定月だけ本人照合用の出勤と統合マスタをExcelへ渡す", () => {
+    const data = fixture();
+    data.archivedCasts = [cast("zero", "旧マスタの名前"), cast("archived", "退店者", { status: "departed" })];
+    const output = elements(render(data)).find((row) => row.type === CastSalesExport)!;
+    expect(output.props.beautyContext.closings).toEqual(data.closings);
+    expect(output.props.beautyContext.casts.map((row: CastRecord) => [row.id, row.name])).toEqual([
+      ["zero", "出勤なし"], ["archived", "退店者"],
+    ]);
+  });
+
+  it("確定月の出力には補正情報を渡さず、確定解除後の出力だけへ再適用する", () => {
+    const data = fixture(); const snapshot = closeMonth(data, true);
+    const closed = elements(render(data)).find((row) => row.type === CastSalesExport)!;
+    expect(closed.props.results).toBe(snapshot);
+    expect(closed.props.beautyContext).toBeUndefined();
+    data.monthStates = [{ ...data.monthStates[0], status: "open" }];
+    const reopened = elements(render(data)).find((row) => row.type === CastSalesExport)!;
+    expect(reopened.props.results).not.toBe(snapshot);
+    expect(reopened.props.beautyContext).toBeDefined();
+  });
+});
