@@ -2,14 +2,16 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { User } from "firebase/auth";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { DailyClosing } from "@/domain/gms";
+import type { DailyCast, DailyClosing } from "@/domain/gms";
 import type { AccountingWorkspaceData } from "@/domain/month-accounting";
-import { StoreWork } from "./store-work";
+import { DailyPreview, StoreWork } from "./store-work";
+import { projectDailyWorkAllowances } from "@/domain/daily-work-allowance-preview";
 
 const harness = vi.hoisted(() => ({
   drafts: {} as Record<string, unknown>,
   states: [] as unknown[], stateIndex: 0,
   buttons: [] as Array<{ label: string; click: () => unknown }>,
+  checks: [] as Array<{ disabled?: boolean; checked?: boolean; change: (event: { target: { checked: boolean } }) => unknown }>,
   preview: null as null | { title: string; children: import("react").ReactNode; onClose: () => void },
   submit: vi.fn(), withdraw: vi.fn(), deleteClosing: vi.fn(),
 }));
@@ -51,9 +53,12 @@ vi.mock("./ui", async (importOriginal) => {
   const react = await import("react");
   const collect = (node: import("react").ReactNode) => {
     if (Array.isArray(node)) { node.forEach(collect); return; }
-    if (!react.isValidElement<{ children?: import("react").ReactNode; onClick?: () => unknown }>(node)) return;
+    if (!react.isValidElement<{ children?: import("react").ReactNode; onClick?: () => unknown; type?: string; disabled?: boolean; checked?: boolean; onChange?: (event: { target: { checked: boolean } }) => unknown }>(node)) return;
     if (node.type === "button" && typeof node.props.children === "string" && node.props.onClick) {
       harness.buttons.push({ label: node.props.children, click: node.props.onClick });
+    }
+    if (node.type === "input" && node.props.type === "checkbox" && node.props.onChange) {
+      harness.checks.push({ disabled: node.props.disabled, checked: node.props.checked, change: node.props.onChange });
     }
     collect(node.props.children);
   };
@@ -96,6 +101,7 @@ const run = vi.fn(async () => true);
 function render(data = source) {
   harness.stateIndex = 0;
   harness.buttons = [];
+  harness.checks = [];
   harness.preview = null;
   return renderToStaticMarkup(createElement(StoreWork, { data, user: { uid: "print-preview-test" } as User, busy: false, run }));
 }
@@ -105,13 +111,47 @@ function open(index: number) {
   button.click();
 }
 function selectedClosing() {
-  const node = harness.preview?.children as import("react").ReactElement<{ closing: DailyClosing }> | undefined;
+  const node = harness.preview?.children as import("react").ReactElement<Parameters<typeof DailyPreview>[0]> | undefined;
   return node?.props.closing;
+}
+function previewMarkup() {
+  expect(harness.preview).not.toBeNull();
+  return renderToStaticMarkup(harness.preview!.children);
+}
+function castCells(markup: string) {
+  const table = markup.split("<h3>キャスト</h3>")[1].split("<h3>スタッフ</h3>")[0];
+  const row = table.match(/<tbody><tr>([\s\S]*?)<\/tr>/)?.[1];
+  expect(row).toBeDefined();
+  return [...row!.matchAll(/<td(?: [^>]*)?>([\s\S]*?)<\/td>/g)].map((cell) => cell[1]);
+}
+function allowanceFixture(beautyAllowance = 0, transportFee = 0): AccountingWorkspaceData {
+  const data = structuredClone(source);
+  const day = closing("2026-09-03", "submitted");
+  const cast: DailyCast = {
+    masterId: "cast-preview", posCastId: "pos-preview", name: "表示キャスト", kind: "regular",
+    startTime: "20:00", endTime: "02:00", hours: 6, hourlyRate: 3000,
+    honShimeiCount: 1, banaiShimeiCount: 2, dohanCount: 0, dohanBack: 0,
+    honShimeiSales: 10000, jonaiExtensionSales: 2000, drinkSales: 0, drinkAllocations: [], bottles: [], liquorCost: 0,
+    beautyAllowance, transportFee, dailyPayment: 1111, advancePayment: 2222,
+  };
+  day.casts = [cast];
+  data.closings = [day];
+  data.casts = [{ id: cast.masterId, name: cast.name, legalName: "", status: "active", hiredAt: "2026-09-01", hourlyRates: { "2026-09": 3000 }, note: "", createdAt: "", updatedAt: "" }];
+  return data;
+}
+function registerAllowances(data: AccountingWorkspaceData, eligible: boolean, amount: number) {
+  const day = data.closings[0], cast = day.casts[0], month = day.businessDate.slice(0, 7);
+  data.beautyMonths = { [month]: { revision: (data.beautyMonths?.[month]?.revision || 0) + 1, casts: {
+    [cast.masterId]: { [day.businessDate]: { eligible, attendanceClosingId: day.id, attendanceIndex: 0, attendancePosCastId: cast.posCastId } },
+  } } };
+  data.transportMonths = { [month]: { revision: (data.transportMonths?.[month]?.revision || 0) + 1, casts: {
+    [cast.masterId]: { [day.businessDate]: { amount, attendanceClosingId: day.id, attendanceIndex: 0, legacyInputIds: [] } },
+  }, drivers: {} } };
 }
 
 beforeEach(() => {
   harness.drafts = { "store.workflowDirty": true, "store.workflow.new.cashRevisionReason": "入力途中の確認内容" };
-  harness.states = []; harness.stateIndex = 0; harness.buttons = []; harness.preview = null;
+  harness.states = []; harness.stateIndex = 0; harness.buttons = []; harness.checks = []; harness.preview = null;
   vi.clearAllMocks();
 });
 
@@ -176,5 +216,147 @@ describe("店舗送信済みデータの印刷プレビュー操作", () => {
     expect(selectedClosing()?.expenses[0].payee).toBe("保存された支払先 2026-09-02");
     harness.preview!.onClose(); render(updated); open(0); render(updated);
     expect(selectedClosing()?.expenses[0].payee).toBe("更新後の支払先");
+  });
+});
+
+describe("店舗プレビューの美容室手当・送迎代", () => {
+  it("未承認の日次にも別登録額を表示し、現金・経費・日払い・元データ・下書きを変更しない", () => {
+    const data = allowanceFixture();
+    registerAllowances(data, true, 1500);
+    const original = structuredClone(data);
+    render(data);
+    const drafts = structuredClone(harness.drafts);
+    open(0); render(data);
+    const markup = previewMarkup();
+    const cells = castCells(markup);
+    const baseline = renderToStaticMarkup(createElement(DailyPreview, { closing: data.closings[0] }));
+    const baselineCells = castCells(baseline);
+    expect(cells[9]).toBe("￥500");
+    expect(cells[12]).toBe("￥1,500");
+    cells.forEach((value, index) => { if (index !== 9 && index !== 12) expect(value).toBe(baselineCells[index]); });
+    expect(markup.match(/<tr class="total-row">([\s\S]*?)<\/tr>/)?.[1]).toContain("<td>1人</td>");
+    expect(markup.slice(markup.indexOf("<h3>スタッフ</h3>"))).toBe(baseline.slice(baseline.indexOf("<h3>スタッフ</h3>")));
+    expect(selectedClosing()).toBe(data.closings[0]);
+    expect(harness.drafts).toEqual(drafts);
+    expect(data).toEqual(original);
+    expect(run).not.toHaveBeenCalled();
+    expect(harness.submit).not.toHaveBeenCalled();
+    expect(harness.withdraw).not.toHaveBeenCalled();
+    expect(harness.deleteClosing).not.toHaveBeenCalled();
+  });
+
+  it("閲覧中の金額だけは最新登録へ追従し、日次原本と下書きは選択時のまま保持する", () => {
+    const data = allowanceFixture();
+    render(data); open(0); render(data);
+    const drafts = structuredClone(harness.drafts);
+    const original = structuredClone(data);
+    expect(castCells(previewMarkup())[9]).toBe("￥0");
+    const updated = structuredClone(data);
+    registerAllowances(updated, true, 2000);
+    updated.closings[0].expenses[0].payee = "後から更新した支払先";
+    updated.closings[0].cash.expectedClosingCash = 201234;
+    updated.closings[0].updatedAt = "2026-09-15T00:00:00.000Z";
+    render(updated);
+    expect(castCells(previewMarkup())[9]).toBe("￥500");
+    expect(castCells(previewMarkup())[12]).toBe("￥2,000");
+    expect(selectedClosing()).toBe(data.closings[0]);
+    expect(previewMarkup()).toContain("保存された支払先 2026-09-03");
+    expect(previewMarkup()).not.toContain("後から更新した支払先");
+    expect(selectedClosing()?.cash).toEqual(original.closings[0].cash);
+    registerAllowances(updated, false, 0);
+    render(updated);
+    expect(castCells(previewMarkup())[9]).toBe("￥0");
+    expect(castCells(previewMarkup())[12]).toBe("￥0");
+    expect(harness.drafts).toEqual(drafts);
+    expect(data).toEqual(original);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("否・送迎0円を旧日次の金額より優先し、美容室人数も表示額と一致させる", () => {
+    const data = allowanceFixture(500, 1500);
+    registerAllowances(data, false, 0);
+    render(data); open(0); render(data);
+    const markup = previewMarkup();
+    expect(castCells(markup)[9]).toBe("￥0");
+    expect(castCells(markup)[12]).toBe("￥0");
+    expect(markup.match(/<tr class="total-row">([\s\S]*?)<\/tr>/)?.[1]).toContain("<td>0人</td>");
+    expect(selectedClosing()?.casts[0]).toMatchObject({ beautyAllowance: 500, transportFee: 1500 });
+  });
+
+  it("人物・出勤根拠の不一致は金額0円と区別して要確認を表示する", () => {
+    const data = allowanceFixture(500, 1000);
+    registerAllowances(data, true, 1500);
+    data.beautyMonths!["2026-09"].casts["cast-preview"]["2026-09-03"].attendancePosCastId = "different-pos-person";
+    data.transportMonths!["2026-09"].casts["cast-preview"]["2026-09-03"].attendanceIndex = 9;
+    render(data); open(0); render(data);
+    const markup = previewMarkup();
+    expect(castCells(markup)[9]).toBe("要確認");
+    expect(castCells(markup)[12]).toBe("要確認");
+    expect(markup).toContain("美容室手当・送迎代の要確認事項");
+    expect(markup).toContain('role="alert"');
+    expect(markup.match(/<tr class="total-row">([\s\S]*?)<\/tr>/)?.[1]).toContain("<td>要確認</td>");
+    expect(selectedClosing()?.casts[0]).toMatchObject({ beautyAllowance: 500, transportFee: 1000 });
+  });
+
+  it("送信前の新規プレビューへ既存出勤の登録額を推測で転記しない", () => {
+    const data = allowanceFixture();
+    registerAllowances(data, true, 1500);
+    const draft = { ...structuredClone(data.closings[0]), id: "preview", submissionId: "new-submission", checksum: "b".repeat(64) };
+    const original = structuredClone(draft);
+    const allowancePreview = projectDailyWorkAllowances(data, draft);
+    const markup = renderToStaticMarkup(createElement(DailyPreview, { closing: draft, allowancePreview }));
+    expect(castCells(markup)[9]).toBe("要確認");
+    expect(castCells(markup)[12]).toBe("要確認");
+    expect(markup).toContain("美容室手当・送迎代の要確認事項");
+    expect(draft).toEqual(original);
+  });
+
+  it("送信前プレビューにも表示用データを適用し、別登録更新だけでは現金確認と下書きを戻さない", () => {
+    const data = allowanceFixture(500, 1000);
+    data.closings[0].status = "returned";
+    registerAllowances(data, true, 1500);
+    const day = data.closings[0];
+    harness.drafts["store.editing"] = day;
+    const draftKey = "store.workflow." + day.id + ".";
+    for (const [key, value] of Object.entries({
+      stage: "cash",
+      "cashFunding2.companyReplenishment": 0,
+      "cashFunding2.personalReplenishment": 0,
+      "cashFunding2.companyTransfer": 0,
+      personalRepayment: 0, openingPersonalDebt: 0,
+      cashRevisionReason: "当時の実績を確認",
+    })) harness.drafts[draftKey + key] = value;
+    render(data);
+    const cashCheck = harness.checks.find((check) => !check.disabled);
+    expect(cashCheck).toBeDefined();
+    cashCheck!.change({ target: { checked: true } });
+    render(data);
+    const next = harness.buttons.find((button) => button.label === "現金照合内容を確認して送信確認へ");
+    expect(next).toBeDefined();
+    next!.click();
+    const markup = render(data);
+    expect(markup).toContain('class="preview-sheet"');
+    expect(castCells(markup)[9]).toBe("要確認");
+    expect(castCells(markup)[12]).toBe("要確認");
+    const drafts = structuredClone(harness.drafts);
+    const updated = structuredClone(data);
+    registerAllowances(updated, false, 0);
+    const latestMarkup = render(updated);
+    expect(latestMarkup).toContain('class="preview-sheet"');
+    expect(latestMarkup).toContain("確認済み・経理へ送信");
+    expect(castCells(latestMarkup)[9]).toBe("￥0");
+    expect(castCells(latestMarkup)[12]).toBe("￥0");
+    expect(harness.drafts).toEqual(drafts);
+    expect(harness.drafts[draftKey + "castRows"]).toEqual(day.casts);
+    expect(run).not.toHaveBeenCalled();
+    expect(harness.submit).not.toHaveBeenCalled();
+  });
+
+  it("表示用データを渡さない従来呼出しでは旧日次の保存額を維持する", () => {
+    const data = allowanceFixture(500, 1500);
+    const markup = renderToStaticMarkup(createElement(DailyPreview, { closing: data.closings[0] }));
+    expect(castCells(markup)[9]).toBe("￥500");
+    expect(castCells(markup)[12]).toBe("￥1,500");
+    expect(markup).not.toContain("美容室手当・送迎代の要確認事項");
   });
 });

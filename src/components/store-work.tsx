@@ -13,6 +13,7 @@ import { STAFF_MONTHLY_RATES_START_MONTH, staffMonthlyRateForMonth } from "@/dom
 import { calculateConfirmedCashFunding, cashFundingDraftContext, cashFundingIssues, recommendedPersonalRepayment, cashDayIssues, cashChangeImpacts, sameCashReconciliation, assertCashLedgerChange } from "@/domain/cash-funding";
 import type { CashFundingContext, CashFundingInputs } from "@/domain/cash-funding";
 import { duplicateClosingForNewWorkflow, existingClosingSubmissionMessage } from "@/domain/daily-edit-source";
+import { projectDailyWorkAllowances } from "@/domain/daily-work-allowance-preview";
 import { deleteUnapprovedClosing, submitClosing, withdrawClosing } from "@/lib/firebase/repository";
 import { Card, Field, MoneyInput, Modal, StatusPill, Table, yen } from "./ui";
 import { useRecoverableState, useUpdateDraftBusy } from "./update-drafts";
@@ -172,7 +173,7 @@ export function StoreWork(props: Props) {
         })}
       </Table>
     </Card></div>
-    {preview && <PrintPreview title={`GMS 営業日次データ ${preview.businessDate}`} onClose={() => setPreview(null)}><DailyPreview closing={preview} /></PrintPreview>}
+    {preview && <PrintPreview title={`GMS 営業日次データ ${preview.businessDate}`} onClose={() => setPreview(null)}><DailyPreview closing={preview} allowancePreview={projectDailyWorkAllowances(props.data, preview)} /></PrintPreview>}
   </div>;
 }
 
@@ -628,6 +629,16 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     }
   };
 
+  const previewClosing: DailyClosing | undefined = visibleStage === "preview" && pos && cash ? {
+    id: initial?.id || "preview", businessDate: pos.businessDate, status: "submitted",
+    submissionId: pos.submissionId, checksum: pos.checksum, sales: pos.sales, customers: pos.customers,
+    nominations: pos.nominations, casts: castRows, staffWork, drivers: driverRows, expenses,
+    staffDailyPaymentTotal: staffWork.reduce((sum, row) => sum + row.dailyPayment, 0),
+    dispatchStaffPayment, dispatchCastPayment, dispatchFee, liquorDeliveryAmount, cash,
+    ...(cashChanged ? { cashRevisionReason: cashRevisionReason.trim() } : {}),
+    posSnapshot: pos, updatedAt: new Date().toISOString(),
+  } : undefined;
+
   return <Card title={initial ? `${initial.businessDate} 再編集` : "当日営業データ作成"} description="POS JSONの照合から現金の補充・返済実績・確認まで順番に入力します。" action={initial ? <button className="button secondary" disabled={busy} onClick={() => { if (window.confirm("保存していない再編集内容を破棄して終了しますか？")) onFinished(); }}>再編集を終了</button> : null}>
     <div className="stepper">{(["json", "details", "cash", "preview"] as Stage[]).map((value, index) => <span key={value} className={visibleStage === value ? "active" : ""}><b>{index + 1}</b>{["JSON取込", "店舗データ", "現金照合", "送信確認"][index]}</span>)}</div>
     {error && <div className="notice error">{error}</div>}
@@ -761,7 +772,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
       {!cashConfirmed && <div className="notice warn">現金の一致確認が必要です。入力・前提の変更や画面の再読込・復元後は、もう一度確認してください。</div>}
       <div className="actions spread"><button className="button secondary" onClick={() => setStage("details")}>店舗データへ戻る</button><button className="button" disabled={busy || !canSubmitCash} onClick={() => { if (canSubmitCash) setStage("preview"); }}>現金照合内容を確認して送信確認へ</button></div>
     </div>}
-    {visibleStage === "preview" && pos && cash && <div className="stack section-pad"><DailyPreview closing={{ id: initial?.id || "preview", businessDate: pos.businessDate, status: "submitted", submissionId: pos.submissionId, checksum: pos.checksum, sales: pos.sales, customers: pos.customers, nominations: pos.nominations, casts: castRows, staffWork, drivers: driverRows, expenses, staffDailyPaymentTotal: staffWork.reduce((sum, row) => sum + row.dailyPayment, 0), dispatchStaffPayment, dispatchCastPayment, dispatchFee, liquorDeliveryAmount, cash, ...(cashChanged ? { cashRevisionReason: cashRevisionReason.trim() } : {}), posSnapshot: pos, updatedAt: new Date().toISOString() }} /><div className="actions spread"><button className="button secondary" onClick={() => setStage("cash")}>現金照合へ戻る</button><button className="button submit-button" disabled={busy || !canSubmitCash} onClick={() => void submit()}>{busy ? "送信中…" : "確認済み・経理へ送信"}</button></div></div>}
+    {previewClosing && <div className="stack section-pad"><DailyPreview closing={previewClosing} allowancePreview={projectDailyWorkAllowances(data, previewClosing)} /><div className="actions spread"><button className="button secondary" onClick={() => setStage("cash")}>現金照合へ戻る</button><button className="button submit-button" disabled={busy || !canSubmitCash} onClick={() => void submit()}>{busy ? "送信中…" : "確認済み・経理へ送信"}</button></div></div>}
   </Card>;
 }
 
@@ -779,22 +790,34 @@ function CashContextTable({ before, after }: { before?: Partial<CashFundingConte
   return <Table headers={["前提", "保存時", "最新"]}>{labels.map(([key, label]) => <tr key={key}><td>{label}</td><td>{display(before?.[key])}</td><td>{display(after?.[key])}</td></tr>)}</Table>;
 }
 
-export function DailyPreview({ closing }: { closing: DailyClosing }) {
+export function DailyPreview({ closing, allowancePreview }: {
+  closing: DailyClosing;
+  allowancePreview?: ReturnType<typeof projectDailyWorkAllowances>;
+}) {
+  // 保存済み日次や下書きを変えず、美容室・送迎の表示額だけを差し替える。
+  const castAllowances = closing.casts.map((row, index) => {
+    if (!allowancePreview) return { beautyAllowance: row.beautyAllowance, transportFee: row.transportFee };
+    const projected = allowancePreview.casts.find((item) => item.index === index && item.posCastId === row.posCastId);
+    return projected || { beautyAllowance: null, transportFee: null };
+  });
+  const allowanceAmount = (amount: number | null) => amount === null ? "要確認" : yen.format(amount);
   const expenseTotal = closing.expenses.reduce((sum, row) => sum + row.amount, 0);
-  const castTotals = closing.casts.reduce((total, row) => ({
+  const castTotals = closing.casts.reduce((total, row, index) => ({
     honShimeiCount: total.honShimeiCount + row.honShimeiCount,
     banaiShimeiCount: total.banaiShimeiCount + row.banaiShimeiCount,
     dohanCount: total.dohanCount + row.dohanCount,
     honShimeiSales: total.honShimeiSales + row.honShimeiSales,
     jonaiExtensionSales: total.jonaiExtensionSales + row.jonaiExtensionSales,
-    beautyCount: total.beautyCount + (row.beautyAllowance > 0 ? 1 : 0),
+    beautyCount: total.beautyCount + ((castAllowances[index].beautyAllowance ?? 0) > 0 ? 1 : 0),
   }), { honShimeiCount: 0, banaiShimeiCount: 0, dohanCount: 0, honShimeiSales: 0, jonaiExtensionSales: 0, beautyCount: 0 });
   const drinkTotals = summarizePreviewDrinks(closing.casts, closing.posSnapshot);
   return <div className="preview-sheet">
     <header><div><p className="eyebrow">営業日次データ</p><h2>{closing.businessDate}</h2></div><StatusPill tone={closing.status === "approved" ? "good" : "warn"}>{closingLabels[closing.status]}</StatusPill></header>
     <div className="grid metrics"><Metric label="総売上" value={closing.sales.totalSales} /><Metric label="現金売上" value={closing.sales.cashSales} /><Metric label="カード売上" value={closing.sales.cardSales} /><Metric label="経費総計" value={expenseTotal} /></div>
     <h3>キャスト</h3>
-    <Table headers={["名前", "勤務", "本指名", "場内指名", "同伴", "本指名売上", "場内延長売上", "ボトルバック", "ドリンクバック", "美容室", "日払い", "立替", "送迎"]}>{[...closing.casts.map((row) => <tr key={row.posCastId}>
+    {allowancePreview && <p className="muted compact-text">美容室手当・キャスト送迎代は最新の登録内容を表示しています。</p>}
+    {Boolean(allowancePreview?.issues.length) && <div className="notice warn" role="alert"><strong>美容室手当・送迎代の要確認事項</strong>{allowancePreview!.issues.map((issue, index) => <div key={index}>{issue}</div>)}</div>}
+    <Table headers={["名前", "勤務", "本指名", "場内指名", "同伴", "本指名売上", "場内延長売上", "ボトルバック", "ドリンクバック", "美容室", "日払い", "立替", "送迎"]}>{[...closing.casts.map((row, index) => <tr key={row.posCastId}>
       <td>{row.name}<br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td>
       <td>{row.startTime}–{row.endTime}<br />{row.hours}時間</td>
       <td>{row.honShimeiCount}本</td>
@@ -804,10 +827,10 @@ export function DailyPreview({ closing }: { closing: DailyClosing }) {
       <td>{yen.format(row.jonaiExtensionSales)}</td>
       <td className="wrap-cell preview-product-cell"><PreviewBottleBackDetails row={row} /></td>
       <td className="wrap-cell preview-product-cell"><PreviewDrinkBackDetails row={row} pos={closing.posSnapshot} /></td>
-      <td>{yen.format(row.beautyAllowance)}</td>
+      <td>{allowanceAmount(castAllowances[index].beautyAllowance)}</td>
       <td>{yen.format(row.dailyPayment)}</td>
       <td>{yen.format(row.advancePayment)}</td>
-      <td>{yen.format(row.transportFee)}</td>
+      <td>{allowanceAmount(castAllowances[index].transportFee)}</td>
     </tr>), <tr key="cast-totals" className="total-row">
       <td colSpan={2}><strong>合計</strong></td>
       <td>{castTotals.honShimeiCount}本</td>
@@ -824,7 +847,7 @@ export function DailyPreview({ closing }: { closing: DailyClosing }) {
           <small>キャスト欄の延べ杯数{drinkTotals.hasUnknownQuantity ? "（杯数不明の旧データあり）" : ""}</small>
         </div>
       </td>
-      <td>{castTotals.beautyCount}人</td>
+      <td>{castAllowances.some((row) => row.beautyAllowance === null) ? "要確認" : `${castTotals.beautyCount}人`}</td>
       <td>—</td><td>—</td><td>—</td>
     </tr>]}</Table>
     <h3>スタッフ</h3>
