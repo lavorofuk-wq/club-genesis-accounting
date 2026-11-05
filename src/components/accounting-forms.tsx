@@ -5,6 +5,7 @@ import type { User } from "firebase/auth";
 import { secureRandomUUID } from "@/lib/crypto-compat";
 import type { CashReconciliation, CastRecord, CastAccountingInput, ResolvedCastAccountingInput, CastReward, CastSalesBackBreakdown, CastSalesBottleSummary, CastSalesReport, DailyClosing, LegacyBottleClassification, MonthlyAdjustments } from "@/domain/gms";
 import { beautyClosingsForExport } from "@/domain/beauty-export";
+import { projectDailyWorkAllowances } from "@/domain/daily-work-allowance-preview";
 import { findUnclassifiedLegacyBottles, normalizeMonthlyAdjustments } from "@/domain/gms";
 import { validateExpenseExport, type ExpenseExportInput } from "@/domain/expense-export";
 import { buildBalanceExportReport, type BalanceExportInput } from "@/domain/balance-export";
@@ -75,6 +76,7 @@ function ApprovalView({ data, user, busy, run }: Props) {
     setReviewed((rows) => Object.fromEntries(Object.entries(rows).filter(([key]) => currentKeys.has(key))));
   }, [reviewKeys]);
   const expandedClosing = data.closings.find((row) => row.id === expanded);
+  const workAllowances = useMemo(() => expandedClosing ? projectDailyWorkAllowances(data, expandedClosing) : undefined, [data, expandedClosing]);
   return <div className="grid">
     <div className="grid metrics">
       <Metric label="経理確認待ち" value={`${data.closings.filter((row) => row.status === "submitted").length}件`} />
@@ -102,13 +104,13 @@ function ApprovalView({ data, user, busy, run }: Props) {
           </div></td></tr>;
         })}
       </Table>
-      {expandedClosing && <ClosingDetail closing={expandedClosing} closings={data.closings} reviewed={Boolean(reviewed[closingReviewKey(expandedClosing, data.closings)])} disabled={busy || Boolean(accountingMonthLockMessage(data, expandedClosing.businessDate))} onReviewed={() => setReviewed((rows) => ({ ...rows, [closingReviewKey(expandedClosing, data.closings)]: true }))} />}
+      {expandedClosing && <ClosingDetail closing={expandedClosing} closings={data.closings} workAllowances={workAllowances} reviewed={Boolean(reviewed[closingReviewKey(expandedClosing, data.closings)])} disabled={busy || Boolean(accountingMonthLockMessage(data, expandedClosing.businessDate))} onReviewed={() => setReviewed((rows) => ({ ...rows, [closingReviewKey(expandedClosing, data.closings)]: true }))} />}
       {expanded && !expandedClosing && <div className="notice error">対象データが更新されたため、最新データを読み込んでください。</div>}
     </Card>
   </div>;
 }
 
-function ClosingDetail({ closing, closings, reviewed, disabled, onReviewed }: { closing: DailyClosing; closings: DailyClosing[]; reviewed: boolean; disabled: boolean; onReviewed: () => void }) {
+function ClosingDetail({ closing, closings, reviewed, disabled, onReviewed, workAllowances }: { closing: DailyClosing; closings: DailyClosing[]; reviewed: boolean; disabled: boolean; onReviewed: () => void; workAllowances?: ReturnType<typeof projectDailyWorkAllowances> }) {
   const expenseTotal = closing.expenses.reduce((sum, row) => sum + row.amount, 0);
   const regularDaily = closing.casts.filter((row) => row.kind === "regular").reduce((sum, row) => sum + row.dailyPayment, 0);
   const trialDaily = closing.casts.filter((row) => row.kind === "trial").reduce((sum, row) => sum + row.dailyPayment, 0);
@@ -120,8 +122,15 @@ function ClosingDetail({ closing, closings, reviewed, disabled, onReviewed }: { 
     {closing.returnReason && <div className="notice error"><strong>差戻し理由</strong><br />{closing.returnReason}</div>}
     <div className="summary-strip"><span><small>総売上</small><strong>{yen.format(closing.sales.totalSales)}</strong></span><span><small>現金売上</small><strong>{yen.format(closing.sales.cashSales)}</strong></span><span><small>カード売上</small><strong>{yen.format(closing.sales.cardSales)}</strong></span><span><small>現金照合</small><strong className={fundingProblems.length ? "text-danger" : "text-good"}>{!fundingProblems.length ? "照合確認済み" : !closing.cash.funding ? "補充・返済未入力" : "要確認"}</strong></span></div>
     <h3>店舗データプレビュー</h3>
+    {workAllowances && <p className="muted compact-text">美容室手当・キャスト送迎代は最新の登録内容を表示しています。</p>}
+    {workAllowances?.issues.length ? <div className="notice warn"><strong>美容室手当・送迎代の登録を確認してください。</strong><ul>{workAllowances.issues.map((issue) => <li key={issue}>{issue}</li>)}</ul></div> : null}
     <Table headers={["キャスト", "出退勤・時間", "本指名/場内/同伴", "本指名売上", "場内延長売上", "ボトル・ドリンク明細", "手当・控除"]}>
-      {closing.casts.map((row) => <tr key={row.posCastId}><td><strong>{row.name}</strong><br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td><td>{row.startTime}–{row.endTime}<br />{row.hours}時間</td><td>{row.honShimeiCount} / {row.banaiShimeiCount} / {row.dohanCount}</td><td>{yen.format(row.honShimeiSales)}</td><td>{yen.format(row.jonaiExtensionSales)}</td><td className="wrap-cell"><ClosingCastProductDetails row={row} pos={closing.posSnapshot} /></td><td className="wrap-cell">美容室 {yen.format(row.beautyAllowance)}<br />日払い {yen.format(row.dailyPayment)}<br />立替 {yen.format(row.advancePayment)}<br />送迎 {yen.format(row.transportFee)}</td></tr>)}
+      {closing.casts.map((row, index) => {
+        const displayed = workAllowances?.casts.find((item) => item.index === index && item.posCastId === row.posCastId);
+        const beauty = workAllowances ? displayed?.beautyAllowance : row.beautyAllowance;
+        const transport = workAllowances ? displayed?.transportFee : row.transportFee;
+        return <tr key={row.posCastId}><td><strong>{row.name}</strong><br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td><td>{row.startTime}–{row.endTime}<br />{row.hours}時間</td><td>{row.honShimeiCount} / {row.banaiShimeiCount} / {row.dohanCount}</td><td>{yen.format(row.honShimeiSales)}</td><td>{yen.format(row.jonaiExtensionSales)}</td><td className="wrap-cell"><ClosingCastProductDetails row={row} pos={closing.posSnapshot} /></td><td className="wrap-cell">美容室 {typeof beauty === "number" ? yen.format(beauty) : "要確認"}<br />日払い {yen.format(row.dailyPayment)}<br />立替 {yen.format(row.advancePayment)}<br />送迎 {typeof transport === "number" ? yen.format(transport) : "要確認"}</td></tr>;
+      })}
     </Table>
     <h3>スタッフ・送迎ドライバー</h3>
     <p className="muted compact-text">登録時時給は店舗入力時の保存値です。在籍スタッフの未確定月（2026年9月以降）は月度時給で給与計算します。</p>

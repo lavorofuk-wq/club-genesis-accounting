@@ -1,3 +1,4 @@
+import { withoutCastMonthlyRules } from "./cast-monthly-rules-baseline-helper.mjs";
 import { withoutTransportRules } from "./transport-rules-baseline-helper.mjs";
 import { withoutOneYenSalesRewardRules } from "./sales-reward-rules-baseline-helper.mjs";
 import assert from "node:assert/strict";
@@ -45,7 +46,7 @@ function canonical(value) {
 const fingerprint = (value) => createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex");
 
 function outsideRetiredRules(value) {
-  const copy = withoutAccountingExpenseRules(withoutCastSalesRankingRosterRules(withoutTransportRules(withoutOneYenSalesRewardRules(value))));
+  const copy = withoutAccountingExpenseRules(withoutCastSalesRankingRosterRules(withoutTransportRules(withoutCastMonthlyRules(withoutOneYenSalesRewardRules(value)))));
   const workspace = copy.$workspace;
   // Ver2.37の新規追加項目だけを除き、それ以外は撤去前の指紋を維持する。
   delete workspace.accountingAdjustments.$month.castInputs;

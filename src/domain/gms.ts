@@ -6,6 +6,7 @@ import type { CashFunding } from "./cash-funding";
 import { sha256Hex } from "../lib/crypto-compat";
 import { resolveCastAccountingInputs, castAccountingInputTotals, normalizeCastAccountingInputs } from "./cast-accounting-inputs";
 import { calculateCastWithholding } from "./cast-withholding";
+import { castIntroducerOverrideForMonth, castTrialRateOverrideForMonth } from "./cast-monthly";
 
 export type Role = "shop" | "accounting" | "op";
 export type PersonStatus = "active" | "trial" | "departed";
@@ -35,9 +36,12 @@ export type CastRecord = {
   hiredAt?: string;
   trialDate?: string;
   departedAt?: string;
+  departureLockToken?: string;
   hourlyRates: MonthlyRates;
   trialHourlyRate?: number;
+  trialHourlyRates?: MonthlyRates;
   introducerId?: string;
+  monthlyIntroducers?: Record<string, NonNullable<DailyCast["introducer"]> | false>;
   attendanceAdvisoryFee?: number;
   entryAdvisoryFee?: number;
   convertedFromTrialId?: string;
@@ -2117,6 +2121,23 @@ export function castIdentityForMonth(
     || row.posCastId;
 }
 
+export function castIntroducerOverrideForAccounting(
+  castId: string,
+  castById: ReadonlyMap<string, CastRecord>,
+  month: string,
+  deletionCommits: readonly IntroducerDeletionCommit[],
+  dailyTrialIds: readonly string[] = [],
+): DailyCast["introducer"] | false {
+  const member = castById.get(castId);
+  const ownSetting = castIntroducerOverrideForMonth(member, month);
+  const trialId = member?.hiredAt?.startsWith(`${month}-`) && member.convertedFromTrialId
+    ? member.convertedFromTrialId
+    : dailyTrialIds.length === 1 ? dailyTrialIds[0] : undefined;
+  const selected = ownSetting ?? (trialId ? castIntroducerOverrideForMonth(castById.get(trialId), month) : undefined);
+  if (selected && deletionCommits.some((commit) => commit.introducerId === selected.id && commit.month <= month)) return false;
+  return selected;
+}
+
 export function calculateCastSalesReports(
   closings: DailyClosing[],
   casts: CastRecord[],
@@ -2258,7 +2279,9 @@ export function calculateCastRewards(
     const monthlyRate = rateForMonth(member?.hourlyRates || {}, month);
     const hourlySources = entries.map(({ businessDate, row }) => ({
       businessDate, hours: row.hours,
-      hourlyRate: row.kind === "regular" && monthlyRate > 0 ? monthlyRate : row.hourlyRate,
+      hourlyRate: (row.kind === "trial"
+        ? castTrialRateOverrideForMonth(castById.get(row.masterId), month)
+        : row.kind === "regular" ? monthlyRate : 0) || row.hourlyRate,
     }));
     const hourlyByDay = calculateDailyHourlyPay(hourlySources);
     const appliedHourlyRates = [...new Set(hourlySources.map((source) => source.hourlyRate))].sort((a, b) => a - b);
@@ -2337,7 +2360,10 @@ export function calculateCastRewards(
       ...(monthEvent ? [{ kind: "event" as const, order: introducerMonthEventEffectiveOrderValue(monthEvent), event: monthEvent }] : []),
       ...(deletionCommit ? [{ kind: "commit" as const, order: deletionCommit.completedAtMs, commit: deletionCommit }] : []),
     ].sort((left, right) => left.order - right.order || (left.kind === "commit" ? 1 : -1)).at(-1);
-    const effectiveIntroducer = latestSpecial?.kind === "commit"
+    const monthlyIntroducer = castIntroducerOverrideForAccounting(id, castById, month, introducerDeletionCommits,
+      [...new Set(rows.filter((row) => row.kind === "trial").map((row) => row.masterId))]);
+    const effectiveIntroducer = monthlyIntroducer !== undefined ? monthlyIntroducer || undefined
+      : latestSpecial?.kind === "commit"
       ? undefined
       : latestSpecial?.event.state === "deleted"
         ? undefined

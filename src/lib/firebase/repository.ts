@@ -62,6 +62,7 @@ import {
 import { staffMonthlyRates } from "@/domain/staff-rates";
 import { validateAccountingExpenseInputs, validateConsumptionTaxRate } from "@/domain/accounting-expenses";
 import { castAccountingAttendanceSources, castAccountingInputTotals, normalizeCastAccountingInputs } from "@/domain/cast-accounting-inputs";
+import { castHasApprovedWork, isCastMonth } from "@/domain/cast-monthly";
 import { buildCastSalesRankingRoster } from "@/domain/cast-sales-ranking";
 import type { TransportSettings, TransportMonth } from "@/domain/transport";
 import { normalizeTransportSettings, normalizeTransportMonth, transportCastDays, transportAttendance, transportUnresolvedLegacyInputs } from "@/domain/transport";
@@ -939,6 +940,7 @@ async function prepareEntryEventPlan(
   next: CastRecord,
   introducer: IntroducerRecord | null,
   user: User,
+  selectedMonth?: string,
 ): Promise<EntryEventPlan> {
   const financialFieldsUnchanged = Boolean(before
     && entryEventFinancialFields(before) === entryEventFinancialFields(next));
@@ -995,6 +997,7 @@ async function prepareEntryEventPlan(
   if (existing.length > 0
     && desiredMonth
     && operationMonth !== desiredMonth
+    && selectedMonth !== desiredMonth
     && before?.hiredAt === next.hiredAt) return {};
   if (financialFieldsUnchanged) {
     const current = existing.find((row) => row.month === desiredMonth)?.event;
@@ -1181,7 +1184,10 @@ function normalizeCastAdvisoryFees(
   };
 }
 
-function introducerTermsSnapshot(next: CastRecord, introducer: IntroducerRecord): NonNullable<IntroducerMonthEvent["introducer"]> {
+function introducerTermsSnapshot(
+  next: Pick<CastRecord, "attendanceAdvisoryFee" | "entryAdvisoryFee">,
+  introducer: IntroducerRecord,
+): NonNullable<IntroducerMonthEvent["introducer"]> {
   return {
     id: introducer.id,
     name: introducer.name,
@@ -1369,8 +1375,13 @@ async function prepareConvertedCastIntroducerMonthPlan(
   return { [`introducerMonthEvents/${month}/${active.id}`]: base };
 }
 
-export async function saveCast(value: Partial<CastRecord> & Pick<CastRecord, "name" | "legalName" | "status">, user: User) {
+export async function saveCast(
+  value: Partial<CastRecord> & Pick<CastRecord, "name" | "legalName" | "status">,
+  user: User,
+  month?: string,
+) {
   await requireUser(user);
+  if (month !== undefined && !isCastMonth(month)) throw new Error("キャストデータの対象月が正しくありません。");
   const id = value.id || entityId("cast");
   // 紹介者の再設定月は端末時計ではなくFirebaseサーバー時計で決める。
   const serverClock = await firebaseServerNow();
@@ -1381,6 +1392,10 @@ export async function saveCast(value: Partial<CastRecord> & Pick<CastRecord, "na
   if ((before as (CastRecord & { deletedAt?: string }) | null)?.deletedAt) throw new Error("このキャストデータは削除されています。最新データを読み込んでください。");
   assertConversionUnlocked(before as (CastRecord & ConversionLockCarrier) | null);
   assertFresh(before, value.updatedAt);
+  if (before && (value.status !== before.status
+    || (value.departedAt !== undefined && value.departedAt !== before.departedAt))) {
+    throw new Error("在籍区分・退店日の変更は退店または退店取消から行ってください。");
+  }
   const name = value.name.trim();
   const legalName = value.legalName.trim();
   if (!name || !legalName) throw new Error("キャスト名と本名を入力してください。");
@@ -1388,21 +1403,66 @@ export async function saveCast(value: Partial<CastRecord> & Pick<CastRecord, "na
   if (value.status === "trial" && !validDate(value.trialDate || before?.trialDate)) throw new Error("体入日が正しくありません。");
   if (value.status === "departed" && (!validDate(value.hiredAt || before?.hiredAt) || !validDate(value.departedAt || before?.departedAt))) throw new Error("採用日または退店日が正しくありません。");
   if (value.status === "departed" && String(value.departedAt || before?.departedAt) < String(value.hiredAt || before?.hiredAt)) throw new Error("退店日は採用日以降にしてください。");
-  const hourlyRates = value.hourlyRates || before?.hourlyRates || {};
-  validateCastPaySetting(value.status, hourlyRates, value.trialHourlyRate ?? before?.trialHourlyRate, before);
+  const hiredMonth = (value.hiredAt || before?.hiredAt)?.slice(0, 7);
+  const trialMonth = (value.trialDate || before?.trialDate)?.slice(0, 7);
+  const departureMonth = before?.departedAt?.slice(0, 7);
+  if (month && (value.status === "trial" ? trialMonth !== month
+    : !hiredMonth || month < hiredMonth || (departureMonth && month > departureMonth))) {
+    throw new Error("対象月のキャストデータを選び直してください。");
+  }
+  let hourlyRates = value.hourlyRates || before?.hourlyRates || {};
+  if (month && before && value.status !== "trial") {
+    hourlyRates = { ...before.hourlyRates };
+    if (value.hourlyRates && Object.hasOwn(value.hourlyRates, month)) hourlyRates[month] = value.hourlyRates[month];
+  }
+  const requestedTrialRate = value.trialHourlyRate ?? before?.trialHourlyRate;
+  validateCastPaySetting(value.status, hourlyRates, requestedTrialRate, before);
+  const trialHourlyRates = month && value.status === "trial" && requestedTrialRate && requestedTrialRate > 0
+    ? { ...before?.trialHourlyRates, [month]: requestedTrialRate }
+    : before?.trialHourlyRates;
   if (value.status !== "trial" && Object.keys(hourlyRates).some((month) => month < String(value.hiredAt || before?.hiredAt).slice(0, 7))) throw new Error("採用月より前の月度時給は登録できません。");
-  const introducerId = String(Object.hasOwn(value, "introducerId") ? value.introducerId || "" : before?.introducerId || "").trim() || undefined;
-  const introducer = await loadIntroducer(introducerId);
-  const advisoryFees = normalizeCastAdvisoryFees(value, before, introducerId, introducer);
+  const selectsIntroducer = Object.hasOwn(value, "introducerId");
+  const selectedId = String(selectsIntroducer ? value.introducerId || "" : before?.introducerId || "").trim() || undefined;
+  const selectedIntroducer = await loadIntroducer(selectedId);
+  if (month && selectsIntroducer && selectedId && !selectedIntroducer) {
+    throw new Error("選択された紹介者データが見つかりません。紹介者を選び直してください。");
+  }
+  const selectedFees = normalizeCastAdvisoryFees(value, before, selectedId, selectedIntroducer);
+  const monthlyIntroducers = month && selectsIntroducer
+    ? {
+      ...before?.monthlyIntroducers,
+      [month]: selectedIntroducer
+        ? introducerTermsSnapshot({
+          ...selectedFees,
+          entryAdvisoryFee: month === hiredMonth ? selectedFees.entryAdvisoryFee : 0,
+        }, selectedIntroducer)
+        : false as const,
+    }
+    : before?.monthlyIntroducers;
+  // 従来の入店顧問料は採用月に一度だけ記録する。
+  const hireState = month && before && selectsIntroducer && month === hiredMonth
+    ? (await get(rootRef(`accountingMonthStates/${month}`))).val() as AccountingMonthState | null
+    : null;
+  const updatesLegacyIntroducer = !month || !before
+    || (selectsIntroducer && month === hiredMonth && (!hireState || hireState.status === "open"));
+  const introducerId = updatesLegacyIntroducer ? selectedId : before?.introducerId;
+  const advisoryFees = updatesLegacyIntroducer ? selectedFees : {
+    attendanceAdvisoryFee: before?.attendanceAdvisoryFee,
+    entryAdvisoryFee: before?.entryAdvisoryFee,
+  };
+  const introducer = updatesLegacyIntroducer ? selectedIntroducer
+    : selectedId === before?.introducerId ? selectedIntroducer : await loadIntroducer(before?.introducerId);
   const proposed = clean({
     ...withoutInternalFields(before || {}), ...withoutInternalFields(value), id, name, legalName, hourlyRates, introducerId,
+    trialHourlyRate: month && before?.status === "trial" ? before.trialHourlyRate : requestedTrialRate,
+    trialHourlyRates, monthlyIntroducers,
     ...advisoryFees,
     note: value.note ?? "",
     createdAt: before?.createdAt || timestamp, updatedAt: timestamp,
     previousUpdatedAt: before?.updatedAt,
   }) as CastRecord;
-  const entryEventPlan = await prepareEntryEventPlan(before, proposed, introducer, user);
-  const introducerMonthEventPlan = await prepareIntroducerReassignmentPlan(before, proposed, introducer, timestamp, user);
+  const entryEventPlan = await prepareEntryEventPlan(before, proposed, introducer, user, month);
+  const introducerMonthEventPlan = month ? {} : await prepareIntroducerReassignmentPlan(before, proposed, introducer, timestamp, user);
   if (Object.keys(introducerMonthEventPlan).length) assertIntroducerMonthBoundarySafe(serverClock.milliseconds);
   const hasAtomicFinancialEventPlan = Object.keys(entryEventPlan).length > 0
     || Object.keys(introducerMonthEventPlan).length > 0;
@@ -1459,7 +1519,12 @@ export async function saveCast(value: Partial<CastRecord> & Pick<CastRecord, "na
   return id;
 }
 
-export async function convertTrialCast(trialId: string, value: Partial<CastRecord> & Pick<CastRecord, "hiredAt">, user: User) {
+export async function convertTrialCast(
+  trialId: string,
+  value: Partial<CastRecord> & Pick<CastRecord, "hiredAt">,
+  user: User,
+  month?: string,
+) {
   await requireUser(user);
   const activeId = entityId("cast");
   // 体入→在籍化に伴う紹介者履歴も、端末時計ずれで別月へ入れない。
@@ -1479,6 +1544,7 @@ export async function convertTrialCast(trialId: string, value: Partial<CastRecor
   if (!legalName) throw new Error("本名を入力してください。");
   const hiredAt = incoming.hiredAt || "";
   if (!validDate(hiredAt)) throw new Error("採用日が正しくありません。");
+  if (month !== undefined && month !== hiredAt.slice(0, 7)) throw new Error("対象月は採用月にしてください。");
   if (validDate(initialTrial.trialDate) && hiredAt < initialTrial.trialDate!) throw new Error("採用日は体入日以降にしてください。");
   validateCastPaySetting("active", incoming.hourlyRates || {}, incoming.trialHourlyRate);
   if (Object.keys(incoming.hourlyRates || {}).some((month) => month < hiredAt.slice(0, 7))) throw new Error("採用月より前の月度時給は登録できません。");
@@ -1500,14 +1566,18 @@ export async function convertTrialCast(trialId: string, value: Partial<CastRecor
     const introducerId = String(Object.hasOwn(incoming, "introducerId") ? incoming.introducerId || "" : trial.introducerId || "").trim() || undefined;
     const introducer = await loadIntroducer(introducerId);
     const advisoryFees = normalizeCastAdvisoryFees({ ...incoming, status: "active" }, trial, introducerId, introducer);
+    const monthlyIntroducers = month ? {
+      [month]: introducer ? introducerTermsSnapshot(advisoryFees, introducer) : false as const,
+    } : undefined;
     const proposed = clean({
       ...withoutInternalFields(trial), ...incoming, id: activeId, name, legalName, status: "active",
       hourlyRates: incoming.hourlyRates || {}, introducerId, ...advisoryFees,
+      trialHourlyRates: undefined, monthlyIntroducers,
       convertedFromTrialId: trialId, convertedToCastId: undefined, departedAt: undefined,
       createdAt: timestamp, updatedAt: timestamp, previousUpdatedAt: undefined,
     }) as CastRecord;
-    const entryEventPlan = await prepareEntryEventPlan(null, proposed, introducer, user);
-    const introducerMonthEventPlan = await prepareConvertedCastIntroducerMonthPlan(trialId, proposed, introducer, timestamp, user);
+    const entryEventPlan = await prepareEntryEventPlan(null, proposed, introducer, user, month);
+    const introducerMonthEventPlan = month ? {} : await prepareConvertedCastIntroducerMonthPlan(trialId, proposed, introducer, timestamp, user);
     if (Object.keys(introducerMonthEventPlan).length) assertIntroducerMonthBoundarySafe(serverClock.milliseconds);
     try {
       nameClaimHandle = await acquireClaim("castNameClaims", claimKey(name), activeId);
@@ -1562,17 +1632,44 @@ export async function convertTrialCast(trialId: string, value: Partial<CastRecor
 export async function departCast(id: string, date: string, expectedUpdatedAt: string, user: User) {
   await requireUser(user);
   if (!validDate(date)) throw new Error("退店日はYYYY-MM-DD形式の実在する日付で入力してください。");
-  const timestamp = now();
-  const result = await runReadyTransaction(rootRef(`casts/${id}`), (current) => {
-    const existing = current as (CastRecord & ConversionLockCarrier) | null;
-    if (!existing || existing.status !== "active" || existing.deletedAt) throw new Error("在籍キャストが見つかりません。最新データを読み込んでください。");
-    assertConversionUnlocked(existing);
-    assertFresh(existing, expectedUpdatedAt);
-    if (existing.hiredAt && date < existing.hiredAt) throw new Error("退店日は採用日以降にしてください。");
-    return clean({ ...withoutInternalFields(existing), status: "departed", departedAt: date, previousUpdatedAt: existing.updatedAt, updatedAt: timestamp });
+  const month = date.slice(0, 7);
+  const clock = await firebaseServerNow();
+  const lockRef = rootRef("castDepartureLock");
+  const token = secureRandomUUID();
+  const lock = { month, token, owner: user.uid, expiresAt: clock.milliseconds + 60_000 };
+  await runReadyTransaction(lockRef, (current) => {
+    if (current && current.expiresAt > clock.milliseconds) {
+      throw new Error("別の退店登録を処理しています。少し待ってから再試行してください。");
+    }
+    return lock;
   }, { applyLocally: false });
-  const departed = result.snapshot.val() as CastRecord | null;
-  if (!departed) throw new Error("退店登録を完了できませんでした。最新データを読み込んでください。");
+
+  let departed: CastRecord;
+  try {
+    // 同月の承認処理と直列化し、一覧を開いた後に確定した勤務も確認する。
+    const [history, casts] = await Promise.all([get(rootRef("history")), get(rootRef("casts"))]);
+    const closings = asArray<DailyClosing>(history.val()).map(normalizeDailyClosing);
+    if (castHasApprovedWork(closings, asArray<CastRecord>(casts.val()), month, id)) {
+      throw new Error(`${month}月度には承認済みの勤務実績があるため、退店登録できません。`);
+    }
+    const result = await runReadyTransaction(rootRef(`casts/${id}`), (current) => {
+      const existing = current as (CastRecord & ConversionLockCarrier) | null;
+      if (!existing || existing.status !== "active" || existing.deletedAt) throw new Error("在籍キャストが見つかりません。最新データを読み込んでください。");
+      assertConversionUnlocked(existing);
+      assertFresh(existing, expectedUpdatedAt);
+      if (existing.hiredAt && date < existing.hiredAt) throw new Error("退店日は採用日以降にしてください。");
+      return clean({
+        ...withoutInternalFields(existing), status: "departed", departedAt: date, departureLockToken: token,
+        previousUpdatedAt: existing.updatedAt, updatedAt: nextEventTimestamp(clock.timestamp, existing.updatedAt),
+      });
+    }, { applyLocally: false });
+    const saved = result.snapshot.val() as CastRecord | null;
+    if (!saved) throw new Error("退店登録を完了できませんでした。最新データを読み込んでください。");
+    departed = saved;
+  } finally {
+    await runReadyTransaction(lockRef, (current) => current?.token === token ? null : undefined,
+      { applyLocally: false }).catch(() => undefined);
+  }
   await releaseClaimAfterEntitySaved("castNameClaims", claimKey(departed.name), id, "キャスト退店");
 }
 export async function restoreCast(id: string, expectedUpdatedAt: string, user: User) {
@@ -1600,6 +1697,7 @@ export async function restoreCast(id: string, expectedUpdatedAt: string, user: U
       assertFresh(existing, expectedUpdatedAt);
       const restored = { ...withoutInternalFields(existing), status: "active" as const, previousUpdatedAt: existing.updatedAt, updatedAt: timestamp };
       delete restored.departedAt;
+      delete restored.departureLockToken;
       return restored;
     }, { applyLocally: false });
   } catch (error) {
