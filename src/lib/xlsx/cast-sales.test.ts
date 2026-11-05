@@ -228,19 +228,23 @@ describe("キャスト売上XLSX", () => {
     expect(data).toEqual(before);
   });
 
-  it("体入から同月入店した実計算の体入時給と月度時給を出力し、未承認単価を混ぜない", async () => {
+  it.each([
+    { trialRate: undefined, appliedRate: 2000, rateLabel: "2,000円 / 3,500円", hourlyPay: 15875, netPay: 11375 },
+    { trialRate: 2500, appliedRate: 2500, rateLabel: "2,500円 / 3,500円", hourlyPay: 17000, netPay: 12500 },
+  ])("同月入店した実計算の体入・在籍時給を出力する（月度体入時給 $trialRate）", async ({ trialRate, appliedRate, rateLabel, hourlyPay, netPay }) => {
     const { month, casts, closings } = convertedCastWorkbookFixture();
+    if (trialRate !== undefined) casts[0].trialHourlyRates = { [month]: trialRate, "2026-10": 8000 };
     const data = calculatedCastExport(closings, casts, month);
     expect(data.castRewards).toHaveLength(1);
-    expect(data.castRewards[0]).toMatchObject({ id: "active", appliedHourlyRates: [2000, 3500], trialOnly: false, hourlyPay: 15875, dailyPayment: 4500, netPay: 11375 });
+    expect(data.castRewards[0]).toMatchObject({ id: "active", appliedHourlyRates: [appliedRate, 3500], trialOnly: false, hourlyPay, dailyPayment: 4500, netPay });
     const before = structuredClone(data);
     const book = createCastSalesWorkbook(data, month, "承認済みデータ（未確定）");
     const restored = new ExcelJS.Workbook();
     await restored.xlsx.load(await book.xlsx.writeBuffer());
     expect(restored.worksheets).toHaveLength(1);
-    expect(restored.worksheets[0].getCell("Y1").value).toBe("2,000円 / 3,500円");
-    expect(restored.worksheets[0].getCell("I36").value).toBe(15875);
-    expect(restored.worksheets[0].getCell("U44").value).toBe(11375);
+    expect(restored.worksheets[0].getCell("Y1").value).toBe(rateLabel);
+    expect(restored.worksheets[0].getCell("I36").value).toBe(hourlyPay);
+    expect(restored.worksheets[0].getCell("U44").value).toBe(netPay);
     expect(data).toEqual(before);
   });
 

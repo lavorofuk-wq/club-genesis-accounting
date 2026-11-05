@@ -4,6 +4,7 @@ import {
   calculateDriverPayroll,
   calculateDailyHourlyPay,
   castIdentityForMonth,
+  castIntroducerOverrideForAccounting,
   castMasterIdentityForMonth,
   compareDailyClosingSubmissionOrder,
   compareIntroducerMonthEventEffectiveOrder,
@@ -40,7 +41,7 @@ import { applyBeautyAllowances, normalizeBeautyMonth } from "./beauty-allowance"
 import { normalizeCastSalesRankingRoster, type CastSalesRankingRoster } from "./cast-sales-ranking";
 import { calculateCastWithholding } from "./cast-withholding";
 
-export const MONTHLY_CALCULATION_VERSION = "2.51.0";
+export const MONTHLY_CALCULATION_VERSION = "2.53.0";
 export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 3 as const;
 
 export type IntroducerEntryEvent = {
@@ -888,9 +889,11 @@ export function introducerEntryEventConflicts(
   introducerMonthEvents: IntroducerMonthEvent[] = [],
   introducerDeletionCommits: IntroducerDeletionCommit[] = [],
 ) {
+  const castById = new Map(data.casts.map((cast) => [cast.id, cast]));
   return rewards.flatMap((reward): string[] => {
-    const cast = data.casts.find((row) => row.id === reward.id);
+    const cast = castById.get(reward.id);
     if (!cast?.convertedFromTrialId || reward.advisoryDays !== 0 || !cast.hiredAt?.startsWith(month)) return [];
+    if (castIntroducerOverrideForAccounting(cast.id, castById, month, introducerDeletionCommits) !== undefined) return [];
     const entry = storedEvents.find((event) => event.month === month && event.castId === cast.id);
     if (!entry || entry.amount === 0 || reward.introducer?.id === entry.introducerId) return [];
     const aliases = new Set([cast.id, cast.convertedFromTrialId]);
@@ -968,12 +971,15 @@ export function calculateIntroducerPayments(
     ...rewardByCast.keys(),
     ...entries.keys(),
     ...introducerMonthEvents.filter((event) => event.month === month && event.state === "reassigned").map((event) => event.castId),
+    ...data.casts.filter((cast) => cast.hiredAt?.startsWith(`${month}-`)
+      && castIntroducerOverrideForAccounting(cast.id, castById, month, introducerDeletionCommits))
+      .map((cast) => cast.id),
   ]);
   return [...castIds].flatMap((castId): IntroducerPaymentRow[] => {
     const reward = rewardByCast.get(castId);
     const entry = entries.get(castId);
     const monthEvent = monthEventForCast(castId, data, month, introducerMonthEvents);
-    const cast = data.casts.find((row) => row.id === castId);
+    const cast = castById.get(castId);
     const aliases = new Set([
       castId,
       cast?.convertedFromTrialId,
@@ -991,13 +997,15 @@ export function calculateIntroducerPayments(
       ...(monthEvent ? [{ kind: "event" as const, order: introducerMonthEventEffectiveOrderValue(monthEvent), event: monthEvent }] : []),
       ...(deletionCommit ? [{ kind: "commit" as const, order: deletionCommit.completedAtMs }] : []),
     ].sort((left, right) => left.order - right.order || (left.kind === "commit" ? 1 : -1)).at(-1);
-    if (latestSpecial?.kind === "commit" || latestSpecial?.event.state === "deleted") return [];
+    const monthlyIntroducer = castIntroducerOverrideForAccounting(castId, castById, month, introducerDeletionCommits);
+    if (monthlyIntroducer === false) return [];
+    if (monthlyIntroducer === undefined && (latestSpecial?.kind === "commit" || latestSpecial?.event.state === "deleted")) return [];
     const effectiveMonthEvent = latestSpecial?.kind === "event" ? latestSpecial.event : undefined;
     const intro = reward
       ? reward.introducer
-      : effectiveMonthEvent?.state === "reassigned"
+      : monthlyIntroducer ?? (effectiveMonthEvent?.state === "reassigned"
         ? effectiveMonthEvent.introducer
-        : undefined;
+        : undefined);
     // 出勤済みで最後の日次が「紹介者なし」なら、入店時イベントだけを旧紹介者へ支払わない。
     if (reward && !intro) return [];
     if (!intro && !entry) return [];
@@ -1016,7 +1024,8 @@ export function calculateIntroducerPayments(
     // 体入日のため入店顧問料が0のままになる。入店時に保存したイベントと紹介者が
     // 同一なら、その一回分だけは採用日基準で計上する（異なる紹介者は推測しない）。
     const sameIntroducerEntryWithoutRegularAttendance = Boolean(
-      reward
+      monthlyIntroducer === undefined
+        && reward
         && reward.advisoryDays === 0
         && cast?.convertedFromTrialId
         && intro
@@ -1027,7 +1036,7 @@ export function calculateIntroducerPayments(
     // 日次がある人物は、入店顧問料も含めて最後に保存された日次（または再設定イベント）の
     // snapshotを月全体へ適用する。保存イベントは月内に日次が一度もない入店キャスト専用。
     // 明示した0円訂正は同じ紹介者の入店顧問料だけへ適用し、歩合・出勤顧問料は維持する。
-    const cancelledEntryFee = entry?.amount === 0 && entry.introducerId === intro?.id;
+    const cancelledEntryFee = monthlyIntroducer === undefined && entry?.amount === 0 && entry.introducerId === intro?.id;
     const entryAdvisory = cancelledEntryFee ? 0 : intro
       ? (hiredThisMonth && sameIntroducerEntryWithoutRegularAttendance
         ? entry!.amount
@@ -1141,6 +1150,8 @@ function introducerSaveOrderIssues(
   }));
 
   return [...groups.entries()].flatMap(([castId, entries]): string[] => {
+    const trialIds = [...new Set(entries.filter(({ row }) => row.kind === "trial").map(({ row }) => row.masterId))];
+    if (castIntroducerOverrideForAccounting(castId, castById, month, commits, trialIds) !== undefined) return [];
     const name = castById.get(castId)?.name || entries[0]?.row.name
       || events.find((event) => event.month === month && event.castId === castId)?.castName
       || castId;
@@ -1282,6 +1293,7 @@ function introducerMonthEventConsistencyIssues(
   });
   const scopedData = { ...data, casts: currentCasts };
   return [...canonicalCasts.values()].flatMap((cast): string[] => {
+    if (castIntroducerOverrideForAccounting(cast.id, castById, month, commits) !== undefined) return [];
     const event = monthEventForCast(cast.id, scopedData, month, events);
     if (!event) return [];
     const aliasIds = new Set([
@@ -1343,11 +1355,15 @@ function introducerDeletionCommitConsistencyIssues(
   commits: IntroducerDeletionCommit[],
 ) {
   const currentCasts = data.casts.filter((cast) => !(cast as CastRecord & { deletedAt?: string }).deletedAt);
+  const castById = new Map(currentCasts.map((cast) => [cast.id, cast]));
+  const hasMonthlyIntroducer = (cast: CastRecord) =>
+    castIntroducerOverrideForAccounting(cast.id, castById, month, commits) !== undefined;
   const monthCommits = commits.filter((commit) => commit.month === month);
   const omittedIssues = monthCommits.flatMap((commit) => currentCasts
-    .filter((cast) => cast.introducerId === commit.introducerId && !commit.linkedCastIds.includes(cast.id))
+    .filter((cast) => cast.introducerId === commit.introducerId && !commit.linkedCastIds.includes(cast.id) && !hasMonthlyIntroducer(cast))
     .map((cast) => `${cast.name}が紹介者削除確定履歴の対象者一覧から欠落しています。紹介者削除履歴を確認してください。`));
   const synchronizationIssues = currentCasts.flatMap((cast): string[] => {
+    if (hasMonthlyIntroducer(cast)) return [];
     const aliases = new Set([
       cast.id,
       cast.convertedFromTrialId,
@@ -1553,7 +1569,7 @@ export async function monthlySourceFingerprint(
       .sort((left, right) => left.id.localeCompare(right.id)),
     introducerMonthEvents: monthEvents.filter((row) => row.month === month)
       .sort((left, right) => left.id.localeCompare(right.id)),
-    introducerDeletionCommits: deletionCommits.filter((row) => row.month === month)
+    introducerDeletionCommits: deletionCommits.filter((row) => row.month <= month)
       .sort((left, right) => left.id.localeCompare(right.id)),
   });
   return sha256Hex(JSON.stringify(source));

@@ -71,9 +71,38 @@ describe("common/accounting form recovery", () => {
 
 it("入店顧問料を0にした編集欄は空欄にせず0を表示する", () => {
   drafts.set("common.casts.editing", { id: "cast-1", status: "active", name: "花子", legalName: "山田花子",
-    introducerId: "intro-1", entryAdvisoryFee: 0, hourlyRates: { "2026-09": 3000 } });
+    hiredAt: "2026-09-01", introducerId: "intro-1", entryAdvisoryFee: 0, hourlyRates: { "2026-09": 3000 } });
+  drafts.set("common.casts.month", "2026-09");
   const introducer = { id: "intro-1", name: "紹介者", feeType: "sales10" as const, attendanceAdvisoryEnabled: false,
     entryAdvisoryEnabled: true, note: "", createdAt: "2026-09-01", updatedAt: "2026-09-01" };
   const markup = renderToStaticMarkup(createElement(CommonForms, { section: "casts", data: { ...data, introducers: [introducer] }, user, busy: false, run }));
   expect(markup).toMatch(/入店顧問料<[^>]*><input[^>]*value="0"/);
+});
+
+it("退店者を過去の在籍月にその月の時給と紹介者で表示する", () => {
+  const cast = {
+    id: "cast-1", status: "departed" as const, name: "花子", legalName: "山田花子", hiredAt: "2026-10-01", departedAt: "2026-11-01",
+    hourlyRates: { "2026-10": 3500, "2026-11": 4400 }, note: "", createdAt: "2026-10-01", updatedAt: "2026-11-01",
+    monthlyIntroducers: { "2026-10": { id: "intro-1", name: "10月の紹介者", feeType: "sales10" as const, attendanceAdvisoryFee: 0, entryAdvisoryFee: 0 } },
+  };
+  drafts.set("common.casts.month", "2026-10");
+  const props = { section: "casts" as const, data: { ...data, casts: [cast] }, user, busy: false, run };
+  const october = renderToStaticMarkup(createElement(CommonForms, props));
+  expect(october).toContain("在籍キャスト<b>1</b>");
+  expect(october).toContain("退店キャスト<b>0</b>");
+  expect(october).toContain("3,500");
+  expect(october).toContain("10月の紹介者");
+  expect(october).not.toContain(">退店</button>");
+
+  drafts.set("common.casts.month", "2026-11");
+  drafts.set("common.casts.tab", "departed");
+  const november = renderToStaticMarkup(createElement(CommonForms, props));
+  expect(november).toContain("在籍キャスト<b>0</b>");
+  expect(november).toContain("退店キャスト<b>1</b>");
+  expect(november).toContain("4,400");
+
+  drafts.set("common.casts.month", "2026-12");
+  const december = renderToStaticMarkup(createElement(CommonForms, props));
+  expect(december).toContain("退店キャスト<b>0</b>");
+  expect(december).not.toContain("花子");
 });

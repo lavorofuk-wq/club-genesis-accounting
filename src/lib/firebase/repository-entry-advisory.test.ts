@@ -34,9 +34,10 @@ vi.mock("./ready-transaction", () => ({ runReadyTransaction: memory.transaction 
 vi.mock("../client-release", () => ({ assertCurrentClientRelease: vi.fn().mockResolvedValue(undefined) }));
 
 
-import { convertTrialCast, saveCast } from "./repository";
+import { convertTrialCast, departCast, saveCast } from "./repository";
 import type { CastRecord, IntroducerRecord } from "@/domain/gms";
 import type { IntroducerEntryEvent } from "@/domain/month-accounting";
+import { castIntroducerOverrideForMonth, castTrialRateForMonth } from "@/domain/cast-monthly";
 
 const user = { uid: "test-op" } as User;
 const initialTime = "2026-09-02T03:00:00.000Z";
@@ -62,6 +63,41 @@ beforeEach(() => {
   });
   memory.update.mockImplementation(async (reference: { path: string }, plan: Record<string, unknown>) => {
     for (const [path, value] of Object.entries(plan)) memory.write([reference.path, path].filter(Boolean).join("/"), value);
+  });
+});
+
+describe("キャストの月度管理", () => {
+  it("体入時給の月度設定を旧単価と区別して保存する", async () => {
+    await saveCast({ ...trial, trialHourlyRate: 2600 }, user, "2026-09");
+    const updated = getCast(trial.id);
+    expect(updated.trialHourlyRate).toBe(2000);
+    expect(castTrialRateForMonth(updated, "2026-10")).toBe(2600);
+  });
+
+  it("翌月の時給と紹介者なしを保存し、採用月の時給・紹介者・顧問料は保持する", async () => {
+    const cast = await converted();
+    vi.setSystemTime(new Date("2026-10-02T03:00:00.000Z"));
+    await saveCast({ ...cast, introducerId: undefined, hourlyRates: { "2026-10": 3400 } }, user, "2026-10");
+    const updated = getCast(cast.id);
+    expect(updated.hourlyRates).toEqual({ "2026-09": 3000, "2026-10": 3400 });
+    expect(updated.introducerId).toBe(intro.id);
+    expect(castIntroducerOverrideForMonth(updated, "2026-09")).toBeUndefined();
+    expect(castIntroducerOverrideForMonth(updated, "2026-11")).toBe(false);
+    expect(memory.read(entryPath(cast.id))).toMatchObject({ amount: 30000, introducerId: intro.id });
+  });
+
+  it("承認済みの同月体入勤務があれば退店を拒否し、承認待ちだけの翌月は退店できる", async () => {
+    const cast = await converted();
+    memory.write("history/approved", { businessDate: "2026-09-01", status: "approved",
+      casts: [{ kind: "trial", masterId: trial.id, name: trial.name, hours: 2 }] });
+    memory.write("history/submitted", { businessDate: "2026-10-03", status: "submitted",
+      casts: [{ kind: "regular", masterId: cast.id, name: cast.name, hours: 2 }] });
+    await expect(departCast(cast.id, "2026-09-30", cast.updatedAt, user)).rejects.toThrow("承認済みの勤務実績");
+    expect(getCast(cast.id).status).toBe("active");
+    expect(memory.read("castDepartureLock")).toBeNull();
+    await departCast(cast.id, "2026-10-20", cast.updatedAt, user);
+    expect(getCast(cast.id)).toMatchObject({ status: "departed", departedAt: "2026-10-20" });
+    expect(memory.read("castDepartureLock")).toBeNull();
   });
 });
 afterEach(() => vi.useRealTimers());

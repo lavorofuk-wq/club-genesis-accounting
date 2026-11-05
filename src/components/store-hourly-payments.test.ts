@@ -265,4 +265,32 @@ describe("店舗の時給1円単位と支払実績保全", () => {
     click("照合を確定して店舗データ作成へ");
     expect((draft.values[`${prefix}.castRows`] as DailyCast[])[0].dailyPayment).toBe(8529);
   });
+
+  it("新規日次は営業月の体入時給と紹介者を使い、同じ勤務の再編集は保存値を維持する", () => {
+    const introducer: NonNullable<DailyCast["introducer"]> = {
+      id: "intro", name: "紹介者", feeType: "sales10",
+      attendanceAdvisoryEnabled: false, entryAdvisoryEnabled: false,
+      attendanceAdvisoryFee: 0, entryAdvisoryFee: 0,
+    };
+    const monthlyData = { ...data,
+      casts: [{ ...data.casts[0], trialHourlyRates: { "2026-09": 2_500, "2026-10": 3_500 },
+        monthlyIntroducers: { "2026-09": introducer, "2026-10": false as const } }],
+      introducers: [{ ...introducer, attendanceAdvisoryEnabled: false, entryAdvisoryEnabled: false,
+        note: "", createdAt: "", updatedAt: "" }],
+    };
+    const prefix = workflow({ stage: "json", pos: trialPos(), mapping: { "pos-cast": "trial-cast" } });
+    render(monthlyData);
+    click("照合を確定して店舗データ作成へ");
+    expect((draft.values[`${prefix}.castRows`] as DailyCast[])[0]).toMatchObject({
+      hourlyRate: 2_500, dailyPayment: 10_625, introducer,
+    });
+
+    const original = closing({ casts: [trialCast], staffWork: [], posSnapshot: trialPos() });
+    const editingPrefix = workflow({ stage: "json" }, original);
+    render(monthlyData);
+    click("照合を確定して店舗データ作成へ");
+    const restored = (draft.values[`${editingPrefix}.castRows`] as DailyCast[])[0];
+    expect(restored).toMatchObject({ hourlyRate: trialCast.hourlyRate, dailyPayment: trialCast.dailyPayment });
+    expect(restored.introducer).toBeUndefined();
+  });
 });

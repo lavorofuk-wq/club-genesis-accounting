@@ -8,6 +8,7 @@ import type {
   PosClosingV3, PosItem, PosTransaction, ReconciledDailyCastInputs
 } from "@/domain/gms";
 import { buildDailyCasts, calculateCash, canMapAsDispatch, deriveReeditCastMapping, floorTen, floorYen, hoursBetweenQuarter, invalidTrialBeautyExpensesForRows, isCastMappingComplete, isUnapprovedClosingStatus, mergeReconciledDailyCastInputs, parsePosClosingV3, posCastReferences, posItemOccurrenceKey, rateForMonth, requiresBottleCost, restoreDailyCastBackMetadata, staffCandidatesForBusinessDate } from "@/domain/gms";
+import { castIntroducerOverrideForMonth, castTrialRateForMonth } from "@/domain/cast-monthly";
 import type { AccountingWorkspaceData } from "@/domain/month-accounting";
 import { STAFF_MONTHLY_RATES_START_MONTH, staffMonthlyRateForMonth } from "@/domain/staff-rates";
 import { calculateConfirmedCashFunding, cashFundingDraftContext, cashFundingIssues, recommendedPersonalRepayment, cashDayIssues, cashChangeImpacts, sameCashReconciliation, assertCashLedgerChange } from "@/domain/cash-funding";
@@ -445,17 +446,20 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
       if (mapping[source.id] === "dispatch") return [source.id, { masterId: "", name: source.name, kind: "dispatch" as const, hourlyRate: 0 }];
       const cast = candidates(source.kind, source.name).find((row) => row.id === mapping[source.id]);
       const savedSnapshot = initialSnapshotFor(source);
-      if (!cast && savedSnapshot) return [source.id, {
+      if (savedSnapshot) return [source.id, {
         masterId: savedSnapshot.masterId,
         name: savedSnapshot.name,
         kind: savedSnapshot.kind,
         hourlyRate: savedSnapshot.hourlyRate,
         introducer: savedSnapshot.introducer
       }];
-      const introducer = data.introducers.find((row) => row.id === cast?.introducerId);
+      const monthlyIntroducer = castIntroducerOverrideForMonth(cast, month);
+      const introducer = monthlyIntroducer === undefined
+        ? data.introducers.find((row) => row.id === cast?.introducerId)
+        : undefined;
       return [source.id, {
         masterId: cast?.id || "", name: cast?.name || source.name, kind: source.kind,
-        hourlyRate: source.kind === "trial" ? cast?.trialHourlyRate || 0 : rateForMonth(cast?.hourlyRates || {}, month),
+        hourlyRate: source.kind === "trial" ? castTrialRateForMonth(cast, month) : rateForMonth(cast?.hourlyRates || {}, month),
         introducer: introducer ? {
           id: introducer.id,
           name: introducer.name,
@@ -464,7 +468,8 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
           entryAdvisoryEnabled: introducer.entryAdvisoryEnabled,
           attendanceAdvisoryFee: introducer.attendanceAdvisoryEnabled ? cast?.attendanceAdvisoryFee || 0 : 0,
           entryAdvisoryFee: introducer.entryAdvisoryEnabled ? cast?.entryAdvisoryFee || 0 : 0
-        } : undefined
+        } : monthlyIntroducer && data.introducers.some((row) => row.id === monthlyIntroducer.id)
+          ? monthlyIntroducer : undefined
       }];
     }));
     const generatedRows = buildDailyCasts(pos, details, data.liquor, occurrenceSpecialCosts(pos, specialCosts));

@@ -278,7 +278,7 @@ describe("月次会計ドメイン", () => {
     expect(results.castRewards[0]).toMatchObject({ grossPay: 720500, withholding: 58248, netPay: 662252 });
     const saved = buildMonthlySnapshot(month, 1, "a".repeat(64), input, results, source.closings,
       "accounting-user", "2026-10-01T00:00:00Z");
-    expect(saved.calculationVersion).toBe("2.51.0");
+    expect(saved.calculationVersion).toBe(MONTHLY_CALCULATION_VERSION);
     expect(normalizeMonthlyAccountingSnapshot(saved, month, 1)?.castRewards).toEqual(results.castRewards);
     expect(canFinalizeMonthlyAccounting(source, month, input, true).allowed).toBe(true);
     expect({ source, input }).toEqual(before);
@@ -2885,6 +2885,84 @@ describe("日別送迎を反映した月次確定", () => {
     const result = calculateMonthlyAccounting(source, month, inputs);
     expect(result.castRewards).toEqual([]);
     expect(result.warnings.some((warning) => warning.includes("送迎記録") && warning.includes("差戻し"))).toBe(true);
+  });
+});
+
+describe("キャスト月度設定", () => {
+  const priorTerms: NonNullable<DailyCast["introducer"]> = {
+    id: "intro-a", name: "紹介者A", feeType: "sales10",
+    attendanceAdvisoryEnabled: true, attendanceAdvisoryFee: 100, entryAdvisoryFee: 0,
+  };
+  const selectedTerms: NonNullable<DailyCast["introducer"]> = {
+    id: "intro-b", name: "紹介者B", feeType: "gross10",
+    attendanceAdvisoryEnabled: true, attendanceAdvisoryFee: 500,
+    entryAdvisoryEnabled: true, entryAdvisoryFee: 5_000,
+  };
+
+  it("同月入店後も体入の月度時給を体入日に適用し、確定前の給与と紹介料だけを更新する", () => {
+    const trial = cast({ id: "trial-cast", status: "trial", hiredAt: undefined, trialDate: "2026-09-01",
+      convertedToCastId: "cast-1", hourlyRates: {}, trialHourlyRate: 2_000,
+      trialHourlyRates: { "2026-09": 2_500, "2026-10": 3_500 },
+      monthlyIntroducers: { [month]: priorTerms } });
+    const regular = cast({ hiredAt: "2026-09-02", convertedFromTrialId: trial.id,
+      monthlyIntroducers: { [month]: selectedTerms } });
+    const trialDay = approvedClosing({ id: "trial-day", businessDate: "2026-09-01",
+      casts: [dailyCast({ masterId: trial.id, kind: "trial", hours: 4, hourlyRate: 2_000, dailyPayment: 8_000, introducer: priorTerms })] });
+    const regularDay = approvedClosing({ id: "regular-day", businessDate: "2026-09-02",
+      casts: [dailyCast({ hours: 4, introducer: undefined })] });
+    const source = workspace({ casts: [trial, regular], closings: [trialDay, regularDay] });
+    const original = structuredClone(source.closings);
+
+    const result = calculateMonthlyAccounting(source, month, adjustments());
+
+    expect(result.castRewards).toHaveLength(1);
+    expect(result.castRewards[0]).toMatchObject({
+      id: regular.id, hourlyPay: 22_000, dailyPayment: 8_000, appliedHourlyRates: [2_500, 3_000], introducer: selectedTerms,
+    });
+    expect(result.introducerPayments[0]).toMatchObject({
+      introducerId: selectedTerms.id, attendanceAdvisory: 500, entryAdvisory: 5_000,
+    });
+    expect(canFinalizeMonthlyAccounting(source, month, adjustments(), false).allowed).toBe(true);
+    expect(source.closings).toEqual(original);
+    regular.monthlyIntroducers = { [month]: false };
+    expect(calculateMonthlyAccounting(source, month, adjustments()).introducerPayments).toEqual([]);
+  });
+
+  it("紹介者を翌月に引き継ぎ、マスタ削除はその月以降にだけ適用する", () => {
+    const source = workspace({
+      casts: [cast({ monthlyIntroducers: { "2026-08": selectedTerms } })],
+      closings: [
+        approvedClosing({ id: "september", businessDate: "2026-09-01", casts: [dailyCast({ introducer: priorTerms })] }),
+        approvedClosing({ id: "october", businessDate: "2026-10-01", casts: [dailyCast({ introducer: priorTerms })] }),
+      ],
+    });
+    const deletion = introducerDeletionCommit({ id: selectedTerms.id, introducerId: selectedTerms.id,
+      month: "2026-10", linkedCastIds: [] });
+    const september = calculateMonthlyAccounting(source, month, adjustments(), [], [], [deletion]);
+    const october = calculateMonthlyAccounting(source, "2026-10", adjustments({ month: "2026-10" }), [], [], [deletion]);
+
+    expect(september.introducerPayments[0]).toMatchObject({ introducerId: selectedTerms.id });
+    expect(october.introducerPayments).toEqual([]);
+    expect(source.closings[1].casts[0].introducer).toEqual(priorTerms);
+  });
+
+  it("出勤がない採用月も月度の入店顧問料を適用し、紹介者なしで旧入店イベントを支払わない", () => {
+    const member = cast({ introducerId: priorTerms.id, entryAdvisoryFee: 1_000,
+      monthlyIntroducers: { [month]: selectedTerms } });
+    const source = workspace({ casts: [member], introducers: [introducer(priorTerms)] });
+    const entry: IntroducerEntryEvent = {
+      id: member.id, month, castId: member.id, castName: member.name, hiredAt: member.hiredAt!,
+      introducerId: priorTerms.id, introducerName: priorTerms.name, feeType: priorTerms.feeType,
+      amount: 1_000, createdAt: member.createdAt, createdBy: "accounting-user",
+      updatedAt: member.updatedAt, updatedBy: "accounting-user",
+    };
+    const calculate = () => calculateMonthlyAccounting(source, month, adjustments(), [entry]).introducerPayments;
+
+    expect(calculate()).toEqual([expect.objectContaining({ introducerId: selectedTerms.id, entryAdvisory: 5_000 })]);
+    member.monthlyIntroducers = { [month]: false };
+    expect(calculate()).toEqual([]);
+    member.monthlyIntroducers = undefined;
+    expect(calculate()).toEqual([expect.objectContaining({ introducerId: priorTerms.id, entryAdvisory: 1_000 })]);
   });
 });
 

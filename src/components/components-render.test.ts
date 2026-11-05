@@ -1195,6 +1195,16 @@ describe("主要ページのSSRスモーク", () => {
     },
   );
 
+  it("対象月に承認済みの勤務があるキャストだけ退店操作を無効にする", () => {
+    const render = (status: DailyClosing["status"]) => renderToStaticMarkup(createElement(CommonForms, {
+      section: "casts", data: { ...data, closings: [{ ...closing, status }] }, user, busy: false, run,
+    }));
+    expect(render("approved")).toContain('disabled="">退店</button>');
+    expect(render("approved")).toContain("対象月に承認済みの勤務があるため退店できません。");
+    expect(render("submitted")).not.toContain('disabled="">退店</button>');
+    expect(render("submitted")).not.toContain("対象月に承認済みの勤務があるため退店できません。");
+  });
+
   it.each(["approval", "castSales", "castRewards", "introducers", "staffPayroll", "driverPayroll", "expenses", "balance"] as const)(
     "経理フォーム %s を代表データで描画できる",
     (section) => {
