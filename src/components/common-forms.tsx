@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef } from "react";
 import type { User } from "firebase/auth";
-import { castHasApprovedWork, castIntroducerForDisplay, castIntroducerOverrideForMonth, castStatusForMonth, castTrialRateForMonth } from "@/domain/cast-monthly";
+import { castHasApprovedWork, castIntroducerForDisplay, castIntroducerOverrideForMonth, castSharedIntroducerMemberForMonth, castStatusForMonth, castTrialRateForMonth } from "@/domain/cast-monthly";
 import type { CastRecord, DriverRecord, IntroducerFeeType, IntroducerRecord, LiquorRecord, StaffRecord, WorkspaceData } from "@/domain/gms";
 import { dayAfterIsoDate, rateForMonth } from "@/domain/gms";
 import { monthlyRatesForSave } from "@/domain/master-pay-validation";
@@ -64,6 +64,7 @@ function CastManager({ data, user, busy, run, onDirtyChange }: Props) {
   const [tab, setTab] = useRecoverableState<CastRecord["status"]>("common.casts.tab", "active");
   const [editing, setEditing] = useRecoverableState<Partial<CastRecord> | null>("common.casts.editing", null);
   const [sourceTrialId, setSourceTrialId] = useRecoverableState("common.casts.sourceTrialId", "");
+  const [introducerOnly, setIntroducerOnly] = useRecoverableState("common.casts.introducerOnly", false);
   const [month, setMonth] = useRecoverableState("common.casts.month", currentMonth());
   const [rate, setRate] = useRecoverableState("common.casts.rate", 0);
   const editedCast = data.casts.find((row) => row.id === editing?.id);
@@ -90,6 +91,8 @@ function CastManager({ data, user, busy, run, onDirtyChange }: Props) {
   const newRegistration = editing && (!editing.id || Boolean(sourceTrialId));
   const useDateMonth = newRegistration || editing?.status === "trial";
   const editMonth = useDateMonth && draftDate && isValidIsoDate(draftDate) ? draftDate.slice(0, 7) : month;
+  const sharedMember = editedCast && !newRegistration ? castSharedIntroducerMemberForMonth(editedCast, month, knownCasts) : undefined;
+  const sharedIntroducer = sharedMember && sharedMember.id !== editedCast?.id ? sharedMember : undefined;
   const introducer = data.introducers.find((row) => row.id === editing?.introducerId);
   const historicalIntroducer = !introducer && editing?.introducerId && editedCast
     ? castIntroducerForDisplay(editedCast, month, data) : undefined;
@@ -97,8 +100,10 @@ function CastManager({ data, user, busy, run, onDirtyChange }: Props) {
     && castIntroducerOverrideForMonth(editedCast, month) !== false;
   const entryFeeMonth = editing?.status !== "trial" && editing?.hiredAt?.slice(0, 7) === editMonth;
 
-  const begin = (row?: CastRecord, converting = false) => {
+  const begin = (row?: CastRecord, mode: "details" | "conversion" | "introducer" = "details") => {
+    const converting = mode === "conversion";
     setSourceTrialId(converting && row ? row.id : "");
+    setIntroducerOnly(mode === "introducer");
     setIntroducerDirty(false);
     setRate(row && row.status !== "trial" ? rateForMonth(row.hourlyRates, month) : 0);
     if (!row) {
@@ -131,7 +136,8 @@ function CastManager({ data, user, busy, run, onDirtyChange }: Props) {
           const terms = castIntroducerForDisplay(row, month, data);
           const canRegisterDeparture = row.status === "active";
           const hasApprovedWork = canRegisterDeparture && castHasApprovedWork(data.closings, knownCasts, month, row.id);
-          const converted = knownCasts.find((item) => item.id === row.convertedToCastId);
+          const converted = tab === "trial" ? knownCasts.find((item) => item.id === row.convertedToCastId || item.convertedFromTrialId === row.id) : undefined;
+          const shared = castSharedIntroducerMemberForMonth(row, month, knownCasts);
           return <tr key={row.id}>
             <td><strong>{row.name}</strong></td><td>{row.legalName || "—"}</td><td>{rowRate > 0 ? yen.format(rowRate) : "—"}</td>
             <td>{tab === "trial" ? row.trialDate : tab === "departed" ? row.departedAt : row.hiredAt}</td>
@@ -142,9 +148,10 @@ function CastManager({ data, user, busy, run, onDirtyChange }: Props) {
                 const date = promptDepartureDate(month);
                 if (date) void run(() => departCast(row.id, date, row.updatedAt, user), "退店を登録しました。");
               }}>退店</button>}
-              {tab === "trial" && (row.convertedToCastId
+              {tab === "trial" && (row.convertedToCastId || converted
                 ? <StatusPill tone="good">{converted?.hiredAt ? `${converted.hiredAt} 入店` : "入店済み"}</StatusPill>
-                : <button className="button secondary mini" disabled={busy} onClick={() => begin(row, true)}>入店</button>)}
+                : <button className="button secondary mini" disabled={busy} onClick={() => begin(row, "conversion")}>入店</button>)}
+              {shared.id !== row.id && !shared.deletedAt && <button className="button secondary mini" disabled={busy} onClick={() => begin(shared, "introducer")}>紹介者変更</button>}
               {tab === "departed" && <button className="button secondary mini" disabled={busy} onClick={() => void run(() => restoreCast(row.id, row.updatedAt, user), "退店登録を取り消しました。")}>退店取消</button>}
               {(tab === "trial" || tab === "departed") && <button className="button danger mini" disabled={busy} onClick={() => {
                 const message = tab === "trial" ? `体入キャスト「${row.name}」を完全削除しますか？\n過去の送信済み日次データは削除されません。` : `「${row.name}」を完全削除しますか？`;
@@ -155,17 +162,21 @@ function CastManager({ data, user, busy, run, onDirtyChange }: Props) {
         })}
       </Table>
     </Card>
-    {editing && <Modal title={sourceTrialId ? "体入キャストを入店登録" : editing.id ? "キャストデータ編集" : editing.status === "trial" ? "体入キャスト登録" : "新規キャスト入店"} disabled={busy} onClose={() => setEditing(null)}><form className="stack" onSubmit={async (event) => {
+    {editing && <Modal title={introducerOnly ? `${editing.name}の紹介者変更` : sourceTrialId ? "体入キャストを入店登録" : editing.id ? "キャストデータ編集" : editing.status === "trial" ? "体入キャスト登録" : "新規キャスト入店"} disabled={busy} onClose={() => setEditing(null)}><form className="stack" onSubmit={async (event) => {
       event.preventDefault();
-      const value = { ...editing } as CastRecord;
+      if (introducerOnly && !introducerDirty) return;
+      const value = { ...editing } as Parameters<typeof saveCast>[0];
       if (!entryFeeMonth) delete value.entryAdvisoryFee;
-      if (!newRegistration && !introducerDirty) {
+      if (sharedIntroducer || (!newRegistration && !introducerDirty)) {
         delete value.introducerId;
         delete value.attendanceAdvisoryFee;
         delete value.entryAdvisoryFee;
       }
       let saved: boolean;
-      if (sourceTrialId) saved = await run(() => convertTrialCast(sourceTrialId, { ...value, hiredAt: value.hiredAt || dateInMonth(editMonth), hourlyRates: { [editMonth]: rate } }, user, editMonth), "体入キャストを在籍登録しました。");
+      if (introducerOnly) {
+        delete value.hourlyRates;
+        saved = await run(() => saveCast(value, user, editMonth), "月度の紹介者を更新しました。");
+      } else if (sourceTrialId) saved = await run(() => convertTrialCast(sourceTrialId, { ...value, hiredAt: value.hiredAt || dateInMonth(editMonth), hourlyRates: { [editMonth]: rate } }, user, editMonth), "体入キャストを在籍登録しました。");
       else saved = await run(() => saveCast({
         ...value,
         hourlyRates: value.status !== "trial"
@@ -179,11 +190,15 @@ function CastManager({ data, user, busy, run, onDirtyChange }: Props) {
         if (sourceTrialId) setTab("active");
       }
     }}>
+      {!introducerOnly && <>
       <div className="grid two"><Field label="キャスト名"><input className="input" required value={editing.name || ""} onChange={(e) => setEditing({ ...editing, name: e.target.value })} /></Field><Field label="本名"><input className="input" required value={editing.legalName || ""} onChange={(e) => setEditing({ ...editing, legalName: e.target.value })} /></Field></div>
       {editing.status === "trial"
         ? <div className="grid two"><Field label="体入日"><input className="input" type="date" required value={editing.trialDate || ""} onChange={(e) => setEditing({ ...editing, trialDate: e.target.value })} /></Field><Field label={`${editMonth}月度の体入時給`}><MoneyInput min={1} value={editing.trialHourlyRate || 0} onChange={(value) => setEditing({ ...editing, trialHourlyRate: value })} /></Field></div>
         : <div className="grid two"><Field label="採用日"><input className="input" type="date" required min={sourceTrialId ? editing.trialDate : undefined} value={editing.hiredAt || ""} onChange={(e) => setEditing({ ...editing, hiredAt: e.target.value })} /></Field><Field label={`${editMonth}月度の時給`}><MoneyInput min={1} value={rate} onChange={setRate} /></Field></div>}
-      <Field label={`${editMonth}月度の紹介者`}><select className="input" value={editing.introducerId || (canSetNoIntroducer ? "__unset__" : "")} onChange={(e) => {
+      </>}
+      {sharedIntroducer ? <Field label={`${month}月度の紹介者`} hint={sharedIntroducer.deletedAt ? "同月に入店した在籍記録と共有しています。" : "同月の在籍記録と共有しています。変更は一覧の「紹介者変更」から行えます。"}>
+        <output>{castIntroducerForDisplay(sharedIntroducer, month, data)?.name || "—"}</output>
+      </Field> : <Field label={`${editMonth}月度の紹介者`} hint="未確定月は対象月全体に選択した紹介者を適用します。「紹介者なし」の紹介料・顧問料は0円です。確定済みの支払は確定時の金額を使用します。"><select className="input" value={editing.introducerId || (canSetNoIntroducer ? "__unset__" : "")} onChange={(e) => {
         const introducerId = e.target.value || undefined;
         const selectedIntroducer = data.introducers.find((row) => row.id === introducerId);
         setIntroducerDirty(true);
@@ -193,7 +208,7 @@ function CastManager({ data, user, busy, run, onDirtyChange }: Props) {
           attendanceAdvisoryFee: selectedIntroducer?.attendanceAdvisoryEnabled ? editing.attendanceAdvisoryFee : undefined,
           entryAdvisoryFee: selectedIntroducer?.entryAdvisoryEnabled ? editing.entryAdvisoryFee : undefined,
         });
-      }}>{canSetNoIntroducer && <option value="__unset__" disabled>月度の紹介者未設定</option>}<option value="">紹介者なし</option>{!introducer && editing.introducerId && <option value={editing.introducerId} disabled>{historicalIntroducer?.name || "紹介者"}（削除済み）</option>}{data.introducers.map((row) => <option key={row.id} value={row.id}>{row.name}</option>)}</select></Field>
+      }}>{canSetNoIntroducer && <option value="__unset__" disabled>月度の紹介者未設定</option>}<option value="">紹介者なし</option>{!introducer && editing.introducerId && <option value={editing.introducerId} disabled>{historicalIntroducer?.name || "紹介者"}（削除済み）</option>}{data.introducers.map((row) => <option key={row.id} value={row.id}>{row.name}</option>)}</select></Field>}
       {editing.status !== "trial" && introducer && <div className="grid two">
         {introducer.attendanceAdvisoryEnabled && <Field label="1出勤あたり顧問料"><MoneyInput value={editing.attendanceAdvisoryFee || 0} onChange={(value) => {
           setIntroducerDirty(true);
@@ -204,8 +219,8 @@ function CastManager({ data, user, busy, run, onDirtyChange }: Props) {
           setEditing({ ...editing, entryAdvisoryFee: value });
         }} /><small>0円で保存すると、未確定の入店顧問料を取り消します。</small></Field>}
       </div>}
-      <Field label="備考"><textarea className="input" rows={3} value={editing.note || ""} onChange={(e) => setEditing({ ...editing, note: e.target.value })} /></Field>
-      <div className="actions"><button className="button" disabled={busy}>保存</button><button type="button" className="button secondary" onClick={() => setEditing(null)}>取消</button></div>
+      {!introducerOnly && <Field label="備考"><textarea className="input" rows={3} value={editing.note || ""} onChange={(e) => setEditing({ ...editing, note: e.target.value })} /></Field>}
+      <div className="actions"><button className="button" disabled={busy || (introducerOnly && !introducerDirty)}>保存</button><button type="button" className="button secondary" onClick={() => setEditing(null)}>取消</button></div>
     </form></Modal>}
   </div>;
 }

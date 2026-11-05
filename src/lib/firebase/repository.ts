@@ -1066,8 +1066,7 @@ export async function loadWorkspaceData(role?: Role): Promise<AccountingWorkspac
     get(rootRef("liquorCosts")), get(rootRef("history")), get(rootRef("config/cashFloat")),
     accountingAccess ? get(rootRef("accountingAdjustments")) : Promise.resolve(null),
     accountingAccess ? get(rootRef("introducerEntryEvents")) : Promise.resolve(null),
-    accountingAccess ? get(rootRef("introducerDeletionCommits")) : Promise.resolve(null),
-    accountingAccess ? get(rootRef("introducerMonthEvents")) : Promise.resolve(null),
+    get(rootRef("introducerDeletionCommits")), get(rootRef("introducerMonthEvents")),
     get(rootRef("accountingMonthStates")),
     accountingAccess ? get(rootRef("accountingMonthSnapshots")) : Promise.resolve(null),
     get(rootRef("config/transportSettings")), get(rootRef("transportMonths")),
@@ -1077,12 +1076,12 @@ export async function loadWorkspaceData(role?: Role): Promise<AccountingWorkspac
   const allStaffRows = asArray<StaffRecord & { deletedAt?: string }>(staff.val());
   const entryEventRows = Object.entries((entryEvents?.val() || {}) as Record<string, Record<string, IntroducerEntryEvent>>)
     .flatMap(([month, rows]) => Object.entries(rows || {}).map(([id, row]) => ({ ...row, id, month })));
-  const introducerDeletionCommitRows = Object.entries((introducerDeletionCommits?.val() || {}) as Record<string, IntroducerDeletionCommit>)
+  const introducerDeletionCommitRows = Object.entries((introducerDeletionCommits.val() || {}) as Record<string, IntroducerDeletionCommit>)
     .flatMap(([id, row]) => {
       const normalized = normalizeIntroducerDeletionCommit(row, id);
       return normalized ? [normalized] : [];
     });
-  const introducerMonthEventRows = Object.entries((introducerMonthEvents?.val() || {}) as Record<string, Record<string, IntroducerMonthEvent>>)
+  const introducerMonthEventRows = Object.entries((introducerMonthEvents.val() || {}) as Record<string, Record<string, IntroducerMonthEvent>>)
     .flatMap(([month, rows]) => Object.entries(rows || {}).flatMap(([id, row]) => {
       const normalized = normalizeIntroducerMonthEvent(row, month, id);
       return normalized ? [normalized] : [];
@@ -2655,12 +2654,14 @@ async function currentMonthlySources(month: string) {
   } as MonthlyAdjustments);
   const events = Object.entries((entryEvents.val() || {}) as Record<string, IntroducerEntryEvent>)
     .map(([id, row]) => ({ ...row, id, month }));
-  const rawDeletionCommits = Object.entries((introducerDeletionCommits.val() || {}) as Record<string, IntroducerDeletionCommit>);
+  // 以前の削除も、対象月へ引き継いだ月度紹介者に影響する。
+  const rawDeletionCommits = Object.entries((introducerDeletionCommits.val() || {}) as Record<string, IntroducerDeletionCommit>)
+    .filter(([, row]) => isCastMonth(row?.month) && row.month <= month);
   const deletionCommits = rawDeletionCommits.flatMap(([id, row]) => {
     const normalized = normalizeIntroducerDeletionCommit(row, id);
     return normalized ? [normalized] : [];
-  }).filter((row) => row.month === month);
-  if (deletionCommits.length !== rawDeletionCommits.filter(([, row]) => row?.month === month).length) {
+  });
+  if (deletionCommits.length !== rawDeletionCommits.length) {
     throw new Error(`${month}の紹介者削除確定履歴が不正なため月次確定できません。Firebaseデータを確認してください。`);
   }
   const rawMonthEvents = Object.entries((introducerMonthEvents.val() || {}) as Record<string, IntroducerMonthEvent>);

@@ -6,7 +6,6 @@ const rules = JSON.parse(await readFile(new URL("../database.rules.json", import
 const now = 1800000000000;
 const id = "daily_20261102";
 const castId = "cast_member";
-const workspace = "accounting-dev";
 const month = "2026-11";
 const children = Symbol("RTDB child nodes");
 
@@ -25,7 +24,7 @@ class Snapshot {
   isString() { return typeof this.val() === "string"; }
 }
 
-function evaluate(rule, before, after, path, { role = "op", uid = "user", key = month } = {}) {
+function evaluate(rule, before, after, path, { role = "op", uid = "user", key = month, workspace = "accounting-dev" } = {}) {
   if (typeof rule === "boolean") return rule;
   const root = { [workspace]: before, users: { [uid]: { role } } };
   const expression = rule.replaceAll(".matches(", ".match(").replaceAll(".beginsWith(", ".startsWith(");
@@ -121,7 +120,8 @@ test("月度体入時給は有効月と正の整数を要求し、入店変換�
 test("月度紹介者は履歴か明示なしを保存でき、変換中・削除処理中は条件を変更しない", () => {
   const introduction = { id: "intro", name: "紹介者", feeType: "sales10", attendanceAdvisoryFee: 100, entryAdvisoryFee: 0 };
   const monthRules = rules.casts.$id.monthlyIntroducers.$month;
-  const setIntroduction = (value, cast = active) => castTree({ ...cast, monthlyIntroducers: { [month]: value } });
+  const introducers = { [introduction.id]: { name: introduction.name } };
+  const setIntroduction = (value, cast = active) => castTree({ ...cast, monthlyIntroducers: { [month]: value } }, { introducers });
   const path = [...castPath, "monthlyIntroducers", month];
   const existing = setIntroduction(introduction);
   for (const [value, allowed] of [[introduction, true], [false, true], [true, false], [{ id: "missing-fields" }, false]]) {
@@ -136,4 +136,30 @@ test("月度紹介者は履歴か明示なしを保存でき、変換中・削�
   assert.equal(evaluate(monthRules.feeType[".validate"], existing, setIntroduction({ ...introduction, feeType: "wrong" }), [...path, "feeType"]), false);
   assert.equal(evaluate(monthRules.attendanceAdvisoryFee[".validate"], existing, setIntroduction({ ...introduction, attendanceAdvisoryFee: -1 }),
     [...path, "attendanceAdvisoryFee"]), false);
+});
+
+test("月度紹介者は保存時点で実在する紹介者だけを新規・変更でき、削除済み履歴は維持できる", () => {
+  const introduction = { id: "intro", name: "紹介者", feeType: "sales10", attendanceAdvisoryFee: 100, entryAdvisoryFee: 0 };
+  const rule = rules.casts.$id.monthlyIntroducers.$month[".validate"];
+  const path = [...castPath, "monthlyIntroducers", month];
+  const introducers = { [introduction.id]: { name: introduction.name } };
+  const previous = { ...active, monthlyIntroducers: { [month]: introduction } };
+  const next = { ...active, monthlyIntroducers: { [month]: { ...introduction, attendanceAdvisoryFee: 200 } } };
+  const cleared = { ...active, monthlyIntroducers: { [month]: false } };
+  for (const workspace of ["accounting-dev", "accounting"]) {
+    const options = { workspace };
+    const live = castTree(previous, { introducers });
+    assert.equal(evaluate(rule, castTree(active, { introducers }), live, path, options), true);
+    assert.equal(evaluate(rule, live, castTree(next, { introducers }), path, options), true);
+    assert.equal(evaluate(rule, castTree(active), castTree(previous), path, options), false);
+    assert.equal(evaluate(rule, live, castTree(next), path, options), false);
+    assert.equal(evaluate(rule, castTree(previous), castTree(next), path, options), false);
+    assert.equal(evaluate(rule, castTree(previous), castTree({ ...previous, note: "備考だけ編集" }), path, options), true);
+    assert.equal(evaluate(rule, castTree(previous), castTree(cleared), path, options), true);
+    for (const [expiresAt, allowed] of [[now + 100, false], [now, true]]) {
+      const deleting = { ...live, introducerDeletionLocks: { [introduction.id]: { expiresAt } } };
+      assert.equal(evaluate(rule, deleting, castTree(next, { introducers }), path, options), allowed);
+      assert.equal(evaluate(rule, deleting, castTree(cleared, { introducers }), path, options), true);
+    }
+  }
 });

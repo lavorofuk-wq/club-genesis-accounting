@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { calculateCashFunding, cashFundingContext } from "./cash-funding";
 import { legacyBottleSourceKey } from "./gms";
 import { calculateCastWithholding } from "./cast-withholding";
+import { castIntroducerForDisplay, castSharedIntroducerMemberForMonth } from "./cast-monthly";
 import type {
   CastRecord,
   CastReward,
@@ -2898,6 +2899,75 @@ describe("キャスト月度設定", () => {
     attendanceAdvisoryEnabled: true, attendanceAdvisoryFee: 500,
     entryAdvisoryEnabled: true, entryAdvisoryFee: 5_000,
   };
+
+  it("月途中の紹介者変更を承認済みの日次全体へ適用し、紹介者なしで全費目を0円にする", () => {
+    const member = cast({ hiredAt: "2026-09-01", introducerId: priorTerms.id });
+    const source = workspace({
+      casts: [member],
+      closings: [
+        approvedClosing({ id: "first", businessDate: "2026-09-04",
+          casts: [dailyCast({ honShimeiSales: 60_000, introducer: priorTerms })] }),
+        approvedClosing({ id: "last", businessDate: "2026-09-24",
+          casts: [dailyCast({ honShimeiSales: 40_000, introducer: priorTerms })] }),
+      ],
+    });
+    const calculate = () => calculateMonthlyAccounting(source, month, adjustments());
+    expect(calculate().introducerPayments).toEqual([
+      expect.objectContaining({ introducerId: priorTerms.id, salesBase: 100_000, total: 10_200 }),
+    ]);
+
+    member.monthlyIntroducers = { [month]: { ...selectedTerms, feeType: "sales10" } };
+    expect(calculate().introducerPayments).toEqual([
+      expect.objectContaining({ introducerId: selectedTerms.id, salesBase: 100_000, salesFee: 10_000,
+        attendanceAdvisory: 1_000, entryAdvisory: 5_000, total: 16_000 }),
+    ]);
+
+    member.monthlyIntroducers[month] = false;
+    const withoutIntroducer = calculate();
+    expect(withoutIntroducer.introducerPayments).toEqual([]);
+    expect(withoutIntroducer.balance.introducer).toBe(0);
+    expect(source.closings.map((day) => day.casts[0].introducer)).toEqual([priorTerms, priorTerms]);
+  });
+
+  it("旧マスタや未承認日次と異なっても、最後に保存された承認済み条件を表示と紹介料へ使う", () => {
+    const member = cast({ introducerId: selectedTerms.id });
+    const newer = approvedClosing({ id: "newer", businessDate: `${month}-01`, submittedAtMs: 300,
+      casts: [dailyCast({ introducer: priorTerms })] });
+    const older = approvedClosing({ id: "older", businessDate: `${month}-02`, submittedAtMs: 200,
+      casts: [dailyCast({ introducer: selectedTerms })] });
+    const pending = approvedClosing({ id: "pending", status: "submitted", businessDate: `${month}-03`, submittedAtMs: 400,
+      casts: [dailyCast({ introducer: selectedTerms })] });
+    const returned = approvedClosing({ id: "returned", status: "returned", businessDate: `${month}-04`, submittedAtMs: 500,
+      casts: [dailyCast({ introducer: selectedTerms })] });
+    const source = workspace({ casts: [member], introducers: [introducer(selectedTerms)], closings: [newer, older, pending, returned] });
+    const displayed = () => castIntroducerForDisplay(member, month, source, month);
+
+    expect(displayed()).toEqual(priorTerms);
+    expect(calculateMonthlyAccounting(source, month, adjustments()).introducerPayments[0].introducerId).toBe(priorTerms.id);
+    newer.casts[0].introducer = undefined;
+    expect(displayed()).toBeUndefined();
+    expect(calculateMonthlyAccounting(source, month, adjustments()).introducerPayments).toEqual([]);
+    newer.status = "returned";
+    older.status = "submitted";
+    expect(displayed()?.id).toBe(selectedTerms.id);
+    expect(castIntroducerForDisplay(member, month, source, "2026-10")).toBeUndefined();
+  });
+
+  it("同月入店した体入・在籍の紹介者表示を統合し、翌月入店では体入月の設定を共有しない", () => {
+    const trial = cast({ id: "trial", status: "trial", hiredAt: undefined, trialDate: `${month}-01`, convertedToCastId: "cast-1" });
+    const member = cast({ hiredAt: `${month}-02`, convertedFromTrialId: trial.id, introducerId: selectedTerms.id });
+    const source = workspace({ casts: [trial, member], introducers: [introducer(selectedTerms)],
+      closings: [approvedClosing({ businessDate: `${month}-01`, casts: [dailyCast({ masterId: trial.id, kind: "trial", introducer: priorTerms })] })] });
+
+    expect(castSharedIntroducerMemberForMonth(trial, month, source.casts)).toBe(member);
+    expect(castIntroducerForDisplay(member, month, source, month)).toEqual(priorTerms);
+    expect(castIntroducerForDisplay(trial, month, source, month)).toEqual(priorTerms);
+    member.monthlyIntroducers = { [month]: false };
+    expect(castIntroducerForDisplay(trial, month, source, month)).toBeUndefined();
+    member.hiredAt = "2026-10-02";
+    expect(castSharedIntroducerMemberForMonth(trial, month, source.casts)).toBe(trial);
+    expect(castIntroducerForDisplay(trial, month, source, month)).toEqual(priorTerms);
+  });
 
   it("同月入店後も体入の月度時給を体入日に適用し、確定前の給与と紹介料だけを更新する", () => {
     const trial = cast({ id: "trial-cast", status: "trial", hiredAt: undefined, trialDate: "2026-09-01",
