@@ -14,7 +14,7 @@ import {
   type AccountingWorkspaceData, type MonthlyAccountingResults,
 } from "@/domain/month-accounting";
 import { approveClosing, cancelAccountingMonthClosing, finalizeAccountingMonth, reopenAccountingMonth, returnClosing, saveMonthlyAdjustments } from "@/lib/firebase/repository";
-import { Card, Field, MoneyInput, StatusPill, Table, currentMonth, yen } from "./ui";
+import { Card, Field, MoneyInput, StatusPill, Table, currentMonth, today, yen } from "./ui";
 import { summarizeCastDrinksByPrice } from "./store-work";
 import { useRecoverableState, useUpdateDraftBusy } from "./update-drafts";
 import { cashDayIssues, cashFundingIssues, cashLedgerIssues, type CashFundingSummary } from "@/domain/cash-funding";
@@ -69,14 +69,29 @@ function accountingMonthLockMessage(data: AccountingWorkspaceData, businessDate:
 function ApprovalView({ data, user, busy, run }: Props) {
   const [expanded, setExpanded] = useRecoverableState("accounting.approval.expanded", "");
   const [reviewed, setReviewed] = useState<Record<string, boolean>>({});
-  const reviewKeys = JSON.stringify(data.closings.map((row) => closingReviewKey(row, data.closings)).sort());
+  const endDate = today();
+  const firstDay = new Date(`${endDate}T00:00:00.000Z`);
+  firstDay.setUTCDate(firstDay.getUTCDate() - 4);
+  const startDate = firstDay.toISOString().slice(0, 10);
+  const recent = data.closings.filter((row) => row.status !== "withdrawn"
+    && row.businessDate >= startDate && row.businessDate <= endDate);
+  const olderPending = data.closings.filter((row) => row.businessDate < startDate
+    && (row.status === "submitted" || row.status === "returned"));
+  const visibleClosings = [...recent, ...olderPending];
+  const reviewKeys = JSON.stringify(visibleClosings.map((row) => closingReviewKey(row, data.closings)).sort());
   useEffect(() => {
     const currentKeys = new Set<string>(JSON.parse(reviewKeys) as string[]);
     // 前提変更で失効した確認は破棄する。後から金額が元へ戻っても確認済みを復元しない。
     setReviewed((rows) => Object.fromEntries(Object.entries(rows).filter(([key]) => currentKeys.has(key))));
   }, [reviewKeys]);
-  const expandedClosing = data.closings.find((row) => row.id === expanded);
+  const expandedClosing = visibleClosings.find((row) => row.id === expanded);
   const workAllowances = useMemo(() => expandedClosing ? projectDailyWorkAllowances(data, expandedClosing) : undefined, [data, expandedClosing]);
+  const cards = [
+    { id: "recent", title: "店舗送信データの確認・承認",
+      description: `営業日付 ${startDate}〜${endDate}。詳細で店舗データと現金照合を確認してから承認します。`, rows: recent },
+    ...(olderPending.length ? [{ id: "older", title: "過去の確認待ち・差戻し",
+      description: "直近5日より前の確認待ち・差戻しデータを確認できます。", rows: olderPending }] : []),
+  ];
   return <div className="grid">
     <div className="grid metrics">
       <Metric label="経理確認待ち" value={`${data.closings.filter((row) => row.status === "submitted").length}件`} />
@@ -84,9 +99,9 @@ function ApprovalView({ data, user, busy, run }: Props) {
       <Metric label="差戻し" value={`${data.closings.filter((row) => row.status === "returned").length}件`} />
       <Metric label="当月承認売上" value={yen.format(data.closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(currentMonth())).reduce((sum, row) => sum + row.sales.totalSales, 0))} />
     </div>
-    <Card title="店舗送信データの確認・承認" description="店舗データと現金照合の全項目を詳細で確認してから承認します。">
-      <Table headers={["営業日", "状態", "総売上", "経費・支払", "営業終了時現金", "照合", "操作"]}>
-        {data.closings.filter((row) => row.status !== "withdrawn").map((row) => {
+    {cards.map(({ id, title, description, rows }) => <Card key={id} title={title} description={description}>
+      <Table headers={["営業日", "状態", "総売上", "経費・支払", "営業終了時現金", "照合", "操作"]} empty="直近5日間の店舗送信データはありません。">
+        {rows.map((row) => {
           const revisionKey = closingReviewKey(row, data.closings);
           const isReviewed = Boolean(reviewed[revisionKey]);
           const monthLock = accountingMonthLockMessage(data, row.businessDate);
@@ -104,9 +119,9 @@ function ApprovalView({ data, user, busy, run }: Props) {
           </div></td></tr>;
         })}
       </Table>
-      {expandedClosing && <ClosingDetail closing={expandedClosing} closings={data.closings} workAllowances={workAllowances} reviewed={Boolean(reviewed[closingReviewKey(expandedClosing, data.closings)])} disabled={busy || Boolean(accountingMonthLockMessage(data, expandedClosing.businessDate))} onReviewed={() => setReviewed((rows) => ({ ...rows, [closingReviewKey(expandedClosing, data.closings)]: true }))} />}
-      {expanded && !expandedClosing && <div className="notice error">対象データが更新されたため、最新データを読み込んでください。</div>}
-    </Card>
+      {expandedClosing && rows.includes(expandedClosing) && <ClosingDetail closing={expandedClosing} closings={data.closings} workAllowances={workAllowances} reviewed={Boolean(reviewed[closingReviewKey(expandedClosing, data.closings)])} disabled={busy || Boolean(accountingMonthLockMessage(data, expandedClosing.businessDate))} onReviewed={() => setReviewed((rows) => ({ ...rows, [closingReviewKey(expandedClosing, data.closings)]: true }))} />}
+      {id === "recent" && expanded && !data.closings.some((row) => row.id === expanded) && <div className="notice error">対象データが更新されたため、最新データを読み込んでください。</div>}
+    </Card>)}
   </div>;
 }
 

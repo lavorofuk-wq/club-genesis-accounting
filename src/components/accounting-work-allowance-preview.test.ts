@@ -1,6 +1,6 @@
 import { createElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { User } from "firebase/auth";
 import type { DailyCast, DailyClosing } from "@/domain/gms";
 import type { AccountingWorkspaceData } from "@/domain/month-accounting";
@@ -84,8 +84,87 @@ function castCells(tree: ReactNode, index = 0) {
   return renderToStaticMarkup(createElement("table", null, createElement("tbody", null, rows[index])));
 }
 beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-09-03T00:30:00+09:00"));
   hooks.values = []; hooks.cursor = 0; hooks.effects = []; hooks.drafts.clear();
   hooks.drafts.set("accounting.approval.expanded", "day-2"); run.mockClear();
+});
+afterEach(() => { vi.useRealTimers(); });
+
+describe("受信承認の直近5暦日と過去の未処理分", () => {
+  const recentTitle = "店舗送信データの確認・承認";
+  const olderTitle = "過去の確認待ち・差戻し";
+  function card(tree: ReactNode, title: string) {
+    const result = elements(tree).find((element) => element.props.title === title);
+    expect(result).toBeDefined();
+    return result!;
+  }
+  function dated(base: DailyClosing, businessDate: string, status: DailyClosing["status"]): DailyClosing {
+    return { ...structuredClone(base), id: `daily-${businessDate}`, businessDate, status };
+  }
+  beforeEach(() => {
+    // UTCでは11/2のため、端末のUTC日付で5日を求める実装を検出する。
+    vi.setSystemTime(new Date("2026-11-03T00:30:00+09:00"));
+    hooks.drafts.set("accounting.approval.expanded", "");
+  });
+
+  it("日本時間の今日と4日前を含め、古い未処理分だけ別カードに残す", () => {
+    const data = fixture(), base = data.closings[0];
+    data.closings = [
+      dated(base, "2026-11-05", "returned"), dated(base, "2026-11-04", "submitted"),
+      dated(base, "2026-11-03", "submitted"), dated(base, "2026-11-02", "approved"),
+      dated(base, "2026-11-01", "withdrawn"), dated(base, "2026-10-31", "returned"), dated(base, "2026-10-30", "approved"),
+      { ...dated(base, "2026-10-29", "submitted"), submittedAt: "2026-11-02T16:00:00Z" },
+      dated(base, "2026-10-28", "returned"), dated(base, "2026-10-27", "approved"), dated(base, "2026-10-26", "withdrawn"),
+    ];
+    const tree = render(data);
+    const dates = (title: string) => [...renderToStaticMarkup(card(tree, title)).matchAll(/<tr><td>(\d{4}-\d{2}-\d{2})<\/td>/g)].map((match) => match[1]);
+    expect(dates(recentTitle)).toEqual(["2026-11-03", "2026-11-02", "2026-10-31", "2026-10-30"]);
+    expect(dates(olderTitle)).toEqual(["2026-10-29", "2026-10-28"]);
+  });
+
+  it("直近の一覧が空でも、過去カードで確認待ちの詳細を開いて承認できる", () => {
+    const data = fixture();
+    data.closings = [dated(data.closings[0], "2026-10-29", "submitted")];
+    let tree = render(data);
+    expect(renderToStaticMarkup(card(tree, recentTitle))).toContain("直近5日間の店舗送信データはありません。");
+    const older = card(tree, olderTitle);
+    expect(button(older, "承認").props.disabled).toBe(true);
+    button(older, "詳細").props.onClick();
+    tree = render(data);
+    expect(renderToStaticMarkup(card(tree, recentTitle))).not.toContain("店舗データプレビュー");
+    const expandedOlder = card(tree, olderTitle);
+    expect(renderToStaticMarkup(expandedOlder)).toContain("店舗データプレビュー");
+    const review = button(detail(expandedOlder), "店舗・現金プレビューの全項目を確認済みにする");
+    expect(review.props.disabled).toBe(false);
+    review.props.onClick();
+    expect(button(card(render(data), olderTitle), "承認").props.disabled).toBe(false);
+  });
+
+  it("一覧から除外した前営業日の現金繰越を照合し、変更時に確認済みを失効させる", () => {
+    const data = fixture(), base = data.closings[0];
+    const previous = dated(base, "2026-10-29", "approved");
+    const current = dated(base, "2026-10-30", "submitted");
+    current.cash.funding = {
+      ...current.cash.funding!, previousClosingId: previous.id, previousBusinessDate: previous.businessDate,
+      previousClosingCash: previous.cash.expectedClosingCash,
+    };
+    data.closings = [current, previous];
+    hooks.drafts.set("accounting.approval.expanded", current.id);
+    let tree = render(data);
+    expect(renderToStaticMarkup(card(tree, recentTitle))).not.toContain(`<tr><td>${previous.businessDate}</td>`);
+    const review = button(detail(tree), "店舗・現金プレビューの全項目を確認済みにする");
+    expect(review.props.disabled).toBe(false);
+    review.props.onClick();
+    expect(button(render(data), "承認").props.disabled).toBe(false);
+
+    previous.cash.funding!.companyTransfer += 100;
+    previous.cash.expectedClosingCash += 100;
+    previous.cash.actualClosingCash += 100;
+    tree = render(data);
+    expect(button(tree, "承認").props.disabled).toBe(true);
+    expect(button(detail(tree), "店舗・現金プレビューの全項目を確認済みにする").props.disabled).toBe(true);
+  });
 });
 
 describe("受信承認の美容室手当・送迎表示", () => {
