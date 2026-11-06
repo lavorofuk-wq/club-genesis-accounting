@@ -164,6 +164,16 @@ describe("日次送信の再編集元と重複営業日の保護", () => {
     ]);
   });
 
+  it("店舗では取消前の送迎を訂正するために入店取消済みの在籍IDを保持する", async () => {
+    memory.values.set("casts", {
+      cancelled: { name: "取消済み", deletedAt: timestamp, entryCancelledAt: timestamp },
+      deleted: { name: "通常削除", deletedAt: timestamp },
+    });
+    const workspace = await loadWorkspaceData("shop");
+    expect(workspace.casts).toEqual([]);
+    expect(workspace.archivedCasts).toEqual([expect.objectContaining({ id: "cancelled" })]);
+  });
+
   it.each([
     { status: "returned" as const, operation: /再編集/ },
     { status: "withdrawn" as const, operation: /再編集/ },

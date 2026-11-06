@@ -155,7 +155,8 @@ export function buildCastSalesRankingRoster(results: Results, casts: CastRecord[
   const bounds = monthBounds(month);
   const entries = new Map(rows.map((row) => [row.id, { id: row.id, name: row.name }]));
   for (const cast of index(casts, "キャスト名簿").values()) {
-    if (entries.has(cast.id) || rewards.get(cast.id)?.trialOnly || cast.status === "trial" || cast.deletedAt || cast.convertedToCastId) continue;
+    if (entries.has(cast.id) || rewards.get(cast.id)?.trialOnly || cast.status === "trial"
+      || cast.deletedAt || cast.entryCancelledAt || cast.convertedToCastId) continue;
     requireValue(cast.status === "active" || cast.status === "departed", `${cast.name || cast.id}の在籍区分を確認できません。`);
     named(cast.name, `${cast.id}のキャスト名`);
     requireValue(validDate(cast.hiredAt), `${cast.name}の採用日を確認できないため、売上順位表の対象月の在籍を判定できません。`);

@@ -46,6 +46,8 @@ export type CastRecord = {
   entryAdvisoryFee?: number;
   convertedFromTrialId?: string;
   convertedToCastId?: string;
+  entryCancelledAt?: string;
+  entryCancellationToken?: string;
   note: string;
   createdAt: string;
   updatedAt: string;
@@ -2082,11 +2084,11 @@ function convertedCastForMonth(
 ) {
   const source = castById.get(masterId);
   const direct = source?.convertedToCastId ? castById.get(source.convertedToCastId) : undefined;
-  if (direct?.hiredAt?.startsWith(month)) return direct;
+  if (!direct?.entryCancelledAt && direct?.hiredAt?.startsWith(month)) return direct;
   // 体入マスタが完全削除済みでも、在籍側に保存した逆参照で同月の履歴を統合する。
   if (!source) {
     return casts.find((candidate) =>
-      candidate.convertedFromTrialId === masterId && candidate.hiredAt?.startsWith(month));
+      !candidate.entryCancelledAt && candidate.convertedFromTrialId === masterId && candidate.hiredAt?.startsWith(month));
   }
   return undefined;
 }
@@ -2102,6 +2104,7 @@ export function castMasterIdentityForMonth(
   // 旧版の物理削除で在籍側マスタだけが消えていても、残存する体入側の変換先IDと
   // 同月regular日次のIDが一致する場合に限り、同一人物として復元する。
   const missingConvertedTargetId = source?.convertedToCastId
+    && !castById.get(source.convertedToCastId)?.entryCancelledAt
     && monthDailyMasterIds?.has(source.convertedToCastId)
     ? source.convertedToCastId
     : undefined;
@@ -2129,6 +2132,7 @@ export function castIntroducerOverrideForAccounting(
   dailyTrialIds: readonly string[] = [],
 ): DailyCast["introducer"] | false {
   const member = castById.get(castId);
+  if (member?.entryCancelledAt) return false;
   const ownSetting = castIntroducerOverrideForMonth(member, month);
   const trialId = member?.hiredAt?.startsWith(`${month}-`) && member.convertedFromTrialId
     ? member.convertedFromTrialId

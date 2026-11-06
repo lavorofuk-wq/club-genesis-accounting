@@ -3,12 +3,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { User } from "firebase/auth";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AccountingWorkspaceData } from "@/domain/month-accounting";
-import type { CastRecord, DailyCast, IntroducerRecord } from "@/domain/gms";
+import type { CastRecord, DailyCast, DailyClosing, IntroducerRecord } from "@/domain/gms";
 
 const drafts = vi.hoisted(() => new Map<string, unknown>());
 type IntroducerSelect = { value: string; onChange: (event: { target: { value: string } }) => void };
 const castForm = vi.hoisted(() => ({
-  buttons: new Map<string, () => void>(),
+  buttons: new Map<string, () => void | Promise<void>>(),
   submit: undefined as undefined | ((event: { preventDefault: () => void }) => Promise<void>),
   introducer: undefined as IntroducerSelect | undefined,
 }));
@@ -20,13 +20,14 @@ vi.mock("./update-drafts", () => ({
   useUpdateDraftBusy: () => undefined,
 }));
 vi.mock("@/lib/firebase/repository", async (importOriginal) => ({
-  ...await importOriginal<typeof import("@/lib/firebase/repository")>(), saveCast: vi.fn(async () => "saved"),
+  ...await importOriginal<typeof import("@/lib/firebase/repository")>(),
+  saveCast: vi.fn(async () => "saved"), cancelCastConversion: vi.fn(async () => undefined),
 }));
 vi.mock("./ui", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./ui")>();
   const collectButtons = (node: ReactNode) => {
     if (Array.isArray(node)) { node.forEach(collectButtons); return; }
-    if (!isValidElement<{ children?: ReactNode; onClick?: () => void }>(node)) return;
+    if (!isValidElement<{ children?: ReactNode; onClick?: () => void | Promise<void> }>(node)) return;
     if (node.type === "button" && node.props.onClick && typeof node.props.children === "string") {
       castForm.buttons.set(node.props.children, node.props.onClick);
     }
@@ -52,7 +53,7 @@ vi.mock("./ui", async (importOriginal) => {
 });
 import { CommonForms } from "./common-forms";
 import { AccountingForms } from "./accounting-forms";
-import { saveCast } from "@/lib/firebase/repository";
+import { cancelCastConversion, saveCast } from "@/lib/firebase/repository";
 
 const user = { uid: "test-user" } as User;
 const data: AccountingWorkspaceData = {
@@ -222,5 +223,69 @@ describe("体入と在籍で共有する月度紹介者", () => {
     castForm.buttons.get("編集")!();
     render(laterMember);
     expect(castForm.introducer?.value).toBe(old.id);
+  });
+});
+
+describe("キャストの入店取消", () => {
+  const hireMonth = "2026-11";
+  const trialMonth = "2026-10";
+  const trial: CastRecord = {
+    id: "trial-cast", status: "trial", name: "花子", legalName: "山田花子", trialDate: `${trialMonth}-23`, convertedToCastId: "active-cast",
+    hourlyRates: {}, trialHourlyRate: 3000, note: "", createdAt: `${trialMonth}-23`, updatedAt: `${hireMonth}-01`,
+  };
+  const active: CastRecord = {
+    id: "active-cast", status: "active", name: trial.name, legalName: trial.legalName, hiredAt: `${hireMonth}-01`, convertedFromTrialId: trial.id,
+    hourlyRates: { [hireMonth]: 4000 }, note: "", createdAt: `${hireMonth}-01`, updatedAt: `${hireMonth}-02`,
+  };
+  const work = (cast: CastRecord, kind: DailyCast["kind"], status: DailyClosing["status"], businessDate: string) => ({
+    id: businessDate, businessDate, status,
+    casts: [{ masterId: cast.id, posCastId: `pos-${cast.id}`, name: cast.name, kind, hours: 4 } as DailyCast],
+  } as DailyClosing);
+  const render = (updates: Partial<AccountingWorkspaceData> = {}) => {
+    castForm.buttons.clear();
+    return renderToStaticMarkup(createElement(CommonForms, {
+      section: "casts", data: { ...data, casts: [trial, active], ...updates }, user, busy: false,
+      run: async (action) => { await action(); return true; },
+    }));
+  };
+  beforeEach(() => { drafts.set("common.casts.month", hireMonth); });
+
+  it("承認済み体入と承認前在籍だけなら取消でき、再照合を案内して体入月へ戻る", async () => {
+    const markup = render({ closings: [
+      work(trial, "trial", "approved", `${trialMonth}-23`),
+      work(active, "regular", "submitted", `${hireMonth}-01`),
+    ] });
+    expect(markup).toContain('class="button danger mini">入店取消</button>');
+    const confirm = vi.fn(() => true);
+    vi.stubGlobal("window", { confirm });
+    try { await castForm.buttons.get("入店取消")!(); } finally { vi.unstubAllGlobals(); }
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining(`${trialMonth}月度の体入キャストに戻しますか？`));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("再送・承認の前にキャスト照合を修正してください。"));
+    expect(cancelCastConversion).toHaveBeenCalledExactlyOnceWith(active.id, active.updatedAt, user);
+    expect(drafts.get("common.casts.month")).toBe(trialMonth);
+    expect(drafts.get("common.casts.tab")).toBe("trial");
+  });
+
+  it("表示月以外の承認済み在籍勤務でも取消を無効にする", () => {
+    const markup = render({ closings: [work(active, "regular", "approved", "2026-12-01")] });
+    expect(markup).toContain('disabled="">入店取消</button>');
+    expect(markup).toContain("承認済みの在籍勤務があるため入店取消できません。");
+  });
+
+  it("採用月の確定済みは確定解除を案内し、元体入のない直接入店には操作を表示しない", () => {
+    const markup = render({ monthStates: [{ month: hireMonth, status: "closed", revision: 1, updatedAt: "", updatedBy: user.uid }] });
+    expect(markup).toContain('disabled="">入店取消</button>');
+    expect(markup).toContain(`入店取消するには${hireMonth}月度の月次確定を解除してください。`);
+    expect(render({ casts: [{ ...active, convertedFromTrialId: undefined }] })).not.toContain(">入店取消</button>");
+  });
+
+  it("取消済み在籍の逆参照を無視して、元体入を再入店できるようにする", () => {
+    drafts.set("common.casts.month", trialMonth);
+    drafts.set("common.casts.tab", "trial");
+    const markup = render({ casts: [{ ...trial, convertedToCastId: undefined }], archivedCasts: [{
+      ...active, entryCancelledAt: `${hireMonth}-02`, deletedAt: `${hireMonth}-02`,
+    }] });
+    expect(markup).toContain(">入店</button>");
+    expect(markup).not.toContain("入店済み");
   });
 });

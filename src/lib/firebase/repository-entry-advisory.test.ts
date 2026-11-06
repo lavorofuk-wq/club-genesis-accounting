@@ -34,7 +34,7 @@ vi.mock("./ready-transaction", () => ({ runReadyTransaction: memory.transaction 
 vi.mock("../client-release", () => ({ assertCurrentClientRelease: vi.fn().mockResolvedValue(undefined) }));
 
 
-import { convertTrialCast, departCast, saveCast } from "./repository";
+import { approveClosing, cancelCastConversion, convertTrialCast, departCast, saveCast } from "./repository";
 import type { CastRecord, IntroducerRecord } from "@/domain/gms";
 import type { IntroducerEntryEvent } from "@/domain/month-accounting";
 import { castIntroducerOverrideForMonth, castTrialRateForMonth } from "@/domain/cast-monthly";
@@ -108,6 +108,73 @@ async function converted() {
   expect(memory.read(entryPath(id))).toMatchObject({ amount: 30000 });
   return getCast(id);
 }
+
+describe("入店取消", () => {
+  it("承認済み体入・未承認在籍の日次を保持したまま元の体入IDへ戻し、同名で入店し直せる", async () => {
+    const active = await converted();
+    const trialDay = { businessDate: "2026-09-01", status: "approved",
+      casts: [{ kind: "trial", masterId: trial.id, hours: 2, hourlyRate: 2000, dailyPayment: 4000 }] };
+    const unapprovedDay = { businessDate: "2026-09-02", status: "submitted", updatedAt: initialTime,
+      checksum: "checksum", submissionId: "submission", casts: [{ kind: "regular", masterId: active.id, hours: 2 }] };
+    memory.write("history/trial-day", trialDay);
+    memory.write("history/unapproved-day", unapprovedDay);
+    vi.setSystemTime(new Date("2026-09-03T03:00:00.000Z"));
+
+    await cancelCastConversion(active.id, active.updatedAt, user);
+
+    const restored = getCast(trial.id);
+    expect(restored).toMatchObject({ status: "trial", trialDate: trial.trialDate, trialHourlyRate: trial.trialHourlyRate });
+    expect(restored.convertedToCastId).toBeUndefined();
+    expect(getCast(active.id)).toMatchObject({ entryCancelledAt: expect.any(String), deletedAt: expect.any(String), deletedBy: user.uid });
+    expect(memory.read("history/trial-day")).toEqual(trialDay);
+    expect(memory.read("history/unapproved-day")).toEqual(unapprovedDay);
+    expect(memory.read(entryPath(active.id))).toMatchObject({ amount: 30000 });
+    expect(memory.read("cashManagementLock")).toBeNull();
+
+    await expect(approveClosing("unapproved-day", unapprovedDay, user)).rejects.toThrow("入店取消済みの在籍キャスト");
+    expect(memory.read("history/unapproved-day")).toEqual(unapprovedDay);
+    const nextId = await convertTrialCast(trial.id, {
+      ...restored, hiredAt: "2026-09-03", hourlyRates: { "2026-09": 3000 },
+    }, user, "2026-09");
+    expect(nextId).not.toBe(active.id);
+    expect(getCast(trial.id).convertedToCastId).toBe(nextId);
+  });
+
+  it("別月の承認済み在籍勤務があれば元の入店登録を保持する", async () => {
+    const active = await converted();
+    memory.write("history/regular-day", { businessDate: "2026-10-05", status: "approved",
+      casts: [{ kind: "regular", masterId: active.id, hours: 2 }] });
+
+    await expect(cancelCastConversion(active.id, active.updatedAt, user)).rejects.toThrow("承認済みの在籍勤務");
+
+    expect(getCast(active.id).deletedAt).toBeUndefined();
+    expect(getCast(trial.id).convertedToCastId).toBe(active.id);
+    expect(memory.read("cashManagementLock")).toBeNull();
+  });
+
+  it("取消の一括保存が拒否されたときは双方の元データを保持し、日次ロックを解放する", async () => {
+    const active = await converted();
+    const originalTrial = getCast(trial.id);
+    memory.update.mockRejectedValue(new Error("PERMISSION_DENIED"));
+
+    await expect(cancelCastConversion(active.id, active.updatedAt, user)).rejects.toThrow("PERMISSION_DENIED");
+
+    expect(getCast(active.id)).toEqual(active);
+    expect(getCast(trial.id)).toEqual(originalTrial);
+    expect(memory.read("cashManagementLock")).toBeNull();
+  });
+
+  it.each(["closing", "closed"])("採用月が%sなら月次確定の解除を要求する", async (status) => {
+    const active = await converted();
+    memory.write("accountingMonthStates/2026-09", { status });
+
+    await expect(cancelCastConversion(active.id, active.updatedAt, user)).rejects.toThrow("先に月次確定を解除");
+
+    expect(getCast(active.id).entryCancelledAt).toBeUndefined();
+    expect(getCast(trial.id).convertedToCastId).toBe(active.id);
+    expect(memory.read("cashManagementLock")).toBeNull();
+  });
+});
 
 describe("在籍化後の入店顧問料0円訂正", () => {
   it.each(["2026-09-20T03:00:00.000Z", "2026-10-01T03:00:00.000Z"])("%sの保存で原本と0円履歴をまとめて更新する", async (time) => {

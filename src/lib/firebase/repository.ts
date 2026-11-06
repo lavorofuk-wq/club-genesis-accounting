@@ -62,7 +62,7 @@ import {
 import { staffMonthlyRates } from "@/domain/staff-rates";
 import { validateAccountingExpenseInputs, validateConsumptionTaxRate } from "@/domain/accounting-expenses";
 import { castAccountingAttendanceSources, castAccountingInputTotals, normalizeCastAccountingInputs } from "@/domain/cast-accounting-inputs";
-import { castHasApprovedWork, isCastMonth } from "@/domain/cast-monthly";
+import { castHasApprovedRegularWork, castHasApprovedWork, isCastMonth } from "@/domain/cast-monthly";
 import { buildCastSalesRankingRoster } from "@/domain/cast-sales-ranking";
 import type { TransportSettings, TransportMonth } from "@/domain/transport";
 import { normalizeTransportSettings, normalizeTransportMonth, transportCastDays, transportAttendance, transportUnresolvedLegacyInputs } from "@/domain/transport";
@@ -129,7 +129,8 @@ const DAILY_CLOSING_DELETION_LOCK_TTL_MS = 120_000;
 
 type CashManagementLock = {
   id: string;
-  operation: "submit" | "delete" | "approve";
+  operation: "submit" | "delete" | "approve" | "cancelCastConversion";
+  month?: string;
   token: string;
   owner: string;
   acquiredAtMs: number;
@@ -386,10 +387,11 @@ async function acquireDailyClosingDeletionLock(
   return stored;
 }
 
-async function acquireCashManagementLock(id: string, operation: CashManagementLock["operation"], user: User) {
+async function acquireCashManagementLock(id: string, operation: CashManagementLock["operation"], user: User, month?: string) {
   const serverClock = await firebaseServerNow();
   const pending: CashManagementLock = {
     id, operation, token: secureRandomUUID(), owner: user.uid,
+    ...(month ? { month } : {}),
     acquiredAtMs: serverOrderTimestamp(),
     expiresAt: serverClock.milliseconds + CASH_MANAGEMENT_LOCK_TTL_MS,
   };
@@ -402,7 +404,7 @@ async function acquireCashManagementLock(id: string, operation: CashManagementLo
   }, { applyLocally: false });
   const stored = result.snapshot.val() as CashManagementLock | null;
   if (!result.committed || !stored || stored.token !== pending.token || stored.owner !== user.uid
-    || stored.id !== id || stored.operation !== operation || !Number.isSafeInteger(stored.acquiredAtMs)) {
+    || stored.id !== id || stored.operation !== operation || stored.month !== month || !Number.isSafeInteger(stored.acquiredAtMs)) {
     throw new Error("現金データの更新ロックを取得できませんでした。最新データを読み込んでやり直してください。");
   }
   return stored;
@@ -421,7 +423,8 @@ async function assertCashManagementLockOwned(lock: CashManagementLock) {
   const [snapshot, serverClock] = await Promise.all([get(rootRef("cashManagementLock")), firebaseServerNow()]);
   const existing = snapshot.val() as CashManagementLock | null;
   if (!existing || existing.token !== lock.token || existing.owner !== lock.owner
-    || existing.id !== lock.id || existing.operation !== lock.operation || existing.expiresAt <= serverClock.milliseconds) {
+    || existing.id !== lock.id || existing.operation !== lock.operation || existing.month !== lock.month
+    || existing.expiresAt <= serverClock.milliseconds) {
     throw new Error("現金データの更新ロックが期限切れまたは更新済みです。最新データを読み込み、現金を再確認してください。");
   }
 }
@@ -882,6 +885,7 @@ async function applyCastAndIntroducerPlansAtomically(
 async function applyConversionPlanWithVerification(
   plan: Record<string, unknown>,
   isApplied: () => Promise<boolean>,
+  operation = "在籍化",
 ) {
   let lastError: unknown;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -895,7 +899,7 @@ async function applyConversionPlanWithVerification(
       } catch {
         if (attempt === 1) {
           throw new AmbiguousConversionWriteError(
-            "在籍化の保存結果を確認できませんでした。通信状態を確認し、最新データを読み込んでから在籍・体入データの状態を確認してください。",
+            `${operation}の保存結果を確認できませんでした。通信状態を確認し、最新データを読み込んでから在籍・体入データの状態を確認してください。`,
           );
         }
       }
@@ -1125,7 +1129,8 @@ export async function loadWorkspaceData(role?: Role): Promise<AccountingWorkspac
     adjustments: Object.entries((adjustments?.val() || {}) as Record<string, Omit<MonthlyAdjustments, "month">>)
       .map(([month, row]) => normalizeMonthlyAdjustments({ month, ...row } as MonthlyAdjustments)),
     cashFloat: Number(cashFloat.val() ?? 200000),
-    archivedCasts: accountingAccess ? allCastRows.filter((row) => Boolean(row.deletedAt)) : [],
+    // 店舗でも、取消前のIDを参照する送迎登録の確認・訂正に使う。
+    archivedCasts: allCastRows.filter((row) => row.deletedAt && (accountingAccess || row.entryCancelledAt)),
     archivedStaff: accountingAccess ? allStaffRows.filter((row) => Boolean(row.deletedAt)) : [],
     introducerEntryEvents: entryEventRows,
     introducerDeletionCommits: introducerDeletionCommitRows,
@@ -1628,6 +1633,63 @@ export async function convertTrialCast(
   return activeId;
 }
 
+export async function cancelCastConversion(activeId: string, expectedUpdatedAt: string, user: User) {
+  await requireUser(user);
+  const activePath = `casts/${activeId}`;
+  const initial = (await get(rootRef(activePath))).val() as CastRecord | null;
+  if (!initial || initial.status !== "active" || initial.deletedAt || !initial.convertedFromTrialId || !validDate(initial.hiredAt)) {
+    throw new Error("元の体入登録がある在籍キャストだけ入店を取り消せます。");
+  }
+  assertFresh(initial, expectedUpdatedAt);
+  const month = initial.hiredAt!.slice(0, 7);
+  const trialPath = `casts/${initial.convertedFromTrialId}`;
+  const lock = await acquireCashManagementLock(activeId, "cancelCastConversion", user, month);
+  try {
+    const [activeSnapshot, trialSnapshot, history, entryEvents] = await Promise.all([
+      get(rootRef(activePath)), get(rootRef(trialPath)), get(rootRef("history")), get(rootRef("introducerEntryEvents")),
+    ]);
+    const active = activeSnapshot.val() as (CastRecord & ConversionLockCarrier) | null;
+    const trial = trialSnapshot.val() as (CastRecord & ConversionLockCarrier) | null;
+    if (!active || active.status !== "active" || active.deletedAt
+      || active.hiredAt !== initial.hiredAt || active.convertedFromTrialId !== initial.convertedFromTrialId) {
+      throw new Error("在籍キャストが更新されています。最新データを読み込んでください。");
+    }
+    assertFresh(active, expectedUpdatedAt);
+    if (!trial || trial.status !== "trial" || trial.deletedAt || trial.convertedToCastId !== activeId) {
+      throw new Error("元の体入登録を確認できないため入店を取り消せません。");
+    }
+    assertConversionUnlocked(active);
+    assertConversionUnlocked(trial);
+    if (castHasApprovedRegularWork(asArray<DailyClosing>(history.val()).map(normalizeDailyClosing), activeId)) {
+      throw new Error("承認済みの在籍勤務があるため入店を取り消せません。");
+    }
+    const eventMonths = Object.entries((entryEvents.val() || {}) as Record<string, Record<string, IntroducerEntryEvent>>)
+      .filter(([eventMonth, entries]) => isCastMonth(eventMonth) && Number(entries?.[activeId]?.amount) > 0)
+      .map(([eventMonth]) => eventMonth);
+    await Promise.all([...new Set([month, ...eventMonths])].map(assertMonthOpen));
+    await assertCashManagementLockOwned(lock);
+    const timestamp = nextEventTimestamp(now(), active.updatedAt);
+    await applyConversionPlanWithVerification({
+      [`${activePath}/entryCancelledAt`]: timestamp,
+      [`${activePath}/entryCancellationToken`]: lock.token,
+      [`${activePath}/deletedAt`]: timestamp,
+      [`${activePath}/deletedBy`]: user.uid,
+      [`${activePath}/previousUpdatedAt`]: active.updatedAt,
+      [`${activePath}/updatedAt`]: timestamp,
+      [`${trialPath}/convertedToCastId`]: null,
+      [`${trialPath}/previousUpdatedAt`]: trial.updatedAt,
+      [`${trialPath}/updatedAt`]: nextEventTimestamp(timestamp, trial.updatedAt),
+    }, async () => {
+      const [savedActive, savedTrial] = await Promise.all([get(rootRef(activePath)), get(rootRef(trialPath))]);
+      return savedActive.val()?.entryCancellationToken === lock.token
+        && savedTrial.val()?.convertedToCastId !== activeId;
+    }, "入店取消");
+    await releaseClaimAfterEntitySaved("castNameClaims", claimKey(active.name), activeId, "入店取消");
+  } finally {
+    await releaseCashManagementLock(lock).catch(() => undefined);
+  }
+}
+
 export async function departCast(id: string, date: string, expectedUpdatedAt: string, user: User) {
   await requireUser(user);
   if (!validDate(date)) throw new Error("退店日はYYYY-MM-DD形式の実在する日付で入力してください。");
@@ -2120,6 +2182,13 @@ export async function saveCashFloat(amount: number, user: User) {
   await requireUser(user); await set(rootRef("config/cashFloat"), amount);
 }
 
+async function assertNoCancelledCastWork(closing: DailyClosing, message: string) {
+  const activeIds = new Set(Object.values(closing.casts || {}).flatMap((row) =>
+    row?.kind === "regular" && row.masterId ? [row.masterId] : []));
+  const masters = await Promise.all([...activeIds].map((id) => get(rootRef(`casts/${id}`))));
+  if (masters.some((snapshot) => snapshot.val()?.entryCancelledAt)) throw new Error(message);
+}
+
 export async function submitClosing(value: DailyClosing, user: User, expectedUpdatedAt?: string) {
   await requireUser(user, ["shop", "op"]);
   if (!value.posSnapshot) throw new Error("POS原本がありません。POS JSONを取り込み直してください。");
@@ -2148,6 +2217,7 @@ export async function submitClosing(value: DailyClosing, user: User, expectedUpd
       throw new Error("現在は使用できない編集情報が含まれています。店舗の送信済みデータから再編集してください。");
     }
     validateDailyClosingForSubmission(value, before);
+    await assertNoCancelledCastWork(value, "入店取消済みの在籍キャストが含まれています。キャストの照合を修正してから送信してください。");
     const monthStates = Object.entries((monthStatesSnapshot.val() || {}) as Record<string, AccountingMonthState>)
       .map(([month, state]) => ({ ...state, month }));
     assertCashLedgerChange(before ? { ...before, id: value.id } : null, value, asArray<DailyClosing>(allSnapshot.val()), monthStates);
@@ -2306,6 +2376,7 @@ export async function approveClosing(id: string, expected: ClosingRevision, user
     const selected = all.find((row) => row.id === id);
     if (!selected || selected.status !== "submitted") throw new Error("経理確認待ちのデータだけ承認できます。");
     assertClosingRevision(selected, expected);
+    await assertNoCancelledCastWork(selected, "入店取消済みの在籍キャストが含まれています。店舗へ差し戻し、キャストの照合を修正してください。");
     const cashIssues = [...cashDayIssues(selected, all),
       ...cashLedgerIssues(all.filter((row) => row.businessDate <= selected.businessDate), selected.businessDate.slice(0, 7))];
     if (cashIssues.length) throw new Error(`現金記録を確認できないため承認できません。${[...new Set(cashIssues)].join("\n")}`);

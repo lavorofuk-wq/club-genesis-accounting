@@ -2,20 +2,20 @@
 
 import { useEffect, useMemo, useRef } from "react";
 import type { User } from "firebase/auth";
-import { castHasApprovedWork, castIntroducerForDisplay, castIntroducerOverrideForMonth, castSharedIntroducerMemberForMonth, castStatusForMonth, castTrialRateForMonth } from "@/domain/cast-monthly";
+import { castHasApprovedRegularWork, castHasApprovedWork, castIntroducerForDisplay, castIntroducerOverrideForMonth, castSharedIntroducerMemberForMonth, castStatusForMonth, castTrialRateForMonth } from "@/domain/cast-monthly";
 import type { CastRecord, DriverRecord, IntroducerFeeType, IntroducerRecord, LiquorRecord, StaffRecord, WorkspaceData } from "@/domain/gms";
 import { dayAfterIsoDate, rateForMonth } from "@/domain/gms";
 import { monthlyRatesForSave } from "@/domain/master-pay-validation";
 import type { AccountingWorkspaceData } from "@/domain/month-accounting";
 import { STAFF_MONTHLY_RATES_START_MONTH, staffMonthlyRateForMonth, staffMonthlyRates, staffMonthlyRatesStartMonth } from "@/domain/staff-rates";
 import {
-  convertTrialCast, convertTrialStaff, deleteCast, deleteDriver, deleteIntroducer, deleteLiquor, deleteStaff,
+  cancelCastConversion, convertTrialCast, convertTrialStaff, deleteCast, deleteDriver, deleteIntroducer, deleteLiquor, deleteStaff,
   departCast, departStaff, restoreCast, restoreStaff, saveCashFloat, saveCast, saveDriver, saveIntroducer, saveLiquor, saveStaff
 } from "@/lib/firebase/repository";
 import { Card, Field, Modal, MoneyInput, StatusPill, Table, currentMonth, today, yen } from "./ui";
 import { useRecoverableState } from "./update-drafts";
 
-type CommonWorkspaceData = WorkspaceData & Partial<Pick<AccountingWorkspaceData, "archivedCasts" | "introducerMonthEvents" | "introducerDeletionCommits">>;
+type CommonWorkspaceData = WorkspaceData & Partial<Pick<AccountingWorkspaceData, "archivedCasts" | "introducerMonthEvents" | "introducerDeletionCommits" | "monthStates">>;
 type Props = { data: CommonWorkspaceData; user: User; busy: boolean; section: "casts" | "staff" | "drivers" | "introducers" | "liquor" | "cash"; run: (action: () => Promise<unknown>, message: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void };
 
 function useCommonDirty(onDirtyChange: Props["onDirtyChange"], dirty: boolean) {
@@ -49,6 +49,16 @@ function promptDepartureDate(month?: string) {
     return null;
   }
   return value;
+}
+
+function castEntryCancellationReason(cast: CastRecord, trialMonth: string | undefined, data: CommonWorkspaceData) {
+  if (!trialMonth) return "元の体入キャストを確認できないため入店取消できません。";
+  if (castHasApprovedRegularWork(data.closings, cast.id)) return "承認済みの在籍勤務があるため入店取消できません。";
+  const hireMonth = cast.hiredAt?.slice(0, 7);
+  const state = data.monthStates?.find((row) => row.month === hireMonth);
+  if (state?.status === "closing") return `${hireMonth}月度の月次確定処理が完了するまで入店取消できません。`;
+  if (state?.status === "closed") return `入店取消するには${hireMonth}月度の月次確定を解除してください。`;
+  return "";
 }
 
 export function CommonForms(props: Props) {
@@ -123,6 +133,17 @@ function CastManager({ data, user, busy, run, onDirtyChange }: Props) {
     setEditing(converting ? { ...value, status: "active", hiredAt: row.trialDate && row.trialDate > currentDate ? row.trialDate : currentDate, hourlyRates: {} } : value);
   };
 
+  const cancelEntry = async (row: CastRecord, trialMonth: string) => {
+    const hasUnapprovedWork = data.closings.some((closing) => closing.status !== "approved"
+      && closing.casts.some((cast) => cast.kind === "regular" && cast.masterId === row.id));
+    const recheck = hasUnapprovedWork ? "\n承認前の日次は残ります。再送・承認の前にキャスト照合を修正してください。" : "";
+    if (!window.confirm(`「${row.name}」の入店を取り消し、${trialMonth}月度の体入キャストに戻しますか？\n入店顧問料も取り消します。${recheck}`)) return;
+    if (await run(() => cancelCastConversion(row.id, row.updatedAt, user), "入店を取り消し、元の体入キャストに戻しました。")) {
+      setMonth(trialMonth);
+      setTab("trial");
+    }
+  };
+
   return <div className="grid">
     <Card><div className="month-toolbar"><Field label="対象月"><input className="input" type="month" value={month} disabled={busy || Boolean(editing)} onChange={(event) => {
       const next = event.target.value;
@@ -136,8 +157,14 @@ function CastManager({ data, user, busy, run, onDirtyChange }: Props) {
           const terms = castIntroducerForDisplay(row, month, data);
           const canRegisterDeparture = row.status === "active";
           const hasApprovedWork = canRegisterDeparture && castHasApprovedWork(data.closings, knownCasts, month, row.id);
-          const converted = tab === "trial" ? knownCasts.find((item) => item.id === row.convertedToCastId || item.convertedFromTrialId === row.id) : undefined;
+          const converted = tab === "trial" ? knownCasts.find((item) => !item.entryCancelledAt
+            && (item.id === row.convertedToCastId || item.convertedFromTrialId === row.id)) : undefined;
           const shared = castSharedIntroducerMemberForMonth(row, month, knownCasts);
+          const hasEntryConversion = row.status === "active" && Boolean(row.convertedFromTrialId);
+          const entryTrial = hasEntryConversion ? data.casts.find((item) => item.id === row.convertedFromTrialId
+            && item.status === "trial" && item.convertedToCastId === row.id && !item.deletedAt) : undefined;
+          const trialMonth = entryTrial?.trialDate && isValidIsoDate(entryTrial.trialDate) ? entryTrial.trialDate.slice(0, 7) : undefined;
+          const cancelReason = hasEntryConversion ? castEntryCancellationReason(row, trialMonth, data) : "";
           return <tr key={row.id}>
             <td><strong>{row.name}</strong></td><td>{row.legalName || "—"}</td><td>{rowRate > 0 ? yen.format(rowRate) : "—"}</td>
             <td>{tab === "trial" ? row.trialDate : tab === "departed" ? row.departedAt : row.hiredAt}</td>
@@ -148,6 +175,9 @@ function CastManager({ data, user, busy, run, onDirtyChange }: Props) {
                 const date = promptDepartureDate(month);
                 if (date) void run(() => departCast(row.id, date, row.updatedAt, user), "退店を登録しました。");
               }}>退店</button>}
+              {hasEntryConversion && <button type="button" className="button danger mini" disabled={busy || Boolean(cancelReason)} onClick={() => {
+                if (trialMonth && !cancelReason) return cancelEntry(row, trialMonth);
+              }}>入店取消</button>}
               {tab === "trial" && (row.convertedToCastId || converted
                 ? <StatusPill tone="good">{converted?.hiredAt ? `${converted.hiredAt} 入店` : "入店済み"}</StatusPill>
                 : <button className="button secondary mini" disabled={busy} onClick={() => begin(row, "conversion")}>入店</button>)}
@@ -157,7 +187,8 @@ function CastManager({ data, user, busy, run, onDirtyChange }: Props) {
                 const message = tab === "trial" ? `体入キャスト「${row.name}」を完全削除しますか？\n過去の送信済み日次データは削除されません。` : `「${row.name}」を完全削除しますか？`;
                 if (window.confirm(message)) void run(() => deleteCast(row.id, row.updatedAt, user), "キャストデータを完全削除しました。");
               }}>完全削除</button>}
-            </div>{hasApprovedWork && <small className="muted">対象月に承認済みの勤務があるため退店できません。</small>}</td>
+            </div>{hasApprovedWork && <div><small className="muted">対象月に承認済みの勤務があるため退店できません。</small></div>}
+            {cancelReason && <div><small className="muted">{cancelReason}</small></div>}</td>
           </tr>;
         })}
       </Table>

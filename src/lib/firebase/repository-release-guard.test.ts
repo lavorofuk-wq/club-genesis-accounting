@@ -39,6 +39,7 @@ const snapshot = { month } as MonthlyAccountingSnapshot;
 const operations: Record<string, () => Promise<unknown>> = {
   saveCast: () => repository.saveCast({ name: "キャスト", legalName: "本名", status: "active" }, user),
   convertTrialCast: () => repository.convertTrialCast("cast-1", { hiredAt: date }, user),
+  cancelCastConversion: () => repository.cancelCastConversion("cast-1", updatedAt, user),
   departCast: () => repository.departCast("cast-1", date, updatedAt, user),
   restoreCast: () => repository.restoreCast("cast-1", updatedAt, user),
   deleteCast: () => repository.deleteCast("cast-1", updatedAt, user),

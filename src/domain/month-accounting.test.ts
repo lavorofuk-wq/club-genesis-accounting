@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { calculateCashFunding, cashFundingContext } from "./cash-funding";
 import { legacyBottleSourceKey } from "./gms";
 import { calculateCastWithholding } from "./cast-withholding";
-import { castIntroducerForDisplay, castSharedIntroducerMemberForMonth } from "./cast-monthly";
+import { castHasApprovedRegularWork, castIntroducerForDisplay, castSharedIntroducerMemberForMonth, castStatusForMonth } from "./cast-monthly";
+import { buildCastSalesRankingRoster } from "./cast-sales-ranking";
 import type {
   CastRecord,
   CastReward,
@@ -2899,6 +2900,68 @@ describe("キャスト月度設定", () => {
     attendanceAdvisoryEnabled: true, attendanceAdvisoryFee: 500,
     entryAdvisoryEnabled: true, entryAdvisoryFee: 5_000,
   };
+
+  it("入店取消の勤務判定は営業月を問わず本人IDの承認済み在籍行だけを見る", () => {
+    const trial = approvedClosing({ casts: [
+      dailyCast({ kind: "trial", masterId: "trial" }),
+      dailyCast({ kind: "trial", posCastId: "old-trial-pos" }),
+    ] });
+    const another = approvedClosing({ casts: [dailyCast({ masterId: "same-name-other-cast" })] });
+    const pending = approvedClosing({ status: "submitted", casts: [dailyCast()] });
+    const returned = approvedClosing({ status: "returned", returnedFromStatus: "approved", casts: [dailyCast()] });
+    const later = approvedClosing({ businessDate: "2026-10-02", casts: [dailyCast()] });
+    expect(castHasApprovedRegularWork([trial, another, pending, returned], "cast-1")).toBe(false);
+    expect(castHasApprovedRegularWork([trial, another, pending, returned, later], "cast-1")).toBe(true);
+  });
+
+  it("入店取消は体入時給・日払いを元IDに保持し、バック・売上報酬・入店顧問料を再計上しない", () => {
+    const trial = cast({ id: "trial", status: "trial", hiredAt: undefined, trialDate: "2026-09-01",
+      convertedToCastId: "cast-1", hourlyRates: {}, trialHourlyRate: 2_000 });
+    const regular = cast({ hiredAt: "2026-09-02", convertedFromTrialId: trial.id,
+      introducerId: selectedTerms.id, entryAdvisoryFee: 5_000,
+      monthlyIntroducers: { [month]: selectedTerms } });
+    const closing = approvedClosing({ businessDate: "2026-09-01", casts: [dailyCast({
+      masterId: trial.id, kind: "trial", hours: 4, hourlyRate: 2_000, dailyPayment: 8_000,
+      honShimeiCount: 1, honShimeiSales: 1_300_000, introducer: priorTerms,
+    })] });
+    const source = workspace({ casts: [trial, regular], introducers: [introducer(selectedTerms)], closings: [closing] });
+    const entry: IntroducerEntryEvent = {
+      id: regular.id, month, castId: regular.id, castName: regular.name, hiredAt: regular.hiredAt!,
+      introducerId: selectedTerms.id, introducerName: selectedTerms.name, feeType: selectedTerms.feeType,
+      amount: 5_000, createdAt: regular.createdAt, createdBy: "accounting-user",
+      updatedAt: regular.updatedAt, updatedBy: "accounting-user",
+    };
+    const reassigned = introducerMonthEvent({ state: "reassigned", castId: regular.id, introducer: selectedTerms });
+    const before = calculateMonthlyAccounting(source, month, adjustments(), [entry], [reassigned]);
+    expect(before.castRewards[0]).toMatchObject({ id: regular.id, honShimeiBack: 1_000, salesReward: 780_000 });
+    expect(before.introducerPayments[0]).toMatchObject({ introducerId: selectedTerms.id, entryAdvisory: 5_000 });
+    const raw = structuredClone({ closings: source.closings, entry, reassigned });
+
+    const restored = { ...trial, convertedToCastId: undefined };
+    const cancelled = { ...regular, entryCancelledAt: "2026-10-01T00:00:00Z", deletedAt: "2026-10-01T00:00:00Z" };
+    const afterSource = { ...source, casts: [restored], archivedCasts: [cancelled] };
+    const after = calculateMonthlyAccounting(afterSource, month, adjustments(), [entry], [reassigned]);
+    expect(after.castRewards).toEqual([expect.objectContaining({
+      id: trial.id, trialOnly: true, hourlyPay: 8_000, dailyPayment: 8_000, honShimeiBack: 0,
+      banaiShimeiBack: 0, dohanBack: 0, bottleBack: 0, drinkBack: 0, salesReward: 0, netPay: 0,
+    })]);
+    expect(after.castSalesReports[0]).toMatchObject({ id: trial.id, totals: { backTotal: 0, honShimeiSales: 1_300_000 } });
+    expect(after.introducerPayments).toEqual([]);
+    expect(after.balance.introducer).toBe(0);
+    expect(castStatusForMonth(restored, month)).toBe("trial");
+    expect(buildCastSalesRankingRoster(after, [restored, cancelled], month).entries).toEqual([]);
+    expect(canFinalizeMonthlyAccounting(afterSource, month, adjustments(), false, [entry], [reassigned]).integrityIssues).toEqual([]);
+    expect({ closings: source.closings, entry, reassigned }).toEqual(raw);
+
+    // 旧体入マスタが存在しない場合も、取消済み在籍の逆参照で体入報酬を再統合しない。
+    const historical = calculateMonthlyAccounting({
+      ...source, casts: [], archivedCasts: [{ ...cancelled, monthlyIntroducers: undefined }],
+    },
+      month, adjustments(), [entry], [reassigned]);
+    expect(historical.castRewards[0]).toMatchObject({ id: trial.id, trialOnly: true, honShimeiBack: 0 });
+    expect(historical.introducerPayments).toEqual([]);
+    expect(castSharedIntroducerMemberForMonth(trial, month, [trial, cancelled])).toBe(trial);
+  });
 
   it("月途中の紹介者変更を承認済みの日次全体へ適用し、紹介者なしで全費目を0円にする", () => {
     const member = cast({ hiredAt: "2026-09-01", introducerId: priorTerms.id });

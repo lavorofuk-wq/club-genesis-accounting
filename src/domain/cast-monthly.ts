@@ -10,7 +10,7 @@ type CastDisplayData = Pick<WorkspaceData, "closings" | "introducers">
 export const isCastMonth = (month: string) => /^\d{4}-(0[1-9]|1[0-2])$/.test(month);
 
 export function castStatusForMonth(cast: CastRecord, month: string): PersonStatus | undefined {
-  if (!isCastMonth(month) || cast.deletedAt) return undefined;
+  if (!isCastMonth(month) || cast.deletedAt || cast.entryCancelledAt) return undefined;
   if (cast.status === "trial") return cast.trialDate?.slice(0, 7) === month ? "trial" : undefined;
   if (!cast.hiredAt || cast.hiredAt.slice(0, 7) > month) return undefined;
   const departureMonth = cast.departedAt?.slice(0, 7);
@@ -21,6 +21,11 @@ export function castStatusForMonth(cast: CastRecord, month: string): PersonStatu
 
 export function castHasApprovedWork(closings: DailyClosing[], casts: CastRecord[], month: string, castId: string) {
   return castAccountingAttendanceDays(closings, casts, month, castId).length > 0;
+}
+
+export function castHasApprovedRegularWork(closings: DailyClosing[], activeId: string): boolean {
+  return closings.some((closing) => closing.status === "approved"
+    && closing.casts?.some((row) => row.kind === "regular" && row.masterId === activeId));
 }
 
 export function castTrialRateOverrideForMonth(cast: CastRecord | undefined, month: string) {
@@ -41,7 +46,7 @@ export function castIntroducerOverrideForMonth(cast: CastRecord | undefined, mon
 export function castSharedIntroducerMemberForMonth(cast: CastRecord, month: string, casts: readonly CastRecord[]): CastRecord {
   if (cast.status !== "trial" || !cast.convertedToCastId) return cast;
   const target = casts.find((row) => row.id === cast.convertedToCastId);
-  return target?.hiredAt?.startsWith(`${month}-`) ? target : cast;
+  return !target?.entryCancelledAt && target?.hiredAt?.startsWith(`${month}-`) ? target : cast;
 }
 
 export function castIntroducerForDisplay(

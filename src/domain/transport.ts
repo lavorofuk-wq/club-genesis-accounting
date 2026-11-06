@@ -1,5 +1,5 @@
 import { castIdentityForMonth, type CastAccountingInput, type DailyClosing, type MonthlyAdjustments, type WorkspaceData } from "./gms";
-import { normalizeCastAccountingInputs, resolveCastAccountingInputs } from "./cast-accounting-inputs";
+import { approvedTrialAttendanceForCancelledEntry, normalizeCastAccountingInputs, resolveCastAccountingInputs } from "./cast-accounting-inputs";
 
 export const TRANSPORT_AMOUNTS = [500, 1000, 1500, 2000] as const;
 export type TransportSettings = {
@@ -183,6 +183,8 @@ export function applyTransport(data: WorkspaceData, month: string, adjustments: 
     const consumed = new Set<string>();
     const added: CastAccountingInput[] = [];
     const identity = castIdentity(data, month);
+    const castById = new Map(data.casts.map((cast) => [cast.id, cast]));
+    const restoredOverrides = new Map<string, number>();
     const checkSource = (id: string, businessDate: string, kind: "cast" | "driver", record: CastTransportDay | DriverTransportDay, nonzero: boolean) => {
       if (!businessDate.startsWith(`${month}-`)) { issues.push(`${businessDate}の送迎記録が対象月と一致しません。`); return false; }
       if (!nonzero) return false;
@@ -205,16 +207,30 @@ export function applyTransport(data: WorkspaceData, month: string, adjustments: 
         if (consumed.has(id)) issues.push(`${input.castName}の旧送迎入力が複数の送迎記録に関連付いています。`);
         consumed.add(id);
       }
-      if (!checkSource(castId, businessDate, "cast", record, record.amount > 0)) continue;
+      const restored = approvedTrialAttendanceForCancelledEntry(data.closings, castById.get(castId), month, { ...record, businessDate });
+      const targetId = restored ? identity(restored.row) : castId;
+      if (restored) {
+        const key = targetId + "/" + businessDate;
+        const current = records.casts[targetId]?.[businessDate];
+        if (record.amount > 0 && (current || (restoredOverrides.get(key) || 0) > 0)) {
+          issues.push(`${businessDate}・${restored.row.name}の送迎記録が入店取消後の同じ出勤日に重複しています。送迎画面で確認してください。`);
+          continue;
+        }
+        if (!current && !restoredOverrides.get(key)) restoredOverrides.set(key, record.amount);
+      }
+      if (!checkSource(targetId, businessDate, "cast", record, record.amount > 0)) continue;
       const id = `transport_${castId}_${businessDate}`;
       if (inputs.some((input) => input.id === id)) { issues.push("送迎記録とキャスト入力のIDが重複しています。"); continue; }
-      added.push({ id, castId, castName: data.casts.find((row) => row.id === castId)?.name || castId,
+      added.push({ id, castId: targetId, castName: castById.get(targetId)?.name || restored?.row.name || targetId,
         kind: "transport", label: "送迎代", amount: record.amount, businessDate,
         attendanceClosingId: record.attendanceClosingId, attendanceIndex: record.attendanceIndex });
     }
     const closings = data.closings.map((closing) => !closing.businessDate.startsWith(`${month}-`) ? closing : {
-      ...closing, casts: (closing.casts || []).map((row) => records.casts[identity(row)]?.[closing.businessDate] === undefined
-        ? row : { ...row, transportFee: 0 }),
+      ...closing, casts: (closing.casts || []).map((row) => {
+        const castId = identity(row);
+        return records.casts[castId]?.[closing.businessDate] || restoredOverrides.has(castId + "/" + closing.businessDate)
+          ? { ...row, transportFee: 0 } : row;
+      }),
     });
     const driverRemoteAllowance = { ...adjustments.driverRemoteAllowance };
     for (const [driverId, days] of Object.entries(records.drivers)) for (const [businessDate, record] of Object.entries(days)) {

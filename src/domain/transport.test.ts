@@ -211,6 +211,55 @@ describe("既存給与を保持する送迎境界条件", () => {
     expect(transportCastDays(data, month, cast.id).map((row) => row.amount)).toEqual([1500, 500]);
   });
 
+  it.each([1500, 0])("入店取消後も元体入への送迎上書き%s円を一度だけ適用する", (amount) => {
+    const trial: CastRecord = { ...cast, id: "trial-1", status: "trial", trialDate: month + "-02" };
+    const cancelled = { ...cast, hiredAt: month + "-03", convertedFromTrialId: trial.id,
+      deletedAt: month + "-05T00:00:00Z", entryCancelledAt: month + "-05T00:00:00Z" };
+    const data = withRecord(workspace([closing("02", { casts: [dailyCast({ masterId: trial.id, kind: "trial", transportFee: 500 })] })],
+      adjustments([legacy("old")])), record(amount, ["old"]));
+    data.casts = [trial, cancelled];
+    const original = structuredClone(data);
+    const calculated = reward(data);
+    expect(calculated.applied.issues).toEqual([]);
+    expect(calculated.rewards).toEqual([expect.objectContaining({ id: trial.id, trialOnly: true, transportFee: amount })]);
+    expect(calculated.sales[0].totals.transportFee).toBe(amount);
+    expect(calculated.applied.closings[0].casts[0].transportFee).toBe(0);
+    expect(data).toEqual(original);
+  });
+
+  it("根拠が別人または未承認なら入店取消の送迎を引き継がない", () => {
+    const trial: CastRecord = { ...cast, id: "trial-1", status: "trial" };
+    const cancelled = { ...cast, hiredAt: month + "-03", convertedFromTrialId: trial.id,
+      entryCancelledAt: month + "-05T00:00:00Z" };
+    const day = closing("02", { casts: [dailyCast({ masterId: "other", kind: "trial", transportFee: 500 })] });
+    const data = withRecord(workspace([day]), record(1500));
+    data.casts = [trial, cancelled];
+    expect(applyTransport(data, month, data.adjustments[0])).toMatchObject({
+      issues: [expect.stringContaining("出勤がありません")], adjustments: { castInputs: [] },
+    });
+    day.casts[0].masterId = trial.id;
+    day.status = "submitted";
+    expect(applyTransport(data, month, data.adjustments[0])).toMatchObject({
+      issues: [expect.stringContaining("出勤がありません")], adjustments: { castInputs: [] },
+    });
+  });
+
+  it("入店取消で送迎が重複した場合は旧在籍側を0円に訂正すれば解消する", () => {
+    const trial: CastRecord = { ...cast, id: "trial-1", status: "trial" };
+    const cancelled = { ...cast, hiredAt: month + "-03", convertedFromTrialId: trial.id,
+      entryCancelledAt: month + "-05T00:00:00Z" };
+    const day = closing("02", { casts: [dailyCast({ masterId: trial.id, kind: "trial" })] });
+    const data = withRecord(workspace([day]), record(1500));
+    data.casts = [trial, cancelled];
+    data.transportMonths![month].casts[trial.id] = { [day.businessDate]: record(500) };
+    expect(reward(data).applied.issues).toEqual([expect.stringContaining("重複")]);
+
+    data.transportMonths![month].casts[cancelled.id][day.businessDate].amount = 0;
+    const corrected = reward(data);
+    expect(corrected.applied.issues).toEqual([]);
+    expect(corrected.rewards[0].transportFee).toBe(500);
+  });
+
   it("再送で出勤位置が変わった記録は同額で根拠を更新すれば復旧する", () => {
     const data = withRecord(workspace([closing("02", { casts: [dailyCast({ masterId: "other", posCastId: "other", transportFee: 0 }), dailyCast()] })]), record(1500));
     expect(reward(data).applied.issues.join()).toContain("出勤変更");

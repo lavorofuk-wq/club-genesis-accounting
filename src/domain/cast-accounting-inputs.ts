@@ -67,6 +67,23 @@ export function castAccountingAttendanceDays(closings: DailyClosing[], casts: Ca
   return [...new Set(castAccountingAttendanceSources(closings, casts, month, castId).map((source) => source.businessDate))];
 }
 
+/** 取消前に在籍IDへ保存された金額は、保存根拠と元体入IDが一致するときだけ引き継ぐ。 */
+export function approvedTrialAttendanceForCancelledEntry(
+  closings: DailyClosing[], cast: CastRecord | undefined, month: string,
+  attendance: Pick<CastAccountingInput, "businessDate" | "attendanceClosingId" | "attendanceIndex">,
+) {
+  if (!cast?.entryCancelledAt || !cast.convertedFromTrialId || !cast.hiredAt?.startsWith(`${month}-`)
+    || !attendance.attendanceClosingId || attendance.attendanceIndex === undefined) return undefined;
+  const matches = closings.filter((closing) => closing.id === attendance.attendanceClosingId);
+  if (matches.length !== 1) return undefined;
+  const closing = matches[0];
+  const row = closing.casts?.[attendance.attendanceIndex];
+  if (closing.status !== "approved" || !date(closing.businessDate) || !closing.businessDate.startsWith(`${month}-`)
+    || (attendance.businessDate !== undefined && attendance.businessDate !== closing.businessDate)
+    || row?.kind !== "trial" || row.masterId !== cast.convertedFromTrialId) return undefined;
+  return { closing, row };
+}
+
 export function resolveCastAccountingInputs(adjustments: Pick<MonthlyAdjustments, "month" | "castInputs"> | undefined,
   closings: DailyClosing[], casts: CastRecord[], month: string): { inputs: ResolvedCastAccountingInput[]; issues: string[] } {
   if (adjustments?.castInputs === undefined) return { inputs: [], issues: [] };
@@ -76,7 +93,14 @@ export function resolveCastAccountingInputs(adjustments: Pick<MonthlyAdjustments
     const resolved: ResolvedCastAccountingInput[] = [];
     const issues: string[] = [];
     const attendanceByCast = new Map<string, string[]>();
+    const castById = new Map(casts.map((cast) => [cast.id, cast]));
     for (const input of inputs) {
+      const restored = approvedTrialAttendanceForCancelledEntry(closings, castById.get(input.castId), month, input);
+      if (restored) {
+        const castId = castIdentityForMonth(restored.row, castById, casts, month);
+        resolved.push({ ...input, castId, businessDate: restored.closing.businessDate });
+        continue;
+      }
       const label = `${input.castName}「${input.label}」`;
       const days = attendanceByCast.get(input.castId) ?? castAccountingAttendanceDays(closings, casts, month, input.castId);
       attendanceByCast.set(input.castId, days);

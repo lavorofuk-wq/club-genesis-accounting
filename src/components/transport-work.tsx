@@ -234,7 +234,7 @@ export function TransportWork({ data, user, busy, run, onDirtyChange }: Props) {
     <Card title="キャスト送迎" description="キャスト名から送迎情報の編集・送迎記録を選択します。">
       <div className="transport-person-grid">{castRows.map(({ cast, registration, days, unresolved }) => <button type="button" className="transport-person" key={cast.id} disabled={waiting} onClick={() => move({ type: "castMenu", id: cast.id })}>
         <span className="transport-person-heading"><strong>{cast.name}</strong><span aria-hidden="true">›</span></span><span className="transport-person-detail">{registration ? registration.amounts.map((amount) => yen.format(amount)).join(" / ") : "送迎記録あり・未登録"}</span>
-        <span className="transport-person-total">{month.slice(5)}月 <b>{yen.format(days.reduce((sum, day) => sum + day.amount, 0) + unresolved.reduce((sum, input) => sum + input.amount, 0))}</b>{cast.status !== "active" && <small>在籍外</small>}</span>{unresolved.length > 0 && <span className="text-danger">日付確認待ち {unresolved.length}件</span>}
+        <span className="transport-person-total">{month.slice(5)}月 <b>{yen.format(days.reduce((sum, day) => sum + day.amount, 0) + unresolved.reduce((sum, input) => sum + input.amount, 0))}</b>{cast.entryCancelledAt ? <small>入店取消</small> : cast.status !== "active" && <small>在籍外</small>}</span>{unresolved.length > 0 && <span className="text-danger">日付確認待ち {unresolved.length}件</span>}
       </button>)}</div>{!castRows.length && <p className="muted">登録されたキャストはいません。「キャスト送迎登録」から追加してください。</p>}
     </Card>
     <Card title="ドライバー遠方手当" description="ドライバー名から出勤日を選びます。同じ日に複数回の手当を記録できます。">
