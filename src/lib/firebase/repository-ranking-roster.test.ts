@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { User } from "firebase/auth";
-import type { CastRecord, MonthlyAdjustments, WorkspaceData } from "@/domain/gms";
+import type { CastRecord, IntroducerDeletionCommit, MonthlyAdjustments, WorkspaceData } from "@/domain/gms";
 import { normalizeMonthlyAdjustments } from "@/domain/gms";
-import { buildMonthlySnapshot, calculateMonthlyAccounting, monthlySourceFingerprint, normalizeMonthlyAccountingSnapshot } from "@/domain/month-accounting";
+import { buildMonthlySnapshot, calculateMonthlyAccounting, monthlySourceFingerprint, normalizeIntroducerDeletionCommit, normalizeMonthlyAccountingSnapshot } from "@/domain/month-accounting";
 import { buildCastSalesRankingRoster } from "@/domain/cast-sales-ranking";
 
 const memory = vi.hoisted(() => ({
@@ -32,10 +32,10 @@ const data = (): WorkspaceData => ({
   casts: Object.values(memory.values.get(scoped("casts")) as Record<string, CastRecord> ?? {}),
   staff: [], drivers: [], introducers: [], liquor: [], closings: [], adjustments: [], cashFloat: 0,
 });
-async function candidate(withRoster = true) {
+async function candidate(withRoster = true, deletionCommits: IntroducerDeletionCommit[] = []) {
   const current = data();
-  const results = calculateMonthlyAccounting(current, month, adjustments);
-  return buildMonthlySnapshot(month, 1, await monthlySourceFingerprint(current, month, adjustments), adjustments,
+  const results = calculateMonthlyAccounting(current, month, adjustments, [], [], deletionCommits);
+  return buildMonthlySnapshot(month, 1, await monthlySourceFingerprint(current, month, adjustments, [], [], deletionCommits), adjustments,
     results, [], user.uid, "2026-09-30T12:00:00.000Z",
     withRoster ? buildCastSalesRankingRoster(results, current.casts, month) : undefined);
 }
@@ -52,6 +52,30 @@ beforeEach(() => {
     if (path.includes("/accountingMonthSnapshots/") && result !== undefined) memory.afterSnapshot?.();
     return { committed: result !== undefined, snapshot: { val: () => structuredClone(result) } };
   });
+});
+
+it("前月に削除した紹介者は当月確定時にも支払わず、プレビューと同じ金額を保存する", async () => {
+  const introducerId = "intro-deleted";
+  const completedAt = "2026-08-24T10:00:00.000Z";
+  const timestamp = Date.parse(completedAt);
+  const deletion = {
+    id: introducerId, introducerId, introducerName: "削除済み紹介者", month: "2026-08",
+    token: "deletion-token", owner: user.uid, deletedAtMs: timestamp, completedAt, completedAtMs: timestamp,
+  };
+  const member = cast({ monthlyIntroducers: { [month]: {
+    id: introducerId, name: deletion.introducerName, feeType: "sales10",
+    attendanceAdvisoryFee: 0, entryAdvisoryEnabled: true, entryAdvisoryFee: 5000,
+  } } });
+  memory.values.set(scoped("casts"), { [member.id]: member });
+  memory.values.set(scoped("introducerDeletionCommits"), { [introducerId]: deletion });
+  const source = await candidate(true, [normalizeIntroducerDeletionCommit(deletion, introducerId)!]);
+  expect(source.introducerPayments).toEqual([]);
+  expect((await candidate()).introducerPayments).toMatchObject([{ introducerId, total: 5000 }]);
+
+  await finalizeAccountingMonth(month, source, 0, user);
+
+  expect(stored()).toMatchObject({ introducerPayments: [], balance: { introducer: 0 } });
+  expect(memory.values.get(scoped("accountingMonthStates/" + month))).toMatchObject({ status: "closed" });
 });
 
 describe.each(["accounting-dev", "accounting"])("売上順位表名簿の%s確定保存", (environment) => {

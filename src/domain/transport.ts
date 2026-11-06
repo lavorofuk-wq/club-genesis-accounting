@@ -1,5 +1,5 @@
-import { castIdentityForMonth, type CastAccountingInput, type DailyClosing, type MonthlyAdjustments, type WorkspaceData } from "./gms";
-import { normalizeCastAccountingInputs, resolveCastAccountingInputs } from "./cast-accounting-inputs";
+import { castIdentityForMonth, type CastAccountingInput, type CastRecord, type DailyClosing, type MonthlyAdjustments, type WorkspaceData } from "./gms";
+import { approvedTrialAttendanceForCancelledEntry, normalizeCastAccountingInputs, resolveCastAccountingInputs } from "./cast-accounting-inputs";
 
 export const TRANSPORT_AMOUNTS = [500, 1000, 1500, 2000] as const;
 export type TransportSettings = {
@@ -135,8 +135,9 @@ export function transportUnresolvedLegacyInputs(data: WorkspaceData, month: stri
 }
 
 /** 旧日次・旧追加入力と編集後の額を一つの日別明細として表示する。0円の上書きは削除履歴。 */
-export function transportCastDays(data: WorkspaceData, month: string, castId: string) {
-  const overrides = normalizeTransportMonth(data.transportMonths?.[month]).casts[castId] || {};
+export function transportCastDays(data: WorkspaceData & { archivedCasts?: CastRecord[] }, month: string, castId: string) {
+  const records = normalizeTransportMonth(data.transportMonths?.[month]).casts;
+  const overrides = records[castId] || {};
   const consumedIds = new Set(Object.values(overrides).flatMap((day) => day.legacyInputIds));
   const result = new Map<string, { businessDate: string; amount: number; legacyInputIds: string[]; hasRecord: boolean }>();
   const getDay = (businessDate: string) => {
@@ -145,8 +146,18 @@ export function transportCastDays(data: WorkspaceData, month: string, castId: st
     return row;
   };
   const identity = castIdentity(data, month);
+  // 保存先は旧在籍カードに残し、同じ体入日の元額だけを月次と同様に抑制する。
+  const restoredOverrideDays = new Set<string>();
+  for (const cast of [...data.casts, ...(data.archivedCasts || [])]) {
+    if (!cast.entryCancelledAt) continue;
+    for (const [businessDate, record] of Object.entries(records[cast.id] || {})) {
+      const restored = approvedTrialAttendanceForCancelledEntry(data.closings, cast, month, { ...record, businessDate });
+      if (restored && identity(restored.row) === castId) restoredOverrideDays.add(businessDate);
+    }
+  }
   // 差戻し・取下げ後も保存済みの旧額を確認・削除できる。給与計算は別途承認日だけを採用する。
   for (const closing of data.closings.filter((row) => row.businessDate.startsWith(`${month}-`))) {
+    if (restoredOverrideDays.has(closing.businessDate)) continue;
     for (const row of closing.casts || []) if (identity(row) === castId && row.transportFee > 0) {
       getDay(closing.businessDate).amount += row.transportFee;
     }
@@ -183,6 +194,8 @@ export function applyTransport(data: WorkspaceData, month: string, adjustments: 
     const consumed = new Set<string>();
     const added: CastAccountingInput[] = [];
     const identity = castIdentity(data, month);
+    const castById = new Map(data.casts.map((cast) => [cast.id, cast]));
+    const restoredOverrides = new Map<string, number>();
     const checkSource = (id: string, businessDate: string, kind: "cast" | "driver", record: CastTransportDay | DriverTransportDay, nonzero: boolean) => {
       if (!businessDate.startsWith(`${month}-`)) { issues.push(`${businessDate}の送迎記録が対象月と一致しません。`); return false; }
       if (!nonzero) return false;
@@ -205,16 +218,30 @@ export function applyTransport(data: WorkspaceData, month: string, adjustments: 
         if (consumed.has(id)) issues.push(`${input.castName}の旧送迎入力が複数の送迎記録に関連付いています。`);
         consumed.add(id);
       }
-      if (!checkSource(castId, businessDate, "cast", record, record.amount > 0)) continue;
+      const restored = approvedTrialAttendanceForCancelledEntry(data.closings, castById.get(castId), month, { ...record, businessDate });
+      const targetId = restored ? identity(restored.row) : castId;
+      if (restored) {
+        const key = targetId + "/" + businessDate;
+        const current = records.casts[targetId]?.[businessDate];
+        if (record.amount > 0 && (current || (restoredOverrides.get(key) || 0) > 0)) {
+          issues.push(`${businessDate}・${restored.row.name}の送迎記録が入店取消後の同じ出勤日に重複しています。送迎画面で確認してください。`);
+          continue;
+        }
+        if (!current && !restoredOverrides.get(key)) restoredOverrides.set(key, record.amount);
+      }
+      if (!checkSource(targetId, businessDate, "cast", record, record.amount > 0)) continue;
       const id = `transport_${castId}_${businessDate}`;
       if (inputs.some((input) => input.id === id)) { issues.push("送迎記録とキャスト入力のIDが重複しています。"); continue; }
-      added.push({ id, castId, castName: data.casts.find((row) => row.id === castId)?.name || castId,
+      added.push({ id, castId: targetId, castName: castById.get(targetId)?.name || restored?.row.name || targetId,
         kind: "transport", label: "送迎代", amount: record.amount, businessDate,
         attendanceClosingId: record.attendanceClosingId, attendanceIndex: record.attendanceIndex });
     }
     const closings = data.closings.map((closing) => !closing.businessDate.startsWith(`${month}-`) ? closing : {
-      ...closing, casts: (closing.casts || []).map((row) => records.casts[identity(row)]?.[closing.businessDate] === undefined
-        ? row : { ...row, transportFee: 0 }),
+      ...closing, casts: (closing.casts || []).map((row) => {
+        const castId = identity(row);
+        return records.casts[castId]?.[closing.businessDate] || restoredOverrides.has(castId + "/" + closing.businessDate)
+          ? { ...row, transportFee: 0 } : row;
+      }),
     });
     const driverRemoteAllowance = { ...adjustments.driverRemoteAllowance };
     for (const [driverId, days] of Object.entries(records.drivers)) for (const [businessDate, record] of Object.entries(days)) {

@@ -113,6 +113,36 @@ describe("本人出勤日への解決", () => {
     const result = resolveCastAccountingInputs(adjustments([input()]), data.closings, data.casts, month);
     expect(result.issues).toEqual([]); expect(result.inputs[0].castId).toBe(member.id);
   });
+
+  it("入店取消後は承認済みの元体入行と保存根拠が一致する追加金額だけを引き継ぐ", () => {
+    const day = closing("2026-09-02", [
+      dailyCast({ masterId: "trial-1", kind: "trial" }),
+      dailyCast({ masterId: "other", posCastId: "other", kind: "trial" }),
+    ]);
+    const data = workspace([day]);
+    const cancelled = { ...data.casts[0], hiredAt: "2026-09-04", convertedFromTrialId: "trial-1",
+      deletedAt: "2026-09-05T00:00:00Z", entryCancelledAt: "2026-09-05T00:00:00Z" };
+    const trial: CastRecord = { ...member, id: "trial-1", status: "trial", hiredAt: undefined, trialDate: day.businessDate };
+    const anchor = { attendanceClosingId: day.id, attendanceIndex: 0 };
+    const saved = adjustments([
+      input(anchor),
+      input({ ...anchor, id: "allowance", kind: "allowance", amount: 1_000, businessDate: undefined }),
+    ]);
+    const original = structuredClone(saved);
+    const result = calculateMonthlyAccounting({ ...data, casts: [trial], archivedCasts: [cancelled] }, month, saved);
+    expect(result.warnings).toEqual([]);
+    expect(result.castRewards.find((row) => row.id === trial.id)).toMatchObject({
+      trialOnly: true, additionalSales: 10_000, additionalAllowance: 1_000, salesReward: 0,
+    });
+    expect(result.castSalesReports.find((row) => row.id === trial.id)?.totals.accountingInputs)
+      .toEqual(saved.castInputs?.map((row) => ({ ...row, castId: trial.id, businessDate: day.businessDate })));
+    expect(saved).toEqual(original);
+
+    const invalid = adjustments([input(), input({ ...anchor, id: "wrong", attendanceIndex: 1 })]);
+    expect(resolveCastAccountingInputs(invalid, data.closings, [trial, cancelled], month)).toMatchObject({ inputs: [], issues: [expect.any(String), expect.any(String)] });
+    day.status = "submitted";
+    expect(resolveCastAccountingInputs(saved, data.closings, [trial, cancelled], month)).toMatchObject({ inputs: [], issues: [expect.any(String), expect.any(String)] });
+  });
 });
 
 describe("追加売上・手当・送迎の月次反映", () => {

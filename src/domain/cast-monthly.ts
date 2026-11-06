@@ -1,15 +1,16 @@
-import { compareIntroducerMonthEventEffectiveOrder, japanMonthFromTimestamp, rateForMonth } from "./gms";
+import { castIdentityForMonth, castIntroducerForApprovedWork, castIntroducerOverrideForAccounting,
+  compareIntroducerMonthEventEffectiveOrder, japanMonthFromTimestamp, rateForMonth } from "./gms";
 import type { CastRecord, DailyCast, DailyClosing, IntroducerDeletionCommit, IntroducerMonthEvent, PersonStatus, WorkspaceData } from "./gms";
 import { castAccountingAttendanceDays } from "./cast-accounting-inputs";
 
 type IntroducerTerms = NonNullable<DailyCast["introducer"]>;
 type CastDisplayData = Pick<WorkspaceData, "closings" | "introducers">
-  & { introducerDeletionCommits?: IntroducerDeletionCommit[]; introducerMonthEvents?: IntroducerMonthEvent[] };
+  & { casts?: CastRecord[]; archivedCasts?: CastRecord[]; introducerDeletionCommits?: IntroducerDeletionCommit[]; introducerMonthEvents?: IntroducerMonthEvent[] };
 
 export const isCastMonth = (month: string) => /^\d{4}-(0[1-9]|1[0-2])$/.test(month);
 
 export function castStatusForMonth(cast: CastRecord, month: string): PersonStatus | undefined {
-  if (!isCastMonth(month) || cast.deletedAt) return undefined;
+  if (!isCastMonth(month) || cast.deletedAt || cast.entryCancelledAt) return undefined;
   if (cast.status === "trial") return cast.trialDate?.slice(0, 7) === month ? "trial" : undefined;
   if (!cast.hiredAt || cast.hiredAt.slice(0, 7) > month) return undefined;
   const departureMonth = cast.departedAt?.slice(0, 7);
@@ -20,6 +21,11 @@ export function castStatusForMonth(cast: CastRecord, month: string): PersonStatu
 
 export function castHasApprovedWork(closings: DailyClosing[], casts: CastRecord[], month: string, castId: string) {
   return castAccountingAttendanceDays(closings, casts, month, castId).length > 0;
+}
+
+export function castHasApprovedRegularWork(closings: DailyClosing[], activeId: string): boolean {
+  return closings.some((closing) => closing.status === "approved"
+    && closing.casts?.some((row) => row.kind === "regular" && row.masterId === activeId));
 }
 
 export function castTrialRateOverrideForMonth(cast: CastRecord | undefined, month: string) {
@@ -37,32 +43,42 @@ export function castIntroducerOverrideForMonth(cast: CastRecord | undefined, mon
   return applicable ? settings[applicable] : undefined;
 }
 
+export function castSharedIntroducerMemberForMonth(cast: CastRecord, month: string, casts: readonly CastRecord[]): CastRecord {
+  if (cast.status !== "trial" || !cast.convertedToCastId) return cast;
+  const target = casts.find((row) => row.id === cast.convertedToCastId);
+  return !target?.entryCancelledAt && target?.hiredAt?.startsWith(`${month}-`) ? target : cast;
+}
+
 export function castIntroducerForDisplay(
   cast: CastRecord,
   month: string,
   data: CastDisplayData,
   currentMonth = japanMonthFromTimestamp(new Date().toISOString()),
 ): IntroducerTerms | undefined {
-  const override = castIntroducerOverrideForMonth(cast, month);
-  if (override !== undefined) {
-    if (!override || data.introducerDeletionCommits?.some((commit) =>
-      commit.introducerId === override.id && commit.month <= month)) return undefined;
-    return override;
+  const castById = new Map([...(data.archivedCasts || []), ...(data.casts || []), cast].map((row) => [row.id, row]));
+  const casts = [...castById.values()];
+  const member = castSharedIntroducerMemberForMonth(cast, month, casts);
+  const commits = data.introducerDeletionCommits || [];
+  const events = data.introducerMonthEvents || [];
+  const override = castIntroducerOverrideForAccounting(member.id, castById, month, commits);
+  if (override !== undefined) return override || undefined;
+
+  const approved = data.closings.filter((closing) => closing.status === "approved" && closing.businessDate.startsWith(`${month}-`));
+  const monthRegularIds = new Set(approved.flatMap((closing) => (closing.casts || [])
+    .filter((row) => row.kind === "regular").map((row) => row.masterId)));
+  const entries = approved.flatMap((closing) => (closing.casts || [])
+    .filter((row) => castIdentityForMonth(row, castById, casts, month, monthRegularIds) === member.id)
+    .map((row) => ({ closing, row })));
+  if (entries.length) {
+    return castIntroducerForApprovedWork(member.id, castById, month, entries, events, commits);
   }
-  const event = data.introducerMonthEvents?.filter((row) => row.month === month && row.castId === cast.id)
+
+  const event = events.filter((row) => row.month === month && row.castId === member.id)
     .sort(compareIntroducerMonthEventEffectiveOrder).at(-1);
   if (event?.state === "deleted") return undefined;
   if (event?.state === "reassigned") return event.introducer;
-  if (month < currentMonth) {
-    const latest = data.closings.filter((closing) => closing.businessDate.slice(0, 7) === month && closing.status !== "withdrawn")
-      .flatMap((closing) => closing.casts.filter((row) => row.masterId === cast.id).map((row) => ({ closing, row })))
-      .sort((left, right) =>
-        (left.closing.submittedAtMs ?? Date.parse(left.closing.submittedAt || left.closing.updatedAt))
-        - (right.closing.submittedAtMs ?? Date.parse(right.closing.submittedAt || right.closing.updatedAt))
-        || left.closing.businessDate.localeCompare(right.closing.businessDate)).at(-1);
-    return latest?.row.introducer;
-  }
-  const intro = data.introducers.find((row) => row.id === cast.introducerId);
+  if (month < currentMonth) return undefined;
+  const intro = data.introducers.find((row) => row.id === member.introducerId);
   if (!intro) return undefined;
   return {
     id: intro.id,
@@ -70,7 +86,7 @@ export function castIntroducerForDisplay(
     feeType: intro.feeType,
     attendanceAdvisoryEnabled: intro.attendanceAdvisoryEnabled,
     entryAdvisoryEnabled: intro.entryAdvisoryEnabled,
-    attendanceAdvisoryFee: intro.attendanceAdvisoryEnabled ? cast.attendanceAdvisoryFee || 0 : 0,
-    entryAdvisoryFee: intro.entryAdvisoryEnabled ? cast.entryAdvisoryFee || 0 : 0,
+    attendanceAdvisoryFee: intro.attendanceAdvisoryEnabled ? member.attendanceAdvisoryFee || 0 : 0,
+    entryAdvisoryFee: intro.entryAdvisoryEnabled ? member.entryAdvisoryFee || 0 : 0,
   };
 }

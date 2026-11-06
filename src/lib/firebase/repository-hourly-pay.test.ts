@@ -140,6 +140,40 @@ describe("日次送信の再編集元と重複営業日の保護", () => {
     expect(memory.get.mock.calls.every(([reference]) => !/castDailyCorrection|castReturnHandoff/.test(reference.path))).toBe(true);
   });
 
+  it("店舗でも月度紹介者の表示に必要な削除・再設定履歴を取得する", async () => {
+    const completedAt = "2026-08-24T10:00:00.000Z";
+    const completedAtMs = Date.parse(completedAt);
+    memory.values.set("introducerDeletionCommits", { "intro-1": {
+      id: "intro-1", introducerId: "intro-1", introducerName: "紹介者", month: "2026-08",
+      token: "delete-token", owner: user.uid, deletedAtMs: completedAtMs, completedAt, completedAtMs,
+    } });
+    memory.values.set("introducerMonthEvents", { "2026-08": { "cast-1": {
+      id: "cast-1", castId: "cast-1", castName: "キャスト", month: "2026-08", state: "reassigned",
+      deletedIntroducerId: "intro-1", deletedIntroducerName: "紹介者", deletedAt: completedAt, deletedBy: user.uid,
+      revision: 2, createdAt: completedAt, createdBy: user.uid, updatedAt: completedAt, updatedBy: user.uid,
+      reassignedAt: completedAt, reassignedBy: user.uid,
+      introducer: { id: "intro-2", name: "新しい紹介者", feeType: "sales10", attendanceAdvisoryEnabled: false,
+        entryAdvisoryEnabled: false, attendanceAdvisoryFee: 0, entryAdvisoryFee: 0 },
+    } } });
+    const workspace = await loadWorkspaceData("shop");
+    expect(workspace.introducerDeletionCommits).toEqual([
+      expect.objectContaining({ introducerId: "intro-1", month: "2026-08" }),
+    ]);
+    expect(workspace.introducerMonthEvents).toEqual([
+      expect.objectContaining({ castId: "cast-1", state: "reassigned", introducer: expect.objectContaining({ id: "intro-2" }) }),
+    ]);
+  });
+
+  it("店舗では取消前の送迎を訂正するために入店取消済みの在籍IDを保持する", async () => {
+    memory.values.set("casts", {
+      cancelled: { name: "取消済み", deletedAt: timestamp, entryCancelledAt: timestamp },
+      deleted: { name: "通常削除", deletedAt: timestamp },
+    });
+    const workspace = await loadWorkspaceData("shop");
+    expect(workspace.casts).toEqual([]);
+    expect(workspace.archivedCasts).toEqual([expect.objectContaining({ id: "cancelled" })]);
+  });
+
   it.each([
     { status: "returned" as const, operation: /再編集/ },
     { status: "withdrawn" as const, operation: /再編集/ },

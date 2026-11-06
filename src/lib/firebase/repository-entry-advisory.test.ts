@@ -34,7 +34,7 @@ vi.mock("./ready-transaction", () => ({ runReadyTransaction: memory.transaction 
 vi.mock("../client-release", () => ({ assertCurrentClientRelease: vi.fn().mockResolvedValue(undefined) }));
 
 
-import { convertTrialCast, departCast, saveCast } from "./repository";
+import { approveClosing, cancelCastConversion, convertTrialCast, departCast, restoreCast, saveCast } from "./repository";
 import type { CastRecord, IntroducerRecord } from "@/domain/gms";
 import type { IntroducerEntryEvent } from "@/domain/month-accounting";
 import { castIntroducerOverrideForMonth, castTrialRateForMonth } from "@/domain/cast-monthly";
@@ -108,6 +108,171 @@ async function converted() {
   expect(memory.read(entryPath(id))).toMatchObject({ amount: 30000 });
   return getCast(id);
 }
+
+const activeRegistration = {
+  name: trial.name, legalName: trial.legalName, status: "active" as const, hiredAt: "2026-09-03",
+  hourlyRates: { "2026-09": 3000 }, note: "",
+};
+
+function existingNameClaimPath() {
+  return "castNameClaims/" + Object.keys(memory.root.castNameClaims as Record<string, unknown>)[0]!;
+}
+
+describe("入店取消", () => {
+  it("承認済み体入・未承認在籍の日次を保持したまま元の体入IDへ戻し、同名で入店し直せる", async () => {
+    const active = await converted();
+    const trialDay = { businessDate: "2026-09-01", status: "approved",
+      casts: [{ kind: "trial", masterId: trial.id, hours: 2, hourlyRate: 2000, dailyPayment: 4000 }] };
+    const unapprovedDay = { businessDate: "2026-09-02", status: "submitted", updatedAt: initialTime,
+      checksum: "checksum", submissionId: "submission", casts: [{ kind: "regular", masterId: active.id, hours: 2 }] };
+    memory.write("history/trial-day", trialDay);
+    memory.write("history/unapproved-day", unapprovedDay);
+    vi.setSystemTime(new Date("2026-09-03T03:00:00.000Z"));
+
+    await cancelCastConversion(active.id, active.updatedAt, user);
+
+    const restored = getCast(trial.id);
+    expect(restored).toMatchObject({ status: "trial", trialDate: trial.trialDate, trialHourlyRate: trial.trialHourlyRate });
+    expect(restored.convertedToCastId).toBeUndefined();
+    expect(getCast(active.id)).toMatchObject({ entryCancelledAt: expect.any(String), deletedAt: expect.any(String), deletedBy: user.uid });
+    expect(memory.read("history/trial-day")).toEqual(trialDay);
+    expect(memory.read("history/unapproved-day")).toEqual(unapprovedDay);
+    expect(memory.read(entryPath(active.id))).toMatchObject({ amount: 30000 });
+    expect(memory.read("cashManagementLock")).toBeNull();
+
+    await expect(approveClosing("unapproved-day", unapprovedDay, user)).rejects.toThrow("入店取消済みの在籍キャスト");
+    expect(memory.read("history/unapproved-day")).toEqual(unapprovedDay);
+    const nextEntry = {
+      ...restored, hiredAt: "2026-09-03", hourlyRates: { "2026-09": 3000 },
+    };
+    memory.write("accountingMonthStates/2026-09", { status: "closed" });
+    await expect(convertTrialCast(trial.id, nextEntry, user, "2026-09")).rejects.toThrow("先に月次確定を解除");
+    expect(getCast(trial.id).convertedToCastId).toBeUndefined();
+    memory.write("accountingMonthStates/2026-09", { status: "open" });
+    const nextId = await convertTrialCast(trial.id, nextEntry, user, "2026-09");
+    expect(nextId).not.toBe(active.id);
+    expect(getCast(trial.id).convertedToCastId).toBe(nextId);
+  });
+
+  it.each(["入店", "新規在籍", "退店取消"])("%sでは取消時の通信断で残った名義を回収できる", async (operation) => {
+    const active = await converted();
+    const claimPath = existingNameClaimPath();
+    const staleClaim = operation === "新規在籍" ? active.id : { id: active.id, state: "committed" };
+    memory.write(claimPath, staleClaim);
+    vi.setSystemTime(new Date("2026-09-04T03:00:00.000Z"));
+    const transact = memory.transaction.getMockImplementation()!;
+    memory.transaction.mockImplementation(async (reference, callback) => {
+      if (reference.path === claimPath) throw new Error("通信断");
+      return transact(reference, callback);
+    });
+    await expect(cancelCastConversion(active.id, active.updatedAt, user)).rejects.toThrow("旧い重複防止情報を解放");
+    expect(getCast(active.id)).toMatchObject({ entryCancelledAt: expect.any(String), deletedAt: expect.any(String) });
+    expect(memory.read(claimPath)).toEqual(staleClaim);
+    memory.transaction.mockImplementation(transact);
+
+    let nextId: string;
+    if (operation === "入店") {
+      nextId = await convertTrialCast(trial.id, { ...getCast(trial.id), ...activeRegistration }, user, "2026-09");
+    } else if (operation === "退店取消") {
+      nextId = "departed-same-name";
+      memory.write("casts/" + nextId, { ...activeRegistration, status: "departed", hiredAt: "2026-09-01",
+        departedAt: "2026-09-02", createdAt: initialTime, updatedAt: initialTime });
+      await restoreCast(nextId, initialTime, user);
+    } else {
+      nextId = await saveCast(activeRegistration, user, "2026-09");
+    }
+    expect(nextId).not.toBe(active.id);
+    expect(getCast(nextId).status).toBe("active");
+    expect(memory.read(claimPath)).toEqual({ id: nextId, state: "committed" });
+  });
+
+  it("通常の論理削除に紐づく名義は回収しない", async () => {
+    const active = await converted();
+    const claimPath = existingNameClaimPath();
+    memory.write("casts/" + active.id + "/deletedAt", initialTime);
+    await expect(saveCast(activeRegistration, user, "2026-09")).rejects.toThrow("同じキャスト名の在籍キャスト");
+    expect(memory.read(claimPath)).toEqual({ id: active.id, state: "committed" });
+  });
+
+  it("名義の回収前に別のキャストが取得した場合はその名義を保持する", async () => {
+    const active = await converted();
+    const claimPath = existingNameClaimPath();
+    memory.write("casts/" + active.id, { ...active, deletedAt: initialTime, entryCancelledAt: initialTime });
+    const nextClaim = { id: "another-owner", state: "committed" };
+    const transact = memory.transaction.getMockImplementation()!;
+    let claimAttempts = 0;
+    memory.transaction.mockImplementation(async (reference, callback) => {
+      if (reference.path === claimPath && ++claimAttempts === 2) memory.write(claimPath, nextClaim);
+      return transact(reference, callback);
+    });
+    await expect(saveCast(activeRegistration, user, "2026-09")).rejects.toThrow("同じキャスト名の在籍キャスト");
+    expect(memory.read(claimPath)).toEqual(nextClaim);
+  });
+
+  it("別月の承認済み在籍勤務があれば元の入店登録を保持する", async () => {
+    const active = await converted();
+    memory.write("history/regular-day", { businessDate: "2026-10-05", status: "approved",
+      casts: [{ kind: "regular", masterId: active.id, hours: 2 }] });
+
+    await expect(cancelCastConversion(active.id, active.updatedAt, user)).rejects.toThrow("承認済みの在籍勤務");
+
+    expect(getCast(active.id).deletedAt).toBeUndefined();
+    expect(getCast(trial.id).convertedToCastId).toBe(active.id);
+    expect(memory.read("cashManagementLock")).toBeNull();
+  });
+
+  it("取消の一括保存が拒否されたときは双方の元データを保持し、日次ロックを解放する", async () => {
+    const active = await converted();
+    const originalTrial = getCast(trial.id);
+    memory.update.mockRejectedValue(new Error("PERMISSION_DENIED"));
+
+    await expect(cancelCastConversion(active.id, active.updatedAt, user)).rejects.toThrow("PERMISSION_DENIED");
+
+    expect(getCast(active.id)).toEqual(active);
+    expect(getCast(trial.id)).toEqual(originalTrial);
+    expect(memory.read("cashManagementLock")).toBeNull();
+  });
+
+  it("本人が載る後月の現行確定名簿を全て示し、旧版・同名別人・名簿未保存を含めない", async () => {
+    const active = await converted();
+    const rosterPath = (month: string, revision: number) => `accountingMonthSnapshots/${month}/${revision}/castSalesRankingRoster`;
+    const setState = (month: string, status: "closed" | "open") =>
+      memory.write(`accountingMonthStates/${month}`, { status, currentSnapshotRevision: 2 });
+    const entry = { id: active.id, name: "確定時の名前" };
+    setState("2026-10", "closed");
+    memory.write(rosterPath("2026-10", 2), { schemaVersion: 1, entries: [entry] });
+    setState("2026-11", "closed");
+    memory.write(rosterPath("2026-11", 2), { schemaVersion: 1, entries: { 0: entry } });
+    setState("2026-12", "closed");
+    memory.write(rosterPath("2026-12", 1), { schemaVersion: 1, entries: [entry] });
+    setState("2027-01", "closed");
+    memory.write(rosterPath("2027-01", 2), { schemaVersion: 1, entries: [{ id: "other", name: active.name }] });
+
+    await expect(cancelCastConversion(active.id, active.updatedAt, user)).rejects.toThrow(
+      "2026-10月度、2026-11月度は月次確定処理中または確定済みです。先に月次確定を解除してください。",
+    );
+    expect(getCast(active.id).entryCancelledAt).toBeUndefined();
+    expect(getCast(trial.id).convertedToCastId).toBe(active.id);
+    expect(memory.read("cashManagementLock")).toBeNull();
+
+    setState("2026-10", "open");
+    setState("2026-11", "open");
+    await cancelCastConversion(active.id, active.updatedAt, user);
+    expect(getCast(trial.id).convertedToCastId).toBeUndefined();
+    expect(memory.read(rosterPath("2026-10", 2))).toEqual({ schemaVersion: 1, entries: [entry] });
+  });
+
+  it.each(["closing", "closed"])("採用月が%sなら月次確定の解除を要求する", async (status) => {
+    const active = await converted();
+    memory.write("accountingMonthStates/2026-09", { status });
+
+    await expect(cancelCastConversion(active.id, active.updatedAt, user)).rejects.toThrow("先に月次確定を解除");
+
+    expect(getCast(active.id).entryCancelledAt).toBeUndefined();
+    expect(getCast(trial.id).convertedToCastId).toBe(active.id);
+    expect(memory.read("cashManagementLock")).toBeNull();
+  });
+});
 
 describe("在籍化後の入店顧問料0円訂正", () => {
   it.each(["2026-09-20T03:00:00.000Z", "2026-10-01T03:00:00.000Z"])("%sの保存で原本と0円履歴をまとめて更新する", async (time) => {

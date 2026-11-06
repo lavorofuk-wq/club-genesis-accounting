@@ -115,6 +115,39 @@ function trialPos(): PosClosingV3 {
 
 beforeEach(() => { draft.values = {}; draft.buttons = []; });
 
+describe("入店取消済みの在籍照合", () => {
+  const savedCast: DailyCast = { ...trialCast, kind: "regular", masterId: "old-active" };
+  const savedPos: PosClosingV3 = { ...trialPos(), castWork: trialPos().castWork.map((work) => ({
+    ...work, castType: "regular", isTrial: false,
+  })) };
+  const archived = { ...data.casts[0], id: savedCast.masterId, status: "active" as const, hiredAt: businessDate, deletedAt: businessDate };
+  const original = closing({ casts: [savedCast], posSnapshot: savedPos });
+
+  it.each(["returned", "withdrawn"] as const)("再編集（%s）で取消済みIDを再利用せず、JSONの訂正方法を案内する", (status) => {
+    const source = { ...original, status };
+    const prefix = workflow({}, source);
+    const markup = render({ ...data, archivedCasts: [{ ...archived, entryCancelledAt: businessDate }], closings: [source] });
+
+    expect(markup).toContain("入店取消済みの在籍キャストです。");
+    expect(markup).toContain("POSで勤務区分を訂正し、再出力した同じ営業日のJSONを取り込んでください。");
+    expect(markup).not.toContain("保存済み照合を使用");
+    expect(markup).toContain('disabled="">照合を確定して店舗データ作成へ</button>');
+    click("照合を確定して店舗データ作成へ");
+    expect(draft.values[`${prefix}.castRows`]).toEqual([savedCast]);
+  });
+
+  it("通常の論理削除済みマスタは保存済み照合を再編集で引き続き使える", () => {
+    const prefix = workflow({ stage: "json" }, original);
+    const markup = render({ ...data, archivedCasts: [archived], closings: [original] });
+
+    expect(markup).toContain("保存済み照合を使用");
+    expect(markup).not.toContain("入店取消済みの在籍キャストです。");
+    click("照合を確定して店舗データ作成へ");
+    expect(draft.values[`${prefix}.stage`]).toBe("details");
+    expect(draft.values[`${prefix}.castRows`]).toEqual([expect.objectContaining({ masterId: savedCast.masterId, dailyPayment: savedCast.dailyPayment })]);
+  });
+});
+
 describe("店舗の時給1円単位と支払実績保全", () => {
   it("新規の体入スタッフ即日額は日別時給額の1円未満を切り捨てる", () => {
     const prefix = workflow({ stage: "details", pos, staffId: staff.staffId, staffStart: "20:00", staffEnd: "00:15" });

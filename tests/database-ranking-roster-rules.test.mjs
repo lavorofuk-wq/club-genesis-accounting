@@ -11,6 +11,7 @@ test("過去指紋の比較前に名簿ルールの全内容を厳密検証し�
   assert.equal(Object.hasOwn(baseline.$workspace.accountingMonthSnapshots.$month.$revision, "castSalesRankingRoster"), false);
   assert.deepEqual(original.$workspace.accountingMonthSnapshots.$month.$revision.castSalesRankingRoster, rosterRules);
   for (const modify of [
+    (node) => { node[".read"] = "true"; },
     (node) => { node[".validate"] = "true"; },
     (node) => { node[".write"] = "true"; },
     (node) => { delete node.entries.$index.$field; },
@@ -27,6 +28,7 @@ class Snapshot {
   child(path) { return new Snapshot(this.tree, [...this.path, ...String(path).split("/")]); }
   exists() { return this.val() !== null; }
   isString() { return typeof this.val() === "string"; }
+  isNumber() { return typeof this.val() === "number"; }
   hasChildren(keys = []) { const v = this.val(); return v && typeof v === "object" && Object.keys(v).length > 0 && keys.every(key => this.child(key).exists()); }
 }
 function evaluate(rule, snapshot, workspace, vars) {
@@ -65,16 +67,40 @@ test(`${workspace}: 不正schema・型・ID・名前・未知項目を拒否す�
   }
 });
 }
-test("名簿の全階層で本番・devを同じ条件で検証し、書込・読取権限を追加しない", () => {
-  function check(node) {
+test("名簿の全階層で本番・devを同じ条件で検証し、個別の書込・読取権限を追加しない", () => {
+  function check(node, rosterRoot = false) {
     for (const [key, value] of Object.entries(node)) {
       if (key === ".validate") assert.doesNotMatch(value, /\$workspace/);
       else if (typeof value === "object") check(value);
     }
     assert.equal(Object.hasOwn(node, ".write"), false);
-    assert.equal(Object.hasOwn(node, ".read"), false);
+    if (!rosterRoot) assert.equal(Object.hasOwn(node, ".read"), false);
   }
-  check(rosterRules);
+  check(rosterRules, true);
+});
+test("店舗は確定中の親・旧版・給与を読めず、確定済みの現行名簿だけ読める", () => {
+  const read = (rule, workspace, state, revision) => {
+    if (!rule) return false;
+    const root = new Snapshot({
+      users: { operator: { role: "shop" } },
+      [workspace]: { accountingMonthStates: { "2026-10": state } },
+    });
+    return Boolean(new Function("root", "auth", "$workspace", "$month", "$revision", "return (" + rule + ");")(
+      root, { uid: "operator" }, workspace, "2026-10", revision));
+  };
+  const closed = { status: "closed", currentSnapshotRevision: 2 };
+  for (const workspace of ["accounting-dev", "accounting"]) {
+    assert.equal(read(rosterRules[".read"], workspace, closed, "2"), true);
+    assert.equal(read(rosterRules[".read"], workspace, closed, "1"), false);
+    assert.equal(read(rosterRules[".read"], workspace, { ...closed, status: "open" }, "2"), false);
+    assert.equal(read(rosterRules[".read"], workspace, { ...closed, status: "closing" }, "2"), false);
+    assert.equal(read(rosterRules[".read"], workspace, { ...closed, currentSnapshotRevision: "2" }, "2"), false);
+    assert.equal(read(rules.accountingMonthSnapshots[".read"], workspace, closed, "2"), false);
+    const snapshot = rules.accountingMonthSnapshots.$month.$revision;
+    assert.equal(Object.hasOwn(snapshot, ".read"), false);
+    assert.equal(Object.hasOwn(snapshot.castRewards, ".read"), false);
+  }
+  assert.equal(read(rosterRules[".read"], "other", closed, "2"), false);
 });
 test("保存権限は従来の経理・OPと確定ロックを継承し、名簿専用の書込許可を設けない", () => {
   const rule = rules.accountingMonthSnapshots.$month.$revision[".write"];

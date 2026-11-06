@@ -5,6 +5,7 @@ export function withoutCastSalesRankingRosterRules(value) {
   const copy = structuredClone(value);
   const snapshot = copy.$workspace.accountingMonthSnapshots.$month.$revision;
   assert.deepEqual(snapshot.castSalesRankingRoster, {
+    ".read": "($workspace === 'accounting' || $workspace === 'accounting-dev') && auth != null && root.child('users').child(auth.uid).child('role').val() === 'shop' && root.child($workspace).child('accountingMonthStates').child($month).child('status').val() === 'closed' && root.child($workspace).child('accountingMonthStates').child($month).child('currentSnapshotRevision').isNumber() && $revision === (root.child($workspace).child('accountingMonthStates').child($month).child('currentSnapshotRevision').val() + '')",
     ".validate": "newData.hasChildren(['schemaVersion']) && newData.child('schemaVersion').val() === 1",
     schemaVersion: { ".validate": "newData.val() === 1" },
     entries: {

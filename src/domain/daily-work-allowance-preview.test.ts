@@ -77,6 +77,26 @@ describe("日次表示専用の美容室手当・キャスト送迎", () => {
     expect(data).toEqual(before);
   });
 
+  it.each([1500, 0])("入店取消後の承認済み体入日にも送迎上書き%s円を表示する", (amount) => {
+    const data = fixture();
+    const closing = data.closings[0];
+    const trial: CastRecord = { ...data.casts[0], id: "trial-1", status: "trial", trialDate: date };
+    data.archivedCasts = [{ ...data.casts[0], convertedFromTrialId: trial.id,
+      deletedAt: date + "T12:00:00Z", entryCancelledAt: date + "T12:00:00Z" }];
+    data.casts = [trial];
+    data.beautyMonths = undefined;
+    closing.status = "approved";
+    closing.casts[0] = { ...closing.casts[0], masterId: trial.id, kind: "trial", beautyAllowance: 0 };
+    data.transportMonths![month].casts["cast-1"][date].amount = amount;
+    data.transportMonths![month].casts["cast-1"][date].legacyInputIds = ["old"];
+    data.adjustments[0].castInputs = [{ ...legacy("old"), attendanceClosingId: closing.id, attendanceIndex: 0 }];
+    const before = structuredClone(data);
+    expect(preview(data)).toEqual({ casts: [{ index: 0, posCastId: "pos-1", beautyAllowance: 0, transportFee: amount }], issues: [] });
+    expect(data).toEqual(before);
+    data.transportMonths = undefined;
+    expect(preview(data).casts[0].transportFee).toBe(1500);
+  });
+
   it("削除済み体入マスタの同月変換先も月次同様に参照する", () => {
     const data = fixture();
     data.archivedCasts = [{ ...data.casts[0], id: "trial-1", status: "trial", convertedToCastId: "cast-1" }];

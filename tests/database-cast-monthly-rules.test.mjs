@@ -6,7 +6,6 @@ const rules = JSON.parse(await readFile(new URL("../database.rules.json", import
 const now = 1800000000000;
 const id = "daily_20261102";
 const castId = "cast_member";
-const workspace = "accounting-dev";
 const month = "2026-11";
 const children = Symbol("RTDB child nodes");
 
@@ -25,7 +24,7 @@ class Snapshot {
   isString() { return typeof this.val() === "string"; }
 }
 
-function evaluate(rule, before, after, path, { role = "op", uid = "user", key = month } = {}) {
+function evaluate(rule, before, after, path, { role = "op", uid = "user", key = month, workspace = "accounting-dev" } = {}) {
   if (typeof rule === "boolean") return rule;
   const root = { [workspace]: before, users: { [uid]: { role } } };
   const expression = rule.replaceAll(".matches(", ".match(").replaceAll(".beginsWith(", ".startsWith(");
@@ -121,7 +120,8 @@ test("月度体入時給は有効月と正の整数を要求し、入店変換�
 test("月度紹介者は履歴か明示なしを保存でき、変換中・削除処理中は条件を変更しない", () => {
   const introduction = { id: "intro", name: "紹介者", feeType: "sales10", attendanceAdvisoryFee: 100, entryAdvisoryFee: 0 };
   const monthRules = rules.casts.$id.monthlyIntroducers.$month;
-  const setIntroduction = (value, cast = active) => castTree({ ...cast, monthlyIntroducers: { [month]: value } });
+  const introducers = { [introduction.id]: { name: introduction.name } };
+  const setIntroduction = (value, cast = active) => castTree({ ...cast, monthlyIntroducers: { [month]: value } }, { introducers });
   const path = [...castPath, "monthlyIntroducers", month];
   const existing = setIntroduction(introduction);
   for (const [value, allowed] of [[introduction, true], [false, true], [true, false], [{ id: "missing-fields" }, false]]) {
@@ -136,4 +136,118 @@ test("月度紹介者は履歴か明示なしを保存でき、変換中・削�
   assert.equal(evaluate(monthRules.feeType[".validate"], existing, setIntroduction({ ...introduction, feeType: "wrong" }), [...path, "feeType"]), false);
   assert.equal(evaluate(monthRules.attendanceAdvisoryFee[".validate"], existing, setIntroduction({ ...introduction, attendanceAdvisoryFee: -1 }),
     [...path, "attendanceAdvisoryFee"]), false);
+});
+
+test("月度紹介者は保存時点で実在する紹介者だけを新規・変更でき、削除済み履歴は維持できる", () => {
+  const introduction = { id: "intro", name: "紹介者", feeType: "sales10", attendanceAdvisoryFee: 100, entryAdvisoryFee: 0 };
+  const rule = rules.casts.$id.monthlyIntroducers.$month[".validate"];
+  const path = [...castPath, "monthlyIntroducers", month];
+  const introducers = { [introduction.id]: { name: introduction.name } };
+  const previous = { ...active, monthlyIntroducers: { [month]: introduction } };
+  const next = { ...active, monthlyIntroducers: { [month]: { ...introduction, attendanceAdvisoryFee: 200 } } };
+  const cleared = { ...active, monthlyIntroducers: { [month]: false } };
+  for (const workspace of ["accounting-dev", "accounting"]) {
+    const options = { workspace };
+    const live = castTree(previous, { introducers });
+    assert.equal(evaluate(rule, castTree(active, { introducers }), live, path, options), true);
+    assert.equal(evaluate(rule, live, castTree(next, { introducers }), path, options), true);
+    assert.equal(evaluate(rule, castTree(active), castTree(previous), path, options), false);
+    assert.equal(evaluate(rule, live, castTree(next), path, options), false);
+    assert.equal(evaluate(rule, castTree(previous), castTree(next), path, options), false);
+    assert.equal(evaluate(rule, castTree(previous), castTree({ ...previous, note: "備考だけ編集" }), path, options), true);
+    assert.equal(evaluate(rule, castTree(previous), castTree(cleared), path, options), true);
+    for (const [expiresAt, allowed] of [[now + 100, false], [now, true]]) {
+      const deleting = { ...live, introducerDeletionLocks: { [introduction.id]: { expiresAt } } };
+      assert.equal(evaluate(rule, deleting, castTree(next, { introducers }), path, options), allowed);
+      assert.equal(evaluate(rule, deleting, castTree(cleared, { introducers }), path, options), true);
+    }
+  }
+});
+
+const trialId = "cast_trial";
+const cancellationLock = {
+  id: castId, operation: "cancelCastConversion", month, owner: "user", token: "cancel-token",
+  acquiredAtMs: now, expiresAt: now + 60000,
+};
+const cashLockPath = ["cashManagementLock"];
+
+test("入店取消は採用月付きの排他ロックを使用し、送信・承認中は取得できない", () => {
+  const cashRules = rules.cashManagementLock;
+  const pending = { cashManagementLock: cancellationLock };
+  for (const role of ["shop", "accounting", "op"]) {
+    assert.equal(evaluate(cashRules[".write"], {}, pending, cashLockPath, { role }), true);
+    assert.equal(evaluate(cashRules[".write"], pending, {}, cashLockPath, { role }), true);
+  }
+  assert.equal(evaluate(cashRules[".write"], {}, pending, cashLockPath, { role: "visitor" }), false);
+  assert.equal(evaluate(cashRules[".write"], pending, {}, cashLockPath, { uid: "other" }), false);
+  assert.equal(evaluate(cashRules[".validate"], {}, pending, cashLockPath), true);
+  for (const change of [{ month: undefined }, { month: "2026-00" }, { operation: "approve" }]) {
+    assert.equal(evaluate(cashRules[".validate"], {}, { cashManagementLock: { ...cancellationLock, ...change } }, cashLockPath), false);
+  }
+  for (const operation of ["submit", "approve"]) {
+    const dailyLock = { cashManagementLock: { ...cancellationLock, id, month: undefined, operation } };
+    assert.equal(evaluate(cashRules[".write"], dailyLock, pending, cashLockPath), false);
+    assert.equal(evaluate(cashRules[".write"], pending, dailyLock, cashLockPath), false);
+    assert.equal(evaluate(cashRules[".validate"], {}, dailyLock, cashLockPath), true);
+  }
+});
+
+function cancellationTrees() {
+  const trialSource = { ...trial, updatedAt: "trial-before", convertedToCastId: castId };
+  const member = { ...active, hiredAt: "2026-11-03", convertedFromTrialId: trialId };
+  const timestamp = "2026-11-05T12:00:00.000Z";
+  const restored = { ...trialSource, convertedToCastId: undefined, previousUpdatedAt: trialSource.updatedAt, updatedAt: timestamp };
+  const cancelled = { ...member, previousUpdatedAt: member.updatedAt, updatedAt: timestamp, deletedAt: timestamp, deletedBy: "user",
+    entryCancelledAt: timestamp, entryCancellationToken: cancellationLock.token };
+  const before = { casts: { [trialId]: trialSource, [castId]: member }, cashManagementLock: cancellationLock };
+  const after = { casts: { [trialId]: restored, [castId]: cancelled }, cashManagementLock: cancellationLock };
+  return { before, after };
+}
+
+function cancellationAllowed(before, after, workspace) {
+  const castRules = rules.casts.$id;
+  return [castId, trialId].every((id) => [".write", ".validate"]
+    .every((kind) => evaluate(castRules[kind], before, after, ["casts", id], { workspace })));
+}
+
+test("入店取消は在籍と元体入を同時更新する場合だけ成功し、ロック・採用月・両キャストの版を確認する", () => {
+  for (const workspace of ["accounting-dev", "accounting"]) {
+    const { before, after } = cancellationTrees();
+    assert.equal(cancellationAllowed(before, after, workspace), true);
+    for (const id of [castId, trialId]) {
+      const oneSided = { ...after, casts: { ...after.casts, [id]: before.casts[id] } };
+      const writtenId = id === castId ? trialId : castId;
+      assert.equal(evaluate(rules.casts.$id[".validate"], before, oneSided, ["casts", writtenId], { workspace }), false);
+    }
+    for (const change of [{ id: trialId }, { owner: "other" }, { month: "2026-12" }, { token: "new-token" },
+      { token: undefined }, { expiresAt: now }, { operation: "submit" }]) {
+      assert.equal(cancellationAllowed({ ...before, cashManagementLock: { ...cancellationLock, ...change } }, after, workspace), false);
+    }
+    for (const status of ["closing", "closed"]) {
+      assert.equal(cancellationAllowed({ ...before, accountingMonthStates: { [month]: { status } } }, after, workspace), false);
+    }
+    assert.equal(cancellationAllowed({ ...before, accountingMonthStates: { [month]: { status: "open" } } }, after, workspace), true);
+    for (const id of [castId, trialId]) {
+      const changed = { ...before, casts: { ...before.casts, [id]: { ...before.casts[id], updatedAt: "other-change" } } };
+      assert.equal(cancellationAllowed(changed, after, workspace), false);
+    }
+    const unrelated = { ...before, casts: { ...before.casts, [castId]: { ...before.casts[castId], convertedFromTrialId: "another-trial" } } };
+    assert.equal(cancellationAllowed(unrelated, after, workspace), false);
+  }
+});
+
+test("入店取消済みの在籍IDを使う送信・承認だけを拒否し、差戻し・取下げや旧論理削除を保つ", () => {
+  const { after } = cancellationTrees();
+  const rule = rules.history.$id.casts.$index[".validate"];
+  const path = ["history", id, "casts", "0"];
+  const row = { masterId: castId, posCastId: "pos-cast", kind: "regular", beautyAllowance: 0 };
+  const source = (status, value = row, casts = after.casts) => ({ casts, history: { [id]: { status, casts: [value] } } });
+  for (const workspace of ["accounting-dev", "accounting"]) {
+    for (const [status, allowed] of [["submitted", false], ["approved", false], ["returned", true], ["withdrawn", true]]) {
+      assert.equal(evaluate(rule, source("submitted"), source(status), path, { workspace }), allowed);
+    }
+    const { entryCancelledAt: _marker, ...normallyDeleted } = after.casts[castId];
+    assert.equal(evaluate(rule, {}, source("submitted", row, { [castId]: normallyDeleted }), path, { workspace }), true);
+    assert.equal(evaluate(rule, {}, source("submitted", { ...row, kind: "trial", masterId: trialId }), path, { workspace }), true);
+  }
 });

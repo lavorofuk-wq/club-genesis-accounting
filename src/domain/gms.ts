@@ -46,6 +46,8 @@ export type CastRecord = {
   entryAdvisoryFee?: number;
   convertedFromTrialId?: string;
   convertedToCastId?: string;
+  entryCancelledAt?: string;
+  entryCancellationToken?: string;
   note: string;
   createdAt: string;
   updatedAt: string;
@@ -2082,11 +2084,11 @@ function convertedCastForMonth(
 ) {
   const source = castById.get(masterId);
   const direct = source?.convertedToCastId ? castById.get(source.convertedToCastId) : undefined;
-  if (direct?.hiredAt?.startsWith(month)) return direct;
+  if (!direct?.entryCancelledAt && direct?.hiredAt?.startsWith(month)) return direct;
   // 体入マスタが完全削除済みでも、在籍側に保存した逆参照で同月の履歴を統合する。
   if (!source) {
     return casts.find((candidate) =>
-      candidate.convertedFromTrialId === masterId && candidate.hiredAt?.startsWith(month));
+      !candidate.entryCancelledAt && candidate.convertedFromTrialId === masterId && candidate.hiredAt?.startsWith(month));
   }
   return undefined;
 }
@@ -2102,6 +2104,7 @@ export function castMasterIdentityForMonth(
   // 旧版の物理削除で在籍側マスタだけが消えていても、残存する体入側の変換先IDと
   // 同月regular日次のIDが一致する場合に限り、同一人物として復元する。
   const missingConvertedTargetId = source?.convertedToCastId
+    && !castById.get(source.convertedToCastId)?.entryCancelledAt
     && monthDailyMasterIds?.has(source.convertedToCastId)
     ? source.convertedToCastId
     : undefined;
@@ -2129,6 +2132,7 @@ export function castIntroducerOverrideForAccounting(
   dailyTrialIds: readonly string[] = [],
 ): DailyCast["introducer"] | false {
   const member = castById.get(castId);
+  if (member?.entryCancelledAt) return false;
   const ownSetting = castIntroducerOverrideForMonth(member, month);
   const trialId = member?.hiredAt?.startsWith(`${month}-`) && member.convertedFromTrialId
     ? member.convertedFromTrialId
@@ -2136,6 +2140,45 @@ export function castIntroducerOverrideForAccounting(
   const selected = ownSetting ?? (trialId ? castIntroducerOverrideForMonth(castById.get(trialId), month) : undefined);
   if (selected && deletionCommits.some((commit) => commit.introducerId === selected.id && commit.month <= month)) return false;
   return selected;
+}
+
+export function castIntroducerForApprovedWork(
+  castId: string,
+  castById: ReadonlyMap<string, CastRecord>,
+  month: string,
+  entries: readonly { closing: DailyClosing; row: DailyCast }[],
+  monthEvents: readonly IntroducerMonthEvent[],
+  deletionCommits: readonly IntroducerDeletionCommit[],
+): DailyCast["introducer"] {
+  const monthlyIntroducer = castIntroducerOverrideForAccounting(castId, castById, month, deletionCommits,
+    [...new Set(entries.filter(({ row }) => row.kind === "trial").map(({ row }) => row.masterId))]);
+  if (monthlyIntroducer !== undefined) return monthlyIntroducer || undefined;
+
+  // 旧日次は営業日順ではなく、最後の店舗保存時点の紹介者条件を月全体へ適用する。
+  const latest = [...entries].sort((left, right) =>
+    compareDailyClosingSubmissionOrder(left.closing, right.closing)
+    || left.closing.businessDate.localeCompare(right.closing.businessDate)
+    || left.closing.id.localeCompare(right.closing.id)
+    || left.row.posCastId.localeCompare(right.row.posCastId)).at(-1);
+  const dailyIntroducer = latest?.row.introducer;
+  const member = castById.get(castId);
+  const aliases = new Set([castId, member?.convertedFromTrialId, ...entries.map(({ row }) => row.masterId)]);
+  const event = monthEvents.filter((row) => row.month === month && aliases.has(row.castId))
+    .sort(compareIntroducerMonthEventEffectiveOrder).at(-1);
+  const deletion = deletionCommits.filter((commit) => commit.month === month && (
+    commit.linkedCastIds.some((id) => aliases.has(id))
+    // 旧削除履歴の対象者が欠けていても、現存キャストが該当する場合は支払を停止する。
+    || (member !== undefined && !member.deletedAt
+      && (member.introducerId === commit.introducerId || dailyIntroducer?.id === commit.introducerId))
+  )).sort((left, right) => left.completedAtMs - right.completedAtMs || left.id.localeCompare(right.id)).at(-1);
+  if (deletion && (!event || deletion.completedAtMs >= introducerMonthEventEffectiveOrderValue(event))) return undefined;
+  if (event?.state === "deleted") return undefined;
+  // 同時刻なら明示された再設定を優先する。後の日次に紹介者がなければ、なしを適用する。
+  if (event?.state === "reassigned"
+    && (!latest || dailyClosingSubmissionOrderValue(latest.closing) <= introducerMonthEventEffectiveOrderValue(event))) {
+    return event.introducer;
+  }
+  return dailyIntroducer;
 }
 
 export function calculateCastSalesReports(
@@ -2320,60 +2363,6 @@ export function calculateCastRewards(
     const withholding = trialOnly
       ? asNumber(adjustments?.withholdingByCast?.[id])
       : calculateCastWithholding(grossPay, month);
-    // 月途中で条件が変わった場合は営業日・在籍区分ではなく、体入日も含めて
-    // 「最後に店舗保存された日次」に実際に入っている条件を正とする。
-    const latestIntroducerEntry = [...entries].sort((left, right) => {
-      return compareDailyClosingSubmissionOrder(left.closing, right.closing)
-        || left.businessDate.localeCompare(right.businessDate)
-        || left.closing.id.localeCompare(right.closing.id)
-        || left.row.posCastId.localeCompare(right.row.posCastId);
-    }).at(-1);
-    const latestIntroducer = latestIntroducerEntry?.row.introducer;
-    const latestDailySavedOrder = latestIntroducerEntry
-      ? dailyClosingSubmissionOrderValue(latestIntroducerEntry.closing)
-      : Number.NEGATIVE_INFINITY;
-    // 体入・在籍IDのどちらに履歴が残っていても、人物全体で最後に保存された
-    // イベントを採る。異なるパスのrevisionは大小比較できないため順序には使わない。
-    const aliasIds = new Set([
-      id,
-      member?.convertedFromTrialId,
-      ...rows.map((row) => row.masterId),
-    ].filter((value): value is string => Boolean(value)));
-    const monthEvent = introducerMonthEvents
-      .filter((event) => event.month === month && aliasIds.has(event.castId))
-      .sort(compareIntroducerMonthEventEffectiveOrder)
-      .at(-1);
-    const deletionCommit = introducerDeletionCommits
-      // linkedCastIdsは削除時に警告表示し、削除ロック下で固定した対象者の正本。
-      // 旧・破損commitで一覧が欠けても、現存キャストの当月最新日次が削除紹介者を
-      // 指している場合だけ安全側で0にする。archived/物理削除済み履歴は巻き込まない。
-      .filter((commit) => commit.month === month && (
-        commit.linkedCastIds.some((castId) => aliasIds.has(castId))
-        || (member !== undefined && !member.deletedAt && (
-          member.introducerId === commit.introducerId
-          || latestIntroducer?.id === commit.introducerId
-        ))
-      ))
-      .sort((left, right) => left.completedAtMs - right.completedAtMs || left.id.localeCompare(right.id))
-      .at(-1);
-    const latestSpecial = [
-      ...(monthEvent ? [{ kind: "event" as const, order: introducerMonthEventEffectiveOrderValue(monthEvent), event: monthEvent }] : []),
-      ...(deletionCommit ? [{ kind: "commit" as const, order: deletionCommit.completedAtMs, commit: deletionCommit }] : []),
-    ].sort((left, right) => left.order - right.order || (left.kind === "commit" ? 1 : -1)).at(-1);
-    const monthlyIntroducer = castIntroducerOverrideForAccounting(id, castById, month, introducerDeletionCommits,
-      [...new Set(rows.filter((row) => row.kind === "trial").map((row) => row.masterId))]);
-    const effectiveIntroducer = monthlyIntroducer !== undefined ? monthlyIntroducer || undefined
-      : latestSpecial?.kind === "commit"
-      ? undefined
-      : latestSpecial?.event.state === "deleted"
-        ? undefined
-        : latestSpecial?.event.state === "reassigned"
-        // 再設定より後に日次が保存された場合は、その保存内容（紹介者なしを含む）を
-        // 新しい月内条件とする。同一時刻なら明示操作である再設定イベントを優先する。
-        ? latestDailySavedOrder > introducerMonthEventEffectiveOrderValue(latestSpecial.event)
-          ? latestIntroducer
-          : latestSpecial.event.introducer
-        : latestIntroducer;
     return {
       id,
       name: member?.name || rows[0]?.name || "名称未設定",
@@ -2407,7 +2396,8 @@ export function calculateCastRewards(
       transportFee,
       withholding,
       netPay: grossPay - dailyPayment - advancePayment - transportFee - withholding,
-      introducer: trialOnly ? undefined : effectiveIntroducer
+      introducer: trialOnly ? undefined : castIntroducerForApprovedWork(
+        id, castById, month, entries, introducerMonthEvents, introducerDeletionCommits)
     };
   }).sort((left, right) => right.honShimeiSales + right.jonaiExtensionSales - (left.honShimeiSales + left.jonaiExtensionSales));
 }

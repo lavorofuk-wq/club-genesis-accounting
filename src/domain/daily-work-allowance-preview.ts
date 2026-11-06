@@ -1,7 +1,7 @@
 import { castIdentityForMonth, type CastRecord, type DailyClosing, type WorkspaceData } from "./gms";
 import { BEAUTY_ALLOWANCE_AMOUNT, normalizeBeautyMonth } from "./beauty-allowance";
-import { normalizeTransportMonth } from "./transport";
-import { normalizeCastAccountingInputs, resolveCastAccountingInputs } from "./cast-accounting-inputs";
+import { normalizeTransportMonth, type CastTransportDay } from "./transport";
+import { approvedTrialAttendanceForCancelledEntry, normalizeCastAccountingInputs, resolveCastAccountingInputs } from "./cast-accounting-inputs";
 
 export type DailyWorkAllowancePreview = {
   casts: Array<{ index: number; posCastId: string; beautyAllowance: number | null; transportFee: number | null }>;
@@ -94,13 +94,18 @@ export function projectDailyWorkAllowances(data: PreviewData, closing: DailyClos
     const inputs = normalizeCastAccountingInputs(adjustment?.castInputs ?? data.transportLegacyInputs?.[month])
       .filter((row) => row.kind === "transport");
     const consumed = new Set<string>();
+    const restoredCastId = (id: string, businessDate: string, record: CastTransportDay) => {
+      const source = approvedTrialAttendanceForCancelledEntry(data.closings, castById.get(id), month, { ...record, businessDate });
+      return source ? identity(source.row) : undefined;
+    };
     for (const [id, days] of Object.entries(records.casts)) {
       for (const [date, record] of Object.entries(days)) {
         for (const inputId of record.legacyInputIds) {
           const input = inputs.find((row) => row.id === inputId);
           if (!input || input.castId !== id || consumed.has(inputId) || !date.startsWith(`${month}-`)
             || input.businessDate !== undefined && input.businessDate !== date) {
-            const affected = [...new Set([...indexesFor(id), ...(input ? indexesFor(input.castId) : [])])];
+            const affected = [...new Set([...indexesFor(restoredCastId(id, date, record) || id),
+              ...(input ? indexesFor(input.castId) : [])])];
             if (affected.length) fail("transportFee", affected, `${nameFor(id)}の送迎記録と旧送迎入力の対応が一致しません。`);
             continue;
           }
@@ -109,11 +114,20 @@ export function projectDailyWorkAllowances(data: PreviewData, closing: DailyClos
       }
     }
     // 同一人物・同日の元日額を抑制し、根拠行一つだけへ最新額を表示する。
+    const restoredPositive = new Set<string>();
     for (const [id, days] of Object.entries(records.casts)) {
       const record = days[closing.businessDate];
       if (!record) continue;
-      const affected = indexesFor(id);
+      const restored = restoredCastId(id, closing.businessDate, record);
+      const targetId = restored || id;
+      const affected = indexesFor(targetId);
       if (!affected.length && record.attendanceClosingId !== closing.id) continue;
+      if (restored && (records.casts[targetId]?.[closing.businessDate] || restoredPositive.has(targetId))) {
+        if (record.amount > 0) fail("transportFee", affected,
+          `${closing.businessDate}・${nameFor(targetId)}の送迎記録が入店取消後の同じ出勤日に重複しています。送迎画面で確認してください。`);
+        continue;
+      }
+      if (restored && record.amount > 0) restoredPositive.add(targetId);
       const invalidLegacy = affected.some((index) => casts[index].transportFee === null);
       if (!saved) {
         fail("transportFee", affected, `${closing.businessDate}・${nameFor(id)}の送迎代は保存済みの送信元を確認できません。`);
@@ -122,7 +136,7 @@ export function projectDailyWorkAllowances(data: PreviewData, closing: DailyClos
       if (!invalidLegacy) affected.forEach((index) => { casts[index].transportFee = 0; });
       if (record.amount === 0) continue;
       const row = closing.casts[record.attendanceIndex];
-      if (record.attendanceClosingId !== closing.id || !matchesSaved(record.attendanceIndex) || !row || identity(row) !== id) {
+      if (record.attendanceClosingId !== closing.id || !matchesSaved(record.attendanceIndex) || !row || identity(row) !== targetId) {
         fail("transportFee", affected, `${closing.businessDate}・${nameFor(id)}の送迎代と送信済み出勤が一致しません。差戻し・再送・キャスト照合を確認してください。`);
         continue;
       }
@@ -132,9 +146,11 @@ export function projectDailyWorkAllowances(data: PreviewData, closing: DailyClos
     const resolved = resolveCastAccountingInputs({ month, castInputs: inputs }, data.closings, masters, month).inputs;
     for (const input of inputs) {
       if (consumed.has(input.id) || input.amount === 0) continue;
-      const affected = indexesFor(input.castId);
+      const resolvedInput = resolved.find((row) => row.id === input.id);
+      const targetId = resolvedInput?.castId || input.castId;
+      const affected = indexesFor(targetId);
       if (!affected.length) continue;
-      const resolvedDate = resolved.find((row) => row.id === input.id)?.businessDate;
+      const resolvedDate = resolvedInput?.businessDate;
       const anchor = input.attendanceClosingId ? data.closings.filter((row) => row.id === input.attendanceClosingId) : [];
       const anchorDate = anchor.length === 1 ? anchor[0].businessDate : undefined;
       const date = input.businessDate ?? resolvedDate ?? anchorDate;
@@ -144,7 +160,7 @@ export function projectDailyWorkAllowances(data: PreviewData, closing: DailyClos
       }
       if (date !== closing.businessDate) continue;
       // 日付未指定の旧入力が承認日へ解決済みなら、古い根拠日へ戻さない。
-      const useAnchor = input.businessDate !== undefined || resolvedDate === undefined;
+      const useAnchor = targetId !== input.castId || input.businessDate !== undefined || resolvedDate === undefined;
       const candidates = affected.filter((index) => matchesSaved(index)
         && (!useAnchor || input.attendanceClosingId === undefined || input.attendanceClosingId === closing.id)
         && (!useAnchor || input.attendanceIndex === undefined || input.attendanceIndex === index));
