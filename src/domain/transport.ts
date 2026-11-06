@@ -1,4 +1,4 @@
-import { castIdentityForMonth, type CastAccountingInput, type DailyClosing, type MonthlyAdjustments, type WorkspaceData } from "./gms";
+import { castIdentityForMonth, type CastAccountingInput, type CastRecord, type DailyClosing, type MonthlyAdjustments, type WorkspaceData } from "./gms";
 import { approvedTrialAttendanceForCancelledEntry, normalizeCastAccountingInputs, resolveCastAccountingInputs } from "./cast-accounting-inputs";
 
 export const TRANSPORT_AMOUNTS = [500, 1000, 1500, 2000] as const;
@@ -135,8 +135,9 @@ export function transportUnresolvedLegacyInputs(data: WorkspaceData, month: stri
 }
 
 /** 旧日次・旧追加入力と編集後の額を一つの日別明細として表示する。0円の上書きは削除履歴。 */
-export function transportCastDays(data: WorkspaceData, month: string, castId: string) {
-  const overrides = normalizeTransportMonth(data.transportMonths?.[month]).casts[castId] || {};
+export function transportCastDays(data: WorkspaceData & { archivedCasts?: CastRecord[] }, month: string, castId: string) {
+  const records = normalizeTransportMonth(data.transportMonths?.[month]).casts;
+  const overrides = records[castId] || {};
   const consumedIds = new Set(Object.values(overrides).flatMap((day) => day.legacyInputIds));
   const result = new Map<string, { businessDate: string; amount: number; legacyInputIds: string[]; hasRecord: boolean }>();
   const getDay = (businessDate: string) => {
@@ -145,8 +146,18 @@ export function transportCastDays(data: WorkspaceData, month: string, castId: st
     return row;
   };
   const identity = castIdentity(data, month);
+  // 保存先は旧在籍カードに残し、同じ体入日の元額だけを月次と同様に抑制する。
+  const restoredOverrideDays = new Set<string>();
+  for (const cast of [...data.casts, ...(data.archivedCasts || [])]) {
+    if (!cast.entryCancelledAt) continue;
+    for (const [businessDate, record] of Object.entries(records[cast.id] || {})) {
+      const restored = approvedTrialAttendanceForCancelledEntry(data.closings, cast, month, { ...record, businessDate });
+      if (restored && identity(restored.row) === castId) restoredOverrideDays.add(businessDate);
+    }
+  }
   // 差戻し・取下げ後も保存済みの旧額を確認・削除できる。給与計算は別途承認日だけを採用する。
   for (const closing of data.closings.filter((row) => row.businessDate.startsWith(`${month}-`))) {
+    if (restoredOverrideDays.has(closing.businessDate)) continue;
     for (const row of closing.casts || []) if (identity(row) === castId && row.transportFee > 0) {
       getDay(closing.businessDate).amount += row.transportFee;
     }

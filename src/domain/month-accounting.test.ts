@@ -2961,6 +2961,17 @@ describe("キャスト月度設定", () => {
     expect(historical.castRewards[0]).toMatchObject({ id: trial.id, trialOnly: true, honShimeiBack: 0 });
     expect(historical.introducerPayments).toEqual([]);
     expect(castSharedIntroducerMemberForMonth(trial, month, [trial, cancelled])).toBe(trial);
+
+    const reentered = { ...regular, id: "cast-reentered", hiredAt: "2026-09-06" };
+    const reentry = calculateMonthlyAccounting({
+      ...afterSource, casts: [{ ...restored, convertedToCastId: reentered.id }, reentered],
+    }, month, adjustments(), [entry], [reassigned]);
+    expect(reentry.castRewards).toEqual([expect.objectContaining({
+      id: reentered.id, trialOnly: false, honShimeiBack: 1_000, salesReward: 780_000, dailyPayment: 8_000,
+    })]);
+    expect(reentry.introducerPayments).toEqual([expect.objectContaining({
+      castId: reentered.id, introducerId: selectedTerms.id, entryAdvisory: 5_000,
+    })]);
   });
 
   it("月途中の紹介者変更を承認済みの日次全体へ適用し、紹介者なしで全費目を0円にする", () => {

@@ -63,7 +63,7 @@ import { staffMonthlyRates } from "@/domain/staff-rates";
 import { validateAccountingExpenseInputs, validateConsumptionTaxRate } from "@/domain/accounting-expenses";
 import { castAccountingAttendanceSources, castAccountingInputTotals, normalizeCastAccountingInputs } from "@/domain/cast-accounting-inputs";
 import { castHasApprovedRegularWork, castHasApprovedWork, isCastMonth } from "@/domain/cast-monthly";
-import { buildCastSalesRankingRoster } from "@/domain/cast-sales-ranking";
+import { buildCastSalesRankingRoster, normalizeCastSalesRankingRoster } from "@/domain/cast-sales-ranking";
 import type { TransportSettings, TransportMonth } from "@/domain/transport";
 import { normalizeTransportSettings, normalizeTransportMonth, transportCastDays, transportAttendance, transportUnresolvedLegacyInputs } from "@/domain/transport";
 import { beautyAttendance, beautyCastDays, normalizeBeautyMonth } from "@/domain/beauty-allowance";
@@ -264,6 +264,12 @@ function claimId(value: unknown) {
   return "";
 }
 
+class ClaimConflictError extends Error {
+  constructor(readonly ownerId: string) {
+    super("同じ内容のデータがすでに登録されています。");
+  }
+}
+
 async function acquireClaim(path: string, key: string, id: string): Promise<ClaimHandle> {
   const token = secureRandomUUID();
   const expiresAt = Date.now() + CLAIM_PENDING_TTL_MS;
@@ -275,7 +281,7 @@ async function acquireClaim(path: string, key: string, id: string): Promise<Clai
       return { id, state: "pending", token, expiresAt };
     }
     const ownerId = claimId(stored);
-    if (ownerId && ownerId !== id) throw new Error("同じ内容のデータがすでに登録されています。");
+    if (ownerId && ownerId !== id) throw new ClaimConflictError(ownerId);
     if (typeof stored === "string" || (stored && stored.state === "committed")) {
       created = false;
       return current;
@@ -335,6 +341,20 @@ async function releasePendingClaim(handle: ClaimHandle) {
 
 async function releaseClaim(path: string, key: string, id: string) {
   await runReadyTransaction(rootRef(`${path}/${key}`), (current) => claimId(current) === id ? null : current, { applyLocally: false });
+}
+
+async function acquireCastNameClaim(key: string, id: string): Promise<ClaimHandle> {
+  const path = "castNameClaims";
+  try {
+    return await acquireClaim(path, key, id);
+  } catch (error) {
+    if (!(error instanceof ClaimConflictError)) throw error;
+    const owner = (await get(rootRef(`casts/${error.ownerId}`))).val() as CastRecord | null;
+    if (!owner?.entryCancelledAt || !owner.deletedAt) throw error;
+    // 取消保存後の通信断で残った、取消済み在籍IDの名義だけを回収する。
+    await releaseClaim(path, key, error.ownerId);
+    return acquireClaim(path, key, id);
+  }
 }
 
 async function releaseClaimAfterEntitySaved(path: string, key: string, id: string, entityLabel: string) {
@@ -1477,7 +1497,7 @@ export async function saveCast(
     const duplicate = asArray<CastRecord & { deletedAt?: string }>(allSnapshot.val()).some((row) => !row.deletedAt && row.id !== id && row.status === "active" && String(row.name || "").trim() === name);
     if (duplicate) throw new Error("同じキャスト名の在籍キャストは登録できません。");
     try {
-      newClaimHandle = await acquireClaim("castNameClaims", newClaim, id);
+      newClaimHandle = await acquireCastNameClaim(newClaim, id);
     } catch (error) {
       throw claimAcquisitionError(error, "同じキャスト名の在籍キャストは登録できません。");
     }
@@ -1548,13 +1568,17 @@ export async function convertTrialCast(
   if (!legalName) throw new Error("本名を入力してください。");
   const hiredAt = incoming.hiredAt || "";
   if (!validDate(hiredAt)) throw new Error("採用日が正しくありません。");
-  if (month !== undefined && month !== hiredAt.slice(0, 7)) throw new Error("対象月は採用月にしてください。");
+  const hiredMonth = hiredAt.slice(0, 7);
+  if (month !== undefined && month !== hiredMonth) throw new Error("対象月は採用月にしてください。");
   if (validDate(initialTrial.trialDate) && hiredAt < initialTrial.trialDate!) throw new Error("採用日は体入日以降にしてください。");
   validateCastPaySetting("active", incoming.hourlyRates || {}, incoming.trialHourlyRate);
   if (Object.keys(incoming.hourlyRates || {}).some((month) => month < hiredAt.slice(0, 7))) throw new Error("採用月より前の月度時給は登録できません。");
-  if (asArray<CastRecord & { deletedAt?: string }>(allSnapshot.val()).some((row) => !row.deletedAt && row.status === "active" && String(row.name || "").trim() === name)) {
+  const casts = asArray<CastRecord>(allSnapshot.val());
+  if (casts.some((row) => !row.deletedAt && row.status === "active" && String(row.name || "").trim() === name)) {
     throw new Error("同じキャスト名の在籍キャストは登録できません。");
   }
+  const sameMonthReentry = initialTrial.trialDate?.startsWith(`${hiredMonth}-`) && casts.some((row) =>
+    row.deletedAt && row.entryCancelledAt && row.convertedFromTrialId === trialId);
   let conversionLock: ConversionLockHandle<CastRecord> | undefined;
   let nameClaimHandle: ClaimHandle | undefined;
   try {
@@ -1584,7 +1608,7 @@ export async function convertTrialCast(
     const introducerMonthEventPlan = month ? {} : await prepareConvertedCastIntroducerMonthPlan(trialId, proposed, introducer, timestamp, user);
     if (Object.keys(introducerMonthEventPlan).length) assertIntroducerMonthBoundarySafe(serverClock.milliseconds);
     try {
-      nameClaimHandle = await acquireClaim("castNameClaims", claimKey(name), activeId);
+      nameClaimHandle = await acquireCastNameClaim(claimKey(name), activeId);
     } catch (error) {
       throw claimAcquisitionError(error, "同じキャスト名の在籍キャストは登録できません。");
     }
@@ -1596,6 +1620,8 @@ export async function convertTrialCast(
       }
       assertIntroducerMonthBoundarySafe(writeClock.milliseconds);
     }
+    // 取消後に体入として確定した月のバックを再計上するには、先に確定解除が必要。
+    if (sameMonthReentry) await assertMonthOpen(hiredMonth);
     const storedActive = clean(withoutInternalFields(proposed)) as Record<string, unknown>;
     const conversionPlan = {
       [`casts/${activeId}`]: {
@@ -1645,8 +1671,9 @@ export async function cancelCastConversion(activeId: string, expectedUpdatedAt: 
   const trialPath = `casts/${initial.convertedFromTrialId}`;
   const lock = await acquireCashManagementLock(activeId, "cancelCastConversion", user, month);
   try {
-    const [activeSnapshot, trialSnapshot, history, entryEvents] = await Promise.all([
+    const [activeSnapshot, trialSnapshot, history, entryEvents, monthStates] = await Promise.all([
       get(rootRef(activePath)), get(rootRef(trialPath)), get(rootRef("history")), get(rootRef("introducerEntryEvents")),
+      get(rootRef("accountingMonthStates")),
     ]);
     const active = activeSnapshot.val() as (CastRecord & ConversionLockCarrier) | null;
     const trial = trialSnapshot.val() as (CastRecord & ConversionLockCarrier) | null;
@@ -1666,7 +1693,22 @@ export async function cancelCastConversion(activeId: string, expectedUpdatedAt: 
     const eventMonths = Object.entries((entryEvents.val() || {}) as Record<string, Record<string, IntroducerEntryEvent>>)
       .filter(([eventMonth, entries]) => isCastMonth(eventMonth) && Number(entries?.[activeId]?.amount) > 0)
       .map(([eventMonth]) => eventMonth);
-    await Promise.all([...new Set([month, ...eventMonths])].map(assertMonthOpen));
+    const states = (monthStates.val() || {}) as Record<string, AccountingMonthState>;
+    const laterClosed = Object.entries(states).filter(([key, state]) => isCastMonth(key) && key > month && state?.status === "closed");
+    const rosterMonths = await Promise.all(laterClosed.map(async ([key, state]) => {
+      const revision = state.currentSnapshotRevision;
+      if (!Number.isSafeInteger(revision) || Number(revision) <= 0) {
+        throw new Error(`${key}月度の現在の確定版を確認できません。最新データを読み込んでください。`);
+      }
+      const snapshot = await get(rootRef(`accountingMonthSnapshots/${key}/${revision}/castSalesRankingRoster`));
+      const roster = normalizeCastSalesRankingRoster(snapshot.val());
+      return roster?.entries.some((entry) => entry.id === activeId) ? [key] : [];
+    }));
+    const lockedMonths = [...new Set([month, ...eventMonths, ...rosterMonths.flat()])]
+      .filter((key) => states[key] && states[key].status !== "open").sort();
+    if (lockedMonths.length) {
+      throw new Error(`${lockedMonths.map((key) => key + "月度").join("、")}は月次確定処理中または確定済みです。先に月次確定を解除してください。`);
+    }
     await assertCashManagementLockOwned(lock);
     const timestamp = nextEventTimestamp(now(), active.updatedAt);
     await applyConversionPlanWithVerification({
@@ -1746,7 +1788,7 @@ export async function restoreCast(id: string, expectedUpdatedAt: string, user: U
   const nameClaim = claimKey(target.name);
   let nameClaimHandle: ClaimHandle | undefined;
   try {
-    nameClaimHandle = await acquireClaim("castNameClaims", nameClaim, id);
+    nameClaimHandle = await acquireCastNameClaim(nameClaim, id);
   } catch (error) {
     throw claimAcquisitionError(error, "同じキャスト名の在籍キャストがいるため、退店取消できません。");
   }

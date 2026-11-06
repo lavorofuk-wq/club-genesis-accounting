@@ -303,6 +303,8 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     return () => onDirtyChange(false);
   }, [hasUnsavedDailyData, onDirtyChange]);
   const references = useMemo(() => pos ? posCastReferences(pos) : [], [pos]);
+  const cancelledCastIds = useMemo(() => new Set(data.archivedCasts.filter((cast) => cast.entryCancelledAt).map((cast) => cast.id)), [data.archivedCasts]);
+  const hasCancelledMapping = references.some((source) => cancelledCastIds.has(mapping[source.id]));
   const missingBottles = useMemo<MissingBottleCost[]>(() => pos ? pos.transactions.flatMap((transaction) => transaction.items.flatMap((item, itemIndex) => {
     if (!requiresBottleCost(transaction, item, mapping)) return [];
     if (data.liquor.some((row) => row.kind === item.category && row.name === item.label && row.salePrice === item.price)) return [];
@@ -318,12 +320,15 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
   const initialSnapshotFor = (source: (typeof references)[number]) => {
     if (!allowInitialSnapshotMapping || !initial || !pos || initial.businessDate !== pos.businessDate) return undefined;
     const snapshot = initial.casts.find((row) => row.posCastId === source.id);
-    if (!snapshot?.masterId || mapping[source.id] !== snapshot.masterId) return undefined;
+    if (!snapshot?.masterId || mapping[source.id] !== snapshot.masterId || cancelledCastIds.has(snapshot.masterId)) return undefined;
     return snapshot.name === source.name && snapshot.kind === source.kind ? snapshot : undefined;
   };
   const mappingIssue = (source: (typeof references)[number]) => {
     const selected = mapping[source.id];
     if (!selected) return "未照合";
+    if (cancelledCastIds.has(selected)) return source.kind === "regular"
+      ? "入店取消済みの在籍キャストです。正しい在籍キャストを選んでください。実際の勤務が体入の場合は、POSで勤務区分を訂正し、再出力した同じ営業日のJSONを取り込んでください。"
+      : "入店取消済みのキャストです。正しいキャストを選んでください。";
     if (selected === "dispatch") return canMapAsDispatch(source.kind) ? "" : "在籍キャストは派遣として処理できません";
     if (source.kind === "dispatch") return "派遣キャストとして再照合してください";
     return candidates(source.kind, source.name).some((row) => row.id === selected) || Boolean(initialSnapshotFor(source))
@@ -340,8 +345,8 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
   const duplicateClosing = duplicateClosingForNewWorkflow(pos?.businessDate || "", initial, data.closings);
   const duplicateMessage = duplicateClosing ? existingClosingSubmissionMessage(duplicateClosing) : "";
   useEffect(() => {
-    if (workflowLock && stage !== "json") setStage("json");
-  }, [stage, workflowLock]);
+    if ((workflowLock || hasCancelledMapping) && stage !== "json") setStage("json");
+  }, [stage, workflowLock, hasCancelledMapping]);
 
   const hydrateMapping = (closing: PosClosingV3) => {
     const auto: Record<string, string> = {};
@@ -599,7 +604,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
   const canConfirmCash = Boolean(transportConflicts.length === 0 && beautyConflicts.length === 0 && cash?.funding && cash.expectedClosingCash >= 0 && cashInputIssues.length === 0
     && contextConfirmed && (!cashChanged || cashRevisionReason.trim()) && !workflowLock && !duplicateMessage);
   const canSubmitCash = canConfirmCash && cashConfirmed;
-  const visibleStage = stage === "preview" && !canSubmitCash ? "cash" : stage;
+  const visibleStage = hasCancelledMapping ? "json" : stage === "preview" && !canSubmitCash ? "cash" : stage;
   const driverRows = driverWork;
 
   const submit = async () => {
@@ -659,7 +664,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     }} />
     {workflowLock && <div className="notice warn"><strong>この営業日は編集できません。</strong><br />{workflowLock}</div>}
     {duplicateMessage && <div className="notice warn" role="alert"><strong>この営業日の送信済みデータがあります。</strong><p>{duplicateMessage}</p><p>現在の入力は保持していますが、この新規作成画面からは送信できません。</p><a className="text-button" href="#store-sent-data">送信済みデータを確認</a></div>}
-    {stage === "json" && <div className="stack section-pad">
+    {visibleStage === "json" && <div className="stack section-pad">
       {initial && !initial.posSnapshot && <div className="notice warn">この旧データにはPOS原本が保存されていません。再編集するには、同じ営業日のPOS JSONをもう一度取り込んでください。既存データは送信を完了するまで変更されません。商品との一致を検証できない今回のみの特別原価は、安全のため再入力が必要です。</div>}
       {(initial || pos) && <div className="notice warn">同じ営業日のJSONを再取込しても、入力済みの店舗データと補充・会社入金額・返済実績は保持されます。勤務・指名本数・商品配賦などPOS由来の項目だけを再計算します。現金の一致確認はやり直してください。</div>}
       <Field label="POS営業終了JSON（schemaVersion 3）"><input className="input" type="file" accept=".json,application/json" disabled={busy || jsonReading || Boolean(workflowLock)} onChange={async (event) => {
@@ -703,7 +708,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
           const savedSnapshot = initialSnapshotFor(source);
           const currentOptionExists = options.some((row) => row.id === selected);
           const unavailable = selected !== "dispatch" && selected !== "" && !currentOptionExists && !savedSnapshot;
-          const updateMapping = (value: string) => { setMapping((current) => ({ ...current, [source.id]: value })); setError(""); };
+          const updateMapping = (value: string) => { setMapping((current) => ({ ...current, [source.id]: value })); setStage("json"); setError(""); };
           return <tr key={source.id}><td>{source.name}</td><td>{source.kind === "regular" ? "在籍" : source.kind === "trial" ? "体入" : "派遣"}</td><td>{source.kind === "dispatch"
             ? <select className="input table-input" value={selected} onChange={(e) => updateMapping(e.target.value)}><option value="">選択</option><option value="dispatch">派遣キャストとして処理</option>{unavailable && <option value={selected}>選択済みデータは利用不可</option>}</select>
             : <select className="input table-input" value={selected} onChange={(e) => updateMapping(e.target.value)}><option value="">一致するデータを選択</option>{savedSnapshot && !currentOptionExists && <option value={savedSnapshot.masterId}>{savedSnapshot.name}（この日次に保存済み・マスタ削除済み）</option>}{unavailable && <option value={selected}>選択済みデータは利用不可（再照合が必要）</option>}{options.map((row) => <option key={row.id} value={row.id}>{row.name}（{row.trialDate || row.hiredAt}）</option>)}{canMapAsDispatch(source.kind) && <option value="dispatch">派遣キャストとして処理（マスタ登録不要）</option>}</select>}</td><td>{issue ? <><StatusPill tone="danger">{selected ? "再照合が必要" : "未照合"}</StatusPill><br /><small>{issue}</small></> : <><StatusPill tone="good">照合済み</StatusPill>{savedSnapshot && !currentOptionExists && <><br /><small>保存済み照合を使用</small></>}</>}</td></tr>;
@@ -714,7 +719,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
         })}</Table></>}
         <button className="button wide-button" disabled={busy || Boolean(workflowLock) || Boolean(duplicateMessage) || !mappingComplete || !costsComplete} title={workflowLock || duplicateMessage || undefined} onClick={createRows}>照合を確定して店舗データ作成へ</button></>}
     </div>}
-    {stage === "details" && pos && !workflowLock && <div className="stack section-pad">
+    {visibleStage === "details" && pos && !workflowLock && <div className="stack section-pad">
       {unmatchedCastDrafts.length > 0 && <div className="notice error"><strong>引継ぎ保留のキャスト入力があります</strong><p>POSキャストID・名前・区分の一致を確認できなかったため、別人への誤転記を防いで元の入力を保留しています。正しいJSONまたは照合内容を確認してください。</p><Table headers={["キャスト", "本指名売上", "場内延長売上", "美容室", "日払い", "立替", "送迎"]}>{unmatchedCastDrafts.map((row) => <tr key={`${row.posCastId}-${row.name}-${row.kind}`}><td>{row.name}<br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td><td>{yen.format(row.honShimeiSales)}</td><td>{yen.format(row.jonaiExtensionSales)}</td><td>{yen.format(row.beautyAllowance)}</td><td>{yen.format(row.dailyPayment)}</td><td>{yen.format(row.advancePayment)}</td><td>{yen.format(row.transportFee)}</td></tr>)}</Table><button className="button danger mini" onClick={() => { if (window.confirm("引継ぎ保留のキャスト入力を破棄しますか？破棄した値は現在の再編集画面へ戻せません。")) { setUnmatchedCastDrafts([]); setError(""); } }}>保留入力を確認済みとして破棄</button></div>}
       {invalidTrialBeautyExpenses.length > 0 && <div className="notice error">体入キャストとの紐付けを確認できない美容室手当経費があります。経費一覧から対象行を削除し、現在の体入キャストを選び直してください。</div>}
       <h3>キャスト出勤・売上・手当控除</h3><Table headers={["キャスト", "勤務", "本指名", "場内", "同伴", "本指名売上", "場内延長売上", "ボトル/ドリンク", "美容室", "日払い", "立替", "送迎"]}>{castRows.map((row) => <tr key={row.posCastId}><td><strong>{row.name}</strong><br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td><td>{row.startTime}–{row.endTime}<br />{row.hours}時間</td><td>{row.honShimeiCount}本</td><td>{row.banaiShimeiCount}本</td><td>{row.dohanCount}本</td><td><MoneyInput value={row.honShimeiSales} step={10} onChange={(value) => updateCast(row.posCastId, { honShimeiSales: value })} /></td><td><MoneyInput value={row.jonaiExtensionSales} step={10} onChange={(value) => updateCast(row.posCastId, { jonaiExtensionSales: value })} /></td><td><CastProductSummary row={row} pos={pos} /></td><td>{row.beautyAllowance > 0 && <>{yen.format(row.beautyAllowance)}<br /><small>旧日次入力を保持</small><br /></>}<small>{row.kind === "trial" ? "当日経費で登録" : "美容室手当画面で登録・編集"}</small></td><td><MoneyInput value={row.dailyPayment} onChange={(value) => updateCast(row.posCastId, { dailyPayment: value })} /></td><td><MoneyInput value={row.advancePayment} onChange={(value) => updateCast(row.posCastId, { advancePayment: value })} /></td><td>{yen.format(row.transportFee)}<br /><small>送迎画面で登録・編集</small></td></tr>)}</Table>

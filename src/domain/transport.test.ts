@@ -225,6 +225,14 @@ describe("既存給与を保持する送迎境界条件", () => {
     expect(calculated.sales[0].totals.transportFee).toBe(amount);
     expect(calculated.applied.closings[0].casts[0].transportFee).toBe(0);
     expect(data).toEqual(original);
+
+    const shopData = { ...data, casts: [trial], archivedCasts: [cancelled] };
+    expect(transportCastDays(shopData, month, trial.id)).toEqual([
+      { businessDate: month + "-02", amount: 0, legacyInputIds: [], hasRecord: false },
+    ]);
+    expect(transportCastDays(shopData, month, cancelled.id)).toEqual([
+      { businessDate: month + "-02", amount, legacyInputIds: ["old"], hasRecord: amount > 0 },
+    ]);
   });
 
   it("根拠が別人または未承認なら入店取消の送迎を引き継がない", () => {
