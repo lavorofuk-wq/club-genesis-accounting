@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { User } from "firebase/auth";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { invalidTrialBeautyExpensesForRows, mergeReconciledDailyCastInputs, posItemOccurrenceKey, type DailyClosing, type PosClosingV3 } from "@/domain/gms";
 import type { AccountingWorkspaceData } from "@/domain/month-accounting";
 import { buildMonthlySnapshot, calculateMonthlyAccounting, normalizeMonthlyAccountingSnapshot } from "@/domain/month-accounting";
@@ -191,13 +191,17 @@ describe("主要ページのSSRスモーク", () => {
     const render = (workspace: AccountingWorkspaceData) => renderToStaticMarkup(createElement(AccountingForms, {
       section: "approval", data: workspace, user, busy: false, run,
     }));
-    const buttons = render(source).match(/<button[^>]*>差戻し<\/button>/g) || [];
-    expect(buttons).toHaveLength(2);
-    expect(buttons.every((button) => !button.includes('disabled=""'))).toBe(true);
-    const closed = { ...source, monthStates: [{ month, status: "closed" as const, revision: 1, updatedAt: "", updatedBy: "accounting" }] };
-    const locked = render(closed).match(/<button[^>]*>差戻し<\/button>/g) || [];
-    expect(locked).toHaveLength(2);
-    expect(locked.every((button) => button.includes('disabled=""'))).toBe(true);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(`${businessDate}T12:00:00+09:00`));
+    try {
+      const buttons = render(source).match(/<button[^>]*>差戻し<\/button>/g) || [];
+      expect(buttons).toHaveLength(2);
+      expect(buttons.every((button) => !button.includes('disabled=""'))).toBe(true);
+      const closed = { ...source, monthStates: [{ month, status: "closed" as const, revision: 1, updatedAt: "", updatedBy: "accounting" }] };
+      const locked = render(closed).match(/<button[^>]*>差戻し<\/button>/g) || [];
+      expect(locked).toHaveLength(2);
+      expect(locked.every((button) => button.includes('disabled=""'))).toBe(true);
+    } finally { vi.useRealTimers(); }
   });
   it("キャスト報酬に在籍のみの受領書と明細書の個別出力ボタンを表示し、未保存・処理中・不整合では両方停止する", () => {
     const source = balanceWorkspace();
