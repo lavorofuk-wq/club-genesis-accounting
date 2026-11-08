@@ -73,6 +73,7 @@ describe("キャスト報酬から受領書への転記", () => {
     });
     expect(output.map((sheet) => sheet.name)).toEqual(["同月入店", "花子"]);
     expect(output.map((sheet) => sheet.statementCells.E5)).toEqual(["同月入店者の本名", "在籍の本名"]);
+    expect(output.map((sheet) => sheet.cells.C16)).toEqual(["同月入店者の本名", "在籍の本名"]);
     expect(output[0].statementCells.F8).toBe("1,500 / 3,000");
     expect([trial, converted, reward]).toEqual(before);
   });
@@ -92,7 +93,7 @@ describe("キャスト報酬から受領書への転記", () => {
     expect(content).not.toContain("体入除外テスト");
     expect(content).not.toContain("体入本名除外");
     if (document === "receipt") {
-      expect(content).not.toContain("在籍本名テスト");
+      expect(content).toContain("在籍本名テスト");
       expect(content).not.toContain("報酬明細書");
     } else {
       expect(content).toContain("在籍本名テスト");
@@ -124,6 +125,17 @@ describe("キャスト報酬から受領書への転記", () => {
     expect(sheet.statementCells).not.toHaveProperty("F16");
     expect(sheet.statementCells).not.toHaveProperty("F23");
     expect(buildCastReceiptSheets([reward], "2026-09")[0].statementCells.E5).toBe("");
+  });
+  it.each(["hourlyAndBack", "salesReward"] as const)("%sの受領書氏名にIDで登録本名を転記し、未登録を源氏名で補わない", (adoptedSystem) => {
+    const row = adoptedSystem === "hourlyAndBack" ? reward : { ...reward, adoptedSystem, rewardRate: .65,
+      salesReward: 100000, adoptedReward: 100000, grossPay: 100500, netPay: 96000 };
+    const nameCell = adoptedSystem === "hourlyAndBack" ? "C16" : "C15";
+    const rows = [row, { ...row, id: "same-name" }, { ...row, id: "missing" }];
+    const before = structuredClone(rows);
+    const output = buildCastReceiptSheets(rows, "2026-11", { "cast-1": "山田 花子", "same-name": "佐藤 花子" });
+    expect(output.map((sheet) => sheet.cells[nameCell])).toEqual(["山田 花子", "佐藤 花子", ""]);
+    expect(output.map((sheet) => sheet.statementCells.E5)).toEqual(["山田 花子", "佐藤 花子", ""]);
+    expect(rows).toEqual(before);
   });
   it("売上明細に保存された売上・酒代50％・採用率・採用額を使う", () => {
     const sheet = buildCastReceiptSheets([{ ...reward, adoptedSystem: "salesReward", rewardRate: .65,

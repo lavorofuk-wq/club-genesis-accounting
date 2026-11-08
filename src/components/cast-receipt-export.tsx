@@ -73,13 +73,13 @@ export function CastReceiptExport({ rows, reports, casts, month, sourceLabel, di
     }
   };
 
-  return <Card title="受領書・明細書XLSX" description={`${month}・${sourceLabel}。「在籍キャスト報酬」の対象者のみをキャスト別シートにまとめます。体入のみのキャストは除外し、同月に入店したキャストは体入分も含めて出力します。受領書と採用報酬方式の明細書を別々のファイルに出力し、受領書は1名につき1シート・1ページ、明細書は1名につき1シートで名目数に応じて複数ページになります。用紙サイズと既存の印刷サイズは変更しません。受領日・氏名の署名欄は空欄です。`}
+  return <Card title="受領書・明細書XLSX" description={`${month}・${sourceLabel}。「在籍キャスト報酬」の対象者のみをキャスト別シートにまとめます。体入のみのキャストは除外し、同月に入店したキャストは体入分も含めて出力します。受領書と採用報酬方式の明細書を別々のファイルに出力し、受領書は1名につき1シート・1ページ、明細書は1名につき1シートで名目数に応じて複数ページになります。用紙サイズと既存の印刷サイズは変更しません。受領書の氏名欄には登録済みの本名を記入し、受領日は空欄です。`}
     action={<div className="actions">{(["receipt", "statement"] as const).map((document) => {
       const documentName = document === "receipt" ? "受領書" : "明細書";
       const validation = document === "receipt" ? receiptValidation : statementValidation;
       return <button key={document} type="button" className="button" disabled={Boolean(validation.error) || Boolean(exporting)} title={validation.error || undefined} onClick={() => void exportAll(document)}>{exporting === document ? `${documentName}出力中…` : `${documentName}をXLSX出力`}</button>;
     })}</div>}>
-    <p className="muted compact-text">明細書は美容室手当を独立して表示し、追加手当を名目別の月合計で記載します。本名は登録情報から記入し、未登録なら空欄にします。適用時給が保存されていない過去の確定分は「未保存」と記載します。出力対象全員分を印刷するときは、Excelで「ブック全体を印刷」を選択してください。</p>
+    <p className="muted compact-text">明細書は美容室手当を独立して表示し、追加手当を名目別の月合計で記載します。受領書・明細書の本名は登録情報から記入し、未登録なら空欄にします。適用時給が保存されていない過去の確定分は「未保存」と記載します。出力対象全員分を印刷するときは、Excelで「ブック全体を印刷」を選択してください。</p>
     {receiptValidation.error && <p className="muted compact-text">受領書：{receiptValidation.error}</p>}
     {statementValidation.error && <p className="muted compact-text">明細書：{statementValidation.error}</p>}
     {notice?.month === month && <div role="status" className={`notice${notice.error ? " error" : ""}`}>{notice.text}</div>}

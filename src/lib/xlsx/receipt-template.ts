@@ -11,8 +11,8 @@ const spreadsheetNs = "http://schemas.openxmlformats.org/spreadsheetml/2006/main
 const relationshipNs = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const invalidXml = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/u;
 const layouts = {
-  hourlyAndBack: { ...receiptLayouts.hourlyAndBack, nameCell: "G10", cells: new Set(["G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G10"]) },
-  salesReward: { ...receiptLayouts.salesReward, nameCell: "G9", cells: new Set(["B2", "G1", "G2", "G3", "G4", "G5", "G6", "G7", "G9"]) },
+  hourlyAndBack: { ...receiptLayouts.hourlyAndBack, nameCell: "G10", legalNameCell: "C16", cells: new Set(["G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G10", "C16"]) },
+  salesReward: { ...receiptLayouts.salesReward, nameCell: "G9", legalNameCell: "C15", cells: new Set(["B2", "G1", "G2", "G3", "G4", "G5", "G6", "G7", "G9", "C15"]) },
 } as const;
 const statementCells = new Set(["D3", "F4", "E5", "F6", "F7", "F8", "F9", "F10", "F11", "F12", "F13", "F14", "B15", "F15", "F18", "F19", "F20", "F21", "F22", "F25", "F26"]);
 
@@ -189,6 +189,7 @@ export async function fillReceiptTemplate(template: ArrayBuffer | Uint8Array, sh
         let attrs = attributes.replace(/\s+t="[^"]*"/g, "");
         // 結合セルの縮小表示に対応しないビューアでも名前が欠けないよう文字数に合わせる。
         const textWidth = section === "receipt" && logical === layout.nameCell ? 47
+          : section === "receipt" && logical === layout.legalNameCell ? 150
           : section === "statement" && logical === "F4" ? 62
           : section === "statement" && logical === "E5" ? 100
           : section === "statement" && logical === "F8" ? 88 : 0;

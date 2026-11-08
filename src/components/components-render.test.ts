@@ -208,7 +208,7 @@ describe("主要ページのSSRスモーク", () => {
     const render = (workspace = source, busy = false) => renderToStaticMarkup(createElement(AccountingForms, {
       section: "castRewards", data: workspace, user, busy, run,
     }));
-    expect(render()).toContain("受領日・氏名の署名欄は空欄");
+    expect(render()).toContain("受領書の氏名欄には登録済みの本名を記入し、受領日は空欄");
     expect(render()).toContain("別々のファイルに出力");
     expect(render()).toContain("1名につき1シート・1ページ");
     expect(render()).not.toContain("右隣");
