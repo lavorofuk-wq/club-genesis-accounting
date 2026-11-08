@@ -9,7 +9,7 @@ import layouts from "./receipt-layouts.json";
 import { statementAllowanceLines } from "./statement-allowance-pages";
 
 const template = () => readFile("public/templates/cast-receipt-v3.xlsx");
-const cells = { G1: "9月報酬分", G2: 100000, G3: 8300, G4: 1000, G5: 109300, G6: 10000, G7: 3000, G8: 96300, G10: "花子" };
+const cells = { G1: "9月報酬分", G2: 100000, G3: 8300, G4: 1000, G5: 109300, G6: 10000, G7: 3000, G8: 96300, G10: "花子", C16: "山田花子" };
 const statementCells = { D3: "2026年9月分", F4: "花子", E5: "山田花子", F6: 20, F7: 80.25, F8: "3,000 / 4,000", F9: 100000, F10: 8300, F11: 0, F12: 0, F13: 0, F14: 0, F15: 1000, F18: 109300, F19: 3000, F20: 8000, F21: 1000, F22: 1000, F25: 13000, F26: 96300 };
 const part = async (zip: JSZip, path: string) => zip.file(path)!.async("string");
 const open = async (bytes: Uint8Array) => { const book = new ExcelJS.Workbook(); await book.xlsx.load(bytes as unknown as ExcelJS.Buffer); return book; };
@@ -20,7 +20,7 @@ describe("受領書と明細書の分割出力", () => {
   ].map((kinds) => ({ document, kinds: kinds as ReceiptSheet["template"][] })));
   it.each(combinations)("$document: 方式混在・順序変更でも選択した帳票だけを1人1シートへ出す（$kinds）", async ({ document, kinds }) => {
     const input = kinds.map((kind, index): ReceiptSheet => ({ template: kind, name: `キャスト${index + 1}`,
-      cells: kind === "salesReward" ? { B2: "①　日売上－酒代（50％）×65％", G1: "9月報酬分", G2: 1234567, G3: 500, G4: 1235067, G5: 10000, G6: 2000, G7: 1223067, G9: `キャスト${index + 1}` } : { ...cells, G10: `キャスト${index + 1}` },
+      cells: kind === "salesReward" ? { B2: "①　日売上－酒代（50％）×65％", G1: "9月報酬分", G2: 1234567, G3: 500, G4: 1235067, G5: 10000, G6: 2000, G7: 1223067, G9: `キャスト${index + 1}`, C15: "山田花子" } : { ...cells, G10: `キャスト${index + 1}` },
       statementCells: { ...statementCells, F4: `キャスト${index + 1}`, ...(kind === "salesReward" ? { B11: "報酬率", F11: 65, F12: 1234567, F18: 1235067, F25: 12000, F26: 1223067 } : {}) },
     }));
     const bytes = await fillReceiptTemplate(await template(), input, document);
@@ -35,7 +35,7 @@ describe("受領書と明細書の分割出力", () => {
       const entries = document === "receipt" ? input[index].cells : input[index].statementCells;
       for (const [address, expected] of Object.entries(entries)) expect(value(document, address).value).toBe(expected);
       if (document === "receipt") {
-        expect(value("receipt", sales ? "C15" : "C16").value).toBeNull();
+        expect(value("receipt", sales ? "C15" : "C16").value).toBe("山田花子");
         for (const [col, label] of [["B", "令和"], ["C", "年"], ["D", "月"], ["E", "日"]]) expect(value("receipt", `${col}${sales ? 12 : 13}`).value).toBe(label);
         expect(value("receipt", sales ? "G4" : "G5").font).toMatchObject({ name: "Yu Gothic", bold: true, size: 11 });
       } else {
@@ -67,7 +67,7 @@ describe("受領書と明細書の分割出力", () => {
     const content = (await Promise.all(Object.keys(output.files).filter((path) => /\.xml$/.test(path)).map((path) => part(output, path)))).join("");
     if (document === "receipt") {
       expect(content).not.toContain("報酬明細書");
-      expect(content).not.toContain("山田花子");
+      expect(content).toContain("山田花子");
       expect(content).not.toContain("2026年9月分");
       expect(content).toContain("受領印");
     } else {
@@ -133,7 +133,8 @@ describe("受領書と明細書の分割出力", () => {
 
   it.each(["receipt", "statement"] as const)("%s: 大きい金額・小数・長い名前を保持し、既存小数書式を壊さない", async (document) => {
     const name = "長いキャスト名テスト";
-    const bytes = await fillReceiptTemplate(await template(), [{ template: "hourlyAndBack", name, cells: { ...cells, G10: name, G2: 12345678, G8: 1234567.5 }, statementCells: { ...statementCells, F4: name, E5: "山田花子名前が長い場合", F9: 12345678, F26: 1234567.5 } }], document);
+    const legalName = "山田アレクサンドリアマリア花子";
+    const bytes = await fillReceiptTemplate(await template(), [{ template: "hourlyAndBack", name, cells: { ...cells, G10: name, C16: legalName, G2: 12345678, G8: 1234567.5 }, statementCells: { ...statementCells, F4: name, E5: legalName, F9: 12345678, F26: 1234567.5 } }], document);
     const sheet = (await open(bytes)).worksheets[0];
     const get = (section: "receipt" | "statement", address: string) => sheet.getCell(receiptCellAddress("hourlyAndBack", section, address));
     expect(get(document, document === "receipt" ? "G2" : "F9").value).toBe(12345678);
@@ -143,6 +144,10 @@ describe("受領書と明細書の分割出力", () => {
     const nameCell = get(document, document === "receipt" ? "G10" : "F4");
     expect(nameCell.font.size).toBeLessThan(11);
     expect(nameCell.alignment.shrinkToFit).toBe(true);
+    const legalNameCell = get(document, document === "receipt" ? "C16" : "E5");
+    expect(legalNameCell.value).toBe(legalName);
+    expect(legalNameCell.font.size).toBeLessThan(11);
+    expect(legalNameCell.alignment.shrinkToFit).toBe(true);
     if (document === "statement") expect(get("statement", "F7").value).toBe(80.25);
     const styles = await part(await JSZip.loadAsync(bytes), "xl/styles.xml");
     expect((styles.match(/<numFmts\b/g) || [])).toHaveLength(1);
@@ -152,12 +157,12 @@ describe("受領書と明細書の分割出力", () => {
 
   it.each(["receipt", "statement"] as const)("%s: 数式風の氏名を文字列で扱い、同名・禁止文字・長いシート名を安全に出力する", async (document) => {
     const names = ["=1+1<&>\"'", "a/b", "A:B", "history", "'末尾'", "あ".repeat(50), "あ".repeat(50), "😀".repeat(20)];
-    const book = await open(await fillReceiptTemplate(await template(), names.map((name) => ({ template: "hourlyAndBack", name, cells: { ...cells, G10: name }, statementCells: { ...statementCells, E5: name } })), document));
+    const book = await open(await fillReceiptTemplate(await template(), names.map((name) => ({ template: "hourlyAndBack", name, cells: { ...cells, G10: name, C16: name }, statementCells: { ...statementCells, E5: name } })), document));
     expect(new Set(book.worksheets.map((sheet) => sheet.name.toLowerCase())).size).toBe(names.length);
     book.worksheets.forEach((sheet, index) => {
       expect(sheet.name.length).toBeLessThanOrEqual(31);
       expect(sheet.name).not.toMatch(/[\\/*?:\[\]]/);
-      expect(sheet.getCell(receiptCellAddress("hourlyAndBack", document, document === "receipt" ? "G10" : "E5")).value).toBe(names[index]);
+      expect(sheet.getCell(receiptCellAddress("hourlyAndBack", document, document === "receipt" ? "C16" : "E5")).value).toBe(names[index]);
     });
   });
 
@@ -165,7 +170,7 @@ describe("受領書と明細書の分割出力", () => {
     const bytes = await template();
     await expect(fillReceiptTemplate(bytes, [], document)).rejects.toThrow("出力するキャスト");
     const invalidCells: Record<string, string | number>[] = document === "receipt"
-      ? [{ C16: "署名" }, { G8: NaN }, { G10: "あ\u0001" }, { G10: "\uD800" }]
+      ? [{ C13: "受領日" }, { G8: NaN }, { C16: "あ\u0001" }, { C16: "\uD800" }]
       : [{ F23: 100 }, { F26: NaN }, { E5: "あ\u0001" }, { E5: "\uD800" }];
     for (const invalid of invalidCells) await expect(fillReceiptTemplate(bytes, [{ template: "hourlyAndBack", name: "テスト",
       cells: document === "receipt" ? invalid : cells, statementCells: document === "statement" ? invalid : statementCells,

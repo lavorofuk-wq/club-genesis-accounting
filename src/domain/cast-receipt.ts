@@ -34,6 +34,7 @@ export function buildCastReceiptSheets(rows: CastReward[], month: string, legalN
       || !equalAmount(row.adoptedReward, sales ? row.salesReward : row.hourlyAndBack)
       || !equalAmount(row.grossPay, row.adoptedReward + allowances)
       || !equalAmount(row.netPay, row.grossPay - deductions - row.withholding)) fail();
+    const legalName = legalNames[row.id] || "";
     const cells: Record<string, string | number> = sales ? {
       B2: `①　日売上－酒代（50％）×${Number((row.rewardRate * 100).toFixed(10))}％`,
       G1: `${Number(month.slice(5))}月報酬分`,
@@ -44,6 +45,7 @@ export function buildCastReceiptSheets(rows: CastReward[], month: string, legalN
       G6: row.withholding,
       G7: row.netPay,
       G9: row.name,
+      C15: legalName,
     } : {
       G1: `${Number(month.slice(5))}月報酬分`,
       G2: row.hourlyPay,
@@ -54,12 +56,13 @@ export function buildCastReceiptSheets(rows: CastReward[], month: string, legalN
       G7: row.withholding,
       G8: row.netPay,
       G10: row.name,
+      C16: legalName,
     };
     const rates = row.appliedHourlyRates && [...new Set(row.appliedHourlyRates)].sort((a, b) => a - b);
     const statementCells: Record<string, string | number> = {
       D3: `${Number(month.slice(0, 4))}年${Number(month.slice(5))}月分`,
       F4: row.name,
-      E5: legalNames[row.id] || "",
+      E5: legalName,
       F6: row.days,
       F7: row.hours,
       F8: !rates ? "未保存" : rates.length === 1 ? rates[0] : rates.map((rate) => rate.toLocaleString("ja-JP", { maximumFractionDigits: 15 })).join(" / "),
