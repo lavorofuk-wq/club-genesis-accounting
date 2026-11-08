@@ -28,6 +28,7 @@ vi.mock("./update-drafts", () => ({
   }, useUpdateDraftBusy() {},
 }));
 vi.mock("@/lib/firebase/repository", () => ({ approveClosing: vi.fn(), returnClosing: vi.fn() }));
+import { returnClosing } from "@/lib/firebase/repository";
 import { AccountingForms, closingReviewKey } from "./accounting-forms";
 
 const month = "2026-09", businessDate = `${month}-02`;
@@ -61,7 +62,7 @@ function elements(node: ReactNode): Element[] {
   const element = node as Element;
   return [element, ...elements(element.props.children)];
 }
-const run = vi.fn(async () => true);
+const run = vi.fn(async (_action: () => Promise<unknown>, _message: string) => true);
 function renderOnce(data: AccountingWorkspaceData) {
   hooks.cursor = 0; hooks.effects = [];
   const component = AccountingForms({ section: "approval", data, user: { uid: "test" } as User, busy: false, run });
@@ -87,13 +88,14 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date("2026-09-03T00:30:00+09:00"));
   hooks.values = []; hooks.cursor = 0; hooks.effects = []; hooks.drafts.clear();
-  hooks.drafts.set("accounting.approval.expanded", "day-2"); run.mockClear();
+  hooks.drafts.set("accounting.approval.expanded", "day-2"); run.mockClear(); vi.mocked(returnClosing).mockClear();
 });
 afterEach(() => { vi.useRealTimers(); });
 
 describe("受信承認の直近5暦日と過去の未処理分", () => {
   const recentTitle = "店舗送信データの確認・承認";
   const olderTitle = "過去の確認待ち・差戻し";
+  const pastTitle = "過去の承認済みデータ";
   function card(tree: ReactNode, title: string) {
     const result = elements(tree).find((element) => element.props.title === title);
     expect(result).toBeDefined();
@@ -101,6 +103,15 @@ describe("受信承認の直近5暦日と過去の未処理分", () => {
   }
   function dated(base: DailyClosing, businessDate: string, status: DailyClosing["status"]): DailyClosing {
     return { ...structuredClone(base), id: `daily-${businessDate}`, businessDate, status };
+  }
+  function dates(tree: ReactNode, title: string) {
+    return [...renderToStaticMarkup(card(tree, title)).matchAll(/<tr><td>(\d{4}-\d{2}-\d{2})<\/td>/g)].map((match) => match[1]);
+  }
+  function pastDateInput(tree: ReactNode) {
+    const { action, children } = card(tree, pastTitle).props;
+    const input = elements([action, children]).find((element) => element.type === "input" && element.props.type === "date");
+    expect(input).toBeDefined();
+    return input!;
   }
   beforeEach(() => {
     // UTCでは11/2のため、端末のUTC日付で5日を求める実装を検出する。
@@ -118,9 +129,76 @@ describe("受信承認の直近5暦日と過去の未処理分", () => {
       dated(base, "2026-10-28", "returned"), dated(base, "2026-10-27", "approved"), dated(base, "2026-10-26", "withdrawn"),
     ];
     const tree = render(data);
-    const dates = (title: string) => [...renderToStaticMarkup(card(tree, title)).matchAll(/<tr><td>(\d{4}-\d{2}-\d{2})<\/td>/g)].map((match) => match[1]);
-    expect(dates(recentTitle)).toEqual(["2026-11-03", "2026-11-02", "2026-10-31", "2026-10-30"]);
-    expect(dates(olderTitle)).toEqual(["2026-10-29", "2026-10-28"]);
+    expect(dates(tree, recentTitle)).toEqual(["2026-11-03", "2026-11-02", "2026-10-31", "2026-10-30"]);
+    expect(dates(tree, olderTitle)).toEqual(["2026-10-29", "2026-10-28"]);
+  });
+
+  it("過去の承認済みを営業日で1件だけ開き、既存の差戻し処理へ渡す", async () => {
+    const data = fixture(), base = data.closings[0];
+    const recent = dated(base, "2026-10-30", "approved");
+    const target = dated(base, "2026-10-29", "approved");
+    const another = dated(base, "2026-10-27", "approved");
+    const pending = dated(base, "2026-10-28", "submitted");
+    data.closings = [recent, target, pending, another];
+
+    let tree = render(data);
+    expect(pastDateInput(tree).props).toMatchObject({ value: "", max: "2026-10-29" });
+    expect(renderToStaticMarkup(card(tree, pastTitle))).toMatch(/<label[^>]*>.*営業日.*type="date"/);
+    expect(dates(tree, pastTitle)).toEqual([]);
+
+    pastDateInput(tree).props.onChange({ target: { value: target.businessDate } });
+    expect(hooks.drafts.get("accounting.approval.pastDate")).toBe(target.businessDate);
+    tree = render(data);
+    expect(dates(tree, recentTitle)).toEqual([recent.businessDate]);
+    expect(dates(tree, olderTitle)).toEqual([pending.businessDate]);
+    expect(dates(tree, pastTitle)).toEqual([target.businessDate]);
+    button(card(tree, pastTitle), "詳細").props.onClick();
+    tree = render(data);
+    expect(renderToStaticMarkup(card(tree, pastTitle))).toContain("店舗データプレビュー");
+    expect(renderToStaticMarkup(card(tree, recentTitle))).not.toContain("店舗データプレビュー");
+
+    const sendBack = button(card(tree, pastTitle), "差戻し");
+    expect(sendBack.props.disabled).toBe(false);
+    const confirm = vi.fn(() => true), prompt = vi.fn(() => "過去営業日の訂正");
+    vi.stubGlobal("window", { confirm, prompt });
+    try { sendBack.props.onClick(); } finally { vi.unstubAllGlobals(); }
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining(`${target.businessDate}の承認を取り消して`));
+    expect(prompt).toHaveBeenCalledWith(expect.stringContaining("承認後の差戻し理由"));
+    expect(run).toHaveBeenCalledExactlyOnceWith(expect.any(Function), "店舗へ差し戻しました。");
+    await run.mock.calls[0][0]();
+    expect(returnClosing).toHaveBeenCalledExactlyOnceWith(target.id, {
+      businessDate: target.businessDate, updatedAt: target.updatedAt, checksum: target.checksum, submissionId: target.submissionId,
+    }, "過去営業日の訂正", { uid: "test" });
+
+    data.closings = [recent, { ...target, status: "returned" }, pending, another];
+    tree = render(data);
+    expect(dates(tree, pastTitle)).toEqual([]);
+    expect(dates(tree, olderTitle)).toEqual([target.businessDate, pending.businessDate]);
+  });
+
+  it("確定済みの営業日は閲覧できるが、差戻しには月次確定の解除を求める", () => {
+    const data = fixture();
+    data.closings = [dated(data.closings[0], "2026-10-29", "approved")];
+    data.monthStates = [{ month: "2026-10", status: "closed", revision: 1, updatedAt: "", updatedBy: "accounting" }];
+    hooks.drafts.set("accounting.approval.pastDate", "2026-10-29");
+    const past = card(render(data), pastTitle);
+
+    expect(button(past, "詳細").props.disabled).toBe(false);
+    expect(button(past, "差戻し").props.disabled).toBe(true);
+    expect(renderToStaticMarkup(past)).toContain("承認・差戻しを行うには先に月次確定を解除してください。");
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("復元した営業日が直近または承認済み以外なら、過去の承認済み一覧に表示しない", () => {
+    const data = fixture(), base = data.closings[0];
+    data.closings = [
+      dated(base, "2026-11-04", "approved"), dated(base, "2026-10-30", "approved"),
+      dated(base, "2026-10-29", "submitted"), dated(base, "2026-10-28", "returned"), dated(base, "2026-10-27", "withdrawn"),
+    ];
+    for (const closing of data.closings) {
+      hooks.drafts.set("accounting.approval.pastDate", closing.businessDate);
+      expect(dates(render(data), pastTitle)).toEqual([]);
+    }
   });
 
   it("直近の一覧が空でも、過去カードで確認待ちの詳細を開いて承認できる", () => {
