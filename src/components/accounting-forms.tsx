@@ -68,16 +68,23 @@ function accountingMonthLockMessage(data: AccountingWorkspaceData, businessDate:
 
 function ApprovalView({ data, user, busy, run }: Props) {
   const [expanded, setExpanded] = useRecoverableState("accounting.approval.expanded", "");
+  const [pastDate, setPastDate] = useRecoverableState("accounting.approval.pastDate", "");
   const [reviewed, setReviewed] = useState<Record<string, boolean>>({});
   const endDate = today();
   const firstDay = new Date(`${endDate}T00:00:00.000Z`);
   firstDay.setUTCDate(firstDay.getUTCDate() - 4);
   const startDate = firstDay.toISOString().slice(0, 10);
+  firstDay.setUTCDate(firstDay.getUTCDate() - 1);
+  const lastPastDate = firstDay.toISOString().slice(0, 10);
   const recent = data.closings.filter((row) => row.status !== "withdrawn"
     && row.businessDate >= startDate && row.businessDate <= endDate);
   const olderPending = data.closings.filter((row) => row.businessDate < startDate
     && (row.status === "submitted" || row.status === "returned"));
-  const visibleClosings = [...recent, ...olderPending];
+  const pastDateOutOfRange = pastDate > lastPastDate;
+  const pastApproved = pastDate && !pastDateOutOfRange
+    ? data.closings.filter((row) => row.businessDate === pastDate && row.status === "approved")
+    : [];
+  const visibleClosings = [...recent, ...olderPending, ...pastApproved];
   const reviewKeys = JSON.stringify(visibleClosings.map((row) => closingReviewKey(row, data.closings)).sort());
   useEffect(() => {
     const currentKeys = new Set<string>(JSON.parse(reviewKeys) as string[]);
@@ -91,7 +98,12 @@ function ApprovalView({ data, user, busy, run }: Props) {
       description: `営業日付 ${startDate}〜${endDate}。詳細で店舗データと現金照合を確認してから承認します。`, rows: recent },
     ...(olderPending.length ? [{ id: "older", title: "過去の確認待ち・差戻し",
       description: "直近5日より前の確認待ち・差戻しデータを確認できます。", rows: olderPending }] : []),
+    { id: "pastApproved", title: "過去の承認済みデータ",
+      description: "直近5日より前の承認済みデータを営業日で検索し、詳細確認や差戻しができます。", rows: pastApproved },
   ];
+  const pastApprovedEmpty = !pastDate ? "営業日を指定してください。"
+    : pastDateOutOfRange ? `${lastPastDate}以前の営業日を指定してください。`
+    : "指定した営業日の承認済みデータはありません。";
   return <div className="grid">
     <div className="grid metrics">
       <Metric label="経理確認待ち" value={`${data.closings.filter((row) => row.status === "submitted").length}件`} />
@@ -99,8 +111,11 @@ function ApprovalView({ data, user, busy, run }: Props) {
       <Metric label="差戻し" value={`${data.closings.filter((row) => row.status === "returned").length}件`} />
       <Metric label="当月承認売上" value={yen.format(data.closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(currentMonth())).reduce((sum, row) => sum + row.sales.totalSales, 0))} />
     </div>
-    {cards.map(({ id, title, description, rows }) => <Card key={id} title={title} description={description}>
-      <Table headers={["営業日", "状態", "総売上", "経費・支払", "営業終了時現金", "照合", "操作"]} empty="直近5日間の店舗送信データはありません。">
+    {cards.map(({ id, title, description, rows }) => <Card key={id} title={title} description={description}
+      action={id === "pastApproved" ? <Field label="営業日"><input className="input" type="date" max={lastPastDate}
+        value={pastDate} onChange={(event) => setPastDate(event.target.value)} disabled={busy} /></Field> : undefined}>
+      <Table headers={["営業日", "状態", "総売上", "経費・支払", "営業終了時現金", "照合", "操作"]}
+        empty={id === "pastApproved" ? pastApprovedEmpty : "直近5日間の店舗送信データはありません。"}>
         {rows.map((row) => {
           const revisionKey = closingReviewKey(row, data.closings);
           const isReviewed = Boolean(reviewed[revisionKey]);
