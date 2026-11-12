@@ -25,6 +25,8 @@ import {
   isProductionEnvironment,
 } from "@/lib/firebase/client";
 import { loadWorkspaceData, userRole } from "@/lib/firebase/repository";
+import { loadWorkAllowanceMonth } from "@/lib/firebase/work-allowance-refresh";
+import { mergeWorkAllowanceRefresh } from "@/domain/work-allowance-refresh";
 import { CommonForms } from "./common-forms";
 import { StoreWork } from "./store-work";
 import { TransportWork } from "./transport-work";
@@ -276,12 +278,14 @@ export function AccountingApp() {
   const reloadRequestRef = useRef(0);
   const runLockRef = useRef(false);
   const updateReloadRef = useRef(false);
+  const workRefreshRef = useRef<{ month?: string; required: boolean }>({ required: false });
 
   const reload = useCallback(async (
     knownRole?: Role,
     knownUser?: User,
     knownAuthEpoch?: number,
     resetPage = false,
+    workMonth?: string,
   ) => {
     const requestId = ++reloadRequestRef.current;
     const authEpoch = knownAuthEpoch ?? authEpochRef.current;
@@ -313,18 +317,23 @@ export function AccountingApp() {
         return false;
       }
 
-      const nextData = await loadWorkspaceData(nextRole);
-      if (!isCurrentRequest()) return false;
       const roleChanged = roleRef.current !== nextRole;
+      const partial = Boolean(workMonth && !resetPage && !roleChanged && (nextRole === "shop" || nextRole === "op"));
+      const freshMonth = partial ? await loadWorkAllowanceMonth(workMonth!, nextRole) : undefined;
+      const nextData = freshMonth ? undefined : await loadWorkspaceData(nextRole);
+      if (!isCurrentRequest()) return false;
       roleRef.current = nextRole;
       setRole(nextRole);
       if (roleChanged) setData(emptyData);
       setView((currentView) => viewInfo[currentView].roles.includes(nextRole) ? currentView : "home");
-      setData(nextData);
+      if (freshMonth) setData((current) => mergeWorkAllowanceRefresh(current, freshMonth));
+      else setData(nextData!);
+      workRefreshRef.current = { month: freshMonth?.month, required: false };
       if (roleChanged || resetPage) setPageRevision((revision) => revision + 1);
       return true;
     } catch (error) {
       if (!isCurrentRequest()) return false;
+      if (workMonth || workRefreshRef.current.month) workRefreshRef.current.required = true;
       setNotice({
         kind: "error",
         text: `データを読み込めませんでした。${message(error)}`,
@@ -335,6 +344,12 @@ export function AccountingApp() {
     }
   }, []);
 
+  const ensureWorkMonth = useCallback((month: string) => {
+    if (!workRefreshRef.current.month || workRefreshRef.current.month === month || runLockRef.current) return;
+    workRefreshRef.current.required = true;
+    void reload(undefined, undefined, undefined, false, month);
+  }, [reload]);
+
   useEffect(() => {
     let cancelled = false;
     let observerResponded = false;
@@ -343,6 +358,7 @@ export function AccountingApp() {
       observerResponded = true;
       window.clearTimeout(initializationWatchdog);
       const authEpoch = ++authEpochRef.current;
+      workRefreshRef.current = { required: false };
       setUser(next);
       setAuthReady(true);
       if (!next) {
@@ -460,9 +476,15 @@ export function AccountingApp() {
     );
   const permitted = viewInfo[view].roles.includes(role);
   const info = permitted ? viewInfo[view] : viewInfo.home;
-  const navigateTo = (nextView: View) => {
+  const navigateTo = async (nextView: View) => {
+    if (busy || runLockRef.current) return;
     if (nextView === view) return;
     if (pageDirty && !window.confirm("未保存の入力があります。破棄して別のページへ移動しますか？")) return;
+    // 当月だけ更新した状態を、経理・他月の画面へそのまま渡さない。
+    if (workRefreshRef.current.month || workRefreshRef.current.required) {
+      if (!await reload()) return;
+      if (!roleRef.current || !viewInfo[nextView].roles.includes(roleRef.current)) return;
+    }
     setView(nextView);
   };
   const logout = () => {
@@ -473,7 +495,11 @@ export function AccountingApp() {
     if (pageDirty && !window.confirm("未保存の入力があります。最新データを読み込みますか？")) return;
     void reload(undefined, undefined, undefined, true);
   };
-  const run = async (action: () => Promise<unknown>, success: string) => {
+  const run = async (action: () => Promise<unknown>, success: string, workMonth?: string) => {
+    if (workRefreshRef.current.required) {
+      setNotice({ kind: "error", text: "保存結果の確認が必要です。「最新データを読込」で確認してから操作してください。" });
+      return false;
+    }
     if (runLockRef.current) {
       setNotice({ kind: "error", text: "別の処理を実行中です。完了してからもう一度操作してください。" });
       return false;
@@ -481,12 +507,22 @@ export function AccountingApp() {
     runLockRef.current = true;
     setBusy(true);
     setNotice(null);
+    const actorEpoch = authEpochRef.current;
+    const isCurrentActor = () => authEpochRef.current === actorEpoch && auth.currentUser?.uid === user.uid;
     try {
       await action();
-      if (!await reload()) return false;
+      if (!isCurrentActor()) return false;
+      if (!await reload(undefined, user, actorEpoch, false, workMonth)) {
+        if (isCurrentActor()) {
+          workRefreshRef.current.required = true;
+          setNotice({ kind: "error", text: "保存は完了しましたが、最新の保存結果を読み込めませんでした。再保存せず「最新データを読込」で確認してください。入力は保持しています。" });
+        }
+        return false;
+      }
       setNotice({ kind: "success", text: success });
       return true;
     } catch (error) {
+      if (!isCurrentActor()) return false;
       setNotice({
         kind: "error",
         text: `処理できませんでした。${message(error)}`,
@@ -494,7 +530,7 @@ export function AccountingApp() {
       return false;
     } finally {
       runLockRef.current = false;
-      setBusy(false);
+      if (isCurrentActor()) setBusy(false);
     }
   };
   const commonSection = (
@@ -516,11 +552,12 @@ export function AccountingApp() {
   const integrityIssueCount = data.closings.filter(
     (row) => (row.integrityIssues?.length || 0) > 0,
   ).length;
-  const mutationDisabled = busy || release.status !== "current";
+  const mutationDisabled = busy || workRefreshRef.current.required || release.status !== "current";
 
   return (
     <UpdateDraftProvider userId={user.uid} environment={environmentRoot()} view={view} onRestoreView={(restored) => {
       if (!Object.hasOwn(viewInfo, restored) || !viewInfo[restored as View].roles.includes(role)) throw new Error("退避された画面への権限を確認できません。入力は退避したままです。");
+      if (busy || runLockRef.current || workRefreshRef.current.month || workRefreshRef.current.required) throw new Error("最新データを読み込んでから入力を復元してください。退避した入力は保持しています。");
       setView(restored as View);
       setNotice({ kind: "success", text: "更新前の入力を復元しました。内容を確認してから保存してください。自動保存・送信はしていません。" });
     }}>
@@ -620,10 +657,10 @@ export function AccountingApp() {
                 <StoreWork key={`store:${pageRevision}`} data={data} user={user} busy={mutationDisabled} run={run} onDirtyChange={setPageDirty} />
               )}
               {view === "transport" && (
-                <TransportWork key={`transport:${pageRevision}`} data={data} user={user} busy={mutationDisabled} run={run} onDirtyChange={setPageDirty} />
+                <TransportWork key={`transport:${pageRevision}`} data={data} user={user} busy={mutationDisabled} run={run} onDirtyChange={setPageDirty} onScopeChange={ensureWorkMonth} />
               )}
               {view === "beautyAllowance" && (
-                <BeautyAllowanceWork key={`beautyAllowance:${pageRevision}`} data={data} user={user} busy={mutationDisabled} run={run} onDirtyChange={setPageDirty} />
+                <BeautyAllowanceWork key={`beautyAllowance:${pageRevision}`} data={data} user={user} busy={mutationDisabled} run={run} onDirtyChange={setPageDirty} onScopeChange={ensureWorkMonth} />
               )}
               {commonSection && (
                 <CommonForms

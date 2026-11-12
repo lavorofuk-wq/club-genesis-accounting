@@ -9,7 +9,7 @@ import { secureRandomUUID } from "@/lib/crypto-compat";
 import { Card, Field, StatusPill, currentMonth, yen } from "./ui";
 import { useRecoverableState, useUpdateDraftBusy } from "./update-drafts";
 
-type Props = { data: AccountingWorkspaceData; user: User; busy: boolean; run: (action: () => Promise<unknown>, message: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void };
+type Props = { data: AccountingWorkspaceData; user: User; busy: boolean; run: (action: () => Promise<unknown>, message: string, workMonth?: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void; onScopeChange?: (month: string) => void };
 type PersonKind = "cast" | "driver";
 type SettingsPanel = { type: "register" | "castInfo" | "remoteSettings"; id: string; amounts: number[]; original: number[]; revision: number; context: string };
 type CalendarPanel = { type: "calendar"; kind: PersonKind; id: string; date: string; amount: number | null; originalAmount: number | null; entries: Record<string, number>; originalEntries: Record<string, number>; hadRecord: boolean; revision: number; context: string };
@@ -101,32 +101,39 @@ export function TransportModal({ title, children, busy, onClose }: { title: stri
 }
 
 
-export function TransportWork({ data, user, busy, run, onDirtyChange }: Props) {
+export function TransportWork({ data, user, busy, run, onDirtyChange, onScopeChange }: Props) {
   const [month, setMonth] = useRecoverableState("store.transport.month", currentMonth());
+  useEffect(() => { onScopeChange?.(month); }, [month, onScopeChange]);
   const [panel, setPanel] = useRecoverableState<Panel | null>("store.transport.panel", null);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [query, setQuery] = useState(""); const [error, setError] = useState("");
   const [saving, setSaving] = useState(false); const savingRef = useRef(false);
-  const settings = normalizeTransportSettings(data.transportSettings);
-  const storedMonth = normalizeTransportMonth(data.transportMonths?.[month]);
+  const settings = useMemo(() => normalizeTransportSettings(data.transportSettings), [data.transportSettings]);
+  const storedMonth = useMemo(() => normalizeTransportMonth(data.transportMonths?.[month]), [data.transportMonths, month]);
   const monthState = data.monthStates.find((row) => row.month === month);
   const locked = monthState?.status === "closed" || monthState?.status === "closing";
   const waiting = busy || saving; const disabled = waiting || locked;
   const context = useMemo(() => transportSourceKey(data, month), [data, month]);
   const stale = Boolean(panel && "context" in panel && (panel.type !== "calendar" || panel.date) && panel.context !== context);
   const dirty = transportPanelDirty(panel);
-  const castMasters = [...data.casts, ...data.archivedCasts.filter((row) => !data.casts.some((cast) => cast.id === row.id))];
-  const activeCasts = data.casts.filter((row) => row.status === "active" && !row.deletedAt);
-  const castRows = castMasters.map((cast) => ({ cast, registration: settings.castRegistrations[cast.id], days: transportCastDays(data, month, cast.id), unresolved: transportUnresolvedLegacyInputs(data, month, cast.id) }))
-    .filter((row) => row.registration || row.days.some((day) => day.hasRecord) || row.unresolved.length > 0).sort((a, b) => a.cast.name.localeCompare(b.cast.name, "ja"));
-  const legacyRemote = { ...(data.adjustments.find((row) => row.month === month)?.driverRemoteAllowance || {}), ...(data.transportLegacyRemote?.[month] || {}) };
-  const driverIds = new Set([...data.drivers.map((row) => row.id), ...Object.keys(storedMonth.drivers), ...Object.keys(legacyRemote).filter((id) => legacyRemote[id] > 0)]);
-  const drivers = [...driverIds].map((id) => data.drivers.find((row) => row.id === id) || { id, name: data.closings.flatMap((row) => row.drivers || []).find((row) => row.driverId === id)?.name || "登録済みドライバー", status: "departed" as const }).sort((a, b) => a.name.localeCompare(b.name, "ja"));
+  const castMasters = useMemo(() => [...data.casts, ...data.archivedCasts.filter((row) => !data.casts.some((cast) => cast.id === row.id))], [data.casts, data.archivedCasts]);
+  const activeCasts = useMemo(() => data.casts.filter((row) => row.status === "active" && !row.deletedAt), [data.casts]);
+  const castRows = useMemo(() => castMasters.map((cast) => ({ cast, registration: settings.castRegistrations[cast.id], days: transportCastDays(data, month, cast.id), unresolved: transportUnresolvedLegacyInputs(data, month, cast.id) }))
+    .filter((row) => row.registration || row.days.some((day) => day.hasRecord) || row.unresolved.length > 0).sort((a, b) => a.cast.name.localeCompare(b.cast.name, "ja")), [castMasters, settings, data, month]);
+  const { legacyRemote, drivers } = useMemo(() => {
+    const legacyRemote = { ...(data.adjustments.find((row) => row.month === month)?.driverRemoteAllowance || {}), ...(data.transportLegacyRemote?.[month] || {}) };
+    const driverIds = new Set([...data.drivers.map((row) => row.id), ...Object.keys(storedMonth.drivers), ...Object.keys(legacyRemote).filter((id) => legacyRemote[id] > 0)]);
+    const drivers = [...driverIds].map((id) => data.drivers.find((row) => row.id === id) || { id, name: data.closings.flatMap((row) => row.drivers || []).find((row) => row.driverId === id)?.name || "登録済みドライバー", status: "departed" as const }).sort((a, b) => a.name.localeCompare(b.name, "ja"));
+    return { legacyRemote, drivers };
+  }, [data, month, storedMonth]);
   const castForPanel = panel ? castMasters.find((row) => row.id === panel.id) : undefined;
   const personName = panel?.type === "calendar" && panel.kind === "driver" ? drivers.find((row) => row.id === panel.id)?.name || "ドライバー" : castForPanel?.name || "キャスト";
-  const attendanceRows = panel?.type === "calendar" ? transportAttendance(data, month, panel.id, panel.kind) : [];
+  const calendarId = panel?.type === "calendar" ? panel.id : undefined;
+  const calendarKind = panel?.type === "calendar" ? panel.kind : undefined;
+  const attendanceRows = useMemo(() => calendarId && calendarKind ? transportAttendance(data, month, calendarId, calendarKind) : [], [data, month, calendarId, calendarKind]);
   const attendance = attendanceRows.map((row) => row.businessDate);
-  const castDays = panel?.type === "calendar" && panel.kind === "cast" ? transportCastDays(data, month, panel.id) : [];
+  const castDays = useMemo(() => calendarId && calendarKind === "cast" ? transportCastDays(data, month, calendarId) : [], [data, month, calendarId, calendarKind]);
+  const unresolvedPanelInputs = useMemo(() => calendarId && calendarKind === "cast" ? transportUnresolvedLegacyInputs(data, month, calendarId) : [], [data, month, calendarId, calendarKind]);
   const driverDays = panel?.type === "calendar" && panel.kind === "driver" ? storedMonth.drivers[panel.id] || {} : {};
   const records: Record<string, { amount: number; count?: number }> = panel?.type === "calendar" && panel.kind === "cast"
     ? Object.fromEntries(castDays.filter((day) => day.hasRecord).map((day) => [day.businessDate, { amount: day.amount }]))
@@ -174,9 +181,9 @@ export function TransportWork({ data, user, busy, run, onDirtyChange }: Props) {
     savingRef.current = true; setSaving(true); setError("");
     let detail = "";
     try {
-      const success = await run(async () => { try { return await action(); } catch (cause) { detail = cause instanceof Error ? cause.message : "保存できませんでした。"; throw cause; } }, message);
+      const success = await run(async () => { try { return await action(); } catch (cause) { detail = cause instanceof Error ? cause.message : "保存できませんでした。"; throw cause; } }, message, month);
       if (success) { setPanel(next); setConfirmation(null); }
-      else { setError(detail || "保存できませんでした。入力を保持しています。最新の状態を確認してください。"); setConfirmation(null); }
+      else { setError(detail || "保存結果を確認できませんでした。再保存せず最新の記録を確認してください。入力は保持しています。"); setConfirmation(null); }
     } finally { savingRef.current = false; setSaving(false); }
   };
   const saveSettings = () => {
@@ -265,7 +272,7 @@ export function TransportWork({ data, user, busy, run, onDirtyChange }: Props) {
         {panel?.type === "calendar" && <div className="stack">
           {monthNavigation}
           {panel.kind === "driver" && Boolean(legacyRemote[panel.id]) && <div className="notice">既存の月額遠方手当 <strong>{yen.format(legacyRemote[panel.id])}</strong><br /><small>日付のない既存分は保持し、日別記録の合計に加算します。</small></div>}
-          {panel.kind === "cast" && transportUnresolvedLegacyInputs(data, month, panel.id).length > 0 && <div className="notice warn" role="alert"><strong>日付を確認できない送迎代があります。</strong><p>対象日の店舗データを復旧してから編集してください。</p><ul>{transportUnresolvedLegacyInputs(data, month, panel.id).map((input) => <li key={input.id}>{input.label || "送迎代"}：{yen.format(input.amount)}</li>)}</ul></div>}
+          {panel.kind === "cast" && unresolvedPanelInputs.length > 0 && <div className="notice warn" role="alert"><strong>日付を確認できない送迎代があります。</strong><p>対象日の店舗データを復旧してから編集してください。</p><ul>{unresolvedPanelInputs.map((input) => <li key={input.id}>{input.label || "送迎代"}：{yen.format(input.amount)}</li>)}</ul></div>}
           <TransportCalendar month={month} attendance={attendance} records={records} selected={panel.date} disabled={waiting} onSelect={selectDay} />
           {!attendance.length && <p className="notice">この月に送信済み・承認済みの出勤日がありません。</p>}
           {panel.date && <section className="transport-day-editor" aria-label={panel.date + "の記録"}>

@@ -2,6 +2,7 @@ import type { ReactElement, ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Role } from "@/domain/gms";
 import type { AccountingWorkspaceData } from "@/domain/month-accounting";
+import type { WorkAllowanceRefresh } from "@/domain/work-allowance-refresh";
 
 // React の要素とイベントを検証し、Firebase 認証・DB・ブラウザーへの副作用は実行しない。
 const hooks = vi.hoisted(() => ({ values: [] as unknown[], cursor: 0, production: true, releaseStatus: "current" }));
@@ -35,6 +36,7 @@ vi.mock("@/lib/firebase/client", () => ({
   environmentRoot: () => hooks.production ? "accounting" : "accounting-dev",
 }));
 vi.mock("@/lib/firebase/repository", () => ({ loadWorkspaceData: vi.fn(), userRole: vi.fn() }));
+vi.mock("@/lib/firebase/work-allowance-refresh", () => ({ loadWorkAllowanceMonth: vi.fn() }));
 vi.mock("./common-forms", () => ({ CommonForms: () => null }));
 vi.mock("./store-work", () => ({ StoreWork: () => null }));
 vi.mock("./beauty-allowance-work", () => ({ BeautyAllowanceWork: () => null }));
@@ -48,6 +50,9 @@ import { AccountingApp } from "./accounting-app";
 import { AccountingForms } from "./accounting-forms";
 import { BeautyAllowanceWork } from "./beauty-allowance-work";
 import { UpdateDraftProvider } from "./update-drafts";
+import { auth } from "@/lib/firebase/client";
+import { loadWorkspaceData, userRole } from "@/lib/firebase/repository";
+import { loadWorkAllowanceMonth } from "@/lib/firebase/work-allowance-refresh";
 
 type Element = ReactElement<Record<string, any>>; // テストで JSX のイベントを呼び出す。
 function elements(node: ReactNode): Element[] {
@@ -147,5 +152,205 @@ describe("美容室手当の店舗作業導線", () => {
   it("更新待ちの美容室画面に保存停止を伝える", () => {
     seed("shop", "beautyAllowance"); hooks.releaseStatus = "update-available";
     expect(find(render(), (item) => item.type === BeautyAllowanceWork).props.busy).toBe(true);
+  });
+});
+
+describe("送迎・美容室保存後の部分再読込の安全境界", () => {
+  const month = "2026-10";
+  const fullData = (extra: Partial<AccountingWorkspaceData> = {}): AccountingWorkspaceData => ({
+    casts: [], staff: [], drivers: [], introducers: [], liquor: [], closings: [], adjustments: [], cashFloat: 200000,
+    archivedCasts: [], archivedStaff: [], introducerEntryEvents: [], introducerDeletionCommits: [], introducerMonthEvents: [],
+    monthStates: [], monthSnapshots: [], ...extra,
+  });
+  const partialData = (targetMonth = month): WorkAllowanceRefresh => ({
+    month: targetMonth, casts: [], archivedCasts: [], drivers: [], closings: [],
+    transportSettings: { revision: 1, castRegistrations: {}, remoteAmounts: [] },
+    transportMonth: { revision: 1, casts: {}, drivers: {} }, beautyMonth: { revision: 1, casts: {} },
+    legacyInputs: [], legacyRemote: {},
+  });
+  const allowance = (node: ReactNode) => find(node, (item) => item.type === BeautyAllowanceWork);
+  const deferred = <T,>() => {
+    let resolve!: (value: T) => void;
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+    return { promise, resolve, reject };
+  };
+  const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
+  const authUser = auth as unknown as { currentUser: { uid: string } | null };
+  const workState = () => hooks.values[14] as { current: { month?: string; required: boolean } };
+  function seedWork(role: Role = "op") {
+    seed(role, "beautyAllowance");
+    hooks.values[3] = fullData();
+    // 既存harnessはeffectを実行しないため、認証済み状態の各refも明示する。
+    hooks.values.push({ current: role }, { current: 1 }, { current: 0 }, { current: false }, { current: false },
+      { current: { required: false } });
+  }
+  const save = (action = vi.fn(async () => undefined)) => allowance(render()).props.run(action, "保存しました", month) as Promise<boolean>;
+
+  beforeEach(() => {
+    authUser.currentUser = { uid: "accounting-user" };
+    vi.mocked(userRole).mockReset().mockResolvedValue("op");
+    vi.mocked(loadWorkspaceData).mockReset().mockResolvedValue(fullData());
+    vi.mocked(loadWorkAllowanceMonth).mockReset().mockImplementation(async (targetMonth) => partialData(targetMonth));
+    seedWork();
+  });
+  afterEach(() => { authUser.currentUser = { uid: "accounting-user" }; });
+
+  it("書込成功後は対象月だけを読み直し、成功前には反映しない", async () => {
+    const written = deferred<void>();
+    const pending = save(vi.fn(() => written.promise));
+    expect(loadWorkAllowanceMonth).not.toHaveBeenCalled();
+    expect(allowance(render()).props.busy).toBe(true);
+    written.resolve(undefined);
+    expect(await pending).toBe(true);
+    expect(loadWorkAllowanceMonth).toHaveBeenCalledWith(month, "op");
+    expect(loadWorkspaceData).not.toHaveBeenCalled();
+    expect((hooks.values[3] as AccountingWorkspaceData).beautyMonths?.[month].revision).toBe(1);
+    expect(workState().current).toEqual({ month, required: false });
+  });
+
+  it("部分更新後の確定状態と旧snapshotを他画面へ渡さず、全体読込の完了を待つ", async () => {
+    const partial = partialData();
+    partial.monthState = { month, status: "closed", revision: 2 } as NonNullable<WorkAllowanceRefresh["monthState"]>;
+    vi.mocked(loadWorkAllowanceMonth).mockResolvedValueOnce(partial);
+    await save();
+    const next = deferred<AccountingWorkspaceData>();
+    vi.mocked(loadWorkspaceData).mockReturnValueOnce(next.promise);
+    const navigation = button(render(), "キャスト報酬").props.onClick() as Promise<void>;
+    await settle();
+    expect(provider(render()).props.view).toBe("beautyAllowance");
+    expect((hooks.values[3] as AccountingWorkspaceData).monthSnapshots).toEqual([]);
+    const complete = fullData();
+    next.resolve(complete);
+    await navigation;
+    expect(provider(render()).props.view).toBe("castRewards");
+    expect(hooks.values[3]).toBe(complete);
+    expect(workState().current).toEqual({ month: undefined, required: false });
+  });
+
+  it("別月へ切り替えたらその月を取得し、対象月データの完了まで保存を止める", async () => {
+    await save();
+    const next = deferred<WorkAllowanceRefresh>();
+    vi.mocked(loadWorkAllowanceMonth).mockReturnValueOnce(next.promise);
+    allowance(render()).props.onScopeChange("2026-11");
+    await settle();
+    expect(loadWorkAllowanceMonth).toHaveBeenLastCalledWith("2026-11", "op");
+    expect(allowance(render()).props.busy).toBe(true);
+    const action = vi.fn(async () => undefined);
+    expect(await save(action)).toBe(false);
+    expect(action).not.toHaveBeenCalled();
+    next.resolve(partialData("2026-11"));
+    await settle();
+    expect(workState().current).toEqual({ month: "2026-11", required: false });
+    expect(allowance(render()).props.busy).toBe(false);
+  });
+
+  it("別月の読込失敗では保存を停止し、古い月の記録で更新しない", async () => {
+    await save();
+    vi.mocked(loadWorkAllowanceMonth).mockRejectedValueOnce(new Error("通信エラー"));
+    allowance(render()).props.onScopeChange("2026-11");
+    await settle();
+    expect(workState().current.required).toBe(true);
+    expect(allowance(render()).props.busy).toBe(true);
+    const action = vi.fn(async () => undefined);
+    expect(await save(action)).toBe(false);
+    expect(action).not.toHaveBeenCalled();
+  });
+
+  it("月読込が競合した場合は最新の要求だけを採用し、古い要求の失敗で保存を止めない", async () => {
+    await save();
+    const november = deferred<WorkAllowanceRefresh>();
+    const december = deferred<WorkAllowanceRefresh>();
+    vi.mocked(loadWorkAllowanceMonth).mockImplementation((targetMonth) => targetMonth === "2026-11" ? november.promise : december.promise);
+    const onScopeChange = allowance(render()).props.onScopeChange;
+    onScopeChange("2026-11");
+    await settle();
+    onScopeChange("2026-12");
+    await settle();
+    december.resolve(partialData("2026-12"));
+    await settle();
+    expect(workState().current).toEqual({ month: "2026-12", required: false });
+    november.reject(new Error("古い要求の失敗"));
+    await settle();
+    expect(workState().current).toEqual({ month: "2026-12", required: false });
+    expect(allowance(render()).props.busy).toBe(false);
+  });
+
+  it("書込後の読込失敗は保存済みと伝え、再保存を拒否して全体読込で復帰する", async () => {
+    vi.mocked(loadWorkAllowanceMonth).mockRejectedValueOnce(new Error("読取失敗"));
+    const action = vi.fn(async () => undefined);
+    expect(await save(action)).toBe(false);
+    expect(action).toHaveBeenCalledTimes(1);
+    expect(hooks.values[6]).toMatchObject({ kind: "error", text: expect.stringContaining("保存は完了しました") });
+    expect(workState().current.required).toBe(true);
+    expect(await save(action)).toBe(false);
+    expect(action).toHaveBeenCalledTimes(1);
+    button(render(), "最新データを読込").props.onClick();
+    await settle();
+    expect(loadWorkspaceData).toHaveBeenCalledTimes(1);
+    expect(workState().current.required).toBe(false);
+    expect(allowance(render()).props.busy).toBe(false);
+  });
+
+  it("権限が経理へ変わっていたら部分読込せず全体読込・画面権限を更新する", async () => {
+    seedWork("shop");
+    vi.mocked(userRole).mockResolvedValueOnce("accounting");
+    expect(await save()).toBe(true);
+    expect(loadWorkAllowanceMonth).not.toHaveBeenCalled();
+    expect(loadWorkspaceData).toHaveBeenCalledWith("accounting");
+    expect(provider(render()).props.view).toBe("home");
+    expect(hooks.values[1]).toBe("accounting");
+    expect(elements(render()).some((item) => item.type === BeautyAllowanceWork)).toBe(false);
+  });
+
+  it("書込待機中に認証ユーザーが交代したら旧操作の再読込や成功通知を反映しない", async () => {
+    const written = deferred<void>();
+    const pending = save(vi.fn(() => written.promise));
+    authUser.currentUser = { uid: "next-user" };
+    (hooks.values[10] as { current: number }).current++;
+    const nextData = fullData({ cashFloat: 300000 });
+    hooks.values[0] = { uid: "next-user" };
+    hooks.values[3] = nextData;
+    hooks.values[6] = { kind: "success", text: "新しいログイン" };
+    written.resolve(undefined);
+    expect(await pending).toBe(false);
+    expect(loadWorkAllowanceMonth).not.toHaveBeenCalled();
+    expect(loadWorkspaceData).not.toHaveBeenCalled();
+    expect(hooks.values[3]).toBe(nextData);
+    expect(hooks.values[6]).toEqual({ kind: "success", text: "新しいログイン" });
+  });
+
+  it("部分読込待機中のユーザー交代でも旧データを破棄する", async () => {
+    const next = deferred<WorkAllowanceRefresh>();
+    vi.mocked(loadWorkAllowanceMonth).mockReturnValueOnce(next.promise);
+    const pending = save();
+    await settle();
+    authUser.currentUser = { uid: "next-user" };
+    (hooks.values[10] as { current: number }).current++;
+    const nextData = fullData({ cashFloat: 300000 });
+    hooks.values[0] = { uid: "next-user" }; hooks.values[3] = nextData;
+    next.resolve(partialData());
+    expect(await pending).toBe(false);
+    expect(hooks.values[3]).toBe(nextData);
+    expect(workState().current.required).toBe(false);
+  });
+
+  it("保存処理中は画面移動・退避入力の復元・二重保存を拒否する", async () => {
+    const written = deferred<void>();
+    const pending = save(vi.fn(() => written.promise));
+    await button(render(), "キャスト報酬").props.onClick();
+    expect(provider(render()).props.view).toBe("beautyAllowance");
+    expect(() => provider(render()).props.onRestoreView("castRewards")).toThrow("最新データ");
+    const other = vi.fn(async () => undefined);
+    expect(await save(other)).toBe(false);
+    expect(other).not.toHaveBeenCalled();
+    written.resolve(undefined);
+    expect(await pending).toBe(true);
+  });
+
+  it("部分更新後の退避画面復元は全体読込が済むまで拒否する", async () => {
+    await save();
+    expect(() => provider(render()).props.onRestoreView("castRewards")).toThrow("最新データ");
+    expect(provider(render()).props.view).toBe("beautyAllowance");
   });
 });

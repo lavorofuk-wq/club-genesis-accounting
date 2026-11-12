@@ -219,6 +219,7 @@
     }
    },
    "history": {
+    ".indexOn": ["businessDate"],
     ".read": "($workspace === 'accounting' || $workspace === 'accounting-dev') && auth != null && (root.child('users').child(auth.uid).child('role').val() === 'shop' || root.child('users').child(auth.uid).child('role').val() === 'accounting' || root.child('users').child(auth.uid).child('role').val() === 'op')",
     "$id": {
      "casts": {
