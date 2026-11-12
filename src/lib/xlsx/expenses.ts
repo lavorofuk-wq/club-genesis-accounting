@@ -11,14 +11,14 @@ const amountFormat = '#,##0.########;[Red]-#,##0.########;0';
 const border: Partial<ExcelJS.Borders> = Object.fromEntries(
   ["top", "bottom", "left", "right"].map((side) => [side, { style: "thin", color: { argb: "FFCBD5E1" } }]),
 );
-const categories: Array<{ category: ExpenseCategory | "dispatchFee"; column: string; amount: string; label: string }> = [
+const categories: Array<{ category: ExpenseCategory; column: string; amount: string; label: string }> = [
   { category: "liquor", column: "B", amount: "C", label: "酒代" },
   { category: "introduction", column: "D", amount: "E", label: "広告宣伝①" },
   { category: "advertising", column: "F", amount: "G", label: "広告宣伝②" },
   { category: "supplies", column: "H", amount: "I", label: "消耗品/備品" },
   { category: "entertainment", column: "J", amount: "K", label: "交際費" },
   { category: "transportOther", column: "L", amount: "M", label: "交通費" },
-  { category: "dispatchFee", column: "N", amount: "O", label: "その他" },
+  { category: "other", column: "N", amount: "O", label: "その他" },
   { category: "beautyTrial", column: "P", amount: "Q", label: "美容室" },
 ];
 const sum = <T,>(rows: T[], amount: (row: T) => number) => rows.reduce((total, row) => total + amount(row), 0);
@@ -122,17 +122,17 @@ export function createMonthlyExpenseWorkbook(input: ExpenseExportInput, sourceLa
     let dailyTotal = 0;
     for (const category of categories) {
       const payments = new Map<string, number>();
-      if (category.category === "dispatchFee") {
+      // その他経費・派遣手数料・預かり消費税は同じ出力欄へ一度ずつ集約する。
+      if (category.category === "other") {
         if (closing?.dispatchFee) payments.set("派遣手数料", closing.dispatchFee);
         if (!businessDate && results.expenses.consumptionTax !== undefined) {
           payments.set("預かり消費税", results.expenses.consumptionTax);
         }
-      } else {
-        for (const expense of [...(closing?.expenses || []), ...additions]) {
-          if (expense.category !== category.category) continue;
-          const name = expense.payee;
-          payments.set(name, (payments.get(name) || 0) + expense.amount);
-        }
+      }
+      for (const expense of [...(closing?.expenses || []), ...additions]) {
+        if (expense.category !== category.category) continue;
+        const name = expense.payee;
+        payments.set(name, (payments.get(name) || 0) + expense.amount);
       }
       const amount = sum([...payments.values()], (value) => value);
       const names = [...payments.keys()];

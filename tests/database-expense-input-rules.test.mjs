@@ -31,20 +31,36 @@ const collection = rules.accountingAdjustments.$month.expenseInputs;
 const validInput = (row, options = {}) => evaluate(collection.$inputId[".validate"], row, [], options)
   && Object.keys(row).every(field => evaluate(collection.$inputId.$field[".validate"], row, [field], { ...options, field }));
 for (const workspace of ["accounting-dev", "accounting"]) {
-  test(workspace + ": 日付あり・なしと全既存科目を保存可能", () => {
-    for (const category of ["beautyTrial", "introduction", "advertising", "supplies", "entertainment", "liquor", "transportOther"]) {
+  test(workspace + ": 日付あり・なしと交通費・その他を含む全科目を保存可能", () => {
+    for (const category of ["beautyTrial", "introduction", "advertising", "supplies", "entertainment", "liquor", "transportOther", "other"]) {
       assert.equal(validInput(input({ category }), { workspace }), true);
       assert.equal(validInput(input({ category, businessDate: "2026-09-02" }), { workspace }), true);
     }
     assert.equal(evaluate(collection[".validate"], { expense_1: input() }, [], { workspace }), true);
   });
   test(workspace + ": 不正金額・科目・月・未知項目・IDを拒否", () => {
-    for (const extra of [{ amount: -1 }, { amount: 0.1 }, { amount: "1000" }, { amount: Number.MAX_SAFE_INTEGER + 1 }, { category: "other" },
+    for (const extra of [{ amount: -1 }, { amount: 0.1 }, { amount: "1000" }, { amount: Number.MAX_SAFE_INTEGER + 1 }, { category: "unknownCategory" },
       { id: "expense_2" }, { payee: " " }, { businessDate: "2026-10-02" }, { businessDate: "2026-09-00" }, { unknown: true }]) {
       assert.equal(validInput(input(extra), { workspace }), false, JSON.stringify(extra));
     }
   });
 }
+
+test("確定snapshotも旧交通費と新その他を保持し、不正経費を拒否する", () => {
+  const rowRules = rules.accountingMonthSnapshots.$month.$revision.expenses.accountingExpenseInputs.$inputIndex;
+  const validSnapshotInput = row => evaluate(rowRules[".validate"], row)
+    && Object.keys(row).every(field => evaluate(rowRules.$field[".validate"], row, [field], { field }));
+  for (const category of ["transportOther", "other"]) {
+    for (const businessDate of [undefined, "2026-09-02"]) {
+      const row = input({ category, ...(businessDate ? { businessDate } : {}) });
+      assert.equal(validSnapshotInput(row), true);
+      for (const invalid of [{ amount: -1 }, { amount: 0.1 }, { amount: "1000" },
+        { payee: " " }, { category: "unknownCategory" }, { businessDate: "2026-10-02" }, { unknown: true }]) {
+        assert.equal(validSnapshotInput({ ...row, ...invalid }), false, JSON.stringify(invalid));
+      }
+    }
+  }
+});
 test("追加経費は既存の経理/OP、共通revision、確定月保護の対象", () => {
   const monthly = rules.accountingAdjustments.$month;
   const old = { users: { user: { role: "accounting" } }, "accounting-dev": { accountingAdjustments: { [month]: { revision: 1, updatedAt: "before", updatedBy: "user", cardFee: 0 } } } };
