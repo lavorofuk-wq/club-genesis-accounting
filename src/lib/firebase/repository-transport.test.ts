@@ -10,6 +10,14 @@ vi.mock("firebase/database", () => ({ get: memory.get, ref: (_db: unknown, path:
 vi.mock("./client", () => ({ database: {}, rootRef: (path = "") => ({ path: [memory.environment, path].filter(Boolean).join("/") }) }));
 vi.mock("./ready-transaction", () => ({ runReadyTransaction: memory.transaction }));
 vi.mock("../client-release", () => ({ assertCurrentClientRelease: memory.release }));
+vi.mock("./work-allowance-sources", async () => {
+  const { normalizeDailyClosing } = await import("@/domain/gms");
+  return { readWorkAllowanceClosings: async (targetMonth: string) => {
+    const stored = (await memory.get({ path: memory.environment + "/history" })).val() as Record<string, DailyClosing> | null;
+    return Object.entries(stored || {}).filter(([, row]) => row.businessDate.startsWith(targetMonth + "-"))
+      .map(([id, row]) => normalizeDailyClosing({ ...row, id }));
+  } };
+});
 import { saveTransportSettings, saveCastTransportDay, saveDriverTransportDay, loadWorkspaceData } from "./repository";
 
 const month = "2026-09";

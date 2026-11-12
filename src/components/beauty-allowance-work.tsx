@@ -9,7 +9,7 @@ import { Card, Field, StatusPill, currentMonth, yen } from "./ui";
 import { TransportModal, shiftTransportMonth, transportCalendarCells } from "./transport-work";
 import { useRecoverableState, useUpdateDraftBusy } from "./update-drafts";
 
-type Props = { data: AccountingWorkspaceData; user: User; busy: boolean; run: (action: () => Promise<unknown>, message: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void };
+type Props = { data: AccountingWorkspaceData; user: User; busy: boolean; run: (action: () => Promise<unknown>, message: string, workMonth?: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void; onScopeChange?: (month: string) => void };
 type Panel = { id: string; date: string; eligible: boolean | null; originalEligible: boolean | null; hadRecord: boolean; revision: number; context: string };
 type Move = { panel: Panel | null; month?: string };
 
@@ -43,13 +43,14 @@ export function BeautyCalendar({ month, attendance, records, selected, disabled,
   </div>;
 }
 
-export function BeautyAllowanceWork({ data, user, busy, run, onDirtyChange }: Props) {
+export function BeautyAllowanceWork({ data, user, busy, run, onDirtyChange, onScopeChange }: Props) {
   const [month, setMonth] = useRecoverableState("store.beauty.month", currentMonth());
+  useEffect(() => { onScopeChange?.(month); }, [month, onScopeChange]);
   const [panel, setPanel] = useRecoverableState<Panel | null>("store.beauty.panel", null);
   const [confirmation, setConfirmation] = useState<Move | null>(null);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false); const savingRef = useRef(false);
-  const stored = normalizeBeautyMonth(data.beautyMonths?.[month]);
+  const stored = useMemo(() => normalizeBeautyMonth(data.beautyMonths?.[month]), [data.beautyMonths, month]);
   const monthState = data.monthStates.find((row) => row.month === month);
   const locked = monthState?.status === "closed" || monthState?.status === "closing";
   const waiting = busy || saving;
@@ -57,19 +58,23 @@ export function BeautyAllowanceWork({ data, user, busy, run, onDirtyChange }: Pr
   const stale = Boolean(panel?.date && panel.context !== context);
   const dirty = beautyPanelDirty(panel);
   // 削除・退店済みやマスタ不在の過去記録も、日次に保存された本人IDで表示する。
-  const people = new Map([...data.casts, ...data.archivedCasts].map((row) => [row.id, row]));
-  for (const row of data.closings.filter((closing) => closing.businessDate.startsWith(month + "-")).flatMap((closing) => closing.casts || [])) {
-    if (row.kind === "regular" && !people.has(row.masterId)) people.set(row.masterId, { id: row.masterId, name: row.name, status: "departed" } as typeof data.casts[number]);
-  }
-  for (const id of Object.keys(stored.casts)) if (!people.has(id)) people.set(id, { id, name: "保存済みキャスト（" + id + "）", status: "departed" } as typeof data.casts[number]);
-  const castRows = [...people.values()].map((cast) => ({ cast, days: beautyCastDays(data, month, cast.id) }))
-    .filter(({ cast, days }) => cast.status === "active" && !cast.deletedAt || days.some((day) => day.hasRecord))
-    .sort((a, b) => a.cast.name.localeCompare(b.cast.name, "ja"));
+  const { people, castRows } = useMemo(() => {
+    const people = new Map([...data.casts, ...data.archivedCasts].map((row) => [row.id, row]));
+    for (const row of data.closings.filter((closing) => closing.businessDate.startsWith(month + "-")).flatMap((closing) => closing.casts || [])) {
+      if (row.kind === "regular" && !people.has(row.masterId)) people.set(row.masterId, { id: row.masterId, name: row.name, status: "departed" } as typeof data.casts[number]);
+    }
+    for (const id of Object.keys(stored.casts)) if (!people.has(id)) people.set(id, { id, name: "保存済みキャスト（" + id + "）", status: "departed" } as typeof data.casts[number]);
+    const castRows = [...people.values()].map((cast) => ({ cast, days: beautyCastDays(data, month, cast.id) }))
+      .filter(({ cast, days }) => cast.status === "active" && !cast.deletedAt || days.some((day) => day.hasRecord))
+      .sort((a, b) => a.cast.name.localeCompare(b.cast.name, "ja"));
+    return { people, castRows };
+  }, [data, month, stored]);
   const person = panel ? people.get(panel.id) : undefined;
   const personName = person?.name || "キャスト";
   const canEdit = Boolean(panel && data.casts.some((row) => row.id === panel.id && row.status === "active" && !row.deletedAt));
-  const attendanceRows = panel ? beautyAttendance(data, month, panel.id) : [];
-  const days = panel ? beautyCastDays(data, month, panel.id) : [];
+  const panelId = panel?.id;
+  const attendanceRows = useMemo(() => panelId ? beautyAttendance(data, month, panelId) : [], [data, month, panelId]);
+  const days = useMemo(() => panelId ? beautyCastDays(data, month, panelId) : [], [data, month, panelId]);
   const records = Object.fromEntries(days.filter((day) => day.hasRecord && day.eligible !== null).map((day) => [day.businessDate, day.eligible!])) as Record<string, boolean>;
   const selectedSources = panel?.date ? attendanceRows.filter((row) => row.businessDate === panel.date) : [];
   const source = selectedSources.length === 1 ? selectedSources[0] : undefined;
@@ -112,7 +117,7 @@ export function BeautyAllowanceWork({ data, user, busy, run, onDirtyChange }: Pr
       const success = await run(async () => {
         try { await saveBeautyAllowanceDay(month, panel.id, panel.date, panel.eligible!, panel.revision, user); }
         catch (cause) { detail = cause instanceof Error ? cause.message : "保存できませんでした。"; throw cause; }
-      }, personName + "の美容室手当を「" + (panel.eligible ? "可（500円）" : "否（0円）") + "」で保存しました。");
+      }, personName + "の美容室手当を「" + (panel.eligible ? "可（500円）" : "否（0円）") + "」で保存しました。", month);
       if (success) { setPanel(emptyPanel(panel.id)); setConfirmation(null); }
       else setError(detail || "保存結果を確認できませんでした。入力を保持しています。最新の記録を確認してください。");
     } finally { savingRef.current = false; setSaving(false); }

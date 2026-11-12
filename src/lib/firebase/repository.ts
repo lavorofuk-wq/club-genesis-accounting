@@ -5,6 +5,7 @@ import type { User } from "firebase/auth";
 import { database, rootRef } from "./client";
 import { readOneShotValue } from "./one-shot-value";
 import { runReadyTransaction } from "./ready-transaction";
+import { readWorkAllowanceClosings } from "./work-allowance-sources";
 import { assertCurrentClientRelease } from "../client-release";
 import { secureRandomUUID } from "../crypto-compat";
 import { existingClosingSubmissionMessage } from "@/domain/daily-edit-source";
@@ -2570,12 +2571,12 @@ function assertTransportRequest(month: string, expectedRevision: number, id?: st
 }
 async function currentTransportSources(month: string): Promise<DomainWorkspaceData> {
   const [casts, drivers, history, inputs, settings, transportMonth] = await Promise.all([
-    get(rootRef("casts")), get(rootRef("drivers")), get(rootRef("history")),
+    get(rootRef("casts")), get(rootRef("drivers")), readWorkAllowanceClosings(month),
     get(query(rootRef(`accountingAdjustments/${month}/castInputs`), orderByChild("kind"), equalTo("transport"))),
     get(rootRef("config/transportSettings")), get(rootRef(`transportMonths/${month}`)),
   ]);
   return { ...emptyData, casts: asArray<CastRecord>(casts.val()), drivers: asArray<DriverRecord>(drivers.val()),
-    closings: asArray<DailyClosing>(history.val()).map(normalizeDailyClosing),
+    closings: history,
     transportSettings: normalizeTransportSettings(settings.val()),
     transportMonths: { [month]: normalizeTransportMonth(transportMonth.val()) },
     transportLegacyInputs: { [month]: normalizeCastAccountingInputs(inputs.val()) } };
@@ -2678,12 +2679,12 @@ export async function saveBeautyAllowanceDay(month: string, castId: string, busi
   if (typeof eligible !== "boolean") throw new Error("美容室手当の可否を選択してください。");
   await assertMonthOpen(month);
   const [casts, history, monthSnapshot] = await Promise.all([
-    get(rootRef("casts")), get(rootRef("history")), get(rootRef("beautyMonths/" + month)),
+    get(rootRef("casts")), readWorkAllowanceClosings(month), get(rootRef("beautyMonths/" + month)),
   ]);
   const previousMonth = normalizeBeautyMonth(monthSnapshot.val());
   if (previousMonth.revision !== expectedRevision) throw new Error("別の端末で美容室手当が更新されています。最新データを読み込んでください。");
   const data: DomainWorkspaceData = { ...emptyData, casts: asArray<CastRecord>(casts.val()),
-    closings: asArray<DailyClosing>(history.val()).map(normalizeDailyClosing), beautyMonths: { [month]: previousMonth } };
+    closings: history, beautyMonths: { [month]: previousMonth } };
   const previous = previousMonth.casts[castId]?.[businessDate];
   const sources = beautyAttendance(data, month, castId).filter((day) => day.businessDate === businessDate);
   if (sources.length > 1 && (eligible || !previous)) throw new Error("同日の本人の在籍出勤が重複しています。日次の出勤を確認してください。");
