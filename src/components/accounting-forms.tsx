@@ -28,7 +28,7 @@ import { IntroducerStatementExport } from "./introducer-statement-export";
 import { PayrollExport } from "./payroll-export";
 import { CastAccountingInputs } from "./cast-accounting-inputs";
 import { AccountingExpenseInputs } from "./accounting-expense-inputs";
-import { DEFAULT_CONSUMPTION_TAX_RATE, FIXED_EXPENSE_ACCOUNTS, validateAccountingExpenseInputs, validateConsumptionTaxRate } from "@/domain/accounting-expenses";
+import { DEFAULT_CONSUMPTION_TAX_RATE, EXPENSE_LABELS, FIXED_EXPENSE_ACCOUNTS, validateAccountingExpenseInputs, validateConsumptionTaxRate } from "@/domain/accounting-expenses";
 
 type Props = { data: AccountingWorkspaceData; user: User; busy: boolean; run: (action: () => Promise<unknown>, message: string) => Promise<boolean>; onDirtyChange?: (dirty: boolean) => void };
 /** 税率の入力文字列はUI下書きで保持し、計算・保存・確定には数値だけを渡す。 */
@@ -36,7 +36,7 @@ type MonthlyAdjustmentDraft = MonthlyAdjustments & { consumptionTaxRateInput?: s
 type Section = "approval" | "castInputs" | "castSales" | "castRewards" | "introducers" | "staffPayroll" | "driverPayroll" | "expenses" | "balance";
 
 const statusLabel = { submitted: "確認待ち", returned: "差戻し中", approved: "承認済み", withdrawn: "店舗編集中（取下げ）" } as const;
-const expenseLabels: Record<string, string> = { beautyTrial: "美容室手当", introduction: "紹介料", advertising: "広告等", supplies: "備品・消耗品他", entertainment: "交際費・プレゼント等", liquor: "酒代", transportOther: "交通費・その他" };
+const expenseLabels: Record<string, string> = EXPENSE_LABELS;
 const classificationLabels: Record<LegacyBottleClassification, string> = { honShimei: "本指名", jonaiExtension: "場内延長", excluded: "対象外" };
 
 export function AccountingForms({ section, ...props }: Props & { section: Section }) {

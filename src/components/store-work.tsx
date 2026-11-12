@@ -31,7 +31,8 @@ const expenseLabels: Record<ExpenseCategory, string> = {
   supplies: "3. 備品・消耗品他",
   entertainment: "4. 交際費・プレゼント等",
   liquor: "5. 酒代",
-  transportOther: "6. 交通費・その他"
+  transportOther: "6. 交通費",
+  other: "7. その他"
 };
 
 const closingLabels: Record<DailyClosing["status"], string> = {

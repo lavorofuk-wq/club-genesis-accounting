@@ -46,6 +46,13 @@ describe.each(["accounting-dev", "accounting"])("追加経費の保存（%s）",
     expect(saved().expenseInputs).toBeUndefined();
     expect(saved().revision).toBe(3);
   });
+  it("交通費の保存キーを保持し、その他を別の明細として保存する", async () => {
+    const history = structuredClone(memory.values.get(scoped("history")));
+    const rows = [input({ category: "transportOther" }), input({ id: "other_1", category: "other", amount: 670 })];
+    await saveMonthlyAdjustments(defaults({ expenseInputs: rows }), user);
+    expect(saved().expenseInputs).toEqual({ expense_1: rows[0], other_1: rows[1] });
+    expect(memory.values.get(scoped("history"))).toEqual(history);
+  });
   it.each([0, 0.29, 2.01, 3, 3.5, 10, 100])("税率%s%%を選択月だけに保存する", async (consumptionTaxRate) => {
     const otherMonth = scoped("accountingAdjustments/2026-08");
     memory.values.set(otherMonth, { revision: 4, consumptionTaxRate: 8 });
@@ -84,7 +91,7 @@ describe.each(["accounting-dev", "accounting"])("追加経費の保存（%s）",
     await expect(saveMonthlyAdjustments(defaults({ expenseInputs: [input({ businessDate: "2026-10-02" })] }), user)).rejects.toThrow();
     expect(memory.transaction).not.toHaveBeenCalled();
   });
-  it.each([{ amount: -1 }, { amount: 0.5 }, { amount: Number.MAX_SAFE_INTEGER + 1 }, { payee: " " }, { category: "other" }, { id: "bad/path" }])("不正な入力を保存前に拒否する: %j", async (extra) => {
+  it.each([{ amount: -1 }, { amount: 0.5 }, { amount: Number.MAX_SAFE_INTEGER + 1 }, { payee: " " }, { category: "unknownCategory" }, { id: "bad/path" }])("不正な入力を保存前に拒否する: %j", async (extra) => {
     await expect(saveMonthlyAdjustments(defaults({ expenseInputs: [input(extra as Partial<AccountingExpenseInput>)] }), user)).rejects.toThrow();
     expect(memory.transaction).not.toHaveBeenCalled();
   });

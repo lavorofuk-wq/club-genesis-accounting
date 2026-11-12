@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_CONSUMPTION_TAX_RATE, consumptionTaxForSales, normalizeAccountingExpenseInputs, validateAccountingExpenseInputs, validateConsumptionTaxRate } from "./accounting-expenses";
-import { normalizeMonthlyAdjustments, type AccountingExpenseInput, type DailyClosing, type MonthlyAdjustments, type WorkspaceData } from "./gms";
+import { DEFAULT_CONSUMPTION_TAX_RATE, EXPENSE_LABELS, consumptionTaxForSales, normalizeAccountingExpenseInputs, validateAccountingExpenseInputs, validateConsumptionTaxRate } from "./accounting-expenses";
+import { calculateCash, normalizeMonthlyAdjustments, type AccountingExpenseInput, type DailyClosing, type MonthlyAdjustments, type WorkspaceData } from "./gms";
 import { calculateCashFunding, cashFundingContext } from "./cash-funding";
 import { MONTHLY_CALCULATION_VERSION, buildMonthlySnapshot, calculateMonthlyAccounting, canFinalizeMonthlyAccounting, monthlySourceFingerprint, normalizeMonthlyAccountingSnapshot } from "./month-accounting";
 import { validateExpenseExport, type ExpenseExportInput } from "./expense-export";
@@ -55,6 +55,14 @@ function legacy(input: ExpenseExportInput) {
 }
 
 describe("経費追加入力の検証", () => {
+  it("旧交通費キーと新その他を別科目のまま保持し、交通費は表示名だけ変更する", () => {
+    const rows = [expense({ category: "transportOther" }), expense({ id: "other-input", category: "other", amount: 321 })];
+    const before = structuredClone(rows);
+    expect(normalizeAccountingExpenseInputs(rows)).toEqual(before);
+    expect(rows).toEqual(before);
+    expect(EXPENSE_LABELS.transportOther).toBe("交通費");
+    expect(EXPENSE_LABELS.other).toBe("その他");
+  });
   it("配列・IDキーオブジェクトを金額と日付を保持して復元する", () => {
     expect(normalizeAccountingExpenseInputs({ "input-1": expense() })).toEqual([expense()]);
     expect(normalizeAccountingExpenseInputs([null, expense()])).toEqual([expense()]);
@@ -64,7 +72,7 @@ describe("経費追加入力の検証", () => {
   });
   it.each([
     ["小数", { amount: 1.5 }], ["負数", { amount: -1 }], ["文字列", { amount: "100" }], ["無限値", { amount: Infinity }],
-    ["桁あふれ", { amount: Number.MAX_SAFE_INTEGER + 1 }], ["空支払先", { payee: " " }], ["不明科目", { category: "other" }],
+    ["桁あふれ", { amount: Number.MAX_SAFE_INTEGER + 1 }], ["空支払先", { payee: " " }], ["不明科目", { category: "unknownCategory" }],
     ["継承プロパティ科目", { category: "constructor" }], ["不正日付", { businessDate: "2026-09-31" }], ["空ID", { id: "" }],
   ])("%sを黙って補正しない", (_label, overrides) => {
     expect(() => normalizeAccountingExpenseInputs([{ ...expense(), ...(overrides as object) }])).toThrow();
@@ -85,6 +93,34 @@ describe("経費追加入力の検証", () => {
 });
 
 describe("月次3%と追加経費の計算・帳票突合", () => {
+  it("交通費とその他は日次現金・月次経費・収支に一度ずつ計上し、経理追加入力は店舗現金を変えない", () => {
+    const { data, adjustments, input } = fixture(false);
+    const closing = data.closings.at(-1)!;
+    closing.expenses.push({ id: "traffic", category: "transportOther", payee: "タクシー", amount: 230 },
+      { id: "other", category: "other", payee: "その他支払先", amount: 670 });
+    closing.cash = calculateCash({ sales: closing.sales, cashFloat: closing.cash.cashFloat,
+      expenses: closing.expenses.reduce((sum, row) => sum + row.amount, 0), regularDailyPayments: 0,
+      trialDailyPayments: 0, staffDailyPayments: 0, driverDailyPayments: 0, dispatchCastPayment: 0,
+      dispatchStaffPayment: 0, dispatchFee: 0, actualClosingCash: 202323 });
+    closing.cash.funding = calculateCashFunding(cashFundingContext(data.closings.slice(0, -1), closing.businessDate, 200000),
+      { companyReplenishment: 0, personalReplenishment: 0, companyTransfer: 0 }, closing.cash.cashProfit, true);
+    expect(closing.cash).toMatchObject({ expenseAndPaymentTotal: 1010, cashProfit: 2323, expectedClosingCash: 202323, difference: 0 });
+    const cashBefore = structuredClone(closing.cash);
+    adjustments.expenseInputs = [expense({ category: "other", amount: 400 }),
+      expense({ id: "monthly-other", category: "other", amount: 600, businessDate: undefined })];
+    input.results = calculateMonthlyAccounting(data, month, adjustments);
+    expect(input.results.warnings).toEqual([]);
+    expect(input.results.expenses).toMatchObject({ byCategory: { supplies: 330, transportOther: 230, other: 670 },
+      dailyExpenseTotal: 1230, accountingExpenseTotal: 1000, total: 3909 });
+    expect(input.results.balance).toMatchObject({ expenses: 3909, totalCosts: 3909, profit: 6090 });
+    expect(closing.cash).toEqual(cashBefore);
+    const report = buildBalanceExportReport(input);
+    expect(report.days.map((day) => day.expenses)).toEqual([510, 110, 1010]);
+    expect(report.monthlyExpenses.expenses).toBe(2279);
+    expect(report.days.reduce((sum, day) => sum + day.expenses, 0) + report.monthlyExpenses.expenses).toBe(3909);
+    const stored = snapshot(input);
+    expect(normalizeMonthlyAccountingSnapshot(stored, month, 1)).toEqual(stored);
+  });
   it("承認済み合計売上に月額で一度3%を掛け、店舗経費・給与・既存経費を変えない", () => {
     const { input } = fixture();
     expect(input.results.sales.total).toBe(9999);
@@ -132,6 +168,17 @@ describe("月次3%と追加経費の計算・帳票突合", () => {
 });
 
 describe("経費確定の保存と旧確定互換", () => {
+  it("交通費の名称変更で旧確定の保存キー・明細・金額を変更しない", () => {
+    const { data, adjustments, input } = fixture(false);
+    data.closings[0].expenses[0].category = "transportOther";
+    input.results = calculateMonthlyAccounting(data, month, adjustments);
+    legacy(input);
+    const before = structuredClone(input.snapshot);
+    expect(normalizeMonthlyAccountingSnapshot(input.snapshot, month, 1)).toEqual(before);
+    expect(input.snapshot?.expenses.byCategory).toEqual({ transportOther: 110, supplies: 220 });
+    expect(input.snapshot?.expenses.byCategory).not.toHaveProperty("other");
+    expect(input.snapshot).toEqual(before);
+  });
   it("旧計算版に新しい税・経費明細を付けたsnapshotを拒否する", () => {
     const { input } = fixture();
     input.snapshot = snapshot(input);

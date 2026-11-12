@@ -396,6 +396,46 @@ describe("見本形式の月次経費XLSX", () => {
     expectFormulaCachesToMatch(sheet);
   });
 
+  it("その他経費を既存のその他欄へ集約し、同名の派遣手数料・預かり消費税も上書きせず一度だけ計上する", async () => {
+    const data = input();
+    const originalSheet = createMonthlyExpenseWorkbook(data, "確定済み").worksheets[0];
+    data.closings[0].expenses.push(
+      { id: "other-daily", category: "other", payee: "その他支払先", amount: 321 },
+      { id: "other-dispatch-name", category: "other", payee: "派遣手数料", amount: 79 },
+    );
+    data.adjustments.expenseInputs = [
+      { id: "other-dated", category: "other", payee: "その他支払先", amount: 200, businessDate: "2026-09-02" },
+      { id: "transport-dated", category: "transportOther", payee: "追加交通費", amount: 50, businessDate: "2026-09-02" },
+      { id: "other-monthly", category: "other", payee: "月額支払先", amount: 111 },
+      { id: "other-tax-name", category: "other", payee: "預かり消費税", amount: 10 },
+    ];
+    data.results.expenses.consumptionTax = 9000;
+    refresh(data);
+    const before = structuredClone(data);
+    const book = createMonthlyExpenseWorkbook(data, "未確定");
+    const restored = new ExcelJS.Workbook();
+    await restored.xlsx.load(await book.xlsx.writeBuffer());
+    const sheet = restored.worksheets[0];
+    expect(sheet.getCell("L2").value).toBe("交通費");
+    expect(sheet.getCell("L4").value).toBe("transportOther支払先\n追加交通費");
+    expect(value(sheet, "M4")).toBe(656);
+    expect(sheet.getCell("N2").value).toBe("その他");
+    expect(sheet.getCell("N4").value).toBe("派遣手数料\nその他支払先");
+    expect(value(sheet, "O4")).toBe(1408);
+    expect(value(sheet, "R4")).toBe(4286);
+    expect(sheet.getCell("N33").value).toBe("預かり消費税\n月額支払先");
+    expect(value(sheet, "O33")).toBe(9121);
+    expect(value(sheet, "O34")).toBe(10529);
+    expect(value(sheet, "R34")).toBe(13407);
+    expect(value(sheet, "P45")).toBe(115004);
+    expect(value(sheet, "P45")).toBe(data.results.balance.totalCosts);
+    expect(sheet.columnCount).toBe(18);
+    expect(sheet.columns.map((column) => column.width)).toEqual(originalSheet.columns.map((column) => column.width));
+    expect(sheet.pageSetup).toMatchObject({ orientation: "landscape", paperSize: 9, fitToWidth: 1, fitToHeight: 0, printArea: "A1:R45" });
+    expectFormulaCachesToMatch(sheet);
+    expect(data).toEqual(before);
+  });
+
   it.each([["2026-02", 28], ["2028-02", 29], ["2026-04", 30], ["2026-12", 31]])("%sの月末日の直下へ日付なし経費を配置し、下段と数式を維持する", (targetMonth, lastDay) => {
     const data = input();
     data.month = String(targetMonth);

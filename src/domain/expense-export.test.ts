@@ -67,6 +67,29 @@ function finalize(input: ExpenseExportInput) {
 }
 
 describe("経費XLSXの出力元検査", () => {
+  it.each([false, true])("交通費とその他を区別した店舗・経理経費を金額や保存値を変更せず出力できる（確定済み=%s）", (finalized) => {
+    const input = fixture();
+    input.closings[0].expenses.push({ id: "expense-other", category: "other", payee: "その他支払先", amount: 123 });
+    input.closings[0].cash.expenseAndPaymentTotal += 123;
+    input.closings[0].cash.expectedClosingCash -= 123;
+    input.closings[0].cash.actualClosingCash! -= 123;
+    input.closings[0].cash.cashProfit -= 123;
+    input.adjustments.expenseInputs = [
+      { id: "input-other", category: "other", payee: "経理その他", amount: 456, businessDate: "2026-09-02" },
+      { id: "input-transport", category: "transportOther", payee: "経理交通費", amount: 789 },
+    ];
+    input.results = calculateMonthlyAccounting({ casts: [], staff: [], drivers: [], introducers: [], liquor: [],
+      closings: input.closings, adjustments: [input.adjustments], cashFloat: 200_000 }, input.month, input.adjustments);
+    expect(input.results.expenses.byCategory).toMatchObject({ transportOther: 780, other: 123 });
+    expect(input.results.expenses.accountingExpenseTotal).toBe(1245);
+    if (finalized) finalize(input);
+    const before = structuredClone(input);
+    expect(() => validateExpenseExport(input)).not.toThrow();
+    expect(input).toEqual(before);
+    input.results.expenses.byCategory.other += 1;
+    expect(() => validateExpenseExport(input)).toThrow("一致しません");
+  });
+
   it("承認済みだけを集計し、未来月の未承認・差戻し・店舗編集中を除外できる", () => {
     const input = fixture();
     ["submitted", "returned", "withdrawn"].forEach((status, index) => input.closings.push({

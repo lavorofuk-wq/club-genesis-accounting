@@ -372,7 +372,8 @@ export type ExpenseCategory =
   | "supplies"
   | "entertainment"
   | "liquor"
-  | "transportOther";
+  | "transportOther"
+  | "other";
 
 export type AccountingExpenseInput = {
   id: string;

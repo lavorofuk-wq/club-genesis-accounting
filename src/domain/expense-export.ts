@@ -13,7 +13,7 @@ export type ExpenseExportInput = {
 };
 
 const expenseCategories: ExpenseCategory[] = [
-  "beautyTrial", "introduction", "advertising", "supplies", "entertainment", "liquor", "transportOther",
+  "beautyTrial", "introduction", "advertising", "supplies", "entertainment", "liquor", "transportOther", "other",
 ];
 
 function requireValue(condition: unknown, message: string): asserts condition {

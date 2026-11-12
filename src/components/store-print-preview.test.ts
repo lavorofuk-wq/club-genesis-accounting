@@ -156,6 +156,25 @@ beforeEach(() => {
 });
 
 describe("店舗送信済みデータの印刷プレビュー操作", () => {
+  it("保存済み交通費と新その他を別名目で印刷し、原本の科目キーと現金を変えない", () => {
+    const data = structuredClone(source);
+    data.closings[1].expenses = [
+      { id: "traffic", category: "transportOther", payee: "交通費支払先", amount: 300 },
+      { id: "other", category: "other", payee: "その他支払先", amount: 934 },
+    ];
+    const before = structuredClone(data);
+    render(data);
+    open(1);
+    const markup = render(data);
+    expect(markup).toContain("6. 交通費");
+    expect(markup).toContain("7. その他");
+    expect(markup).not.toContain("交通費・その他");
+    expect(markup).toContain("交通費支払先");
+    expect(markup).toContain("その他支払先");
+    expect(selectedClosing()?.cash).toEqual(before.closings[1].cash);
+    expect(data).toEqual(before);
+    expect(harness.submit).not.toHaveBeenCalled();
+  });
   it("各営業日のプレビューボタンを表示し、押す前は帳票を開かない", () => {
     const markup = render();
     expect(harness.buttons.filter((item) => item.label === "プレビュー")).toHaveLength(2);

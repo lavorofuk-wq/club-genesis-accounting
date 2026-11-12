@@ -65,11 +65,14 @@ describe("経理の追加経費入力", () => {
     expect(markup).not.toContain("2026-08-31");
     const category = field(form(), "勘定科目");
     expect(elements(category).filter((row) => row.type === "option").map((row) => row.props.value)).toEqual([
-      "beautyTrial", "introduction", "advertising", "supplies", "entertainment", "liquor", "transportOther",
+      "beautyTrial", "introduction", "advertising", "supplies", "entertainment", "liquor", "transportOther", "other",
     ]);
     expect(markup).toContain("￥1,630");
     expect(markup).toContain("預かり消費税");
     expect(markup).toContain("￥3,029");
+    expect(markup).toContain('value="transportOther">交通費</option>');
+    expect(markup).toContain('value="other">その他</option>');
+    expect(markup).not.toContain("交通費・その他");
   });
 
   it("日付を持たない新規行を追加し、他の行と元配列を保って編集・削除する", () => {
@@ -82,10 +85,10 @@ describe("経理の追加経費入力", () => {
     expect(rows[2].id).toBeTruthy();
     expect(rows.slice(0, 2)).toEqual(original);
     field(form(rows, false, onChange), "支払先・内容").props.onChange({ target: { value: "備品購入" } });
-    field(form(rows, false, onChange), "勘定科目").props.onChange({ target: { value: "advertising" } });
+    field(form(rows, false, onChange), "勘定科目").props.onChange({ target: { value: "other" } });
     find(form(rows, false, onChange), (node) => node.type === MoneyInput).props.onChange(2400);
     field(form(rows, false, onChange), "営業日（任意）").props.onChange({ target: { value: "" } });
-    expect(rows[0]).toMatchObject({ id: first.id, category: "advertising", payee: "備品購入", amount: 2400 });
+    expect(rows[0]).toMatchObject({ id: first.id, category: "other", payee: "備品購入", amount: 2400 });
     expect(rows[0].businessDate).toBeUndefined();
     field(form(rows, false, onChange), "営業日（任意）").props.onChange({ target: { value: month + "-28" } });
     expect(rows[0].businessDate).toBe(month + "-28");
@@ -124,6 +127,18 @@ describe("経理の追加経費入力", () => {
 });
 
 describe("経費画面の月次入力との接続", () => {
+  it("店舗交通費とその他を別行に表示し、確定済み集計や入力元を変更しない", () => {
+    const saved = structuredClone(results);
+    saved.expenses.byCategory = { transportOther: 300, other: 700 };
+    const before = structuredClone(saved);
+    const markup = renderToStaticMarkup(createElement(Expenses, { results: saved, adjustments, closings,
+      closed: true, disabled: true, setAdjustments: noChange, saveDisabled: false, onSave: noSave }));
+    expect(markup).toContain('<td>交通費</td><td>￥300</td>');
+    expect(markup).toContain('<td>その他</td><td>￥700</td>');
+    expect(markup).not.toContain("交通費・その他");
+    expect(markup).toContain('日次経費計 <strong>￥1,000</strong>');
+    expect(saved).toEqual(before);
+  });
   it("固定経費の直前に経費入力を表示し、店舗経費の金額を保つ", () => {
     const markup = renderToStaticMarkup(createElement(Expenses, { results, adjustments, closings, disabled: false, setAdjustments: noChange, saveDisabled: false, onSave: noSave }));
     expect(markup.indexOf("<h2>経費入力</h2>")).toBeLessThan(markup.indexOf("<h2>固定経費・月締め調整</h2>"));

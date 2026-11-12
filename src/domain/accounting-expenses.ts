@@ -2,7 +2,7 @@ import type { AccountingExpenseInput, DailyClosing, ExpenseCategory } from "./gm
 
 export const EXPENSE_LABELS: Record<ExpenseCategory, string> = {
   beautyTrial: "美容室手当", introduction: "紹介料", advertising: "広告等", supplies: "備品・消耗品他",
-  entertainment: "交際費・プレゼント等", liquor: "酒代", transportOther: "交通費・その他",
+  entertainment: "交際費・プレゼント等", liquor: "酒代", transportOther: "交通費", other: "その他",
 };
 /** 固定経費の新規入力で選択する科目。酒代・カード手数料は専用欄で入力する。 */
 export const FIXED_EXPENSE_ACCOUNTS: readonly string[] = ["賃料", "カラオケ", "おしぼり", "リースキン", "固定電話", "西部ガス", "USEN"];
