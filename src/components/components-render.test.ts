@@ -360,6 +360,7 @@ describe("主要ページのSSRスモーク", () => {
     regularReward.netPay = regularReward.grossPay - regularReward.dailyPayment - regularReward.advancePayment - regularReward.transportFee - 101;
     const snapshot = buildMonthlySnapshot(month, 3, "a".repeat(64), source.adjustments[0], result, source.closings, user.uid, new Date().toISOString());
     snapshot.calculationVersion = "2.50.1";
+    delete snapshot.employeePayments;
     const restored = normalizeMonthlyAccountingSnapshot(JSON.parse(JSON.stringify(snapshot)), month, 3);
     expect(restored).toBeDefined();
     const closed: AccountingWorkspaceData = {

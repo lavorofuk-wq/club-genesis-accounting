@@ -71,7 +71,7 @@ function refresh(data: ExpenseExportInput): ExpenseExportInput {
   data.results.sales = { cash, card, total: cash + card };
   const cast = sum(data.results.castRewards, (row) => row.grossPay);
   const introducer = sum(data.results.introducerPayments, (row) => row.total);
-  const staff = sum(data.results.staffPayroll, (row) => row.gross);
+  const staff = sum(data.results.staffPayroll, (row) => row.gross) + (data.results.employeePayments?.allowanceTotal || 0);
   const driver = sum(data.results.driverPayroll, (row) => row.gross);
   const expenses = data.results.expenses.total;
   const totalCosts = cast + introducer + staff + driver + expenses;
@@ -154,6 +154,28 @@ function expectFormulaCachesToMatch(sheet: ExcelJS.Worksheet) {
 }
 
 describe("見本形式の月次経費XLSX", () => {
+  it("社員は給与を作らず手当だけ従業員費用へ載せ、前払い日払いを経費へ混ぜない", () => {
+    const data = input();
+    data.results.expenses.consumptionTax = 9000;
+    refresh(data);
+    const beforeCost = data.results.balance.totalCosts;
+    data.adjustments.staffSalesAllowance.employee = 1000;
+    data.adjustments.staffBottleAllowance.employee = 2000;
+    data.closings[0].employeePayments = [{ staffId: "employee", name: "社員A", dailyPayment: 10000 }];
+    data.results.employeePayments = { dailyTotal: 10000, allowanceTotal: 3000, rows: [
+      { id: "employee", name: "社員A", sales: 1000, bottle: 2000, allowanceTotal: 3000, daily: 10000,
+        days: [{ businessDate: "2026-09-02", dailyPayment: 10000 }] },
+    ] };
+    refresh(data);
+    const before = structuredClone(data);
+    const sheet = createMonthlyExpenseWorkbook(data, "社員手当").worksheets[0];
+    expect(sheet.getCell("J37").value).toBe("社員A（社員手当）");
+    expect(value(sheet, "K37")).toBe(3000);
+    expect(value(sheet, "J45")).toBe(5200);
+    expect(value(sheet, "P45")).toBe(beforeCost + 3000);
+    expectFormulaCachesToMatch(sheet);
+    expect(data).toEqual(before);
+  });
   it("指定の経費分類・支払先・日別金額を見本の列へ正確に出力する", () => {
     const data = input();
     const book = createMonthlyExpenseWorkbook(data, "承認済みデータ（未確定）");

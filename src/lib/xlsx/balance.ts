@@ -50,7 +50,8 @@ export function createMonthlyBalanceWorkbook(input: BalanceExportInput, sourceLa
   const lastDay = new Date(year, monthNumber, 0).getDate();
   const byDate = new Map(report.days.map((day) => [day.businessDate, day]));
   const total = (field: Exclude<keyof BalanceExportDay, "businessDate">) => report.days.reduce((sum, day) => sum + day[field], 0)
-    + (field === "expenses" ? report.monthlyExpenses.expenses : field === "introducerPayment" ? report.monthlyExpenses.introducerPayment : 0);
+    + (field === "expenses" ? report.monthlyExpenses.expenses : field === "introducerPayment" ? report.monthlyExpenses.introducerPayment
+      : field === "employeeGross" ? report.monthlyExpenses.employeeGross ?? 0 : 0);
   const castGross = total("castHourly") + total("castSalesReward") + total("dispatchCastPayment");
   const expenses = total("expenses");
   const employeeGross = total("employeeGross");
@@ -145,8 +146,9 @@ export function createMonthlyBalanceWorkbook(input: BalanceExportInput, sourceLa
   }
   sheet.getCell(`S${monthlyRow}`).value = report.monthlyExpenses.introducerPayment;
   sheet.getCell(`T${monthlyRow}`).value = report.monthlyExpenses.expenses;
-  sheet.getCell(`V${monthlyRow}`).value = formulaValue(`-SUM(S${monthlyRow}:T${monthlyRow})`,
-    -report.monthlyExpenses.introducerPayment - report.monthlyExpenses.expenses);
+  if (report.monthlyExpenses.employeeGross) sheet.getCell(`R${monthlyRow}`).value = report.monthlyExpenses.employeeGross;
+  sheet.getCell(`V${monthlyRow}`).value = formulaValue(`-SUM(${report.monthlyExpenses.employeeGross ? "R" : "S"}${monthlyRow}:T${monthlyRow})`,
+    -(report.monthlyExpenses.employeeGross || 0) - report.monthlyExpenses.introducerPayment - report.monthlyExpenses.expenses);
   templateCell("A34").value = "平均";
   templateCell("A35").value = "合計";
   for (const mapping of columns) {
@@ -185,10 +187,12 @@ export function createMonthlyBalanceWorkbook(input: BalanceExportInput, sourceLa
   labelAt("O37:T37", "キャスト総支給額＋総従業員給＋紹介料＋経費＝総支出");
   mergeAt("U37:V37", formula("SUM(M35:N35,P35,R35:T35)", totalCosts));
   labelAt("A38:L38", "現金売上＋カード実入金（手数料控除後）－キャスト差引支給額－紹介者支払額－従業員差引支給額（送迎含む）－キャスト日払・立替－従業員日払－源泉所得税－派遣支払・手数料－経費（カード手数料除く）" + (cashFunding ? "＋会社補充＋個人補充＋会社送金－個人返済" : "") + "＝現状現金残高");
-  // 総支出に含む日払い・源泉税は別途引かず、送迎控除と実入金で控除済みのカード手数料を戻す。
+  // 時給スタッフの日払い・源泉税は総支出に含む。社員前払いだけは損益外の現金支出として一度引く。
   // 手数料は検証済み月額の定数。入金2欄の直接参照は保持し、Excelでの入力後も再計算する。
   mergeAt("M38:N38", formula("SUM(D35,J42,O42)-U37+N36" + (report.cardFee ? `+${report.cardFee}` : "")
-    + (cashFunding ? "+SUM(J43,O43,J44)-O44" : ""), cash - totalCosts + report.castTransport + report.cardFee + (cashFunding?.netCashMovement || 0)));
+    + (report.employeeAdvance ? `-${report.employeeAdvance}` : "")
+    + (cashFunding ? "+SUM(J43,O43,J44)-O44" : ""), cash - totalCosts - (report.employeeAdvance || 0)
+      + report.castTransport + report.cardFee + (cashFunding?.netCashMovement || 0)));
   labelAt("O38:U38", "現金売上－総支出＝現金残");
   mergeAt("V38:W38", formula("D35-U37", cash - totalCosts));
   labelAt("A39:C39", "キャスト（日払・立替）計");

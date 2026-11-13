@@ -1,13 +1,14 @@
 "use client";
 
 import type { StaffPayrollRow } from "@/domain/month-accounting";
+import type { EmployeePaymentsSummary } from "@/domain/employee-payments";
 import { Card, MoneyInput, Table, yen } from "./ui";
 
 const businessDateLabel = (value: string) => { const [, month, day] = value.split("-").map(Number); return Number.isFinite(month) && Number.isFinite(day) ? `${month}月${day}日` : value; };
 
-type Props = { rows: StaffPayrollRow[]; disabled: boolean; onSales: (id: string, value: number) => void; onBottle: (id: string, value: number) => void };
+type Props = { rows: StaffPayrollRow[]; employees?: EmployeePaymentsSummary; disabled: boolean; onSales: (id: string, value: number) => void; onBottle: (id: string, value: number) => void };
 
-export function StaffPayroll({ rows, ...controls }: Props) {
+export function StaffPayroll({ rows, employees, ...controls }: Props) {
   const groups: Record<"regular" | "trial" | "unknown", StaffPayrollRow[]> = { regular: [], trial: [], unknown: [] };
   for (const row of rows) {
     const sources = row.hourlySources;
@@ -27,6 +28,20 @@ export function StaffPayroll({ rows, ...controls }: Props) {
     <Card title={`体入スタッフ給与（${groups.trial.length}名）`} description="対象月の体入スタッフ給与です。日払いは支払済みの記録を保持し、給与との差額は差引支給額に反映します。">
       <StaffPayrollTable rows={groups.trial} {...controls} empty="当月の体入スタッフ給与データはありません。" />
     </Card>
+    {employees && <Card title={`社員手当・日払い（${employees.rows.length}名）`} description="社員給与は別途計算します。日払いは給与の前払いとして記録し、手当からは控除しません。">
+      <Table empty="対象月の社員データはありません。" headers={["社員", "売上手当", "ボトル手当", "手当合計", "日払い合計"]}>
+        {employees.rows.length ? [...employees.rows.map((row) => <tr key={row.id}><td>{row.name}</td>
+          <td><MoneyInput value={row.sales} disabled={controls.disabled} onChange={(value) => controls.onSales(row.id, value)} /></td>
+          <td><MoneyInput value={row.bottle} disabled={controls.disabled} onChange={(value) => controls.onBottle(row.id, value)} /></td>
+          <td><strong>{yen.format(row.allowanceTotal)}</strong></td><td>{yen.format(row.daily)}</td></tr>),
+          <tr className="total-row" key="employee-total"><td><strong>合計（{employees.rows.length}名）</strong></td>
+            <td>{yen.format(employees.rows.reduce((sum, row) => sum + row.sales, 0))}</td><td>{yen.format(employees.rows.reduce((sum, row) => sum + row.bottle, 0))}</td>
+            <td><strong>{yen.format(employees.allowanceTotal)}</strong></td><td><strong>{yen.format(employees.dailyTotal)}</strong></td></tr>] : null}
+      </Table>
+      {employees.rows.map((row) => <details key={row.id} className="cast-sales-card"><summary className="cast-sales-summary"><strong>{row.name}</strong><span>日払い内訳</span><span>{yen.format(row.daily)}</span></summary>
+        <div className="cast-sales-content"><Table headers={["営業日", "日払い"]}>{row.days.map((day) => <tr key={day.businessDate}><td>{businessDateLabel(day.businessDate)}</td><td>{yen.format(day.dailyPayment)}</td></tr>)}</Table></div>
+      </details>)}
+    </Card>}
     {groups.unknown.length > 0 && <Card title={`区分記録なし（${groups.unknown.length}名）`}>
       <p className="notice" role="alert">給与計算時の在籍・体入区分が保存されていないため、推測で振り分けず表示しています。保存済みの給与額は変更していません。</p>
       <StaffPayrollTable rows={groups.unknown} {...controls} empty="" />

@@ -53,6 +53,30 @@ function totalCells(section: string): string[] {
 beforeEach(() => { capturedInputs.length = 0; });
 
 describe("スタッフ給与の在籍・体入別表示", () => {
+  it("社員手当と日払いを別表示し、勤務・給与計算や日払い控除を表示しない", () => {
+    const onSales = vi.fn(), onBottle = vi.fn();
+    const employees = { rows: [{ id: "employee", name: "社員名", sales: 1000, bottle: 2000, allowanceTotal: 3000,
+      daily: 10000, days: [{ businessDate: "2026-09-03", dailyPayment: 10000 }] }], dailyTotal: 10000, allowanceTotal: 3000 };
+    const before = structuredClone(employees);
+    const markup = renderToStaticMarkup(createElement(StaffPayroll, { rows: [], employees, disabled: false, onSales, onBottle }));
+    const employeeSection = group(markup, "社員手当・日払い（1名）");
+    expect(employeeSection).toContain("9月3日");
+    expect(employeeSection).toContain("￥10,000");
+    expect(employeeSection).toContain("￥3,000");
+    expect(employeeSection).not.toContain("勤務時間");
+    expect(employeeSection).not.toContain("基本給与");
+    expect(employeeSection).not.toContain("差引支給");
+    expect(employeeSection).not.toContain("-7,000");
+    expect(capturedInputs).toHaveLength(2);
+    capturedInputs[0].onChange(4000); capturedInputs[1].onChange(5000);
+    expect(onSales).toHaveBeenCalledWith("employee", 4000);
+    expect(onBottle).toHaveBeenCalledWith("employee", 5000);
+    expect(employees).toEqual(before);
+    capturedInputs.length = 0;
+    renderToStaticMarkup(createElement(StaffPayroll, { rows: [], employees, disabled: true, onSales, onBottle }));
+    expect(capturedInputs.every((input) => input.disabled)).toBe(true);
+  });
+
   it("計算時の区分を使って1人1行へ分け、各一覧の順序と元データを保持する", () => {
     const rows = [payroll("t1", "体入一", "trial"), payroll("r1", "在籍一"),
       payroll("t2", "体入二", "trial"), payroll("r2", "在籍二")];

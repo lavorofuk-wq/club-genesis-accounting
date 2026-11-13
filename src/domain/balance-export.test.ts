@@ -152,6 +152,40 @@ function fundingInput(): BalanceExportInput {
 }
 
 describe("収支帳票の月次突合", () => {
+  it("社員手当は月次の人件費、社員日払いは損益外の前払いとして一度だけ現金控除する", () => {
+    const data = fullInput();
+    const baseline = buildBalanceExportReport(data);
+    const baselineCosts = data.results.balance.totalCosts;
+    data.adjustments.staffSalesAllowance.employee = 1000;
+    data.adjustments.staffBottleAllowance.employee = 2000;
+    data.closings.find((row) => row.businessDate === "2026-09-02")!.employeePayments = [
+      { staffId: "employee", name: "社員", dailyPayment: 10000 },
+    ];
+    data.results.employeePayments = { rows: [{ id: "employee", name: "社員", sales: 1000, bottle: 2000,
+      allowanceTotal: 3000, daily: 10000, days: [{ businessDate: "2026-09-02", dailyPayment: 10000 }] }],
+    dailyTotal: 10000, allowanceTotal: 3000 };
+    data.results.balance.staff += 3000;
+    data.results.balance.totalCosts += 3000;
+    data.results.balance.profit -= 3000;
+    const prior: DailyClosing[] = [];
+    for (const row of [...data.closings].sort((a, b) => a.businessDate.localeCompare(b.businessDate))) {
+      const cashInput = { sales: row.sales, cashFloat: 200000, expenses: 1234,
+        regularDailyPayments: 1000, trialDailyPayments: 0, staffDailyPayments: 2000,
+        employeeDailyPayments: row.employeePayments?.reduce((sum, payment) => sum + payment.dailyPayment, 0) || 0,
+        driverDailyPayments: 1000, dispatchCastPayment: 6000, dispatchStaffPayment: 7000, dispatchFee: 800, actualClosingCash: 0 };
+      const funding = calculateCashFunding(cashFundingContext(prior, row.businessDate, 200000),
+        { companyReplenishment: 0, personalReplenishment: 0, companyTransfer: 0 }, calculateCash(cashInput).cashProfit, true);
+      row.cash = calculateCash({ ...cashInput, funding }); prior.push(row);
+    }
+    const before = structuredClone(data);
+    const report = buildBalanceExportReport(data);
+    expect(report.days).toEqual(baseline.days);
+    expect(report.monthlyExpenses.employeeGross).toBe(3000);
+    expect(data.results.balance.totalCosts).toBe(baselineCosts + 3000);
+    expect(report.employeeDaily).toBe(baseline.employeeDaily + 10000);
+    expect(report.employeeAdvance).toBe(10000);
+    expect(data).toEqual(before);
+  });
   it("現金補充・返済を別集計で渡し、損益日次列と実際の日払いは変えない", () => {
     const data = fundingInput();
     const before = structuredClone(data);

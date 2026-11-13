@@ -115,6 +115,43 @@ function trialPos(): PosClosingV3 {
 
 beforeEach(() => { draft.values = {}; draft.buttons = []; });
 
+describe("社員の日払い入力", () => {
+  it("社員は勤務の選択肢に含めず、金額だけで追加して現金から一度だけ引く", () => {
+    const source = structuredClone(data);
+    source.staff.push({ id: "employee", employmentType: "employee", name: "社員テスト", status: "active", hiredAt: "2026-09-01", note: "", createdAt: "", updatedAt: "" });
+    const prefix = workflow({ pos, stage: "details", employeeId: "employee", employeeAmount: 2500 });
+    let markup = render(source);
+    const hourlySection = markup.split("<h3>スタッフ勤務・日払い</h3>")[1].split("<h3>社員日払い</h3>")[0];
+    expect(hourlySection).not.toContain("社員テスト");
+    const employeeSection = markup.split("<h3>社員日払い</h3>")[1].split("<h3>送迎ドライバー・日払い</h3>")[0];
+    expect(employeeSection).toContain("社員テスト");
+    expect(employeeSection).not.toContain('type="time"');
+    click("社員日払いを追加"); render(source);
+    expect(draft.values[`${prefix}.employeePayments`]).toEqual([{ staffId: "employee", name: "社員テスト", dailyPayment: 2500 }]);
+    expect(draft.values[`${prefix}.staffWork`]).toEqual([]);
+    click("店舗データを確認して現金照合へ");
+    markup = render(source);
+    expect(markup).toContain('<td>社員日払い</td><td>￥2,500</td>');
+    expect(markup).toContain("￥257,500");
+    expect(source.closings).toEqual([]);
+  });
+
+  it("再編集では社員マスタがなくても保存済みの氏名・日払いを復元して表示する", () => {
+    const payment = { staffId: "deleted-employee", name: "保存時の社員名", dailyPayment: 7100 };
+    const saved = closing({ employeePayments: [payment] });
+    const prefix = workflow({}, saved);
+    const before = structuredClone(saved);
+    const markup = render();
+    expect(markup).toContain("保存時の社員名");
+    expect(draft.values[`${prefix}.employeePayments`]).toEqual([payment]);
+    const preview = renderToStaticMarkup(createElement(DailyPreview, { closing: saved }));
+    expect(preview).toContain("社員日払い");
+    expect(preview).toContain("保存時の社員名");
+    expect(preview).toContain("￥7,100");
+    expect(saved).toEqual(before);
+  });
+});
+
 describe("入店取消済みの在籍照合", () => {
   const savedCast: DailyCast = { ...trialCast, kind: "regular", masterId: "old-active" };
   const savedPos: PosClosingV3 = { ...trialPos(), castWork: trialPos().castWork.map((work) => ({

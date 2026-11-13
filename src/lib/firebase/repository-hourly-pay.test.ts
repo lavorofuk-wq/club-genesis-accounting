@@ -83,6 +83,57 @@ beforeEach(() => {
   });
 });
 
+describe("社員日払いの送信と再編集", () => {
+  function employeeClosing(amount = 10000): DailyClosing {
+    const closing = fixture(amount);
+    closing.staffWork = [];
+    closing.staffDailyPaymentTotal = 0;
+    closing.employeePayments = [{ staffId: "employee-1", name: "社員A", dailyPayment: amount }];
+    return closing;
+  }
+  function seedEmployee(extra: object = {}) {
+    memory.values.set("staff/employee-1", { employmentType: "employee", name: "社員A", status: "active", hiredAt: "2026-09-01", ...extra });
+  }
+  it("時給・勤務なしで社員日払いを保存し、現金から一度だけ差し引く", async () => {
+    seedEmployee();
+    const value = employeeClosing();
+    await submitClosing(value, user);
+    expect(memory.values.get(path)).toMatchObject({ employeePaymentsJson: JSON.stringify(value.employeePayments), staffDailyPaymentTotal: 0,
+      cash: { expenseAndPaymentTotal: 10000, cashProfit: 0, expectedClosingCash: 200000 } });
+  });
+  it("改名・削除後の差戻しでも、保存時の社員名・支払明細・現金を維持できる", async () => {
+    seedEmployee({ name: "変更後", deletedAt: timestamp });
+    const value = employeeClosing(3500);
+    const before = { ...structuredClone(value), status: "returned", employeePayments: undefined, employeePaymentsJson: JSON.stringify(value.employeePayments) };
+    memory.values.set(path, before); memory.values.set("history", { [id]: before });
+    await submitClosing(value, user, timestamp);
+    expect(memory.values.get(path)).toMatchObject({ employeePaymentsJson: JSON.stringify(value.employeePayments), cash: value.cash });
+  });
+  it.each([{ employmentType: undefined }, { name: "別の名前" }, { hiredAt: "2026-10-01" },
+    { status: "departed", departedAt: "2026-09-08" }, { deletedAt: timestamp }])("社員の区分・本人・在籍期間が不正な新規日払いは保存しない: %j", async (extra) => {
+    seedEmployee(extra);
+    await expect(submitClosing(employeeClosing(), user)).rejects.toThrow();
+    expect(memory.values.has(path)).toBe(false);
+  });
+  it("日払いだけ変更して現金が不整合な社員明細を保存しない", async () => {
+    seedEmployee();
+    const value = employeeClosing(); value.employeePayments![0].dailyPayment = 9000;
+    await expect(submitClosing(value, user)).rejects.toThrow("合計が現金照合と一致しません");
+    expect(memory.values.has(path)).toBe(false);
+  });
+  it("社員をアルバイト勤務・給与へ混ぜる送信を拒否する", async () => {
+    memory.values.set("staff/staff-1", { employmentType: "employee" });
+    await expect(submitClosing(fixture(1503), user)).rejects.toThrow("社員日払い欄");
+    expect(memory.values.has(path)).toBe(false);
+  });
+  it("同じ社員の日払い重複を拒否する", async () => {
+    seedEmployee();
+    const value = employeeClosing(); value.employeePayments!.push({ ...value.employeePayments![0] });
+    await expect(submitClosing(value, user)).rejects.toThrow();
+    expect(memory.values.has(path)).toBe(false);
+  });
+});
+
 describe("日次送信の再編集元と重複営業日の保護", () => {
   function protectedRecords() {
     // 送信中の排他ロック以外は、エラー時に支払実績・履歴・重複防止記録を含めて不変。

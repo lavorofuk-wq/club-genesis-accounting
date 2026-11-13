@@ -1,4 +1,5 @@
 import { withoutCastMonthlyRules } from "./cast-monthly-rules-baseline-helper.mjs";
+import { withoutEmployeeRules } from "./employee-rules-baseline-helper.mjs";
 import { withoutWorkAllowanceHistoryIndex } from "./history-index-rules-baseline-helper.mjs";
 import { withoutTransportRules } from "./transport-rules-baseline-helper.mjs";
 import { withoutOneYenSalesRewardRules } from "./sales-reward-rules-baseline-helper.mjs";
@@ -357,7 +358,7 @@ nodeTest("売上報酬の指紋ヘルパーは承認された2式だけを戻し
 });
 
 nodeTest("本番公開の変更は承認された18個の環境条件だけで、他の保護式を変更しない", () => {
-  const restored = withoutAccountingExpenseRules(withoutCastSalesRankingRosterRules(withoutTransportRules(withoutCastMonthlyRules(withoutOneYenSalesRewardRules(withoutWorkAllowanceHistoryIndex(rules)))))), targets = [];
+  const restored = withoutAccountingExpenseRules(withoutCastSalesRankingRosterRules(withoutTransportRules(withoutCastMonthlyRules(withoutOneYenSalesRewardRules(withoutWorkAllowanceHistoryIndex(withoutEmployeeRules(rules))))))), targets = [];
   const base = ["$workspace", "accountingMonthSnapshots", "$month", "$revision"];
   targets.push(["$workspace", "accountingAdjustments", "$month", "castInputs", ".validate"]);
   for (const section of [["castSalesReports", "$index", "days", "$dayIndex"], ["castSalesReports", "$index", "totals"]]) {

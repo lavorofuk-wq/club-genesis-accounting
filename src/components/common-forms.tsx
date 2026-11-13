@@ -256,7 +256,52 @@ function CastManager({ data, user, busy, run, onDirtyChange }: Props) {
   </div>;
 }
 
-function StaffManager({ data, user, busy, run, onDirtyChange }: Props) {
+function StaffManager(props: Props) {
+  const [kind, setKind] = useRecoverableState<"hourly" | "employee">("common.staff.kind", "hourly");
+  return <div className="grid">
+    <div className="tabs"><button className={kind === "hourly" ? "active" : ""} disabled={props.busy} onClick={() => setKind("hourly")}>アルバイトスタッフ</button><button className={kind === "employee" ? "active" : ""} disabled={props.busy} onClick={() => setKind("employee")}>社員</button></div>
+    {kind === "employee" ? <EmployeeStaffManager {...props} />
+      : <HourlyStaffManager {...props} data={{ ...props.data, staff: props.data.staff.filter((row) => row.employmentType !== "employee") }} />}
+  </div>;
+}
+
+function EmployeeStaffManager({ data, user, busy, run, onDirtyChange }: Props) {
+  const [tab, setTab] = useRecoverableState<"active" | "departed">("common.employees.tab", "active");
+  const [editing, setEditing] = useRecoverableState<Partial<StaffRecord> | null>("common.employees.editing", null);
+  useCommonDirty(onDirtyChange, Boolean(editing));
+  const employees = data.staff.filter((row) => row.employmentType === "employee");
+  return <div className="grid">
+    <div className="tabs">{(["active", "departed"] as const).map((status) => <button key={status} className={tab === status ? "active" : ""} onClick={() => setTab(status)}>{status === "active" ? "在籍社員" : "退職社員"}<b>{employees.filter((row) => row.status === status).length}</b></button>)}</div>
+    <Card title="社員データ" action={tab === "active" ? <button className="button" disabled={busy} onClick={() => setEditing({ employmentType: "employee", status: "active", name: "", hiredAt: today(), note: "" })}>社員を追加</button> : null}>
+      <Table headers={["名前", "入社日", ...(tab === "departed" ? ["退職日"] : []), "操作"]}>{employees.filter((row) => row.status === tab).map((row) => <tr key={row.id}>
+        <td><strong>{row.name}</strong></td><td>{row.hiredAt}</td>{tab === "departed" && <td>{row.departedAt}</td>}
+        <td><div className="row-actions"><button className="button secondary mini" disabled={busy} onClick={() => setEditing({ ...row })}>編集</button>
+          {row.status === "active" ? <button className="button secondary mini" disabled={busy} onClick={() => {
+            const entered = window.prompt("退職日をYYYY-MM-DDで入力してください。", today());
+            if (entered === null) return;
+            const date = entered.trim();
+            if (!isValidIsoDate(date)) { window.alert("退職日は実在する日付をYYYY-MM-DD形式で入力してください。"); return; }
+            void run(() => departStaff(row.id, date, row.updatedAt, user), "社員の退職を登録しました。");
+          }}>退職</button> : <>
+            <button className="button secondary mini" disabled={busy} onClick={() => void run(() => restoreStaff(row.id, row.updatedAt, user), "退職登録を取り消しました。")}>退職取消</button>
+            <button className="button danger mini" disabled={busy} onClick={() => { if (window.confirm(`「${row.name}」を完全削除しますか？\n過去の送信済み日払い・確定済みデータは保持します。`)) void run(() => deleteStaff(row.id, row.updatedAt, user), "社員を完全削除しました。"); }}>完全削除</button>
+          </>}
+        </div></td>
+      </tr>)}</Table>
+    </Card>
+    {editing && <Modal title="社員登録・編集" disabled={busy} onClose={() => setEditing(null)}><form className="stack" onSubmit={async (event) => {
+      event.preventDefault();
+      const saved = await run(() => saveStaff({ ...editing, employmentType: "employee", name: editing.name || "", status: editing.status === "departed" ? "departed" : "active" }, user), editing.id ? "社員を更新しました。" : "社員を登録しました。");
+      if (saved) setEditing(null);
+    }}>
+      <Field label="名前"><input className="input" required value={editing.name || ""} onChange={(event) => setEditing({ ...editing, name: event.target.value })} /></Field>
+      <Field label="入社日"><input className="input" type="date" required value={editing.hiredAt || ""} onChange={(event) => setEditing({ ...editing, hiredAt: event.target.value })} /></Field>
+      <div className="actions"><button className="button" disabled={busy}>保存</button><button type="button" className="button secondary" onClick={() => setEditing(null)}>取消</button></div>
+    </form></Modal>}
+  </div>;
+}
+
+function HourlyStaffManager({ data, user, busy, run, onDirtyChange }: Props) {
   const [tab, setTab] = useRecoverableState<StaffRecord["status"]>("common.staff.tab", "active");
   const [editing, setEditing] = useRecoverableState<Partial<StaffRecord> | null>("common.staff.editing", null);
   const [sourceTrialId, setSourceTrialId] = useRecoverableState("common.staff.sourceTrialId", "");

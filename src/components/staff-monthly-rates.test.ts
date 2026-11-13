@@ -80,6 +80,34 @@ async function submit() {
 beforeEach(() => { draft.values = {}; draft.buttons = []; draft.fields = []; draft.submit = undefined; vi.clearAllMocks(); });
 
 describe("スタッフ月度時給の共通フォーム", () => {
+  it("社員はアルバイト一覧と分離し、名前と入社日だけで登録する", async () => {
+    const employee: StaffRecord = { id: "employee-old", employmentType: "employee", name: "在籍社員の名前", status: "active", hiredAt: "2026-09-01", note: "", createdAt: "", updatedAt: "before" };
+    expect(render([member, employee])).not.toContain("在籍社員の名前");
+    draft.values["common.staff.kind"] = "employee";
+    let markup = render([member, employee]);
+    expect(markup).toContain("在籍社員の名前");
+    expect(markup).not.toContain("当月時給");
+    click("社員を追加");
+    markup = render([member, employee]);
+    expect(draft.fields.map((row) => row.label)).toEqual(["名前", "入社日"]);
+    expect(markup).not.toContain("時給の対象月");
+    field("名前").onChange({ target: { value: "追加社員" } }); render([member, employee]);
+    field("入社日").onChange({ target: { value: "2026-09-05" } }); render([member, employee]);
+    await submit();
+    expect(saveStaff).toHaveBeenCalledWith({ employmentType: "employee", status: "active", name: "追加社員", hiredAt: "2026-09-05", note: "" }, user);
+    expect(draft.values["common.employees.editing"]).toBeNull();
+  });
+
+  it("社員の編集は区分と更新時刻を保持し時給を補完しない", async () => {
+    const employee: StaffRecord = { id: "employee-old", employmentType: "employee", name: "社員", status: "active", hiredAt: "2026-09-01", note: "", createdAt: "original", updatedAt: "before" };
+    const before = structuredClone(employee);
+    draft.values["common.staff.kind"] = "employee";
+    render([employee]); click("編集"); render([employee]);
+    field("名前").onChange({ target: { value: "社員訂正" } }); render([employee]); await submit();
+    expect(saveStaff).toHaveBeenCalledWith({ ...before, name: "社員訂正" }, user);
+    expect(employee).toEqual(before);
+  });
+
   it("既存単一時給を9月月度として表示し8月以前を選択できない", async () => {
     render(); click("編集");
     const markup = render();

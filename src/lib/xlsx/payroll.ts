@@ -9,6 +9,7 @@ const numberFormat = '#,##0.###############;[Red]-#,##0.###############;0';
 const integerFormat = '#,##0;[Red]-#,##0;0';
 const line = { style: "thin" as const, color: { argb: "FFA8B3BF" } };
 type StaffRow = ReturnType<typeof buildStaffPaymentExport>["rows"][number];
+type EmployeeRow = NonNullable<ReturnType<typeof buildStaffPaymentExport>["employees"]>[number];
 type DriverRow = ReturnType<typeof buildDriverPaymentExport>["rows"][number];
 type Tone = keyof typeof colors;
 
@@ -182,6 +183,49 @@ function staffSheet(book: ExcelJS.Workbook, month: string, name: string, rows: S
   sheet.pageSetup.printArea = `A1:${sheet.getColumn(lastCol).letter}${pages * pageRows - 1}`;
 }
 
+function employeeSheet(book: ExcelJS.Workbook, month: string, rows: EmployeeRow[]) {
+  const total = rows.reduce((sum, row) => sum + row.daily, 0);
+  const width = Math.max(15, moneyWidth([total, ...rows.flatMap((row) => [row.daily, ...row.days.map((day) => day.dailyPayment)])]));
+  const perPage = Math.min(Math.max(1, Math.floor((138 - 19) / width) - 1), rows.length);
+  const sheet = setup(book, "社員日払い", [19, ...Array<number>(perPage + 1).fill(width)]);
+  const pages = Math.ceil(rows.length / perPage);
+  const pageRows = 39;
+  const lastCol = perPage + 2;
+  const position = (index: number) => ({ first: Math.floor(index / perPage) * pageRows + 1, col: 2 + index % perPage });
+  const monthlyTotal = sumFormula(sheet, rows.map((_, index) => [position(index).first + 36, position(index).col]), total);
+  const dailyTotals = Array.from({ length: 31 }, (_, index) => {
+    const entries = rows.map((row) => row.days.find((day) => Number(day.businessDate.slice(8)) === index + 1));
+    return entries.some(Boolean) ? sumFormula(sheet,
+      rows.map((_, employeeIndex) => [position(employeeIndex).first + 5 + index, position(employeeIndex).col]),
+      entries.reduce((sum, entry) => sum + (entry?.dailyPayment ?? 0), 0)) : null;
+  });
+  for (let page = 0; page < pages; page += 1) {
+    const first = page * pageRows + 1;
+    const lastDay = header(sheet, first, lastCol, month, "社員日払い", page, pages);
+    put(sheet, first + 2, lastCol, "社員合計（全員）", 1, "header");
+    put(sheet, first + 3, lastCol, `${rows.length}名`, 1, "header");
+    put(sheet, first + 4, lastCol, "日払い", 1, "header");
+    put(sheet, first + 36, 1, "日払い合計", 1, "total");
+    put(sheet, first + 36, lastCol, monthlyTotal, 1, "total");
+    rows.slice(page * perPage, (page + 1) * perPage).forEach((row, index) => {
+      const col = index + 2;
+      put(sheet, first + 2, col, row.name, 1, "header");
+      sheet.getRow(first + 2).height = Math.max(sheet.getRow(first + 2).height || 0, noteHeight(row.name, width));
+      put(sheet, first + 4, col, "日払い", 1, "header");
+      const days = new Map(row.days.map((day) => [Number(day.businessDate.slice(8)), day.dailyPayment]));
+      for (let day = 1; day <= 31; day += 1) {
+        put(sheet, first + 4 + day, col, day <= lastDay ? days.get(day) ?? null : null, 1, day > lastDay ? "blank" : undefined);
+      }
+      put(sheet, first + 36, col, row.daily, 1, "total");
+    });
+    dailyTotals.forEach((value, index) => put(sheet, first + 5 + index, lastCol,
+      index < lastDay ? value : null, 1, index >= lastDay ? "blank" : "total"));
+    sheet.getRow(first + pageRows - 1).height = 3;
+    if (page < pages - 1) sheet.getRow(first + pageRows - 1).addPageBreak();
+  }
+  sheet.pageSetup.printArea = `A1:${sheet.getColumn(lastCol).letter}${pages * pageRows - 1}`;
+}
+
 export function createStaffPaymentWorkbook(input: PayrollExportInput) {
   const report = buildStaffPaymentExport(input);
   const book = new ExcelJS.Workbook();
@@ -191,6 +235,7 @@ export function createStaffPaymentWorkbook(input: PayrollExportInput) {
   staffSheet(book, report.month, "体入スタッフ", report.rows.filter((row) => row.group === "trial"));
   const unknown = report.rows.filter((row) => row.group === "unknown");
   if (unknown.length) staffSheet(book, report.month, "区分記録なし", unknown);
+  if (report.employees?.length) employeeSheet(book, report.month, report.employees);
   return book;
 }
 

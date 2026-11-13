@@ -233,6 +233,19 @@ describe("新規店舗入力と送信済み営業日の重複防止", () => {
     expect(button("照合を確定して店舗データ作成へ").disabled).toBe(false);
   });
 
+  it("社員の日払い下書きは同日JSONで保持し、別営業日では初期化する", async () => {
+    const employeePayments = [{ staffId: "employee", name: "社員", dailyPayment: 2500 }];
+    restore({ stage: "json", employeePayments, employeeId: "employee-next", employeeAmount: 4000 });
+    vi.stubGlobal("window", { confirm: vi.fn(() => true) });
+    render(); await importJson({ ...pos, submissionId: "same-day" });
+    expect(harness.drafts[prefix + ".employeePayments"]).toEqual(employeePayments);
+    expect(harness.drafts[prefix + ".employeeAmount"]).toBe(4000);
+    render(); await importJson({ ...pos, businessDate: "2026-09-11", submissionId: "next-day" });
+    expect(harness.drafts[prefix + ".employeePayments"]).toEqual([]);
+    expect(harness.drafts[prefix + ".employeeId"]).toBe("");
+    expect(harness.drafts[prefix + ".employeeAmount"]).toBe(0);
+  });
+
   it.each(["returned", "withdrawn"] as const)("%sの一覧から開いた正式再編集では同営業日のJSON再取込を許可する", async (status) => {
     const recorded = sameDay(status); const source = sourceFor(status);
     const key = "store.workflow." + recorded.id;
@@ -250,6 +263,25 @@ describe("新規店舗入力と送信済み営業日の重複防止", () => {
 });
 
 describe("全営業日の現金実績入力", () => {
+  it("社員日払いを現金と送信原本へ反映し、送信成功後に翌日へ残さない", async () => {
+    const employeePayments = [{ staffId: "employee", name: "社員名", dailyPayment: 2500 }];
+    restore({ employeePayments });
+    const source: AccountingWorkspaceData = { ...data, staff: [{ id: "employee", employmentType: "employee", name: "社員名", status: "active", hiredAt: "2026-09-01", note: "", createdAt: "", updatedAt: "" }] };
+    let markup = render(source);
+    expect(markup).toContain('<td>社員日払い</td><td>￥2,500</td>');
+    harness.checks.at(-1)!.change(true); render(source); button(nextLabel).click();
+    markup = render(source);
+    expect(markup).toContain("社員名");
+    button("確認済み・経理へ送信").click();
+    await vi.waitFor(() => expect(harness.submit).toHaveBeenCalledTimes(1));
+    const sent = harness.submit.mock.calls[0][0] as DailyClosing;
+    expect(sent.employeePayments).toEqual(employeePayments);
+    expect(sent.staffWork).toEqual([]);
+    expect(sent.staffDailyPaymentTotal).toBe(0);
+    expect(sent.cash).toMatchObject({ expenseAndPaymentTotal: 2500, cashProfit: 7500, expectedClosingCash: 207500, funding: { confirmed: true } });
+    await vi.waitFor(() => expect(harness.drafts[prefix + ".employeePayments"]).toEqual([]));
+  });
+
   it("新規は補充3項目が0円、開始未返済と実返済は未入力で推定しない", () => {
     delete harness.drafts[prefix + ".openingPersonalDebt"]; delete harness.drafts[prefix + ".personalRepayment"];
     const markup = render();

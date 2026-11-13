@@ -61,6 +61,7 @@ import {
   validateStaffMonthlyPaySetting,
 } from "@/domain/master-pay-validation";
 import { staffMonthlyRates } from "@/domain/staff-rates";
+import { normalizeDailyEmployeePayments } from "@/domain/employee-payments";
 import { validateAccountingExpenseInputs, validateConsumptionTaxRate } from "@/domain/accounting-expenses";
 import { castAccountingAttendanceSources, castAccountingInputTotals, normalizeCastAccountingInputs } from "@/domain/cast-accounting-inputs";
 import { castHasApprovedRegularWork, castHasApprovedWork, isCastMonth } from "@/domain/cast-monthly";
@@ -765,10 +766,14 @@ function validateDailyClosingForSubmission(value: DailyClosing, before: DailyClo
     value.cash.expenseAndPaymentTotal, value.cash.actualClosingCash].forEach((amount) => require(money(amount), "現金照合に不正な金額があります。"));
   const staffDaily = value.staffWork.reduce((sum, row) => sum + row.dailyPayment, 0);
   require(value.staffDailyPaymentTotal === staffDaily, "スタッフ日払い合計が勤務明細と一致しません。");
+  const employeePayments = normalizeDailyEmployeePayments(value.employeePayments ?? value.employeePaymentsJson);
+  require(employeePayments.every((employee) => !value.staffWork.some((work) => work.staffId === employee.staffId)),
+    "同じスタッフがアルバイト勤務と社員日払いに重複しています。");
+  const employeeDaily = employeePayments.reduce((sum, row) => sum + row.dailyPayment, 0);
   const expenseTotal = value.expenses.reduce((sum, row) => sum + row.amount, 0);
   const castDaily = value.casts.reduce((sum, row) => sum + row.dailyPayment, 0);
   const driverDaily = value.drivers.reduce((sum, row) => sum + row.dailyPayment, 0);
-  const paymentTotal = expenseTotal + castDaily + staffDaily + driverDaily
+  const paymentTotal = expenseTotal + castDaily + staffDaily + employeeDaily + driverDaily
     + value.dispatchStaffPayment + value.dispatchCastPayment + value.dispatchFee;
   const cashProfit = value.sales.cashSales - paymentTotal;
   const funding = value.cash.funding;
@@ -1841,10 +1846,22 @@ export async function saveStaff(value: Partial<StaffRecord> & Pick<StaffRecord, 
     assertFresh(existing, value.updatedAt);
     const name = value.name.trim();
     if (!name) throw new Error("スタッフ名を入力してください。");
+    const employmentType = value.employmentType ?? existing?.employmentType;
+    if (employmentType !== undefined && employmentType !== "employee") throw new Error("スタッフの区分が正しくありません。");
+    if (existing && employmentType !== existing.employmentType) throw new Error("社員とアルバイトの区分は変更できません。別のスタッフとして登録してください。");
     if (value.status === "active" && !validDate(value.hiredAt || existing?.hiredAt)) throw new Error("採用日が正しくありません。");
     if (value.status === "trial" && !validDate(value.trialDate || existing?.trialDate)) throw new Error("体入日が正しくありません。");
     if (value.status === "departed" && (!validDate(value.hiredAt || existing?.hiredAt) || !validDate(value.departedAt || existing?.departedAt))) throw new Error("採用日または退店日が正しくありません。");
     if (value.status === "departed" && String(value.departedAt || existing?.departedAt) < String(value.hiredAt || existing?.hiredAt)) throw new Error("退店日は採用日以降にしてください。");
+    if (employmentType === "employee") {
+      if (value.status === "trial") throw new Error("社員を体入スタッフとして登録することはできません。");
+      if (["hourlyRate", "hourlyRates", "trialHourlyRate", "trialDate", "convertedFromTrialId", "convertedToStaffId"]
+        .some((key) => value[key as keyof StaffRecord] !== undefined || existing?.[key as keyof StaffRecord] !== undefined)) {
+        throw new Error("社員には時給・体入・給与計算の設定は登録できません。");
+      }
+      return clean({ ...withoutInternalFields(existing || {}), ...withoutInternalFields(value), employmentType,
+        name, note: value.note ?? existing?.note ?? "", createdAt: existing?.createdAt || timestamp, updatedAt: timestamp });
+    }
     const convertedFromTrialId = value.convertedFromTrialId ?? existing?.convertedFromTrialId;
     const hiredAt = value.hiredAt ?? existing?.hiredAt;
     const trialDate = value.trialDate ?? existing?.trialDate;
@@ -1896,6 +1913,7 @@ export async function convertTrialStaff(trialId: string, value: Partial<StaffRec
   assertConversionUnlocked(initialTrial);
   assertFresh(initialTrial, value.updatedAt);
   const incoming = withoutInternalFields(value);
+  if (incoming.employmentType !== undefined) throw new Error("体入スタッフを社員へ変更することはできません。社員を新規登録してください。");
   const hiredAt = incoming.hiredAt || "";
   if (!validDate(hiredAt)) throw new Error("採用日が正しくありません。");
   if (!isStaffHireDateAfterTrial(initialTrial.trialDate, hiredAt)) throw new Error("採用日は体入日の翌日以降にしてください。");
@@ -2232,6 +2250,30 @@ async function assertNoCancelledCastWork(closing: DailyClosing, message: string)
   if (masters.some((snapshot) => snapshot.val()?.entryCancelledAt)) throw new Error(message);
 }
 
+async function assertEmployeePaymentMasters(value: DailyClosing, before: DailyClosing | null) {
+  const payments = normalizeDailyEmployeePayments(value.employeePayments ?? value.employeePaymentsJson);
+  const recorded = normalizeDailyEmployeePayments(before?.employeePaymentsJson ?? before?.employeePayments);
+  const ids = [...new Set([...value.staffWork.map((row) => row.staffId), ...payments.map((row) => row.staffId)])];
+  const snapshots = await Promise.all(ids.map((id) => get(rootRef(`staff/${id}`))));
+  const masters = new Map(ids.map((id, index) => [id, snapshots[index].val() as StaffRecord | null]));
+  for (const work of value.staffWork) {
+    if (masters.get(work.staffId)?.employmentType === "employee") throw new Error(`${work.name}は社員です。社員日払い欄から入力してください。`);
+  }
+  for (const payment of payments) {
+    const master = masters.get(payment.staffId);
+    const historical = recorded.some((row) => row.staffId === payment.staffId && row.name === payment.name);
+    if (master && master.employmentType !== "employee") throw new Error(`${payment.name}は社員として登録されていません。`);
+    if (historical) continue;
+    if (!master || master.deletedAt || !["active", "departed"].includes(master.status)) {
+      throw new Error(`${payment.name}の社員登録が確認できません。社員を選び直してください。`);
+    }
+    if (master.name !== payment.name || !validDate(master.hiredAt) || master.hiredAt! > value.businessDate
+      || master.status === "departed" && (!validDate(master.departedAt) || master.departedAt! < value.businessDate)) {
+      throw new Error(`${payment.name}の名前・入社日・退職日が営業日と一致しません。社員を選び直してください。`);
+    }
+  }
+}
+
 export async function submitClosing(value: DailyClosing, user: User, expectedUpdatedAt?: string) {
   await requireUser(user, ["shop", "op"]);
   if (!value.posSnapshot) throw new Error("POS原本がありません。POS JSONを取り込み直してください。");
@@ -2260,6 +2302,7 @@ export async function submitClosing(value: DailyClosing, user: User, expectedUpd
       throw new Error("現在は使用できない編集情報が含まれています。店舗の送信済みデータから再編集してください。");
     }
     validateDailyClosingForSubmission(value, before);
+    await assertEmployeePaymentMasters(value, before);
     await assertNoCancelledCastWork(value, "入店取消済みの在籍キャストが含まれています。キャストの照合を修正してから送信してください。");
     const monthStates = Object.entries((monthStatesSnapshot.val() || {}) as Record<string, AccountingMonthState>)
       .map(([month, state]) => ({ ...state, month }));
@@ -2290,6 +2333,12 @@ export async function submitClosing(value: DailyClosing, user: User, expectedUpd
       const operationId = before ? secureRandomUUID() : undefined;
       const stored = clean({
           ...withoutId(value),
+          // 日次の社員明細はスカラーで保存し、状態変更時の部分削除もサーバールールで防ぐ。
+          employeePayments: undefined,
+          employeePaymentsJson: (() => {
+            const rows = normalizeDailyEmployeePayments(value.employeePayments ?? value.employeePaymentsJson);
+            return rows.length ? JSON.stringify(rows) : undefined;
+          })(),
           cashManagementToken: cashLock.token,
           cashRevisionId: operationId,
           previousUpdatedAt: before?.updatedAt,

@@ -1,6 +1,8 @@
 import { calculateDailyHourlyPay, hoursBetweenQuarter, type DailyClosing, type DailyHourlyPay, type DailyStaffWork, type StaffRecord } from "./gms";
 import { supportsMonthlyStaffRatesSnapshot, type MonthlyAccountingResults, type MonthlyAccountingSnapshot, type StaffHourlySource, type StaffPayrollRow } from "./month-accounting";
 import { STAFF_MONTHLY_RATES_START_MONTH, staffMonthlyRateForMonth } from "./staff-rates";
+import { employeePaymentsForExport } from "./employee-payment-export";
+import type { EmployeePaymentRow } from "./employee-payments";
 
 export type PayrollExportInput = {
   results: MonthlyAccountingResults; closings: DailyClosing[]; month: string;
@@ -11,7 +13,7 @@ export type StaffPaymentExportRow = Pick<StaffPayrollRow, "id" | "name" | "hours
   days?: Array<{ businessDate: string; hours: number; amount?: number; dailyPayment?: number }>;
   missingDetails: string[];
 };
-export type StaffPaymentExport = { month: string; rows: StaffPaymentExportRow[] };
+export type StaffPaymentExport = { month: string; rows: StaffPaymentExportRow[]; employees?: EmployeePaymentRow[] };
 export type DriverPaymentExportRow = {
   id: string; name: string; daysCount: number; basic: number; remote: number; gross: number; dailyPayment: number; net: number;
   days?: Array<{ businessDate: string; amount: number }>; missingDetails: string[];
@@ -63,7 +65,8 @@ function sources(input: PayrollExportInput, field: "staffPayroll" | "driverPayro
   const { month, results, snapshot } = input;
   requireValue(/^\d{4}-(0[1-9]|1[0-2])$/.test(month), "給与出力の対象月が不正です。");
   requireValue(results && Number.isSafeInteger(results.approvedDays) && results.approvedDays >= 0, "月次給与データを読み込めません。");
-  requireValue(list<unknown>(results[field], "月次給与").length > 0, "出力対象の給与データがありません。");
+  requireValue(list<unknown>(results[field], "月次給与").length > 0
+    || field === "staffPayroll" && Boolean(results.employeePayments?.rows.length), "出力対象の給与データがありません。");
   const approved = new Map<string, DailyClosing>();
   const dates = new Set<string>();
   for (const closing of list(input.closings, "日次データ")) {
@@ -138,6 +141,7 @@ function savedSources(payroll: StaffPayrollRow, input: PayrollExportInput, byDay
 }
 
 export function buildStaffPaymentExport(input: PayrollExportInput): StaffPaymentExport {
+  const employees = employeePaymentsForExport(input).rows;
   const verified = sources(input, "staffPayroll"); const payrollIds = new Set<string>();
   const prepared = input.results.staffPayroll.map((payroll) => {
     unique(payroll.id, payrollIds, "スタッフ給与ID"); text(payroll.name, "スタッフ名"); hours(payroll.hours, `${payroll.name}の月間勤務時間`);
@@ -228,7 +232,8 @@ export function buildStaffPaymentExport(input: PayrollExportInput): StaffPayment
       ...(hourlySources ? { appliedHourlyRates: [...new Set(hourlySources.map((source) => source.hourlyRate))].sort((a, b) => a - b) } : {}),
       ...(days.size ? { days: [...days.values()].sort((a, b) => a.businessDate.localeCompare(b.businessDate)) } : {}), missingDetails };
   });
-  return { month: input.month, rows: result };
+  requireValue(!employees.some((row) => payrollIds.has(row.id)), "同じ社員が時給給与にも含まれています。");
+  return { month: input.month, rows: result, ...(employees.length ? { employees } : {}) };
 }
 
 export function buildDriverPaymentExport(input: PayrollExportInput): DriverPaymentExport {

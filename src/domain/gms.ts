@@ -7,6 +7,7 @@ import { sha256Hex } from "../lib/crypto-compat";
 import { resolveCastAccountingInputs, castAccountingInputTotals, normalizeCastAccountingInputs } from "./cast-accounting-inputs";
 import { calculateCastWithholding } from "./cast-withholding";
 import { castIntroducerOverrideForMonth, castTrialRateOverrideForMonth } from "./cast-monthly";
+import { normalizeDailyEmployeePayments } from "./employee-payments";
 
 export type Role = "shop" | "accounting" | "op";
 export type PersonStatus = "active" | "trial" | "departed";
@@ -61,6 +62,8 @@ export type CastRecord = {
 export type StaffRecord = {
   id: string;
   name: string;
+  /** 未指定は従来の時給スタッフ。社員は給与を計算せず、日払い・手当だけを管理する。 */
+  employmentType?: "employee";
   status: PersonStatus;
   hiredAt?: string;
   trialDate?: string;
@@ -358,6 +361,12 @@ export type DailyStaffWork = {
   dailyPayment: number;
 };
 
+export type DailyEmployeePayment = {
+  staffId: string;
+  name: string;
+  dailyPayment: number;
+};
+
 export type DailyDriverWork = {
   driverId: string;
   name: string;
@@ -417,6 +426,10 @@ export type DailyClosing = {
   nominations: PosClosingV3["nominations"];
   casts: DailyCast[];
   staffWork: DailyStaffWork[];
+  /** 社員の日払い。アルバイトの勤務・給与計算とは分離する。旧日次には存在しない。 */
+  employeePayments?: DailyEmployeePayment[];
+  /** Firebase保存用の社員明細JSON。承認・差戻しで明細全体の不変性を保護する。 */
+  employeePaymentsJson?: string;
   drivers: DailyDriverWork[];
   expenses: DailyExpense[];
   staffDailyPaymentTotal: number;
@@ -701,6 +714,26 @@ export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
       ...numeric,
     }];
   });
+  let employeePayments: DailyEmployeePayment[] | undefined;
+  if (value.employeePaymentsJson !== undefined || value.employeePayments !== undefined) {
+    try {
+      if (value.employeePaymentsJson !== undefined && typeof value.employeePaymentsJson !== "string") {
+        throw new Error("社員日払いの保存JSONが文字列ではありません。");
+      }
+      employeePayments = normalizeDailyEmployeePayments(value.employeePaymentsJson ?? value.employeePayments);
+      if (value.employeePaymentsJson !== undefined && value.employeePayments !== undefined) {
+        const counterpart = normalizeDailyEmployeePayments(value.employeePayments);
+        const canonical = (rows: DailyEmployeePayment[]) => JSON.stringify([...rows].sort((left, right) => left.staffId.localeCompare(right.staffId)));
+        if (canonical(employeePayments) !== canonical(counterpart)) {
+          integrityIssues.push("社員日払いの保存JSONと読込済み明細が一致しません。");
+        }
+      }
+    }
+    catch (error) {
+      employeePayments = [];
+      integrityIssues.push(error instanceof Error ? error.message : "社員日払いの保存形式が不正です。");
+    }
+  }
   const drivers = storedList<unknown>(value.drivers).flatMap((candidate, index): DailyDriverWork[] => {
     if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
       integrityIssues.push(`送迎ドライバー勤務${index + 1}件目の形式が不正なため除外しました。`);
@@ -801,6 +834,7 @@ export function normalizeDailyClosing(value: DailyClosing): DailyClosing {
     },
     casts,
     staffWork,
+    ...(employeePayments === undefined ? {} : { employeePayments }),
     drivers,
     expenses,
     staffDailyPaymentTotal: storedNumber(value.staffDailyPaymentTotal),
@@ -2461,6 +2495,7 @@ export function calculateCash(input: {
   regularDailyPayments: number;
   trialDailyPayments: number;
   staffDailyPayments: number;
+  employeeDailyPayments?: number;
   driverDailyPayments: number;
   dispatchCastPayment: number;
   dispatchStaffPayment: number;
@@ -2468,7 +2503,7 @@ export function calculateCash(input: {
   actualClosingCash: number;
 }): CashReconciliation {
   const expenseAndPaymentTotal = input.expenses + input.regularDailyPayments + input.trialDailyPayments
-    + input.staffDailyPayments + input.driverDailyPayments
+    + input.staffDailyPayments + (input.employeeDailyPayments ?? 0) + input.driverDailyPayments
     + input.dispatchCastPayment + input.dispatchStaffPayment + input.dispatchFee;
   // 営業の現金収支と資金移動を分離。開店時の補充はcashFloatに含まれる。
   const cashProfit = input.sales.cashSales - expenseAndPaymentTotal;

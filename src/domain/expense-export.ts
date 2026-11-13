@@ -3,6 +3,7 @@ import type { IntroducerPaymentRow, MonthlyAccountingResults, MonthlyAccountingS
 import { consumptionTaxForSales, validateAccountingExpenseInputs, validateConsumptionTaxRate } from "./accounting-expenses";
 import { requiresAccountingExpensesSnapshot, requiresCompleteCashFundingSnapshot, requiresConsumptionTaxRateSnapshot } from "./month-accounting";
 import { cashLedgerIssues } from "./cash-funding";
+import { employeePaymentsForExport } from "./employee-payment-export";
 
 export type ExpenseExportInput = {
   results: MonthlyAccountingResults;
@@ -248,6 +249,11 @@ export function validateExpenseExport({ results, closings, adjustments, month, s
     return sum + row.grossPay;
   }, 0);
   const staffIds = new Set<string>();
+  const employeePayments = employeePaymentsForExport({ results, closings, month, snapshot });
+  for (const row of employeePayments.rows) {
+    sameAmount(row.sales, adjustments.staffSalesAllowance[row.id] || 0, `${row.name}の社員売上手当`);
+    sameAmount(row.bottle, adjustments.staffBottleAllowance[row.id] || 0, `${row.name}の社員ボトル手当`);
+  }
   const staffTotal = array(results.staffPayroll, "スタッフ給与").reduce((sum, row) => {
     requireValue(row, "スタッフ給与を読み込めません。");
     uniqueId(row.id, staffIds, "スタッフ給与");
@@ -281,11 +287,12 @@ export function validateExpenseExport({ results, closings, adjustments, month, s
     return sum + row.total;
   }, 0);
   sameAmount(results.balance.cast, castTotal, "収支のキャスト報酬");
-  sameAmount(results.balance.staff, staffTotal, "収支のスタッフ給与");
+  requireValue(!employeePayments.rows.some((row) => staffIds.has(row.id)), "同じ社員が時給給与にも含まれています。");
+  sameAmount(results.balance.staff, staffTotal + employeePayments.allowanceTotal, "収支のスタッフ給与・社員手当");
   sameAmount(results.balance.driver, driverTotal, "収支のドライバー給与");
   sameAmount(results.balance.introducer, introducerTotal, "収支の紹介者支払");
   sameAmount(results.balance.expenses, summary.total, "収支の経費");
-  const totalCosts = castTotal + staffTotal + driverTotal + introducerTotal + summary.total;
+  const totalCosts = castTotal + staffTotal + employeePayments.allowanceTotal + driverTotal + introducerTotal + summary.total;
   sameAmount(results.balance.totalCosts, totalCosts, "総支出");
   sameAmount(results.balance.profit, results.sales.total - totalCosts, "収支", true);
 
@@ -305,7 +312,7 @@ export function validateExpenseExport({ results, closings, adjustments, month, s
       requireValue(source && source.checksum === reference.checksum && source.updatedAt === reference.updatedAt,
         "日次データの保存世代が月次確定時と一致しません。");
     });
-    const snapshotFields = ["approvedDays", "expenses", "sales", "balance", "castRewards", "staffPayroll", "driverPayroll", "introducerPayments"] as const;
+    const snapshotFields = ["approvedDays", "expenses", "sales", "balance", "castRewards", "staffPayroll", "employeePayments", "driverPayroll", "introducerPayments"] as const;
     snapshotFields.forEach((key) => requireValue(JSON.stringify(canonical(results[key])) === JSON.stringify(canonical(snapshot[key])),
       "出力する月次データが確定時の金額と一致しません。"));
   }

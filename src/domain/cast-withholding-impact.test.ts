@@ -158,6 +158,7 @@ describe("在籍源泉自動計算の他計算・帳票への反映", () => {
     const snapshot = buildMonthlySnapshot(month, 1, "b".repeat(64), input.adjustments, legacy.results,
       input.closings, "accounting", "2026-10-01T00:00:00Z");
     snapshot.calculationVersion = "2.50.3";
+    delete snapshot.employeePayments;
     const saved = normalizeMonthlyAccountingSnapshot(JSON.parse(JSON.stringify(snapshot)), month, 1);
     expect(saved).toBeDefined();
     expect(saved!.castRewards[0]).toMatchObject({ withholding: 1234, netPay: 196_767 });

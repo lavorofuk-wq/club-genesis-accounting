@@ -40,8 +40,9 @@ import { applyTransport, normalizeTransportMonth } from "./transport";
 import { applyBeautyAllowances, normalizeBeautyMonth } from "./beauty-allowance";
 import { normalizeCastSalesRankingRoster, type CastSalesRankingRoster } from "./cast-sales-ranking";
 import { calculateCastWithholding } from "./cast-withholding";
+import { calculateEmployeePayments, normalizeDailyEmployeePayments, normalizeEmployeePaymentsSummary, supportsEmployeePaymentsSnapshot, type EmployeePaymentsSummary } from "./employee-payments";
 
-export const MONTHLY_CALCULATION_VERSION = "2.54.0";
+export const MONTHLY_CALCULATION_VERSION = "2.59.0";
 export const MONTHLY_SNAPSHOT_SCHEMA_VERSION = 3 as const;
 
 export type IntroducerEntryEvent = {
@@ -146,6 +147,8 @@ export type MonthlyAccountingResults = {
   castRewards: CastReward[];
   introducerPayments: IntroducerPaymentRow[];
   staffPayroll: StaffPayrollRow[];
+  /** 社員は給与を計算しない。手当と日払いをそれぞれ独立して保存する。旧確定には補完しない。 */
+  employeePayments?: EmployeePaymentsSummary;
   driverPayroll: DriverPayrollRow[];
   expenses: MonthlyExpenseSummary;
   sales: MonthlySalesSummary;
@@ -603,6 +606,11 @@ export function normalizeMonthlyAccountingSnapshot(
     ? normalizeSnapshotHourlyRows(storedStaffPayroll, pathMonth, "hourly") : storedStaffPayroll;
   const staffPayroll = requireDailyHourlyYen && supportsMonthlyStaffRatesSnapshot(row.calculationVersion)
     ? normalizeSnapshotStaffHourlySources(dailyStaffPayroll as Record<string, unknown>[] | undefined, pathMonth) : dailyStaffPayroll;
+  let employeePayments: EmployeePaymentsSummary | undefined;
+  if (supportsEmployeePaymentsSnapshot(row.calculationVersion)) {
+    try { employeePayments = normalizeEmployeePaymentsSummary(row.employeePayments, pathMonth); }
+    catch { return undefined; }
+  } else if (row.employeePayments !== undefined) return undefined;
   const driverPayroll = validSnapshotRows(row.driverPayroll, ["id", "name"], ["basic", "remote", "gross", "dailyPayment"], { integerKeys: ["days"], allowNegativeKeys: ["net"] });
   const approvedClosings = validSnapshotRows(row.approvedClosings, ["id", "checksum", "updatedAt"], []);
   const warnings = snapshotList<unknown>(row.warnings);
@@ -654,6 +662,8 @@ export function normalizeMonthlyAccountingSnapshot(
     && item.net === Number(item.gross) - Number(item.dailyPayment)));
   if (!castSalesReports || !castRewards || !introducerPayments || !staffPayroll || !driverPayroll || !approvedClosings
     || !castRewardsValid || !introducerPaymentsValid || !staffPayrollValid || !driverPayrollValid
+    || (employeePayments !== undefined && (employeePayments.rows.some((employee) => staffPayroll.some((staff) => snapshotObject(staff) && staff.id === employee.id))
+      || !sameSnapshotPaymentAmount(row.balance.staff, staffPayroll.reduce<number>((sum, staff) => sum + (snapshotObject(staff) ? Number(staff.gross) : 0), 0) + employeePayments.allowanceTotal)))
     || warnings.some((warning) => typeof warning !== "string")
     || categoryValues.some((amount) => !snapshotNonNegative(amount))
     || row.approvedDays !== approvedClosings.length
@@ -673,6 +683,7 @@ export function normalizeMonthlyAccountingSnapshot(
     castRewards: castRewards as CastReward[],
     introducerPayments: introducerPayments as IntroducerPaymentRow[],
     staffPayroll: staffPayroll as StaffPayrollRow[],
+    ...(employeePayments === undefined ? {} : { employeePayments }),
     driverPayroll: driverPayroll as DriverPayrollRow[],
     warnings: warnings as string[],
     approvedClosings: approvedClosings as MonthlyAccountingSnapshot["approvedClosings"],
@@ -772,6 +783,15 @@ export function normalizeIntroducerDeletionCommit(
   } as IntroducerDeletionCommit;
 }
 
+function employeeIdsForAccounting(staff: StaffRecord[], closings: DailyClosing[]) {
+  const ids = new Set(staff.filter((member) => member.employmentType === "employee").map((member) => member.id));
+  for (const closing of closings) {
+    try { normalizeDailyEmployeePayments(closing.employeePayments).forEach((row) => ids.add(row.staffId)); }
+    catch { /* 不正明細は社員支払の集計・確定検証で警告する。 */ }
+  }
+  return ids;
+}
+
 export function calculateStaffPayroll(
   closings: DailyClosing[],
   adjustments: MonthlyAdjustments,
@@ -781,10 +801,12 @@ export function calculateStaffPayroll(
   const map = new Map<string, StaffPayrollRow>();
   const hourlyEntries = new Map<string, StaffHourlySource[]>();
   const staffById = new Map(staff.map((member) => [member.id, member]));
+  const employeeIds = employeeIdsForAccounting(staff, closings);
   const monthWorkIds = new Set(closings.flatMap((closing) => (closing.staffWork ?? [])
     .filter((work) => work.kind === "regular")
     .map((work) => work.staffId)));
   closings.forEach((closing) => (closing.staffWork ?? []).forEach((work) => {
+    if (employeeIds.has(work.staffId)) return;
     const converted = work.kind === "trial"
       ? staff.find((member) => member.convertedFromTrialId === work.staffId && member.hiredAt?.startsWith(month))
       : undefined;
@@ -1068,9 +1090,11 @@ export function calculateIntroducerPayments(
 
 function staffPayrollInputWarnings(rows: DailyClosing[], staff: StaffRecord[], month: string) {
   const masters = new Map(staff.map((member) => [member.id, member]));
+  const employeeIds = employeeIdsForAccounting(staff, rows);
   return rows.flatMap((closing) => (closing.staffWork ?? []).flatMap((work) => {
     const warnings: string[] = [];
     const label = `${closing.businessDate}・${work.name}（スタッフID: ${work.staffId}）`;
+    if (employeeIds.has(work.staffId)) return [`${label}は社員のためアルバイト勤務・時給給与へ登録できません。社員日払いで登録してください。`];
     if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(work.startTime)
       || !/^([01]\d|2[0-3]):[0-5]\d$/.test(work.endTime)
       || !Number.isSafeInteger(work.hours * 4) || work.hours < 0
@@ -1438,6 +1462,7 @@ export function calculateMonthlyAccounting(
   const castSalesReports = calculateCastSalesReports(calculationData.closings, calculationData.casts, month, adjustments);
   const castRewards = calculateCastRewards(calculationData.closings, calculationData.casts, month, adjustments, monthEvents, deletionCommits);
   const staffPayroll = calculateStaffPayroll(approved, adjustments, calculationData.staff, month);
+  const employees = calculateEmployeePayments(approved, calculationData.staff, month, adjustments);
   const driverPayroll = calculateDriverPayroll(approved, adjustments.driverRemoteAllowance);
   const introducerPayments = calculateIntroducerPayments(castRewards, calculationData, month, entryEvents, monthEvents, deletionCommits);
   const byCategory: Record<string, number> = {};
@@ -1488,7 +1513,7 @@ export function calculateMonthlyAccounting(
   const balanceWithoutProfit = {
     cast: castRewards.reduce((sum, row) => sum + row.grossPay, 0),
     introducer: introducerPayments.reduce((sum, row) => sum + row.total, 0),
-    staff: staffPayroll.reduce((sum, row) => sum + row.gross, 0),
+    staff: staffPayroll.reduce((sum, row) => sum + row.gross, 0) + employees.summary.allowanceTotal,
     driver: driverPayroll.reduce((sum, row) => sum + row.gross, 0),
     expenses: expenses.total,
   };
@@ -1503,6 +1528,7 @@ export function calculateMonthlyAccounting(
     castRewards,
     introducerPayments,
     staffPayroll,
+    employeePayments: employees.summary,
     driverPayroll,
     expenses,
     sales,
@@ -1512,6 +1538,7 @@ export function calculateMonthlyAccounting(
       ...beauty.issues,
       ...transport.issues,
       ...accountingExpenseIssues,
+      ...employees.issues,
       ...resolveCastAccountingInputs(adjustments, calculationData.closings, calculationData.casts, month).issues,
       ...castAccountingAmountIssues(castRewards),
       ...monthlyAccountingWarnings(approved, calculationData.casts, month, calculationData.staff),
@@ -1633,6 +1660,7 @@ export function canFinalizeMonthlyAccounting(
     ...cashLedgerIssues(calculationData.closings, month),
     ...duplicateBusinessDates,
     ...staffPayrollInputWarnings(approved, calculationData.staff, month),
+    ...calculateEmployeePayments(approved, calculationData.staff, month, adjustments).issues,
     ...effectiveIntroducerIssues(castRewards),
     ...introducerSaveOrderIssues(calculationData, month, resolvedMonthEvents, resolvedDeletionCommits),
     ...introducerMonthEventConsistencyIssues(calculationData, month, resolvedMonthEvents, resolvedDeletionCommits),

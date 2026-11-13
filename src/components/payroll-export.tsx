@@ -81,7 +81,7 @@ export function PayrollExport({ kind, input, month, sourceLabel, disabledReason 
     }
   };
 
-  return <Card title={`${label}XLSX`} description={`${month}・${sourceLabel}。${kind === "staff" ? "在籍・体入を別シートに分けて出力します。" : "ドライバー全員の支払表を出力します。"}`}
+  return <Card title={`${label}XLSX`} description={`${month}・${sourceLabel}。${kind === "staff" ? "在籍・体入を別シートに分け、社員がいる月は最後に社員日払いも出力します。" : "ドライバー全員の支払表を出力します。"}`}
     action={<button type="button" className="button" disabled={Boolean(validationError) || exporting} title={validationError || undefined} onClick={() => void exportPayroll()}>{exporting ? `${label}出力中…` : `${label}をXLSX出力`}</button>}>
     <p className="muted compact-text">A4横向きで、人数に応じて複数ページに分けます。確定済み月は保存金額を使用し、日別内訳が未保存の欄は空欄・注記付きで出力します。</p>
     {validationError && <p className="muted compact-text">{validationError}</p>}

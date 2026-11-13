@@ -3,6 +3,7 @@ import { validateExpenseExport, type ExpenseExportInput } from "./expense-export
 import { allocateBalancePayroll } from "./balance-allocation";
 import { summarizeCashFunding, type CashFundingSummary } from "./cash-funding";
 import { requiresCompleteCashFundingSnapshot } from "./month-accounting";
+import { employeePaymentsForExport } from "./employee-payment-export";
 
 export type BalanceExportInput = ExpenseExportInput & {
   staff?: StaffRecord[];
@@ -35,13 +36,15 @@ export type BalanceExportReport = {
   month: string;
   days: BalanceExportDay[];
   /** 営業日には配分せず、帳票の月次経費行へ一度だけ表示する。 */
-  monthlyExpenses: { expenses: number; introducerPayment: number };
+  monthlyExpenses: { expenses: number; introducerPayment: number; employeeGross?: number };
   approvedDays: number;
   castDailyAndAdvance: number;
   castTransport: number;
   castWithholding: number;
   castNet: number;
   employeeDaily: number;
+  /** 社員給与の前払い。人件費に含まれないためM38では別に一度控除する。 */
+  employeeAdvance?: number;
   /** カード実入金は手数料控除後。M38では損益経費に含まれるこの金額を戻す。 */
   cardFee: number;
   honShimeiSales: number;
@@ -158,6 +161,7 @@ function canonical(value: unknown): unknown {
 export function buildBalanceExportReport(input: BalanceExportInput): BalanceExportReport {
   validateExpenseExport(input);
   const { results, snapshot, month } = input;
+  const employeePayments = employeePaymentsForExport(input);
   if (snapshot) {
     requireValue(JSON.stringify(canonical(results.castSalesReports)) === JSON.stringify(canonical(snapshot.castSalesReports)),
       "キャストの日別売上・勤務データが月次確定時と一致しません。");
@@ -195,9 +199,10 @@ export function buildBalanceExportReport(input: BalanceExportInput): BalanceExpo
   const monthlyExpenseTotal = results.expenses.fixed + results.expenses.liquorDelivery + results.expenses.cardFee
     + sum(accountingInputs.filter((row) => row.businessDate === undefined), (row) => row.amount)
     + (results.expenses.consumptionTax ?? 0);
-  const monthlyExpenses = { expenses: monthlyExpenseTotal, introducerPayment: results.balance.introducer };
+  const monthlyExpenses = { expenses: monthlyExpenseTotal, introducerPayment: results.balance.introducer,
+    ...(employeePayments.allowanceTotal ? { employeeGross: employeePayments.allowanceTotal } : {}) };
   // 月額行へ分離しても、承認済み営業日がない月の従来の出力制限は維持する。
-  if (monthlyExpenseTotal !== 0 || results.balance.introducer !== 0) {
+  if (monthlyExpenseTotal !== 0 || results.balance.introducer !== 0 || employeePayments.allowanceTotal !== 0) {
     requireValue(approved.length > 0, "対象月の承認済み営業日がないため、収支表を出力できません。");
   }
   const days = approved.map((closing): BalanceExportDay => {
@@ -219,21 +224,22 @@ export function buildBalanceExportReport(input: BalanceExportInput): BalanceExpo
     };
   });
   same(sum(days, (row) => row.castHourly + row.castSalesReward), results.balance.cast, "日別キャスト報酬の合計");
-  same(sum(days, (row) => row.employeeGross), results.balance.staff + results.balance.driver + results.expenses.dispatchStaff,
-    "日別従業員給与の合計");
+  same(sum(days, (row) => row.employeeGross) + employeePayments.allowanceTotal,
+    results.balance.staff + results.balance.driver + results.expenses.dispatchStaff, "日別従業員給与・月次社員手当の合計");
   same(sum(days, (row) => row.introducerPayment) + monthlyExpenses.introducerPayment, results.balance.introducer, "日別・月次紹介者支払の合計");
   same(sum(days, (row) => row.expenses) + monthlyExpenses.expenses, results.expenses.total - results.expenses.dispatchCast - results.expenses.dispatchStaff,
     "日別・月次経費の合計");
   const totalCosts = sum(days, (row) => row.castHourly + row.castSalesReward + row.dispatchCastPayment
-    + row.employeeGross + row.introducerPayment + row.expenses) + monthlyExpenses.expenses + monthlyExpenses.introducerPayment;
+    + row.employeeGross + row.introducerPayment + row.expenses) + monthlyExpenses.expenses + monthlyExpenses.introducerPayment
+    + employeePayments.allowanceTotal;
   same(totalCosts, results.balance.totalCosts, "帳票の総支出");
   same(sum(days, (row) => row.totalSales) - totalCosts, results.balance.profit, "帳票の収支");
   const castDailyAndAdvance = sum(results.castRewards, (row) => row.dailyPayment + row.advancePayment);
   const castTransport = sum(results.castRewards, (row) => row.transportFee);
   const castWithholding = sum(results.castRewards, (row) => row.withholding);
   const castNet = sum(results.castRewards, (row) => row.netPay);
-  const employeeDaily = sum(results.staffPayroll, (row) => row.daily) + sum(results.driverPayroll, (row) => row.dailyPayment);
-  const employeeNet = sum(results.staffPayroll, (row) => row.net) + sum(results.driverPayroll, (row) => row.net);
+  const employeeDaily = sum(results.staffPayroll, (row) => row.daily) + sum(results.driverPayroll, (row) => row.dailyPayment) + employeePayments.dailyTotal;
+  const employeeNet = sum(results.staffPayroll, (row) => row.net) + sum(results.driverPayroll, (row) => row.net) + employeePayments.allowanceTotal;
   same(castDailyAndAdvance, sum(approved, (closing) => sum(closing.casts,
     (cast) => amount(cast.dailyPayment, "キャスト日払い") + amount(cast.advancePayment, "キャスト立替"))),
   "キャスト日払い・立替合計");
@@ -253,11 +259,12 @@ export function buildBalanceExportReport(input: BalanceExportInput): BalanceExpo
     - employeeNet - castDailyAndAdvance - employeeDaily - results.expenses.dispatchCast
     - results.expenses.dispatchStaff - results.expenses.dispatchFee - results.expenses.dailyExpenseTotal
     - monthlyExpenseTotal - datedAccountingExpenses + results.expenses.cardFee + (cashFunding?.netCashMovement || 0);
-  same(expandedCash, results.sales.cash - totalCosts + castTransport + results.expenses.cardFee
+  same(expandedCash, results.sales.cash - totalCosts - employeePayments.dailyTotal + castTransport + results.expenses.cardFee
     + (cashFunding?.netCashMovement || 0), "現状現金残高の控除内訳");
   return {
     month, days, monthlyExpenses, approvedDays: results.approvedDays,
     castDailyAndAdvance, castTransport, castWithholding, castNet, employeeDaily, cardFee: results.expenses.cardFee,
+    ...(employeePayments.dailyTotal ? { employeeAdvance: employeePayments.dailyTotal } : {}),
     honShimeiSales: sum(results.castRewards, (row) => amount(row.honShimeiSales, "キャスト本指名売上")),
     additionalSales: sum(results.castRewards, (row) => amount(row.additionalSales ?? 0, "キャスト追加売上")),
     jonaiExtensionSales: sum(results.castRewards, (row) => amount(row.jonaiExtensionSales, "キャスト場内延長売上")),

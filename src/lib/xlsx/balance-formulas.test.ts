@@ -178,6 +178,30 @@ beforeEach(() => vi.resetAllMocks());
 describe.each(months)("収支XLSXの参照式再計算（$lastDay 日月）", ({ month, lastDay, monthlyRow, offset }) => {
   const lower = (column: string, row: number) => `${column}${row + offset}`;
 
+  it("社員手当だけを月額人件費に含め、社員前払いは利益を変えずM38から一度引く", async () => {
+    const data = report(month, lastDay);
+    data.monthlyExpenses.employeeGross = 3000;
+    data.employeeAdvance = 10000;
+    data.employeeDaily += 10000;
+    mockedBuild.mockReturnValue(data);
+    const book = createMonthlyBalanceWorkbook(input, "社員支払");
+    const restored = new ExcelJS.Workbook();
+    await restored.xlsx.load(await book.xlsx.writeBuffer());
+    const sheet = restored.worksheets[0];
+    expectCachedResults(sheet);
+    const evaluate = formulaEvaluator(sheet);
+    expect(evaluate(`R${monthlyRow}`)).toBe(3000);
+    expect(evaluate(lower("R", 35))).toBe(13500);
+    expect(evaluate(lower("V", 35))).toBe(91500);
+    expect(evaluate(lower("Q", 36))).toBe(11200);
+    expect(evaluate(lower("M", 38))).toBe(62300);
+    expect(evaluate(lower("V", 39))).toBe(91500);
+    sheet.getCell(lower("J", 42)).value = 40000;
+    expect(formulaEvaluator(sheet)(lower("M", 38))).toBe(102300);
+    expect(formulaEvaluator(sheet)(lower("V", 35))).toBe(91500);
+    expect(sheet.pageSetup.printArea).toBe(`A1:W${46 + offset}`);
+  });
+
   it("保存・再読込後も全数式のキャッシュが参照値と一致し、月額変更が集計と利益・現金へ伝わる", async () => {
     const sheet = await restoredSheet(month, lastDay);
     expect(sheet.getCell(`A${lastDay + 2}`).value).toBe(lastDay);
