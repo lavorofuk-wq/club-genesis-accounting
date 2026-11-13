@@ -94,7 +94,7 @@ describe("店舗フォームの更新時入力退避", () => {
     expect(drafts.keys).toEqual([
       "store.editing", "store.workflowDirty",
       ...["stage", "pos", "mapping", "allowInitialSnapshotMapping", "specialCosts", "castRows",
-        "castRowsSourcePos", "unmatchedCastDrafts", "staffWork", "staffId", "staffStart", "staffEnd",
+        "castRowsSourcePos", "unmatchedCastDrafts", "staffWork", "employeePayments", "employeeId", "employeeAmount", "staffId", "staffStart", "staffEnd",
         "driverWork", "expenses", "expenseCategory", "expensePayee", "expensePersonId", "expenseAmount",
         "dispatchStaffPayment", "dispatchCastPayment", "dispatchFee", "liquorDeliveryAmount", "cashFloat", "actualCash",
         "companyReplenishment", "personalReplenishment", "companyTransfer", "cashFunding2.companyReplenishment", "cashFunding2.personalReplenishment", "cashFunding2.companyTransfer", "personalRepayment", "openingPersonalDebt", "cashRevisionReason"]

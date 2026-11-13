@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { User } from "firebase/auth";
 import { secureRandomUUID } from "@/lib/crypto-compat";
 import type {
-  BottleAllocation, CashReconciliation, CastKind, DailyCast, DailyClosing, DailyDriverWork, DailyExpense, DailyStaffWork, ExpenseCategory,
+  BottleAllocation, CashReconciliation, CastKind, DailyCast, DailyClosing, DailyDriverWork, DailyEmployeePayment, DailyExpense, DailyStaffWork, ExpenseCategory,
   PosClosingV3, PosItem, PosTransaction, ReconciledDailyCastInputs
 } from "@/domain/gms";
 import { buildDailyCasts, calculateCash, canMapAsDispatch, deriveReeditCastMapping, floorTen, floorYen, hoursBetweenQuarter, invalidTrialBeautyExpensesForRows, isCastMappingComplete, isUnapprovedClosingStatus, mergeReconciledDailyCastInputs, parsePosClosingV3, posCastReferences, posItemOccurrenceKey, rateForMonth, requiresBottleCost, restoreDailyCastBackMetadata, staffCandidatesForBusinessDate } from "@/domain/gms";
@@ -263,6 +263,9 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
   const [castRowsSourcePos, setCastRowsSourcePos] = useRecoverableState<PosClosingV3 | null>(`${draftKey}.castRowsSourcePos`, initial?.posSnapshot || null);
   const [unmatchedCastDrafts, setUnmatchedCastDrafts] = useRecoverableState<DailyCast[]>(`${draftKey}.unmatchedCastDrafts`, []);
   const [staffWork, setStaffWork] = useRecoverableState<DailyStaffWork[]>(`${draftKey}.staffWork`, () => initial?.staffWork || []);
+  const [employeePayments, setEmployeePayments] = useRecoverableState<DailyEmployeePayment[]>(`${draftKey}.employeePayments`, () => initial?.employeePayments || []);
+  const [employeeId, setEmployeeId] = useRecoverableState(`${draftKey}.employeeId`, "");
+  const [employeeAmount, setEmployeeAmount] = useRecoverableState(`${draftKey}.employeeAmount`, 0);
   const [staffId, setStaffId] = useRecoverableState(`${draftKey}.staffId`, "");
   const [staffStart, setStaffStart] = useRecoverableState(`${draftKey}.staffStart`, "20:00");
   const [staffEnd, setStaffEnd] = useRecoverableState(`${draftKey}.staffEnd`, "02:00");
@@ -314,7 +317,9 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
   const month = pos?.businessDate.slice(0, 7) || "";
 
   const activeOnBusinessDate = (hiredAt?: string, departedAt?: string) => Boolean(pos && hiredAt && hiredAt <= pos.businessDate && (!departedAt || departedAt >= pos.businessDate));
-  const staffCandidates = staffCandidatesForBusinessDate(data.staff, data.archivedStaff, pos?.businessDate || "");
+  const staffCandidates = staffCandidatesForBusinessDate(data.staff, data.archivedStaff, pos?.businessDate || "").filter((row) => row.employmentType !== "employee");
+  const employeeCandidates = data.staff.filter((row) => row.employmentType === "employee" && !row.deletedAt
+    && row.status !== "trial" && activeOnBusinessDate(row.hiredAt, row.departedAt));
   const candidates = (kind: CastKind, name: string) => kind === "dispatch" ? [] : data.casts.filter((row) => row.name === name && (kind === "trial"
     ? row.status === "trial" && row.trialDate === pos?.businessDate
     : row.status !== "trial" && activeOnBusinessDate(row.hiredAt, row.departedAt)));
@@ -390,6 +395,9 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     setCastRowsSourcePos(null);
     setUnmatchedCastDrafts([]);
     setStaffWork([]);
+    setEmployeePayments([]);
+    setEmployeeId("");
+    setEmployeeAmount(0);
     setStaffId("");
     setStaffStart("20:00");
     setStaffEnd("02:00");
@@ -524,10 +532,19 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     setExpenses((rows) => [...rows, { id: secureRandomUUID(), category: expenseCategory, payee, amount: expenseAmount, personId: trial?.masterId, personName: trial?.name }]);
     setExpensePayee(""); setExpensePersonId(""); setExpenseAmount(0); setError("");
   };
+  const addEmployeePayment = () => {
+    const employee = employeeCandidates.find((row) => row.id === employeeId);
+    if (!employee) return setError("社員を選択してください。");
+    if (employeePayments.some((row) => row.staffId === employee.id)) return setError("この社員は追加済みです。一覧の日払い額を変更してください。");
+    if (!Number.isFinite(employeeAmount) || employeeAmount < 0 || employeeAmount > Number.MAX_SAFE_INTEGER) return setError("社員の日払い額は0円以上の処理可能な金額で入力してください。");
+    setEmployeePayments((rows) => [...rows, { staffId: employee.id, name: employee.name, dailyPayment: employeeAmount }]);
+    setEmployeeId(""); setEmployeeAmount(0); setError("");
+  };
   const expenseTotal = expenses.reduce((sum, row) => sum + row.amount, 0);
   const regularDailyPayments = castRows.filter((row) => row.kind === "regular").reduce((sum, row) => sum + row.dailyPayment, 0);
   const trialDailyPayments = castRows.filter((row) => row.kind === "trial").reduce((sum, row) => sum + row.dailyPayment, 0);
   const staffDailyPayments = staffWork.reduce((sum, row) => sum + row.dailyPayment, 0);
+  const employeeDailyPayments = employeePayments.reduce((sum, row) => sum + row.dailyPayment, 0);
   const driverDailyPayments = driverWork.reduce((sum, row) => sum + row.dailyPayment, 0);
   const fundingContextState = useMemo<{ context?: Omit<CashFundingContext, "openingPersonalDebt"> & { openingPersonalDebt: number | null }; error: string }>(() => {
     if (!pos) return { error: "" };
@@ -538,7 +555,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
       return { error: caught instanceof Error ? caught.message : "前営業日の現金情報を確認できません。入力を保持しています。最新データを確認してください。" };
     }
   }, [cashFloat, data.closings, initial, pos]);
-  const cashInputs = pos ? { sales: pos.sales, cashFloat, expenses: expenseTotal, regularDailyPayments, trialDailyPayments, staffDailyPayments, driverDailyPayments, dispatchCastPayment, dispatchStaffPayment, dispatchFee, actualClosingCash: 0 } : null;
+  const cashInputs = pos ? { sales: pos.sales, cashFloat, expenses: expenseTotal, regularDailyPayments, trialDailyPayments, staffDailyPayments, employeeDailyPayments, driverDailyPayments, dispatchCastPayment, dispatchStaffPayment, dispatchFee, actualClosingCash: 0 } : null;
   const fundingInputs = { companyReplenishment, personalReplenishment, companyTransfer };
   const calculatedCash: CashReconciliation | null = cashInputs ? calculateCash(cashInputs) : null;
   let unconfirmedCash = calculatedCash;
@@ -574,7 +591,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
   const provisionalClosing: DailyClosing | undefined = pos && cashForValidation?.funding ? {
     id: initial?.id || `daily_${pos.businessDate.replaceAll("-", "")}`, businessDate: pos.businessDate,
     status: "submitted", submissionId: pos.submissionId, checksum: pos.checksum, sales: pos.sales,
-    customers: pos.customers, nominations: pos.nominations, casts: castRows, staffWork, drivers: driverWork,
+    customers: pos.customers, nominations: pos.nominations, casts: castRows, staffWork, employeePayments, drivers: driverWork,
     expenses, staffDailyPaymentTotal: staffDailyPayments, dispatchStaffPayment, dispatchCastPayment,
     dispatchFee, liquorDeliveryAmount, cash: cashForValidation, posSnapshot: pos, updatedAt: initial?.updatedAt || "",
   } : undefined;
@@ -589,7 +606,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
   const confirmationKey = JSON.stringify({
     businessDate: pos?.businessDate, checksum: pos?.checksum, cash: unconfirmedCash, fundingError, impacts,
     fundingInputs, personalRepayment, openingPersonalDebt, contextKey, contextConfirmed, cashRevisionReason,
-    castRows, staffWork, driverWork, expenses, liquorDeliveryAmount,
+    castRows, staffWork, employeePayments, driverWork, expenses, liquorDeliveryAmount,
   });
   // 金額が同じでも入力が変更された後や、退避から復元した画面では再確認が必要。
   useEffect(() => { setConfirmedCashKey(""); }, [confirmationKey]);
@@ -623,7 +640,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
     const value: DailyClosing = {
       id: initial?.id || `daily_${pos.businessDate.replaceAll("-", "")}`,
       businessDate: pos.businessDate, status: "submitted", submissionId: pos.submissionId, checksum: pos.checksum,
-      sales: pos.sales, customers: pos.customers, nominations: pos.nominations, casts: submissionCastRows, staffWork, drivers: driverRows, expenses,
+      sales: pos.sales, customers: pos.customers, nominations: pos.nominations, casts: submissionCastRows, staffWork, employeePayments, drivers: driverRows, expenses,
       staffDailyPaymentTotal: staffWork.reduce((sum, row) => sum + row.dailyPayment, 0), dispatchStaffPayment, dispatchCastPayment, dispatchFee,
       liquorDeliveryAmount, cash, ...(cashChanged ? { cashRevisionReason: cashRevisionReason.trim() } : {}), posSnapshot: pos, updatedAt: new Date().toISOString()
     };
@@ -643,7 +660,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
   const previewClosing: DailyClosing | undefined = visibleStage === "preview" && pos && cash ? {
     id: initial?.id || "preview", businessDate: pos.businessDate, status: "submitted",
     submissionId: pos.submissionId, checksum: pos.checksum, sales: pos.sales, customers: pos.customers,
-    nominations: pos.nominations, casts: castRows, staffWork, drivers: driverRows, expenses,
+    nominations: pos.nominations, casts: castRows, staffWork, employeePayments, drivers: driverRows, expenses,
     staffDailyPaymentTotal: staffWork.reduce((sum, row) => sum + row.dailyPayment, 0),
     dispatchStaffPayment, dispatchCastPayment, dispatchFee, liquorDeliveryAmount, cash,
     ...(cashChanged ? { cashRevisionReason: cashRevisionReason.trim() } : {}),
@@ -725,6 +742,10 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
       {invalidTrialBeautyExpenses.length > 0 && <div className="notice error">体入キャストとの紐付けを確認できない美容室手当経費があります。経費一覧から対象行を削除し、現在の体入キャストを選び直してください。</div>}
       <h3>キャスト出勤・売上・手当控除</h3><Table headers={["キャスト", "勤務", "本指名", "場内", "同伴", "本指名売上", "場内延長売上", "ボトル/ドリンク", "美容室", "日払い", "立替", "送迎"]}>{castRows.map((row) => <tr key={row.posCastId}><td><strong>{row.name}</strong><br /><small>{row.kind === "trial" ? "体入" : "在籍"}</small></td><td>{row.startTime}–{row.endTime}<br />{row.hours}時間</td><td>{row.honShimeiCount}本</td><td>{row.banaiShimeiCount}本</td><td>{row.dohanCount}本</td><td><MoneyInput value={row.honShimeiSales} step={10} onChange={(value) => updateCast(row.posCastId, { honShimeiSales: value })} /></td><td><MoneyInput value={row.jonaiExtensionSales} step={10} onChange={(value) => updateCast(row.posCastId, { jonaiExtensionSales: value })} /></td><td><CastProductSummary row={row} pos={pos} /></td><td>{row.beautyAllowance > 0 && <>{yen.format(row.beautyAllowance)}<br /><small>旧日次入力を保持</small><br /></>}<small>{row.kind === "trial" ? "当日経費で登録" : "美容室手当画面で登録・編集"}</small></td><td><MoneyInput value={row.dailyPayment} onChange={(value) => updateCast(row.posCastId, { dailyPayment: value })} /></td><td><MoneyInput value={row.advancePayment} onChange={(value) => updateCast(row.posCastId, { advancePayment: value })} /></td><td>{yen.format(row.transportFee)}<br /><small>送迎画面で登録・編集</small></td></tr>)}</Table>
       <h3>スタッフ勤務・日払い</h3><p className="muted compact-text">登録時時給は店舗入力時の保存値です。在籍スタッフの未確定月（2026年9月以降）は月度時給で給与計算します。</p><div className="grid form-row"><Field label="スタッフ"><select className="input" value={staffId} onChange={(e) => setStaffId(e.target.value)}><option value="">選択</option>{staffCandidates.map((row) => <option key={row.id} value={row.id}>{row.name}（{row.status === "trial" ? "体入" : "在籍"}）</option>)}</select></Field><Field label="出勤"><input className="input" type="time" value={staffStart} onChange={(e) => setStaffStart(e.target.value)} /></Field><Field label="退勤"><input className="input" type="time" value={staffEnd} onChange={(e) => setStaffEnd(e.target.value)} /></Field><button className="button compact" onClick={addStaff}>追加</button></div><Table headers={["スタッフ", "区分", "出勤", "退勤", "勤務", "登録時時給", "日払い", "操作"]}>{staffWork.map((row) => <tr key={row.staffId}><td>{row.name}</td><td>{row.kind === "trial" ? "体入" : "在籍"}</td><td>{row.startTime}</td><td>{row.endTime}</td><td>{row.hours}時間</td><td>{yen.format(row.hourlyRate)}</td><td><MoneyInput value={row.dailyPayment} disabled={row.kind === "trial"} onChange={(value) => setStaffWork((rows) => rows.map((item) => item.staffId === row.staffId ? { ...item, dailyPayment: value } : item))} />{row.kind === "trial" && <small>{initial?.staffWork.some((recorded) => recorded.staffId === row.staffId) ? "保存済みの日払い額を保持（時給給与との差額は月次精算）" : "基本給与全額を即日払い"}</small>}</td><td><button className="button danger mini" onClick={() => setStaffWork((rows) => rows.filter((item) => item.staffId !== row.staffId))}>削除</button></td></tr>)}</Table>
+      <h3>社員日払い</h3>
+      <div className="grid form-row"><Field label="社員"><select className="input" value={employeeId} onChange={(event) => setEmployeeId(event.target.value)}><option value="">選択</option>{employeeCandidates.filter((employee) => !employeePayments.some((row) => row.staffId === employee.id)).map((employee) => <option key={employee.id} value={employee.id}>{employee.name}</option>)}</select></Field><Field label="社員日払い額"><MoneyInput value={employeeAmount} onChange={setEmployeeAmount} /></Field><button className="button compact" disabled={busy} onClick={addEmployeePayment}>社員日払いを追加</button></div>
+      <Table headers={["社員", "日払い", "操作"]}>{employeePayments.map((row) => <tr key={row.staffId}><td>{row.name}</td><td><MoneyInput value={row.dailyPayment} onChange={(value) => setEmployeePayments((rows) => rows.map((item) => item.staffId === row.staffId ? { ...item, dailyPayment: value } : item))} /></td><td><button className="button danger mini" onClick={() => setEmployeePayments((rows) => rows.filter((item) => item.staffId !== row.staffId))}>削除</button></td></tr>)}</Table>
+      <div className="right-total">社員日払い合計 <strong>{yen.format(employeeDailyPayments)}</strong></div>
       <h3>送迎ドライバー・日払い</h3><div className="check-grid">{data.drivers.filter((row) => activeOnBusinessDate(row.hiredAt, row.departedAt)).map((row) => { const selected = driverWork.some((item) => item.driverId === row.id); return <label className="select-card" key={row.id}><input type="checkbox" checked={selected} onChange={(e) => setDriverWork(e.target.checked ? [...driverWork.filter((item) => item.driverId !== row.id), { driverId: row.id, name: row.name, dailyRate: row.dailyRate, dailyPayment: 0 }] : driverWork.filter((item) => item.driverId !== row.id))} /><span>{row.name}<small>日給 {yen.format(row.dailyRate)}</small></span></label>; })}</div><Table headers={["ドライバー", "日給", "日払い", "操作"]}>{driverWork.map((row) => <tr key={row.driverId}><td>{row.name}</td><td>{yen.format(row.dailyRate)}</td><td><MoneyInput value={row.dailyPayment} onChange={(value) => setDriverWork((rows) => rows.map((item) => item.driverId === row.driverId ? { ...item, dailyPayment: value } : item))} /></td><td><button className="button danger mini" onClick={() => setDriverWork((rows) => rows.filter((item) => item.driverId !== row.driverId))}>削除</button></td></tr>)}</Table>
       <h3>当日経費</h3><div className="grid form-row expense-row"><Field label="勘定科目"><select className="input" value={expenseCategory} onChange={(e) => { setExpenseCategory(e.target.value as ExpenseCategory); setExpensePayee(""); setExpensePersonId(""); }}>{Object.entries(expenseLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></Field>{expenseCategory === "beautyTrial" ? <Field label="対象の体入キャスト"><select className="input" value={expensePersonId} onChange={(e) => setExpensePersonId(e.target.value)}><option value="">選択</option>{castRows.filter((row) => row.kind === "trial").map((row) => <option key={row.posCastId} value={row.posCastId}>{row.name}</option>)}</select></Field> : <Field label="支払先"><input className="input" value={expensePayee} onChange={(e) => setExpensePayee(e.target.value)} /></Field>}<Field label="金額"><MoneyInput value={expenseAmount} onChange={setExpenseAmount} /></Field><button className="button compact" onClick={addExpense}>追加</button></div><Table headers={["勘定科目", "支払先", "金額", "操作"]}>{expenses.map((row) => <tr key={row.id}><td>{expenseLabels[row.category]}</td><td>{row.payee}</td><td>{yen.format(row.amount)}</td><td><button className="button danger mini" onClick={() => setExpenses((rows) => rows.filter((item) => item.id !== row.id))}>削除</button></td></tr>)}</Table><div className="right-total">経費総計 <strong>{yen.format(expenseTotal)}</strong></div>
       <h3>派遣・納品書</h3><div className="grid four"><Field label="派遣スタッフ支払"><MoneyInput value={dispatchStaffPayment} onChange={setDispatchStaffPayment} /></Field><Field label="派遣キャスト支払"><MoneyInput value={dispatchCastPayment} onChange={setDispatchCastPayment} /></Field><Field label="派遣手数料"><MoneyInput value={dispatchFee} onChange={setDispatchFee} /></Field><Field label="酒代納品書分"><MoneyInput value={liquorDeliveryAmount} onChange={setLiquorDeliveryAmount} /></Field></div>
@@ -758,6 +779,7 @@ function DailyWorkflow({ data, user, busy, run, initial, onFinished, onDirtyChan
         <tr><td>在籍キャスト日払い</td><td>{yen.format(regularDailyPayments)}</td></tr>
         <tr><td>体入キャスト即日支払い</td><td>{yen.format(trialDailyPayments)}</td></tr>
         <tr><td>スタッフ日払い</td><td>{yen.format(staffDailyPayments)}</td></tr>
+        <tr><td>社員日払い</td><td>{yen.format(employeeDailyPayments)}</td></tr>
         <tr><td>送迎ドライバー日払い</td><td>{yen.format(driverDailyPayments)}</td></tr>
         <tr><td>派遣キャスト支払い</td><td>{yen.format(dispatchCastPayment)}</td></tr>
         <tr><td>派遣スタッフ支払い</td><td>{yen.format(dispatchStaffPayment)}</td></tr>
@@ -864,6 +886,9 @@ export function DailyPreview({ closing, allowancePreview }: {
     <h3>スタッフ</h3>
     <p className="muted compact-text">登録時時給は店舗入力時の保存値です。在籍スタッフの未確定月（2026年9月以降）は月度時給で給与計算します。</p>
     <Table headers={["名前", "区分", "出勤", "退勤", "勤務時間", "登録時時給", "日払い"]}>{closing.staffWork.map((row) => <tr key={row.staffId}><td>{row.name}</td><td>{row.kind === "trial" ? "体入" : "在籍"}</td><td>{row.startTime}</td><td>{row.endTime}</td><td>{row.hours}時間</td><td>{yen.format(row.hourlyRate)}</td><td>{yen.format(row.dailyPayment)}</td></tr>)}</Table>
+    <h3>社員日払い</h3>
+    <Table headers={["社員", "営業日", "日払い"]}>{(closing.employeePayments || []).map((row) => <tr key={row.staffId}><td>{row.name}</td><td>{closing.businessDate}</td><td>{yen.format(row.dailyPayment)}</td></tr>)}</Table>
+    <div className="right-total">社員日払い合計 <strong>{yen.format((closing.employeePayments || []).reduce((sum, row) => sum + row.dailyPayment, 0))}</strong></div>
     <h3>送迎ドライバー</h3>
     <Table headers={["名前", "日給", "日払い"]}>{closing.drivers.map((row) => <tr key={row.driverId}><td>{row.name}</td><td>{yen.format(row.dailyRate)}</td><td>{yen.format(row.dailyPayment)}</td></tr>)}</Table>
     <h3>経費・派遣支払・納品書</h3>

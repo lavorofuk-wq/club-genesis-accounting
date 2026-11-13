@@ -44,6 +44,9 @@ export function createMonthlyExpenseWorkbook(input: ExpenseExportInput, sourceLa
   validateExpenseExport(input);
   const { results, month, adjustments } = input;
   const introducers = summarizeExpenseIntroducers(results);
+  const staffPayments = [...results.staffPayroll.map((row) => ({ name: row.name, gross: row.gross })),
+    ...(results.employeePayments?.rows || []).filter((row) => row.allowanceTotal > 0)
+      .map((row) => ({ name: `${row.name}（社員手当）`, gross: row.allowanceTotal }))];
   const approved = input.closings.filter((row) => row.status === "approved" && row.businessDate.startsWith(`${month}-`));
   const byDate = new Map(approved.map((row) => [row.businessDate, row]));
   const [year, monthNumber] = month.split("-").map(Number);
@@ -71,7 +74,7 @@ export function createMonthlyExpenseWorkbook(input: ExpenseExportInput, sourceLa
   // 見本の定員を超える場合は下段を伸ばし、金額・氏名の切捨てを避ける。
   const driverHeader = detailStart + Math.max(4, Math.ceil(introducers.length / 3));
   const driverStart = driverHeader + 1;
-  const totalRow = Math.max(45 + rowOffset, detailHeaderRow + fixed.length, detailStart + Math.ceil(results.staffPayroll.length / 2),
+  const totalRow = Math.max(45 + rowOffset, detailHeaderRow + fixed.length, detailStart + Math.ceil(staffPayments.length / 2),
     driverStart + Math.max(3, Math.ceil(results.driverPayroll.length / 2)));
   const book = new ExcelJS.Workbook();
   book.creator = "GENESIS Management System Ver2.37.0";
@@ -180,7 +183,7 @@ export function createMonthlyExpenseWorkbook(input: ExpenseExportInput, sourceLa
   sheet.getCell(`G${detailStart + 1}`).value = sum(results.castRewards.filter((row) => row.adoptedSystem === "salesReward"), (row) => row.grossPay);
   const dispatchPayment = results.expenses.dispatchCast + results.expenses.dispatchStaff;
   sheet.getCell(`G${detailStart + 3}`).value = dispatchPayment;
-  results.staffPayroll.forEach((person, index) => {
+  staffPayments.forEach((person, index) => {
     const row = detailStart + Math.floor(index / 2);
     label(sheet, `${index % 2 ? "J" : "H"}${row}`, person.name);
     sheet.getCell(`${index % 2 ? "K" : "I"}${row}`).value = person.gross;

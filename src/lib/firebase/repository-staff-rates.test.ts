@@ -34,7 +34,7 @@ vi.mock("./client", () => ({ database: {}, rootRef: (path = "") => ({ path }) })
 vi.mock("./ready-transaction", () => ({ runReadyTransaction: memory.transaction }));
 vi.mock("../client-release", () => ({ assertCurrentClientRelease: vi.fn().mockResolvedValue(undefined) }));
 
-import { convertTrialStaff, saveStaff } from "./repository";
+import { convertTrialStaff, saveStaff, departStaff, restoreStaff, deleteStaff } from "./repository";
 
 const user = { uid: "test-op" } as User;
 const timestamp = "2026-09-01T12:00:00.000Z";
@@ -58,6 +58,41 @@ beforeEach(() => {
 });
 
 describe("スタッフ月度時給の保存・移行", () => {
+  it("社員は名前・入社日で登録し、給与設定を持たず退職・取消・削除後も過去記録を保持する", async () => {
+    const id = await saveStaff({ name: "社員A", status: "active", employmentType: "employee", hiredAt: "2026-09-01" }, user);
+    const employee = memory.read(`staff/${id}`) as StaffRecord;
+    expect(employee).toMatchObject({ name: "社員A", employmentType: "employee", hiredAt: "2026-09-01" });
+    expect(employee).not.toHaveProperty("hourlyRate"); expect(employee).not.toHaveProperty("hourlyRates");
+    const closing = { employeePayments: [{ staffId: id, name: "社員A", dailyPayment: 10000 }] };
+    memory.write("history/closing", closing);
+    await departStaff(id, "2026-09-30", employee.updatedAt, user);
+    let saved = memory.read(`staff/${id}`) as StaffRecord;
+    expect(saved).toMatchObject({ employmentType: "employee", status: "departed" });
+    await restoreStaff(id, saved.updatedAt, user);
+    saved = memory.read(`staff/${id}`) as StaffRecord;
+    expect(saved.status).toBe("active");
+    await deleteStaff(id, saved.updatedAt, user);
+    expect(memory.read(`staff/${id}`)).toMatchObject({ employmentType: "employee", deletedBy: user.uid });
+    expect(memory.read("history/closing")).toEqual(closing);
+  });
+
+  it("既存アルバイトの社員化と社員への時給・体入情報の混入を拒否する", async () => {
+    memory.write("staff/staff-1", member);
+    await expect(saveStaff({ ...member, employmentType: "employee" }, user)).rejects.toThrow("区分は変更できません");
+    for (const invalid of [{ hourlyRate: 0 }, { hourlyRates: {} }, { trialHourlyRate: 1500 },
+      { status: "trial" as const, trialDate: "2026-09-01" }, { convertedFromTrialId: "trial-1" }, { hiredAt: "2026-02-30" }]) {
+      await expect(saveStaff({ name: "社員", status: "active", employmentType: "employee", hiredAt: "2026-09-01", ...invalid }, user)).rejects.toThrow();
+    }
+    expect(memory.read("staff/staff-1")).toEqual(member);
+  });
+
+  it("社員を旧画面から時給スタッフへ保存し直せない", async () => {
+    const id = await saveStaff({ name: "社員", status: "active", employmentType: "employee", hiredAt: "2026-09-01" }, user);
+    const row = memory.read(`staff/${id}`) as StaffRecord;
+    await expect(saveStaff({ ...row, id, employmentType: undefined, hourlyRates: { "2026-09": 1000 } }, user)).rejects.toThrow("社員には時給");
+    expect(memory.read(`staff/${id}`)).toEqual(row);
+  });
+
   it("初回に10月を保存しても9月初期単価を保持し、旧単価と確定値は変更しない", async () => {
     memory.write("staff/staff-1", member);
     const snapshot = { staffPayroll: [{ hourly: 9000, daily: 3000, net: 6000 }] };

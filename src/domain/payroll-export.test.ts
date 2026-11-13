@@ -33,11 +33,26 @@ function frozen(input = fixture()): PayrollExportInput {
 }
 function legacy(input = frozen()): PayrollExportInput {
   input.snapshot!.schemaVersion = 2; input.snapshot!.calculationVersion = "2.19.0";
+  delete input.results.employeePayments; delete input.snapshot!.employeePayments;
   input.results.staffPayroll.forEach((row) => { delete row.hourlyByDay; delete row.hourlySources; });
   input.snapshot!.staffPayroll = structuredClone(input.results.staffPayroll); return input;
 }
 
 describe("スタッフ支払XLSXの保存値・日次照合", () => {
+  it("社員だけの月も給与を作らず、日払い日と保存金額を出力する", () => {
+    const employee = master({ id: "employee", name: "社員", employmentType: "employee", hourlyRates: undefined });
+    const input = fixture([closing(1, { staffWork: [], drivers: [], employeePayments: [
+      { staffId: employee.id, name: employee.name, dailyPayment: 10000 },
+    ] })], [employee]);
+    const before = structuredClone(input);
+    const report = buildStaffPaymentExport(input);
+    expect(report.rows).toEqual([]);
+    expect(report.employees).toEqual([{ id: "employee", name: "社員", sales: 0, bottle: 0, allowanceTotal: 0,
+      daily: 10000, days: [{ businessDate: `${month}-01`, dailyPayment: 10000 }] }]);
+    expect(input).toEqual(before);
+    frozen(input); input.closings = []; input.staff = [];
+    expect(buildStaffPaymentExport(input)).toEqual(report);
+  });
   it("日ごとの1円切捨て、月次手当・日払い・差引を変更せず出力する", () => {
     const input = fixture(); const before = JSON.stringify(input);
     expect(buildStaffPaymentExport(input)).toEqual({ month, rows: [{ id: "staff", name: "中村", group: "regular", hours: 4.5,
@@ -113,6 +128,7 @@ describe("スタッフ支払XLSXの保存値・日次照合", () => {
   it("時給計算基準未保存の1円日別確定は保存日額と原本を照合する", () => {
     const input = frozen(fixture(undefined, [master({ hourlyRates: { [month]: 1500 } })]));
     input.snapshot!.calculationVersion = "2.24.0"; delete input.results.staffPayroll[0].hourlySources;
+    delete input.results.employeePayments; delete input.snapshot!.employeePayments;
     input.snapshot!.staffPayroll = structuredClone(input.results.staffPayroll);
     expect(buildStaffPaymentExport(input).rows[0].days?.[0]).toEqual({ businessDate: `${month}-01`, hours: 2.25, amount: 3375, dailyPayment: 1000 });
   });

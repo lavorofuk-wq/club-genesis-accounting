@@ -28,6 +28,57 @@ beforeEach(() => {
 });
 
 describe("スタッフ支払XLSX", () => {
+  it("末尾の社員日払いシートへ日付・金額・月計だけを出し、既存スタッフの印刷設定を保つ", async () => {
+    const original = createStaffPaymentWorkbook(input);
+    const employees = [
+      { id: "employee-a", name: "社員A", sales: 1000, bottle: 2000, allowanceTotal: 3000, daily: 15000.25,
+        days: [{ businessDate: "2026-09-01", dailyPayment: 10000.25 }, { businessDate: "2026-09-30", dailyPayment: 5000 }] },
+      { id: "employee-b", name: "社員B", sales: 0, bottle: 0, allowanceTotal: 0, daily: 2000,
+        days: [{ businessDate: "2026-09-01", dailyPayment: 2000 }] },
+    ];
+    const report = { month: "2026-09", rows: [staff(), staff("trial", "trial")], employees };
+    const before = structuredClone(report);
+    vi.mocked(buildStaffPaymentExport).mockReturnValue(report);
+    const book = await workbook(createStaffPaymentWorkbook(input));
+    expect(book.worksheets.map((sheet) => sheet.name)).toEqual(["在籍スタッフ", "体入スタッフ", "社員日払い"]);
+    for (let index = 0; index < 2; index += 1) {
+      expect(book.worksheets[index].pageSetup).toMatchObject(original.worksheets[index].pageSetup);
+      expect(book.worksheets[index].columns.map((col) => col.width)).toEqual(original.worksheets[index].columns.map((col) => col.width));
+    }
+    const sheet = book.worksheets[2];
+    expect(sheet.getCell("A5").value).toBe("日付");
+    expect(sheet.getCell("B3").value).toBe("社員A");
+    expect(sheet.getCell("B6").value).toBe(10000.25);
+    expect(sheet.getCell("B35").value).toBe(5000);
+    expect(sheet.getCell("A36").value).toBeNull();
+    expect(sheet.getCell("B37").value).toBe(15000.25);
+    expect(sheet.getCell("D6").result).toBe(12000.25);
+    expect(sheet.getCell("D37").result).toBe(17000.25);
+    const texts: unknown[] = [];
+    sheet.eachRow((row) => row.eachCell((cell) => { if (typeof cell.value === "string") texts.push(cell.value); }));
+    expect(texts.join(" ")).not.toMatch(/時給|勤務時間|基本給与|差引支給|売上手当|ボトル手当/);
+    expect(sheet.pageSetup).toMatchObject({ paperSize: 9, orientation: "landscape", scale: 100, fitToPage: false });
+    expect(report).toEqual(before);
+  });
+
+  it("社員が増えたら社員シートだけを改ページし、日払い総額を全員分一度ずつ集計する", async () => {
+    const employees = Array.from({ length: 10 }, (_, index) => ({ id: `employee-${index}`, name: `社員${index}`, sales: 0,
+      bottle: 0, allowanceTotal: 0, daily: index + 1, days: [{ businessDate: "2028-02-29", dailyPayment: index + 1 }] }));
+    vi.mocked(buildStaffPaymentExport).mockReturnValue({ month: "2028-02", rows: [], employees });
+    const book = createStaffPaymentWorkbook(input);
+    const sheet = book.worksheets.at(-1)!;
+    expect(sheet.name).toBe("社員日払い");
+    expect(sheet.getCell("B3").value).toBe("社員0");
+    expect(sheet.getCell("B42").value).toBe("社員6");
+    expect(sheet.getCell("H37").result).toBe(55);
+    expect(sheet.getCell("H76").result).toBe(55);
+    expect(sheet.getCell("H34").result).toBe(55);
+    expect(sheet.getCell("A35").value).toBeNull();
+    expect(sheet.getCell("H37").formula).toBe("SUM(B37,C37,D37,E37,F37,G37,B76,C76,D76,E76)");
+    const zip = await JSZip.loadAsync(await book.xlsx.writeBuffer());
+    expect(await zip.file("xl/worksheets/sheet3.xml")!.async("string")).toContain('<brk id="39"');
+  });
+
   it("在籍と体入を別シートにし、日別・手当・日払い・差引を保存金額どおり出力する", async () => {
     const book = await workbook(createStaffPaymentWorkbook(input));
     expect(buildStaffPaymentExport).toHaveBeenCalledWith(input);

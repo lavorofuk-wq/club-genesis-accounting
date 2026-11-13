@@ -145,6 +145,7 @@ function ClosingDetail({ closing, closings, reviewed, disabled, onReviewed, work
   const regularDaily = closing.casts.filter((row) => row.kind === "regular").reduce((sum, row) => sum + row.dailyPayment, 0);
   const trialDaily = closing.casts.filter((row) => row.kind === "trial").reduce((sum, row) => sum + row.dailyPayment, 0);
   const staffDaily = closing.staffWork.reduce((sum, row) => sum + row.dailyPayment, 0);
+  const employeeDaily = (closing.employeePayments || []).reduce((sum, row) => sum + row.dailyPayment, 0);
   const driverDaily = closing.drivers.reduce((sum, row) => sum + row.dailyPayment, 0);
   const fundingProblems = closingApprovalCashIssues(closing, closings);
   return <div className="detail-panel">
@@ -166,11 +167,12 @@ function ClosingDetail({ closing, closings, reviewed, disabled, onReviewed, work
     <p className="muted compact-text">登録時時給は店舗入力時の保存値です。在籍スタッフの未確定月（2026年9月以降）は月度時給で給与計算します。</p>
     <Table headers={["区分", "名前", "勤務・給与基準", "日払い"]}>{[
       ...closing.staffWork.map((row) => <tr key={`staff-${row.staffId}`}><td>{row.kind === "trial" ? "体入スタッフ" : "スタッフ"}</td><td>{row.name}</td><td>{row.startTime}–{row.endTime}（{row.hours}時間）<br /><small>登録時時給 {yen.format(row.hourlyRate)}</small></td><td>{yen.format(row.dailyPayment)}</td></tr>),
+      ...(closing.employeePayments || []).map((row) => <tr key={`employee-${row.staffId}`}><td>社員</td><td>{row.name}</td><td>日払い</td><td>{yen.format(row.dailyPayment)}</td></tr>),
       ...closing.drivers.map((row) => <tr key={`driver-${row.driverId}`}><td>送迎ドライバー</td><td>{row.name}</td><td>日給 {yen.format(row.dailyRate)}</td><td>{yen.format(row.dailyPayment)}</td></tr>),
     ]}</Table>
     <h3>現金照合データプレビュー</h3>
     <div className="grid two"><Table headers={["当日経費", "支払先", "金額"]}>{closing.expenses.map((row) => <tr key={row.id}><td>{expenseLabels[row.category] || row.category || "科目未設定"}</td><td>{row.payee}</td><td>{yen.format(row.amount)}</td></tr>)}</Table><Table headers={["現金支払内訳", "金額"]}>
-      <tr><td>経費総計</td><td>{yen.format(expenseTotal)}</td></tr><tr><td>在籍キャスト日払い</td><td>{yen.format(regularDaily)}</td></tr><tr><td>体入キャスト即日払い</td><td>{yen.format(trialDaily)}</td></tr><tr><td>スタッフ日払い</td><td>{yen.format(staffDaily)}</td></tr><tr><td>ドライバー日払い</td><td>{yen.format(driverDaily)}</td></tr><tr><td>派遣キャスト支払</td><td>{yen.format(closing.dispatchCastPayment)}</td></tr><tr><td>派遣スタッフ支払</td><td>{yen.format(closing.dispatchStaffPayment)}</td></tr><tr><td>派遣手数料</td><td>{yen.format(closing.dispatchFee)}</td></tr><tr className="total-row"><td>経費・支払合計</td><td><strong>{yen.format(closing.cash.expenseAndPaymentTotal)}</strong></td></tr>
+      <tr><td>経費総計</td><td>{yen.format(expenseTotal)}</td></tr><tr><td>在籍キャスト日払い</td><td>{yen.format(regularDaily)}</td></tr><tr><td>体入キャスト即日払い</td><td>{yen.format(trialDaily)}</td></tr><tr><td>スタッフ日払い</td><td>{yen.format(staffDaily)}</td></tr><tr><td>社員日払い</td><td>{yen.format(employeeDaily)}</td></tr><tr><td>ドライバー日払い</td><td>{yen.format(driverDaily)}</td></tr><tr><td>派遣キャスト支払</td><td>{yen.format(closing.dispatchCastPayment)}</td></tr><tr><td>派遣スタッフ支払</td><td>{yen.format(closing.dispatchStaffPayment)}</td></tr><tr><td>派遣手数料</td><td>{yen.format(closing.dispatchFee)}</td></tr><tr className="total-row"><td>経費・支払合計</td><td><strong>{yen.format(closing.cash.expenseAndPaymentTotal)}</strong></td></tr>
     </Table></div>
     <Table headers={["現金照合計算", "金額"]}><tr><td>現金売上 ＋ つり銭</td><td>{yen.format(closing.cash.cashSales + closing.cash.cashFloat)}</td></tr><tr><td>営業終了時の計算上現金残額</td><td>{yen.format(closing.cash.expectedClosingCash)}</td></tr><tr><td>営業による現金収支（補充・返済を除く）</td><td>{yen.format(closing.cash.cashProfit)}</td></tr><tr><td>記録済みの営業終了時現金額</td><td>{yen.format(closing.cash.actualClosingCash)}</td></tr><tr><td>記録済みの現金差額</td><td className={closing.cash.difference ? "text-danger" : "text-good"}>{yen.format(closing.cash.difference)}</td></tr><tr className="total-row"><td>照合確認</td><td className={fundingProblems.length ? "text-danger" : "text-good"}><strong>{!fundingProblems.length ? "照合確認済み" : !closing.cash.funding ? "補充・返済未入力" : "要確認"}</strong></td></tr><tr><td>酒代納品書分（当日現金控除外）</td><td>{yen.format(closing.liquorDeliveryAmount)}</td></tr></Table>
     <CashFundingDetail cash={closing.cash} dependencyIssues={fundingProblems} />
@@ -419,7 +421,7 @@ function MonthlyAccounting({ section, data, user, busy, run, onDirtyChange }: Pr
     {results && section === "castSales" && <CastSalesReports rows={results.castSalesReports} rewards={results.castRewards} month={month} />}
     {results && section === "castRewards" && <CastRewards rows={results.castRewards} reports={results.castSalesReports} disabled={busy || locked} onWithholding={(id, value) => setMap("withholdingByCast", id, value)} />}
     {results && section === "introducers" && <IntroducerPayments key={month} rows={results.introducerPayments} castRewards={results.castRewards} />}
-    {results && section === "staffPayroll" && <StaffPayroll rows={results.staffPayroll} disabled={busy || locked} onSales={(id, value) => setMap("staffSalesAllowance", id, value)} onBottle={(id, value) => setMap("staffBottleAllowance", id, value)} />}
+    {results && section === "staffPayroll" && <StaffPayroll rows={results.staffPayroll} employees={results.employeePayments} disabled={busy || locked} onSales={(id, value) => setMap("staffSalesAllowance", id, value)} onBottle={(id, value) => setMap("staffBottleAllowance", id, value)} />}
     {results && section === "driverPayroll" && <DriverPayroll rows={results.driverPayroll} />}
     {results && section === "expenses" && <Expenses results={results} adjustments={adjustments} setAdjustments={setAdjustments} closings={data.closings} closed={closed} disabled={busy || locked} saveDisabled={saveDisabled} onSave={save} />}
     {results && section === "balance" && <><Balance results={results} /><MonthlyCashFunding summary={results.cashFunding} /></>}

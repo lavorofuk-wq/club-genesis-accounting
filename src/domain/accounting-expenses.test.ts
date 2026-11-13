@@ -41,6 +41,7 @@ function snapshot(input: ExpenseExportInput) {
   return buildMonthlySnapshot(month, 1, "b".repeat(64), input.adjustments, structuredClone(input.results), input.closings, "accounting", "2026-09-30T12:00:00.000Z");
 }
 function legacy(input: ExpenseExportInput) {
+  delete input.results.employeePayments;
   const delta = (input.results.expenses.consumptionTax ?? 0) + (input.results.expenses.accountingExpenseTotal ?? 0);
   delete input.results.expenses.accountingExpenseInputs;
   delete input.results.expenses.accountingExpenseTotal;
@@ -52,6 +53,7 @@ function legacy(input: ExpenseExportInput) {
   input.results.balance.profit += delta;
   input.snapshot = snapshot(input);
   input.snapshot.calculationVersion = "2.42.0";
+  delete input.snapshot.employeePayments;
 }
 
 describe("経費追加入力の検証", () => {
@@ -325,9 +327,11 @@ describe("月別の預かり消費税率", () => {
   });
   it("2.43確定は固定3%の税額を保持し、税率を補完・後付けしない", () => {
     const { data, adjustments, input } = fixture();
+    delete input.results.employeePayments;
     delete input.results.expenses.consumptionTaxRate;
     input.snapshot = snapshot(input);
     input.snapshot.calculationVersion = "2.43.0";
+    delete input.snapshot.employeePayments;
     const before = structuredClone(input);
     expect(normalizeMonthlyAccountingSnapshot(input.snapshot, month, 1)).toEqual(input.snapshot);
     expect(() => validateExpenseExport(input)).not.toThrow();

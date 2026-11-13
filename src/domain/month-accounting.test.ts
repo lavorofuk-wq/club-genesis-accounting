@@ -297,6 +297,7 @@ describe("月次会計ドメイン", () => {
   it.each(["2.50.1", "2.50.0", "2.49.1"])("旧確定%sの手入力税額は保持し、解除後の再計算だけ自動税へ変える", (version) => {
     const { source, input, snapshot } = salesRateSnapshot(1_210_000);
     snapshot.calculationVersion = version;
+    delete snapshot.employeePayments;
     const reward = snapshot.castRewards[0];
     reward.withholding = 9123.5;
     reward.netPay = reward.grossPay - 9123.5;
@@ -364,6 +365,7 @@ describe("月次会計ドメイン", () => {
     ]) {
       const { source, input, snapshot } = salesRateSnapshot(sales);
       snapshot.calculationVersion = version;
+      delete snapshot.employeePayments;
       const reward = snapshot.castRewards[0];
       reward.rewardRate = oldRate;
       reward.salesReward = oldSalesPay;
@@ -797,6 +799,7 @@ describe("月次会計ドメイン", () => {
   it.each(["2.48.1", "2.50.0"])("旧確定版%sの売上報酬・基礎は10円単位のまま保持する", (version) => {
     const { snapshot } = salesRateSnapshot(1_210_000);
     snapshot.calculationVersion = version;
+    delete snapshot.employeePayments;
     const before = structuredClone(snapshot);
     expect(normalizeMonthlyAccountingSnapshot(snapshot, month, 1)?.castRewards).toEqual(before.castRewards);
     expect(snapshot).toEqual(before);
@@ -1630,7 +1633,7 @@ describe("月次会計ドメイン", () => {
     expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "2.13.0" }, month, 1)).toBeDefined();
     expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "2.13.1" }, month, 1)).toBeDefined();
     expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "2.14.0" }, month, 1)).toBeDefined();
-    expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "3.0.0", expenses: { ...snapshot.expenses, accountingExpenseInputs: [], accountingExpenseTotal: 0, consumptionTax: 0, consumptionTaxRate: 3 } }, month, 1)).toBeDefined();
+    expect(normalizeMonthlyAccountingSnapshot({ ...snapshot, calculationVersion: "3.0.0", employeePayments: { rows: [], dailyTotal: 0, allowanceTotal: 0 }, expenses: { ...snapshot.expenses, accountingExpenseInputs: [], accountingExpenseTotal: 0, consumptionTax: 0, consumptionTaxRate: 3 } }, month, 1)).toBeDefined();
   });
 
   it("種類別ボトルバックを確定保存し、旧確定データと金額不正を区別する", () => {
@@ -2836,6 +2839,7 @@ describe("日別送迎を反映した月次確定", () => {
     const inputs = adjustments();
     const snapshot = buildMonthlySnapshot(month, 1, "a".repeat(64), inputs, calculateMonthlyAccounting(source, month, inputs), source.closings, "op", "2026-10-01T00:00:00Z");
     snapshot.calculationVersion = "2.48.1";
+    delete snapshot.employeePayments;
     for (const report of snapshot.castSalesReports) {
       delete report.totals.transportFee;
       for (const day of report.days) delete day.transportFee;
